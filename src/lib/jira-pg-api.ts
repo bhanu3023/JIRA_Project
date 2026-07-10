@@ -2049,7 +2049,6 @@ async function _handleJiraPgApi(
         ...(body.customerName !== undefined && { customerName: body.customerName ? String(body.customerName) : null }),
         ...(body.clientName !== undefined && { clientName: body.clientName ? String(body.clientName) : null }),
         ...(body.projectManager !== undefined && { projectManager: body.projectManager ? String(body.projectManager) : null }),
-        ...(rrDepartment ? { current_department: rrDepartment } as any : {}),
       },
       include: {
         status: true,
@@ -2063,11 +2062,12 @@ async function _handleJiraPgApi(
     // Set original_dept and assign next CF key at creation time
     try {
       if (issue?.id) {
-        // If dept was explicitly provided at creation, set it via raw SQL (Prisma doesn't have this column)
-        if (body.department) {
+        // current_department is a raw ALTER TABLE column — Prisma doesn't know it, so set via raw SQL
+        const deptToSet = body.department ? String(body.department) : (rrDepartment || null);
+        if (deptToSet) {
           await pool.query(
             `UPDATE issues SET current_department=$1, original_dept=$1 WHERE id=$2`,
-            [String(body.department), issue.id]
+            [deptToSet, issue.id]
           );
         } else {
           await pool.query(
