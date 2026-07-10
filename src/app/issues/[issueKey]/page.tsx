@@ -305,6 +305,11 @@ export default function IssueDetailPage() {
         let migratedCfg: Record<string, { spaceIds: string[] }> = {};
         try { migratedCfg = JSON.parse(localStorage.getItem('migrated_field_config') || '{}'); } catch {}
 
+        const NATIVE_COLS: Record<string, string> = {
+          'Customer Name': 'customerName', 'Client Name': 'clientName',
+          'Work Type': 'workType', 'Product Type': 'productType',
+          'Combination': 'combination', 'Project Manager': 'projectManager',
+        };
         const applicable = fields.filter((f: any) => {
           if (f.isDeleted) return false;
           // Never show built-in system fields here — they have their own dedicated rows
@@ -312,8 +317,11 @@ export default function IssueDetailPage() {
           const ids: string[] = Array.isArray(f.spaceIds) ? f.spaceIds : [];
           // Check migratedFieldConfig localStorage assignment for this field by name
           const migratedIds: string[] = migratedCfg[f.name]?.spaceIds || [];
-          // Show if: assigned to this space (DB or localStorage config) OR has a stored value
-          return ids.includes(currentIssue.spaceId) || migratedIds.includes(currentIssue.spaceId) || fieldIdsWithValues.has(f.id) || fieldIdsWithValues.has(`cf_${f.id}`);
+          // Also show if the issue already has a native column value for this field
+          const nativeCol = NATIVE_COLS[f.name];
+          const hasNativeValue = nativeCol ? !!((currentIssue as any)[nativeCol]) : false;
+          // Show if: assigned to this space (DB or localStorage config) OR has a stored value OR has a native value
+          return ids.includes(currentIssue.spaceId) || migratedIds.includes(currentIssue.spaceId) || fieldIdsWithValues.has(f.id) || fieldIdsWithValues.has(`cf_${f.id}`) || hasNativeValue;
         });
         setCustomFields(applicable);
       }).catch(() => {});
