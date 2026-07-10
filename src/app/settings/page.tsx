@@ -715,7 +715,10 @@ function SettingsContent() {
               if (MIGRATED_FIELD_NAMES.has(fieldName)) {
                 const cur = migratedFieldConfig[fieldName] || { spaceIds: spaces.map(s => s.id), createIssueSpaceIds: [] };
                 const newSpaceIds = cur.spaceIds.includes(sp.id) ? cur.spaceIds.filter(id => id !== sp.id) : [...cur.spaceIds, sp.id];
-                const newCreateIds = newSpaceIds.includes(sp.id) ? cur.createIssueSpaceIds : cur.createIssueSpaceIds.filter(id => id !== sp.id);
+                // Auto-enable Create Issue when board is added; remove both when board is removed
+                const newCreateIds = newSpaceIds.includes(sp.id)
+                  ? (cur.createIssueSpaceIds.includes(sp.id) ? cur.createIssueSpaceIds : [...cur.createIssueSpaceIds, sp.id])
+                  : cur.createIssueSpaceIds.filter(id => id !== sp.id);
                 saveMigratedFieldConfig({ ...migratedFieldConfig, [fieldName]: { spaceIds: newSpaceIds, createIssueSpaceIds: newCreateIds } });
                 // Also persist to DB: find existing CF by name or create it
                 (async () => {
@@ -744,7 +747,10 @@ function SettingsContent() {
               const cf = customFields.find(f => f.name === fieldName);
               if (!cf) return;
               const newSpaceIds = cf.spaceIds.includes(sp.id) ? cf.spaceIds.filter(id => id !== sp.id) : [...cf.spaceIds, sp.id];
-              const newCreateIds = newSpaceIds.includes(sp.id) ? cf.createIssueSpaceIds : cf.createIssueSpaceIds.filter(id => id !== sp.id);
+              // Auto-enable Create Issue when board is added; remove both when board is removed
+              const newCreateIds = newSpaceIds.includes(sp.id)
+                ? (cf.createIssueSpaceIds.includes(sp.id) ? cf.createIssueSpaceIds : [...cf.createIssueSpaceIds, sp.id])
+                : cf.createIssueSpaceIds.filter(id => id !== sp.id);
               setCustomFields(prev => prev.map(f => f.id === cf.id ? { ...f, spaceIds: newSpaceIds, createIssueSpaceIds: newCreateIds } : f));
               api.updateCustomFieldSpaces(cf.id, newSpaceIds, newCreateIds).catch(() => {});
             };
