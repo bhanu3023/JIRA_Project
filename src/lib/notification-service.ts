@@ -169,7 +169,7 @@ function recipients(...people: Array<{ email?: string | null } | null | undefine
 // ── Notification senders ──────────────────────────────────────────────────────
 
 export async function notifyIssueCreated(issue: {
-  key: string; summary: string; type: string; priority: string;
+  key: string; cfKey?: string | null; summary: string; type: string; priority: string;
   spaceKey: string; spaceName: string;
   status: { name: string; category: string };
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
@@ -181,16 +181,18 @@ export async function notifyIssueCreated(issue: {
 
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const reporterName = issue.reporter ? `${issue.reporter.firstName} ${issue.reporter.lastName}`.trim() : 'Unknown';
+  const displayKey = issue.cfKey || issue.key;
 
   const html = buildEmailHtml({
     title:        'Issue Created',
-    issueKey:     issue.key,
+    issueKey:     displayKey,
     issueSummary: issue.summary,
     spaceKey:     issue.spaceKey,
     spaceName:    issue.spaceName,
     eventLabel:   'New Issue Created',
     eventColor:   '#0052CC',
     fields: [
+      { label: 'Ticket #', value: `${displayKey} (${issue.key})` },
       { label: 'Type',     value: issue.type },
       { label: 'Priority', value: issue.priority, color: PRIORITY_COLOR[issue.priority.toLowerCase()] },
       { label: 'Status',   value: issue.status.name, color: STATUS_COLOR[issue.status.category] },
@@ -202,9 +204,9 @@ export async function notifyIssueCreated(issue: {
 
   await sendNotification(
     to,
-    `[${issue.key}] ${issue.summary}`,
+    `[${displayKey}] ${issue.summary}`,
     html,
-    `New issue created: ${issue.key} - ${issue.summary}\nAssignee: ${assigneeName}\nView: ${issueUrl(issue.key)}`,
+    `New issue created: ${displayKey} (${issue.key}) - ${issue.summary}\nAssignee: ${assigneeName}\nView: ${issueUrl(issue.key)}`,
   );
 }
 

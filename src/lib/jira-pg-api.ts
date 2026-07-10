@@ -2103,7 +2103,7 @@ async function _handleJiraPgApi(
 
     // Send email notification (fire-and-forget)
     notifyIssueCreated({
-      key: issue.key, summary: issue.summary,
+      key: issue.key, cfKey: (issue as any).cf_key || null, summary: issue.summary,
       type: issue.type, priority: issue.priority,
       spaceKey: issue.space?.key ?? sk,
       spaceName: issue.space?.name ?? sk,
