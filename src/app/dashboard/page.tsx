@@ -190,12 +190,9 @@ export default function DashboardPage() {
         setAssignedIssues(issues);
         tabCache.current[tab] = issues;
       } else if (tab === 'worked_on' && user) {
-        const data = await api.getIssues({ assignee: user.id, limit: '20' });
-        const sorted = [...(data.issues || [])].sort((a, b) =>
-          new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime()
-        );
-        setRecentIssues(sorted);
-        tabCache.current[tab] = sorted;
+        const data = await api.request<{ issues: any[] }>(`/worked-on?userId=${user.id}`).catch(() => ({ issues: [] }));
+        setRecentIssues(data.issues || []);
+        tabCache.current[tab] = data.issues || [];
       } else if (tab === 'viewed') {
         // Use localStorage recent items — no API call needed, instant
         const recentIssueItems = getRecentItems(user?.id).filter(i => i.type === 'issue').slice(0, 15);
@@ -219,7 +216,7 @@ export default function DashboardPage() {
 
   const tabs: { key: TabType; label: string; count?: number }[] = [
     { key: 'assigned', label: 'My Assigned Tickets', count: assignedIssues.length },
-    { key: 'worked_on', label: 'Recently Updated' },
+    { key: 'worked_on', label: 'Worked On' },
     { key: 'viewed', label: 'Viewed' },
     { key: 'starred', label: 'Starred' },
     { key: 'boards', label: 'Boards' },

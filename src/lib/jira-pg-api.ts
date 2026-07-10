@@ -31,6 +31,17 @@ pool.query(`CREATE TABLE IF NOT EXISTS issue_dept_transitions (
   moved_at TIMESTAMPTZ DEFAULT NOW()
 )`).catch(() => {});
 
+// Track per-user worked-on history
+pool.query(`CREATE TABLE IF NOT EXISTS user_worked_on_tickets (
+  id SERIAL PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  issue_id TEXT NOT NULL,
+  dept TEXT,
+  reason TEXT NOT NULL DEFAULT 'passed',
+  worked_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, issue_id, dept)
+)`).catch(() => {});
+
 import {
   notifyIssueCreated,
   notifyIssueAssigned,
@@ -2295,6 +2306,13 @@ async function _handleJiraPgApi(
           `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept) VALUES ($1, $2, $3, $4)`,
           [issue.id, issue.spaceId, oldDept || '', newDept]
         );
+        // Record worked-on for whoever handled this ticket in oldDept
+        if (oldDept && issue.assigneeId) {
+          pool.query(
+            `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+            [issue.assigneeId, issue.id, oldDept]
+          ).catch(() => {});
+        }
       } catch {}
 
       // Notifications on dept change
@@ -2694,6 +2712,12 @@ async function _handleJiraPgApi(
       );
       await startDeptSLA(key, null, 'Migration');
 
+      // Ticket returned to Migration — remove 'passed' worked-on entries since work continues
+      pool.query(
+        `DELETE FROM user_worked_on_tickets WHERE issue_id=(SELECT id FROM issues WHERE key=$1) AND reason='passed'`,
+        [key]
+      ).catch(() => {});
+
       // Notify: restored Migration assignee + reporter
       try {
         const recallIssue = await db.issue.findUnique({ where: { key }, select: { reporterId: true, summary: true } });
@@ -2913,6 +2937,13 @@ async function _handleJiraPgApi(
             newValue: `Handed to ${targetDept} â€” SLA started`,
             authorName, authorEmail, createdAt: now,
           });
+          // Record worked-on: agent who was handling this in oldDeptSt passed it along
+          if (oldDeptSt && curAssigneeId) {
+            pool.query(
+              `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+              [curAssigneeId, issue.id, oldDeptSt]
+            ).catch(() => {});
+          }
         }
         // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       }
@@ -2944,6 +2975,15 @@ async function _handleJiraPgApi(
 
     // Status changed?
     if (body.statusId !== undefined && issue.statusId !== data.statusId) {
+      // If status moved to 'done' category, record worked-on for current assignee
+      const newStRec = (issue.space?.statuses ?? []).find((s: any) => s.id === data.statusId);
+      if (newStRec?.category === 'done' && updated.assigneeId) {
+        pool.query(
+          `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'closed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='closed', worked_at=NOW()`,
+          [updated.assigneeId, issue.id, null]
+        ).catch(() => {});
+      }
+
       const oldStatusRec = issue.space?.statuses?.find((s: any) => s.id === issue.statusId);
       const changer = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
       notifyStatusChanged({
@@ -3696,6 +3736,41 @@ async function _handleJiraPgApi(
     if (!existing.rows.length) return json({ error: 'Token not found' }, 404);
     await pool.query(`DELETE FROM api_tokens WHERE id = $1`, [tokenId]);
     return json({ success: true });
+  }
+
+  // â”€â”€ Worked-on tickets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  // GET /worked-on â€” tickets the user passed to another dept or closed
+  if (path === 'worked-on' && method === 'GET') {
+    if (!userId) return json({ issues: [] });
+    const targetUserId = url.searchParams.get('userId') || userId;
+    const rows = await pool.query(
+      `SELECT w.issue_id, w.dept, w.reason, w.worked_at,
+              i.key, i.summary, i.type, i.priority, i.”statusId”,
+              s.name AS status_name, s.category AS status_category, s.color AS status_color,
+              sp.key AS space_key, sp.name AS space_name
+       FROM user_worked_on_tickets w
+       JOIN issues i ON i.id = w.issue_id
+       LEFT JOIN statuses s ON s.id = i.”statusId”
+       LEFT JOIN spaces sp ON sp.id = i.”spaceId”
+       WHERE w.user_id = $1
+       ORDER BY w.worked_at DESC
+       LIMIT 100`,
+      [targetUserId]
+    );
+    const issues = rows.rows.map((r: any) => ({
+      id: r.issue_id,
+      key: r.key,
+      summary: r.summary,
+      type: r.type,
+      priority: r.priority,
+      dept: r.dept,
+      reason: r.reason,
+      workedAt: r.worked_at,
+      status: r.status_name ? { id: r.statusId, name: r.status_name, category: r.status_category, color: r.status_color } : null,
+      space: { key: r.space_key, name: r.space_name },
+    }));
+    return json({ issues });
   }
 
   // â”€â”€ Notifications (DB-backed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
