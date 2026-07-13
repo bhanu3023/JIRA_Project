@@ -19,6 +19,11 @@ const pool = new Pool({
 
 // Ensure original_dept column exists
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).catch(() => {});
+// User invite status: 'invited' | 'active' | 'inactive'
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'`).catch(() => {});
+// Backfill: invited users (isActive=false, no prior login) stay 'invited'; active users get 'active'
+pool.query(`UPDATE users SET status='active' WHERE status IS NULL OR status='' OR (status='active' AND "isActive"=true)`).catch(() => {});
+pool.query(`UPDATE users SET status='inactive' WHERE "isActive"=false AND status='active'`).catch(() => {});
 pool.query(`UPDATE issues SET original_dept = current_department WHERE original_dept IS NULL AND current_department IS NOT NULL`).catch(() => {});
 
 // Track dept transitions for accurate Sent/Watching
@@ -319,8 +324,9 @@ async function resolveUserId(auth: string | null, reqIp?: string): Promise<strin
 /** Format a DB user record to the API shape the frontend expects */
 function formatUser(u: {
   id: string; email: string; firstName: string; lastName: string;
-  role: string; avatarUrl?: string | null; isActive: boolean; createdAt?: Date;
+  role: string; avatarUrl?: string | null; isActive: boolean; createdAt?: Date; status?: string;
 }) {
+  const status = (u as any).status || (u.isActive ? 'active' : 'inactive');
   return {
     id: u.id,
     email: u.email,
@@ -331,6 +337,7 @@ function formatUser(u: {
     organizationId: 'org_demo',
     avatarUrl: u.avatarUrl ?? null,
     isActive: u.isActive,
+    status,
     createdAt: u.createdAt?.toISOString() ?? nowIso(),
   };
 }
@@ -1000,9 +1007,16 @@ async function _handleJiraPgApi(
     if (!user || user.password !== password) {
       return json({ error: 'Invalid email or password' }, 401);
     }
+    // First login: activate invited user
+    if (!user.isActive) {
+      await db.user.update({ where: { id: user.id }, data: { isActive: true } });
+      await pool.query(`UPDATE users SET status='active', "isActive"=true WHERE id=$1`, [user.id]).catch(() => {});
+      user.isActive = true;
+    }
+    await pool.query(`UPDATE users SET status='active' WHERE id=$1 AND status='invited'`, [user.id]).catch(() => {});
     return json({
       token: encodeToken(user.id, clientIp, clientUA),
-      user: formatUser(user),
+      user: { ...formatUser(user), status: 'active' },
     });
   }
 
@@ -1127,10 +1141,13 @@ async function _handleJiraPgApi(
   if (path === 'users' && method === 'GET') {
     // All authenticated users can list users (needed for queue member search)
     const users = await db.user.findMany({
-      where: { isActive: true },
       orderBy: { firstName: 'asc' },
     });
-    return json(users.map(formatUser));
+    // Attach raw status column (ALTER TABLE column not in Prisma)
+    const statusRows = await pool.query(`SELECT id, status FROM users`).catch(() => ({ rows: [] as any[] }));
+    const statusMap: Record<string, string> = {};
+    for (const r of statusRows.rows) statusMap[r.id] = r.status;
+    return json(users.map(u => ({ ...formatUser(u), status: statusMap[u.id] || (u.isActive ? 'active' : 'inactive') })));
   }
 
   if (path === 'users' && method === 'POST') {
@@ -1144,10 +1161,12 @@ async function _handleJiraPgApi(
         lastName: String(body.lastName || ''),
         role: String(body.role || 'developer'),
         password: String(body.password || 'changeme'),
-        isActive: true,
+        isActive: false,
       },
     });
-    return json(formatUser(user));
+    // Mark as 'invited' via raw SQL (status column added via ALTER TABLE)
+    await pool.query(`UPDATE users SET status='invited' WHERE id=$1`, [user.id]).catch(() => {});
+    return json({ ...formatUser(user), status: 'invited' });
   }
 
   const userPatch = path.match(/^users\/([^/]+)$/);
@@ -1159,7 +1178,14 @@ async function _handleJiraPgApi(
     const data: Record<string, unknown> = {};
     // Non-admins cannot change their own role
     if (body.role !== undefined && isAdmin) data.role = String(body.role);
-    if (body.isActive !== undefined && isAdmin) data.isActive = Boolean(body.isActive);
+    if (body.isActive !== undefined && isAdmin) {
+      data.isActive = Boolean(body.isActive);
+      // Sync status column: reactivating sets 'active', deactivating sets 'inactive'
+      pool.query(
+        `UPDATE users SET status=$1 WHERE id=$2`,
+        [Boolean(body.isActive) ? 'active' : 'inactive', id]
+      ).catch(() => {});
+    }
     if (body.firstName !== undefined) data.firstName = String(body.firstName);
     if (body.lastName !== undefined) data.lastName = String(body.lastName);
     if (body.displayName !== undefined) data.displayName = String(body.displayName);

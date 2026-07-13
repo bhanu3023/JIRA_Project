@@ -1822,7 +1822,8 @@ function SettingsContent() {
       const name = `${u.firstName} ${u.lastName} ${u.email}`.toLowerCase();
       const matchSearch = !userSearch || name.includes(userSearch.toLowerCase());
       const matchRole = !userRoleFilter || u.role === userRoleFilter;
-      const matchStatus = !userStatusFilter || (userStatusFilter === 'active' ? u.isActive !== false : u.isActive === false);
+      const st = (u as any).status || (u.isActive !== false ? 'active' : 'inactive');
+      const matchStatus = !userStatusFilter || st === userStatusFilter;
       return matchSearch && matchRole && matchStatus;
     });
 
@@ -2090,10 +2091,27 @@ function SettingsContent() {
                         </div>
                       </td>
                       <td className="px-4 py-2.5 w-[100px] whitespace-nowrap">
-                        <span className={`inline-flex items-center gap-1.5 text-sm font-medium ${u.isActive !== false ? 'text-green-600' : 'text-gray-400'}`}>
-                          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${u.isActive !== false ? 'bg-green-500' : 'bg-gray-400'}`} />
-                          {u.isActive !== false ? 'Active' : 'Inactive'}
-                        </span>
+                        {(() => {
+                          const st = (u as any).status || (u.isActive !== false ? 'active' : 'inactive');
+                          if (st === 'invited') return (
+                            <span className="inline-flex items-center gap-1.5 text-sm font-medium text-yellow-600">
+                              <span className="w-2 h-2 rounded-full flex-shrink-0 bg-yellow-400" />
+                              Invited
+                            </span>
+                          );
+                          if (st === 'active') return (
+                            <span className="inline-flex items-center gap-1.5 text-sm font-medium text-green-600">
+                              <span className="w-2 h-2 rounded-full flex-shrink-0 bg-green-500" />
+                              Active
+                            </span>
+                          );
+                          return (
+                            <span className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-400">
+                              <span className="w-2 h-2 rounded-full flex-shrink-0 bg-gray-400" />
+                              Inactive
+                            </span>
+                          );
+                        })()}
                       </td>
                       <td className="px-4 py-2.5 w-[80px] text-right whitespace-nowrap">
                         <div className="flex items-center justify-end">
