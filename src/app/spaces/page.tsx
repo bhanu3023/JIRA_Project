@@ -42,7 +42,7 @@ const TEMPLATES = [
   },
 ];
 
-const toBackendType = (t: string) => t === 'hr' ? 'kanban' : t === 'dept_queue' ? 'service_desk' : t;
+const toBackendType = (t: string) => t === 'hr' ? 'kanban' : t;
 
 function CreateSpaceModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const createSpace = useStore((s) => s.createSpace);

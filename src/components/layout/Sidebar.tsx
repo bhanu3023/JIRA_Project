@@ -746,7 +746,7 @@ export default function Sidebar() {
                 {/* Inline sub-nav when this space is active and not collapsed */}
                 {isThisSpaceActive && !collapsedSpaces.has(space.key) && (
                   <div className="ml-3 mt-0.5 border-l-2 border-blue-200 pl-3 pb-1">
-                    <SMSpaceSubNav spaceKey={space.key} pathname={pathname} />
+                    <SMSpaceSubNav spaceKey={space.key} pathname={pathname} spaceType={space.type} />
                   </div>
                 )}
 
@@ -843,7 +843,8 @@ export default function Sidebar() {
 
 type CustomQueue = { id: string; name: string; memberIds: string[]; suspendedIds?: string[]; sla?: { timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' } };
 
-function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: string }) {
+function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pathname: string; spaceType?: string }) {
+  const isDeptQueue = spaceType === 'dept_queue';
   const [queuesOpen, setQueuesOpen] = useState(true);
   const [defaultOpen, setDefaultOpen] = useState(true);
   const [counts, setCounts] = useState({ allOpen: 0, assigned: 0, total: 0, unassigned: 0 });
@@ -1002,8 +1003,8 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
         {queuesOpen && (
           <div className="ml-2 mt-0.5 space-y-0.5 border-l border-gray-200 pl-2">
             <div className="ml-2 space-y-0.5">
-                {/* Custom queues — only the ones visible to this user */}
-                {visibleQueues.map(q => {
+                {/* Custom queues — dept_queue only */}
+                {isDeptQueue && visibleQueues.map(q => {
                   const isMenuOpen = queueMenuOpen === q.id;
                   const isDeptSubActive = ['dept_all','dept_unassigned','dept_assigned','dept_closed','sent-watching'].includes(_deptQueueParam) && _deptParam === q.name;
                   const isSubExpanded = expandedQueueSub === q.id || (isDeptSubActive && expandedQueueSub === null);
@@ -1114,8 +1115,8 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
                             <Archive size={11} className={subActive('dept_closed') ? 'text-blue-500' : 'text-gray-400'} />
                             <span className="flex-1 truncate">Worked on</span>
                           </Link>
-                          {/* Sent / Watching */}
-                          <Link
+                          {/* Sent / Watching — dept_queue only */}
+                          {isDeptQueue && <Link
                             href={`/spaces/${spaceKey}?queue=sent-watching&dept=${encodeURIComponent(q.name)}`}
                             className={cn(
                               'flex items-center gap-2 rounded-md px-2 py-1.5 text-[11.5px] transition-colors',
@@ -1126,15 +1127,15 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
                           >
                             <ClipboardList size={11} className={(queueParam === 'sent-watching' && deptParam === q.name) ? 'text-blue-500' : 'text-gray-400'} />
                             <span className="flex-1 truncate">Sent / Watching</span>
-                          </Link>
+                          </Link>}
                         </div>
                       )}
                     </div>
                   );
                 })}
 
-                {/* New Queue button — managers/admins only */}
-                {canManageSpace && (!showCreateQueue ? (
+                {/* New Queue button — managers/admins only, dept_queue only */}
+                {isDeptQueue && canManageSpace && (!showCreateQueue ? (
                   <button onClick={() => setShowCreateQueue(true)}
                     className="flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-blue-600 hover:bg-blue-50 transition-colors w-full">
                     <Plus size={12} />

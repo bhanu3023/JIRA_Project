@@ -1075,17 +1075,27 @@ function SpaceDetailContent() {
 
       {/* ── Queues overview — default landing when clicking a space ── */}
       {queueFilter === 'queues' && (() => {
-        const defaultQueues = [
+        const isDeptQueue = currentSpace?.type === 'dept_queue';
+        // Service Desk: standard ITSM queues only (no custom queues, no Sent/Watching)
+        const serviceDeskQueues = [
+          { id: 'all-open',     label: 'All open',       desc: 'All unresolved tickets in this space'    },
+          { id: 'unassigned',   label: 'Unassigned',     desc: 'Tickets with no assignee'                },
+          { id: 'assigned',     label: 'Assigned to me', desc: 'Tickets assigned to you'                 },
+          { id: 'all-requests', label: 'All Requests',   desc: 'Every ticket ever created in this space' },
+        ];
+        // Dept Queue Board: includes Sent/Watching and custom queues
+        const deptQueueDefaults = [
           { id: 'all-open',      label: 'All open',        desc: 'All unresolved tickets in this space'    },
           { id: 'unassigned',    label: 'Unassigned',      desc: 'Tickets with no assignee'                },
           { id: 'assigned',      label: 'Assigned to me',  desc: 'Tickets assigned to you'                 },
           { id: 'all-requests',  label: 'All Requests',    desc: 'Every ticket ever created in this space' },
-          { id: 'sent-watching', label: 'Sent / Watching', desc: 'Tickets you reported or are watching'    },
+          { id: 'sent-watching', label: 'Sent / Watching', desc: 'Tickets sent to or watched by you'       },
         ];
-        const customQueues = allCustomQueues;
+        const defaultQueues = isDeptQueue ? deptQueueDefaults : serviceDeskQueues;
+        const customQueues = isDeptQueue ? allCustomQueues : [];
         return (
           <div className="flex-1 overflow-y-auto px-6 py-6">
-            <h2 className="text-[15px] font-semibold text-gray-800 mb-1">Queues</h2>
+            <h2 className="text-[15px] font-semibold text-gray-800 mb-1">{isDeptQueue ? 'Department Queues' : 'Queues'}</h2>
             <p className="text-[12px] text-gray-400 mb-5">Select a queue to view its tickets</p>
             <div className="grid grid-cols-1 gap-2 max-w-2xl">
               {defaultQueues.map(q => (
