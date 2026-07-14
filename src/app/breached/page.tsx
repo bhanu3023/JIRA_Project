@@ -88,7 +88,7 @@ function MultiSelect({
       </button>
 
       {open && !disabled && options.length > 0 && (
-        <div className="absolute top-full left-0 z-50 mt-1 bg-white border border-gray-200 rounded-xl shadow-lg py-1 min-w-[180px]">
+        <div className="absolute top-full left-0 z-50 mt-1 bg-white border border-gray-200 rounded-xl shadow-lg py-1 min-w-[180px] max-h-56 overflow-y-auto">
           {options.map(o => (
             <button
               key={o.value}
