@@ -8,15 +8,20 @@ import { Pool } from 'pg';
 
 export const runtime = 'nodejs';
 
+let cachedAppUrl: string | null = null;
 async function getAppUrl(): Promise<string> {
+  if (cachedAppUrl) return cachedAppUrl;
   try {
     const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
-    await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
     const res = await pool.query(`SELECT value FROM app_settings WHERE key = 'app_url'`);
     await pool.end();
-    if (res.rows[0]?.value) return res.rows[0].value.replace(/\/$/, '');
+    if (res.rows[0]?.value) {
+      cachedAppUrl = res.rows[0].value.replace(/\/$/, '');
+      return cachedAppUrl;
+    }
   } catch { /* fall through to env */ }
-  return process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
+  cachedAppUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
+  return cachedAppUrl;
 }
 
 export async function POST(req: NextRequest) {
@@ -108,13 +113,14 @@ export async function POST(req: NextRequest) {
 </body>
 </html>`;
 
-    await transporter.sendMail({
+    // Fire-and-forget — return immediately, email sends in background
+    transporter.sendMail({
       from:    `"${FROM_NAME}" <${FROM_EMAIL}>`,
       to:      email,
       subject: `You've been invited to ${FROM_NAME}`,
       html,
       text: `Hi ${displayName},\n\n${inviterName} has invited you to join ${FROM_NAME}.\n\nSign in here: ${loginUrl}\n\nUse your Microsoft account (${email}) to sign in.`,
-    });
+    }).catch((err: unknown) => console.error('[Invite] Email send failed:', err));
 
     return NextResponse.json({ ok: true, emailSent: true });
   } catch {
