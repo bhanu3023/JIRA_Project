@@ -420,12 +420,13 @@ export async function POST(req: NextRequest) {
   let spaceKey = '';
   let emailDepartment: string | null = null;
 
-  // 1a. In-memory mock store
+  // 1a. In-memory mock store (fallback only — DB below takes priority)
+  let mockSpaceKey = '';
   try {
     const mockModule = await import('@/lib/jira-dev-mock');
     const { getEmailAddressSpaceKey, getEmailAddressRecord } = mockModule as any;
     if (typeof getEmailAddressSpaceKey === 'function') {
-      spaceKey = getEmailAddressSpaceKey(toAddress) || '';
+      mockSpaceKey = getEmailAddressSpaceKey(toAddress) || '';
     }
     if (typeof getEmailAddressRecord === 'function') {
       const rec = getEmailAddressRecord(toAddress);
@@ -433,40 +434,32 @@ export async function POST(req: NextRequest) {
     }
   } catch {}
 
-  // 1b. DB lookup — exact address match (works for any board configured via Settings → Email)
-  if (!spaceKey) {
-    try {
-      const { Pool } = await import('pg');
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
-      // Ensure table exists (with department column)
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS email_configs (
-          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-          space_key TEXT NOT NULL, address TEXT NOT NULL,
-          imap_host TEXT NOT NULL DEFAULT 'outlook.office365.com', imap_port INT NOT NULL DEFAULT 993,
-          smtp_host TEXT NOT NULL DEFAULT 'smtp.office365.com',   smtp_port INT NOT NULL DEFAULT 587,
-          password_enc TEXT, auto_reply BOOLEAN DEFAULT true,
-          auto_reply_text TEXT, department TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
-          UNIQUE(space_key, address)
-        )
-      `);
-      await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`);
-      const dbRow = await pool.query(
-        `SELECT space_key, department FROM email_configs WHERE LOWER(address) = $1 LIMIT 1`,
-        [toAddress]
-      );
-      await pool.end();
-      if (dbRow.rows[0]) {
-        spaceKey = dbRow.rows[0].space_key;
-        if (dbRow.rows[0].department) emailDepartment = dbRow.rows[0].department;
-        console.log(`[EmailReceive] Found space via DB config: ${spaceKey}${emailDepartment ? ` dept:${emailDepartment}` : ''}`);
-      }
-    } catch (e) {
-      console.error('[EmailReceive] DB lookup failed:', e);
+  // 1b. DB lookup — always runs, takes priority over mock store
+  try {
+    const { Pool } = await import('pg');
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+    await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
+    const dbRow = await pool.query(
+      `SELECT space_key, department FROM email_configs WHERE LOWER(address) = $1 LIMIT 1`,
+      [toAddress]
+    );
+    await pool.end();
+    if (dbRow.rows[0]) {
+      spaceKey = dbRow.rows[0].space_key;
+      if (dbRow.rows[0].department) emailDepartment = dbRow.rows[0].department;
+      console.log(`[EmailReceive] Found space via DB config: ${spaceKey}${emailDepartment ? ` dept:${emailDepartment}` : ''}`);
     }
+  } catch (e) {
+    console.error('[EmailReceive] DB lookup failed:', e);
   }
 
-  // 1c. Derive from email local-part as last resort (e.g. sops@domain → SOPS)
+  // 1c. Fall back to mock store if DB had no match
+  if (!spaceKey && mockSpaceKey) {
+    spaceKey = mockSpaceKey;
+    console.log(`[EmailReceive] Using mock store spaceKey: ${spaceKey}`);
+  }
+
+  // 1d. Derive from email local-part as last resort
   if (!spaceKey) {
     spaceKey = toAddress.split('@')[0].toUpperCase().replace(/[^A-Z0-9]/g, '');
     console.log(`[EmailReceive] Derived spaceKey from prefix: ${spaceKey}`);
@@ -513,7 +506,7 @@ export async function POST(req: NextRequest) {
     if (msgIdsToCheck.length > 0) {
       try {
         const { Pool } = await import('pg');
-        const p = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+        const p = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
         for (const mid of msgIdsToCheck) {
           const res = await p.query(`SELECT key FROM issues WHERE "emailthreadid" = $1 LIMIT 1`, [mid]);
           if (res.rows[0]) { existingTicketKey = res.rows[0].key; break; }
@@ -530,7 +523,7 @@ export async function POST(req: NextRequest) {
     if (baseSubject) {
       try {
         const { Pool } = await import('pg');
-        const p = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+        const p = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
         const res = await p.query(
           `SELECT i.key FROM issues i JOIN spaces s ON i."spaceId" = s.id WHERE s.key = $1 AND LOWER(i.summary) = LOWER($2) ORDER BY i."createdAt" DESC LIMIT 1`,
           [sk, baseSubject]
@@ -596,7 +589,7 @@ export async function POST(req: NextRequest) {
     // Also check persistent processed_emails table
     try {
       const { Pool } = await import('pg');
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
       const dup = await pool.query(`SELECT message_id FROM processed_emails WHERE message_id = $1 LIMIT 1`, [mid]);
       await pool.end();
       if (dup.rows[0]) {
@@ -707,10 +700,19 @@ export async function POST(req: NextRequest) {
       customerName: senderDomain,
       clientName: senderDomain,
       labels: [],
-      ...(emailDepartment ? { current_department: emailDepartment } as any : {}),
     },
     include: { status: true, space: { select: { key: true, name: true } } },
   });
+
+  // Set current_department via raw SQL (field not in Prisma schema)
+  if (emailDepartment) {
+    try {
+      const { Pool } = await import('pg');
+      const p2 = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+      await p2.query(`UPDATE issues SET current_department = $1 WHERE key = $2`, [emailDepartment, issue.key]);
+      await p2.end();
+    } catch { /* non-critical */ }
+  }
 
   // If no assignee was found via RR, alert leads + shift leads
   if (!rrAssigneeId) {
@@ -751,7 +753,7 @@ export async function POST(req: NextRequest) {
     (globalThis as any).__processedMsgIds = processedIds;
     try {
       const { Pool } = await import('pg');
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
       // Save to issues table for thread detection
       await pool.query(`UPDATE issues SET "emailthreadid" = $1 WHERE key = $2`, [mid, issueKey]);
       // Save to persistent processed_emails table — survives ticket deletion & server restarts
