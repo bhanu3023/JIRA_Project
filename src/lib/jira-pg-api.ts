@@ -1892,7 +1892,8 @@ async function _handleJiraPgApi(
           `SELECT COUNT(*)::int AS cnt
            FROM issues i
            LEFT JOIN statuses s ON i."statusId" = s.id
-           WHERE i."spaceId" = ANY($1::text[]) AND LOWER(i.current_department) = LOWER($2)
+           WHERE i."spaceId" = ANY($1::text[])
+             AND (LOWER(i.current_department) = LOWER($2) OR i.current_department IS NULL OR i.current_department = '')
            ${deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : ''}
            ${deptSearchClause}`,
           countParams
@@ -1917,7 +1918,8 @@ async function _handleJiraPgApi(
            LEFT JOIN statuses s ON i."statusId" = s.id
            LEFT JOIN users a ON i."assigneeId" = a.id
            LEFT JOIN users r ON i."reporterId" = r.id
-           WHERE i."spaceId" = ANY($1::text[]) AND LOWER(i.current_department) = LOWER($2)
+           WHERE i."spaceId" = ANY($1::text[])
+             AND (LOWER(i.current_department) = LOWER($2) OR i.current_department IS NULL OR i.current_department = '')
            ${deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : ''}
            ${deptSearchClause}
            ORDER BY i."updatedAt" DESC, i."createdAt" DESC
