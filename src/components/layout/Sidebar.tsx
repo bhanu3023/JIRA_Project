@@ -455,17 +455,13 @@ function SMSidebar({
             active={pathname.includes('tab=sla')}
           />
         )}
-        {canManageSpace && (
-          <>
-            <div className="my-2 h-px bg-gray-100" />
-            <SideNavItem
-              href={`/spaces/${spaceKey}/settings`}
-              icon={<Settings size={15} />}
-              label="Settings"
-              active={pathname.includes('/settings')}
-            />
-          </>
-        )}
+        <div className="my-2 h-px bg-gray-100" />
+        <SideNavItem
+          href={`/spaces/${spaceKey}/settings`}
+          icon={<Settings size={15} />}
+          label="Settings"
+          active={pathname.includes('/settings')}
+        />
       </nav>
     </div>
   );
@@ -542,17 +538,13 @@ function SoftwareSidebar({
           label="Workflows"
           active={pathname.includes('/workflow')}
         />
-        {canManageSpace && (
-          <>
-            <div className="my-2 h-px bg-gray-100" />
-            <SideNavItem
-              href={`/spaces/${spaceKey}/settings`}
-              icon={<Settings size={15} />}
-              label="Settings"
-              active={pathname.includes('/settings')}
-            />
-          </>
-        )}
+        <div className="my-2 h-px bg-gray-100" />
+        <SideNavItem
+          href={`/spaces/${spaceKey}/settings`}
+          icon={<Settings size={15} />}
+          label="Settings"
+          active={pathname.includes('/settings')}
+        />
       </nav>
     </div>
   );
