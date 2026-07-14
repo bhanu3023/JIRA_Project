@@ -993,7 +993,30 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
   return (
     <>
     <div className="space-y-0.5">
-      {/* Queues — expandable */}
+      {/* Queues — service_desk: direct links; dept_queue: expandable with custom queues */}
+      {!isDeptQueue ? (
+        <>
+          <Link href={`/spaces/${spaceKey}?queue=all-open`} className={subCls(queueActive('all-open'))}>
+            <InboxIcon size={13} className={queueActive('all-open') ? 'text-blue-600' : 'text-gray-400'} />
+            <span className="flex-1">All open</span>
+            {counts.allOpen > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-600">{counts.allOpen}</span>}
+          </Link>
+          <Link href={`/spaces/${spaceKey}?queue=unassigned`} className={subCls(queueActive('unassigned'))}>
+            <UserX size={13} className={queueActive('unassigned') ? 'text-blue-600' : 'text-gray-400'} />
+            <span className="flex-1">Unassigned</span>
+            {counts.unassigned > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">{counts.unassigned}</span>}
+          </Link>
+          <Link href={`/spaces/${spaceKey}?queue=assigned`} className={subCls(queueActive('assigned'))}>
+            <UserCheck size={13} className={queueActive('assigned') ? 'text-blue-600' : 'text-gray-400'} />
+            <span className="flex-1">Assigned to me</span>
+            {counts.assigned > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">{counts.assigned}</span>}
+          </Link>
+          <Link href={`/spaces/${spaceKey}?queue=all-requests`} className={subCls(queueActive('all-requests'))}>
+            <Archive size={13} className={queueActive('all-requests') ? 'text-blue-600' : 'text-gray-400'} />
+            <span className="flex-1">Closed tickets</span>
+          </Link>
+        </>
+      ) : (
       <div>
         <div className="flex items-center gap-1 rounded-md px-1 py-0.5 hover:bg-gray-100">
           <button onClick={() => setQueuesOpen(v => !v)} className="flex flex-1 items-center gap-2 px-1 py-1 text-[12px] font-medium text-gray-600 hover:text-gray-900">
@@ -1193,6 +1216,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
           </div>
         )}
       </div>
+      )}
 
       {/* Summary */}
       <Link href={`/spaces/${spaceKey}?queue=summary`} className={subCls(queueActive('summary'))}>
