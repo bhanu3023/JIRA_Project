@@ -165,21 +165,27 @@ function SpaceDetailContent() {
   const [closedIssues, setClosedIssues] = useState<any[]>([]);
   const [deptFilter, setDeptFilter] = useState<string>(''); // '' = all departments
   const [allCustomQueues, setAllCustomQueues] = useState<{ id: string; name: string; memberIds: string[] }[]>([]);
-  const [customQueuesLoaded, setCustomQueuesLoaded] = useState(false);
+  // Track which spaceKey the queues were loaded for — avoids stale-spaceKey race condition
+  const [customQueuesLoadedFor, setCustomQueuesLoadedFor] = useState<string>('');
   useEffect(() => {
     if (!spaceKey) return;
-    setCustomQueuesLoaded(false);
-    // Pre-populate from localStorage immediately so the effect doesn't fire with empty queues
+    // Reset loaded marker immediately (synchronous — blocks issues effect until fresh queues arrive)
+    setCustomQueuesLoadedFor('');
+    // Pre-populate from localStorage so the correct queue is known before the API resolves
     try {
       const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
-      if (stored) setAllCustomQueues(JSON.parse(stored));
+      if (stored) {
+        setAllCustomQueues(JSON.parse(stored));
+        setCustomQueuesLoadedFor(spaceKey); // localStorage is fast enough — mark ready immediately
+      }
     } catch {}
     api.request<any[]>(`custom-queues/${spaceKey}`).then((q) => {
       if (Array.isArray(q)) {
         setAllCustomQueues(q);
         try { localStorage.setItem(`custom_queues_${spaceKey}`, JSON.stringify(q)); } catch {}
       }
-    }).catch(() => {}).finally(() => setCustomQueuesLoaded(true));
+      setCustomQueuesLoadedFor(spaceKey);
+    }).catch(() => { setCustomQueuesLoadedFor(spaceKey); });
   }, [spaceKey]);
 
   // Active custom queue object — resolved synchronously from already-loaded allCustomQueues (no extra API call)
@@ -344,7 +350,7 @@ function SpaceDetailContent() {
   useEffect(() => {
     if (!spaceKey || queueFilter === 'queues') return;
     // For custom queues, wait until allCustomQueues has loaded so activeCustomQueue is resolved
-    if (queueFilter.startsWith('cq_') && !customQueuesLoaded) return;
+    if (queueFilter.startsWith('cq_') && customQueuesLoadedFor !== spaceKey) return;
     let cancelled = false;
     setLoadError(null);
     (async () => {
@@ -453,7 +459,7 @@ function SpaceDetailContent() {
       }
     })();
     return () => { cancelled = true; };
-  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoaded, filters, debouncedSearch, loadSpace, loadIssues, user?.id]);
+  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, user?.id]);
 
   // Load custom fields assigned to this space → dynamic columns
   useEffect(() => {
