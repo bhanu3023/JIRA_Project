@@ -355,10 +355,13 @@ export async function notifyCommentAdded(issue: {
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
   comment: { body: string; author?: { email?: string | null; firstName?: string; lastName?: string } | null };
 }) {
-  // Don't notify the commenter themselves
+  // Always notify the reporter (they are the customer who sent the email).
+  // Only skip the commenter from the assignee side (agents don't need self-notifications).
   const commenterEmail = (issue.comment.author?.email || '').toLowerCase();
-  const to = recipients(issue.assignee, issue.reporter)
-    .filter(e => e !== commenterEmail);
+  const reporterEmail  = (issue.reporter?.email || '').toLowerCase();
+  const assigneeEmails = recipients(issue.assignee).filter(e => e !== commenterEmail);
+  const reporterEmails = reporterEmail ? [reporterEmail] : [];
+  const to = Array.from(new Set([...assigneeEmails, ...reporterEmails])).filter(Boolean);
   if (!to.length) return;
 
   const authorName = issue.comment.author
