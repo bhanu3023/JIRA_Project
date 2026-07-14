@@ -10,7 +10,7 @@ import { getOAuthTokens, getValidAccessToken } from '@/lib/oauth-service';
 
 export const runtime = 'nodejs';
 
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db';
+const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
 
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));

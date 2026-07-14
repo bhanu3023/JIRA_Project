@@ -131,24 +131,78 @@ function buildEmailHtml(opts: {
 </html>`;
 }
 
+// ── Send via Microsoft Graph API (OAuth fallback when SMTP not configured) ─────
+async function sendViaGraph(opts: { from: string; to: string[]; subject: string; html: string; text: string }) {
+  try {
+    const { getValidAccessToken, getOAuthTokens } = await import('@/lib/oauth-service');
+    const tokens = getOAuthTokens(opts.from);
+    if (!tokens) return false;
+    const accessToken = await getValidAccessToken(opts.from).catch(() => null);
+    if (!accessToken) return false;
+
+    for (const recipient of opts.to) {
+      const message = {
+        subject: opts.subject,
+        body: { contentType: 'HTML', content: opts.html },
+        toRecipients: [{ emailAddress: { address: recipient } }],
+      };
+      const res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, saveToSentItems: false }),
+      });
+      if (res.ok || res.status === 202) {
+        console.log(`[Notification] Sent via Graph: ${opts.subject} → ${recipient}`);
+      } else {
+        const err = await res.text().catch(() => '');
+        console.error(`[Notification] Graph send failed for ${recipient}: ${res.status} ${err.slice(0, 200)}`);
+      }
+    }
+    return true;
+  } catch (e: any) {
+    console.error('[Notification] Graph send error:', e?.message);
+    return false;
+  }
+}
+
+// ── Find best sender email (any connected OAuth account) ───────────────────────
+async function getBestSenderEmail(): Promise<string | null> {
+  try {
+    const { getAllOAuthEmails } = await import('@/lib/oauth-service');
+    const emails = getAllOAuthEmails();
+    return emails[0] || null;
+  } catch { return null; }
+}
+
 // ── Send helper ────────────────────────────────────────────────────────────────
 async function sendNotification(to: string[], subject: string, html: string, text: string) {
-  const transporter = getTransporter();
-  if (!transporter) return; // SMTP not configured — skip silently
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
   if (!uniqueTo.length) return;
 
-  try {
-    await transporter.sendMail({
-      from:    `"${FROM_NAME}" <${FROM_EMAIL}>`,
-      to:      uniqueTo.join(', '),
-      subject,
-      html,
-      text,
-    });
-    console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')}`);
-  } catch (err: any) {
-    console.error(`[Notification] Failed to send "${subject}":`, err.message);
+  // Try SMTP first (if configured)
+  const transporter = getTransporter();
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from:    `"${FROM_NAME}" <${FROM_EMAIL}>`,
+        to:      uniqueTo.join(', '),
+        subject,
+        html,
+        text,
+      });
+      console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')}`);
+    } catch (err: any) {
+      console.error(`[Notification] Failed to send "${subject}":`, err.message);
+    }
+    return;
+  }
+
+  // SMTP not configured — fall back to OAuth (Microsoft Graph API)
+  const senderEmail = await getBestSenderEmail();
+  if (senderEmail) {
+    await sendViaGraph({ from: senderEmail, to: uniqueTo, subject, html, text });
+  } else {
+    console.warn(`[Notification] Skipping "${subject}" — no SMTP credentials and no OAuth account connected`);
   }
 }
 

@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
   // Ensure persistent processed_emails table exists and pre-load all processed message IDs
   try {
     const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
 
     // Create the table if it doesn't exist (survives ticket deletions)
     await pool.query(`
@@ -128,7 +128,7 @@ export async function POST(req: NextRequest) {
   // ── Load ALL boards' email configs from DB and restart any missing pollers ──
   try {
     const { Pool } = await import('pg');
-    const pool2 = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+    const pool2 = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
 
     // Ensure table exists (in case it was never created yet)
     await pool2.query(`
