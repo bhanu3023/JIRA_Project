@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db';
+const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
 
 declare global {
   // eslint-disable-next-line no-var

@@ -664,7 +664,7 @@ export function startImapPoller(
     (async () => {
       try {
         const { Pool } = await import('pg');
-        const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db';
+        const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
         const pool = new Pool({ connectionString: DB });
         await pool.query(`
           CREATE TABLE IF NOT EXISTS processed_emails (
@@ -687,7 +687,7 @@ export function startImapPoller(
   (async () => {
     try {
       const { Pool } = await import('pg');
-      const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db';
+      const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
       const pool = new Pool({ connectionString: DB });
       await pool.query(`
         CREATE TABLE IF NOT EXISTS email_configs (

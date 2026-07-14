@@ -18,7 +18,7 @@ import {
   type EmailConfig,
 } from '@/lib/email-service';
 
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db';
+const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
 
 export const runtime = 'nodejs';
 

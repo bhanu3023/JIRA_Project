@@ -490,7 +490,7 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
     const spaceId = issue.spaceId ?? issue.space?.id;
     if (!spaceId) return [];
     const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
     const res = await pool.query(
       `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`, [spaceId]
     );
@@ -4265,7 +4265,7 @@ async function _handleJiraPgApi(
   if (slaListMatch) {
     const spKey = slaListMatch[1].toUpperCase();
     const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
     try {
       const spRow = await pool.query(`SELECT id FROM spaces WHERE key = $1 LIMIT 1`, [spKey]);
       if (!spRow.rows[0]) { await pool.end(); return json({ error: 'Space not found' }, 404); }
@@ -4314,7 +4314,7 @@ async function _handleJiraPgApi(
   if (slaItemMatch) {
     const slaId = slaItemMatch[2];
     const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
     try {
       if (method === 'PATCH') {
         const body = await readJson(req);
