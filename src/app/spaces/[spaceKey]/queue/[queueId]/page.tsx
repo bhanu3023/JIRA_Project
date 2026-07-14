@@ -409,6 +409,7 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
   const [loading, setLoading]     = useState(true);
   const [saving, setSaving]       = useState<string | null>(null);
   const [savedMsg, setSavedMsg]   = useState('');
+  const [restarting, setRestarting]   = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [showPwd, setShowPwd]     = useState(false);
   const [form, setForm]           = useState({ email: '', password: '', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' });
@@ -462,6 +463,20 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
       setTestResult({ ok: false, message: 'Network error — check your credentials' });
     }
     setTesting(false);
+  };
+
+  const restartPoller = async (address: string) => {
+    setRestarting(address);
+    try {
+      const res = await fetch('/api/email/restart-pollers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address }),
+      });
+      const data = await res.json();
+      flash(data.ok ? `Poller restarted for ${address}` : (data.error || 'Restart failed'));
+    } catch { flash('Restart failed'); }
+    setRestarting(null);
   };
 
   const addAndLink = async () => {
@@ -612,10 +627,18 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
                 </p>
               </div>
             </div>
-            <button onClick={() => unlinkEmail(email.id)} disabled={saving === email.id}
-              className="flex items-center gap-1.5 text-[12px] font-medium text-red-500 hover:text-red-700 px-3 py-1.5 rounded-lg border border-red-200 hover:bg-red-50 transition-colors disabled:opacity-40">
-              <Unlink size={13} /> {saving === email.id ? 'Saving…' : 'Unlink'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={() => restartPoller(email.address)} disabled={restarting === email.address}
+                className="flex items-center gap-1.5 text-[12px] font-medium text-blue-600 hover:text-blue-800 px-3 py-1.5 rounded-lg border border-blue-200 hover:bg-blue-50 transition-colors disabled:opacity-40"
+                title="Restart IMAP poller (use if emails stopped creating tickets)">
+                {restarting === email.address ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                {restarting === email.address ? 'Restarting…' : 'Restart'}
+              </button>
+              <button onClick={() => unlinkEmail(email.id)} disabled={saving === email.id}
+                className="flex items-center gap-1.5 text-[12px] font-medium text-red-500 hover:text-red-700 px-3 py-1.5 rounded-lg border border-red-200 hover:bg-red-50 transition-colors disabled:opacity-40">
+                <Unlink size={13} /> {saving === email.id ? 'Saving…' : 'Unlink'}
+              </button>
+            </div>
           </div>
         ))}
       </div>
