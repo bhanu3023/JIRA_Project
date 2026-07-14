@@ -1,10 +1,12 @@
 /**
  * POST /api/email/restart-pollers
  * Reads all configs from email_configs DB and restarts any stopped pollers.
+ * Supports both password-based and OAuth-based (Microsoft/Google) connections.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
 import { startImapPoller, isPollerActiveForEmail } from '@/lib/email-service';
+import { getOAuthTokens, getValidAccessToken } from '@/lib/oauth-service';
 
 export const runtime = 'nodejs';
 
@@ -37,21 +39,62 @@ export async function POST(req: NextRequest) {
 
   for (const row of rows) {
     if (targetAddress && row.address.toLowerCase() !== targetAddress) continue;
-    if (!row.password_enc) {
-      results.push({ address: row.address, status: 'skipped (OAuth — no stored password)' });
-      continue;
-    }
 
-    // Skip if already running
+    // Skip if already running (unless explicitly targeting this address)
     if (!targetAddress && isPollerActiveForEmail(row.address)) {
       results.push({ address: row.address, status: 'already running' });
       continue;
     }
 
+    // Try OAuth tokens first (Microsoft/Google accounts have no stored password)
+    let oauthAccessToken: string | undefined;
+    let oauthRefreshToken: string | undefined;
+    let oauthProvider: string | undefined;
+
+    const stored = getOAuthTokens(row.address.toLowerCase());
+    if (stored) {
+      try {
+        oauthAccessToken = await getValidAccessToken(row.address.toLowerCase()) ?? stored.accessToken;
+        oauthRefreshToken = stored.refreshToken;
+        oauthProvider = stored.provider || 'microsoft';
+      } catch {}
+    }
+
+    const isOAuth = !!oauthAccessToken;
+
+    if (!isOAuth && !row.password_enc) {
+      results.push({ address: row.address, status: 'skipped — no password and no OAuth token stored' });
+      continue;
+    }
+
+    // For Microsoft/Office365 OAuth accounts, always use the correct host
+    const imapHost = isOAuth && (oauthProvider === 'microsoft' || row.imap_host?.includes('outlook'))
+      ? 'outlook.office365.com'
+      : (row.imap_host || 'imap.gmail.com');
+    const smtpHost = isOAuth && (oauthProvider === 'microsoft' || row.smtp_host?.includes('office365'))
+      ? 'smtp.office365.com'
+      : (row.smtp_host || 'smtp.gmail.com');
+
     try {
       const config = {
-        imap: { host: row.imap_host, port: row.imap_port || 993, secure: true, user: row.address, password: row.password_enc },
-        smtp: { host: row.smtp_host, port: row.smtp_port || 587, secure: false, user: row.address, password: row.password_enc },
+        imap: {
+          host: imapHost,
+          port: row.imap_port || 993,
+          secure: true,
+          user: row.address,
+          password: isOAuth ? '' : row.password_enc,
+          oauthAccessToken: isOAuth ? oauthAccessToken : undefined,
+          oauthRefreshToken: isOAuth ? oauthRefreshToken : undefined,
+          oauthProvider: isOAuth ? oauthProvider as any : undefined,
+        },
+        smtp: {
+          host: smtpHost,
+          port: row.smtp_port || 587,
+          secure: false,
+          user: row.address,
+          password: isOAuth ? '' : row.password_enc,
+          oauthAccessToken: isOAuth ? oauthAccessToken : undefined,
+        },
         spaceKey: row.space_key,
         address: row.address,
         autoReply: row.auto_reply ?? true,
@@ -72,13 +115,13 @@ export async function POST(req: NextRequest) {
         }).catch(() => {});
       });
 
-      results.push({ address: row.address, status: 'started' });
-      console.log(`[RestartPollers] Started poller for ${row.address} → space ${row.space_key}`);
+      results.push({ address: row.address, status: isOAuth ? 'started (OAuth)' : 'started (password)' });
+      console.log(`[RestartPollers] Started poller for ${row.address} → space ${row.space_key} via ${isOAuth ? 'OAuth' : 'password'}`);
     } catch (err: any) {
       results.push({ address: row.address, status: `error: ${err.message}` });
     }
   }
 
-  const started = results.filter(r => r.status === 'started').length;
+  const started = results.filter(r => r.status.startsWith('started')).length;
   return NextResponse.json({ ok: true, started, results });
 }
