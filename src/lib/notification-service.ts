@@ -376,26 +376,6 @@ export async function notifyCommentAdded(issue: {
   const to = Array.from(new Set([...assigneeEmails, ...reporterEmails])).filter(Boolean);
   if (!to.length) return;
 
-  const authorName = issue.comment.author
-    ? `${issue.comment.author.firstName} ${issue.comment.author.lastName}`.trim()
-    : 'Someone';
-
-  const html = buildEmailHtml({
-    title:        'Comment Added',
-    issueKey:     issue.key,
-    issueSummary: issue.summary,
-    spaceKey:     issue.spaceKey,
-    spaceName:    issue.spaceName,
-    eventLabel:   'New Comment',
-    eventColor:   '#3B82F6',
-    fields: [
-      { label: 'Commented by', value: authorName },
-      { label: 'Status',       value: issue.status.name },
-    ],
-    comment:   issue.comment.body.slice(0, 500) + (issue.comment.body.length > 500 ? '…' : ''),
-    actionUrl: issueUrl(issue.key),
-  });
-
   // Look up original email thread ID so the notification lands in the same email thread
   let sourceMessageId: string | undefined;
   try {
@@ -406,11 +386,16 @@ export async function notifyCommentAdded(issue: {
     sourceMessageId = row.rows[0]?.emailthreadid || undefined;
   } catch { /* non-critical */ }
 
+  // Send a plain reply email — just the comment text, no ticket template
+  // This looks like a normal email reply so the recipient can reply back
+  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">${issue.comment.body}</div>`;
+  const commentText = issue.comment.body.replace(/<[^>]+>/g, '');
+
   await sendNotification(
     to,
     `Re: [${issue.key}] ${issue.summary}`,
-    html,
-    `${authorName} commented on ${issue.key}:\n\n${issue.comment.body}\n\nView: ${issueUrl(issue.key)}`,
+    commentHtml,
+    commentText,
     sourceMessageId,
   );
 }
