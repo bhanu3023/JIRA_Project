@@ -754,8 +754,9 @@ export async function POST(req: NextRequest) {
     try {
       const { Pool } = await import('pg');
       const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+      await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS emailthreadid TEXT`).catch(() => {});
       // Save to issues table for thread detection
-      await pool.query(`UPDATE issues SET "emailthreadid" = $1 WHERE key = $2`, [mid, issueKey]);
+      await pool.query(`UPDATE issues SET emailthreadid = $1 WHERE key = $2`, [mid, issueKey]);
       // Save to persistent processed_emails table — survives ticket deletion & server restarts
       await pool.query(
         `INSERT INTO processed_emails (message_id) VALUES ($1) ON CONFLICT (message_id) DO NOTHING`,

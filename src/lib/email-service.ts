@@ -446,9 +446,23 @@ export function sanitizeEmailHtml(html: string): string {
   h = h.replace(/\s+on\w+="[^"]*"/gi, '');
   h = h.replace(/\s+on\w+='[^']*'/gi, '');
 
-  // 5. Strip quoted-reply blocks
+  // 5. Strip quoted-reply blocks (plain text patterns embedded in HTML)
   h = h.replace(/(<div[^>]*>)?\s*[-_]{3,}\s*(Original Message|Forwarded Message)[\s\S]*/i, '');
   h = h.replace(/On .{5,80} wrote:[\s\S]*/i, '');
+
+  // 5b. Strip <blockquote> elements entirely (they contain the quoted thread)
+  // Use a loop to handle nesting: replace inner blockquotes first, then outer
+  let bqPrev = '';
+  while (bqPrev !== h) {
+    bqPrev = h;
+    h = h.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi, '');
+  }
+
+  // 5c. Strip Outlook's blue-line reply header divs
+  //     e.g. <div style="...border-top:solid #E1E1E1..."> or border-top:1pt solid
+  h = h.replace(/<div[^>]*style="[^"]*border(?:-top)?:[^"]*solid[^"]*"[^>]*>[\s\S]*$/i, '');
+  // Strip from the <hr> separator Outlook inserts before the quoted block
+  h = h.replace(/<hr[^>]*\/?>\s*<div[^>]*>[\s\S]*$/i, '');
 
   // 6. Strip Outlook reading-pane preview divs (x_ classes, divRplyFwdMsg, etc.)
   //    Use iterative replacement to handle deeply nested structures

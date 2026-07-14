@@ -132,7 +132,7 @@ function buildEmailHtml(opts: {
 }
 
 // ── Send via Microsoft Graph API (OAuth fallback when SMTP not configured) ─────
-async function sendViaGraph(opts: { from: string; to: string[]; subject: string; html: string; text: string }) {
+async function sendViaGraph(opts: { from: string; to: string[]; subject: string; html: string; text: string; inReplyTo?: string }) {
   try {
     const { getValidAccessToken, getOAuthTokens } = await import('@/lib/oauth-service');
     const tokens = getOAuthTokens(opts.from);
@@ -141,11 +141,18 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
     if (!accessToken) return false;
 
     for (const recipient of opts.to) {
-      const message = {
+      const message: any = {
         subject: opts.subject,
         body: { contentType: 'HTML', content: opts.html },
         toRecipients: [{ emailAddress: { address: recipient } }],
       };
+      // Thread the email into the original conversation
+      if (opts.inReplyTo) {
+        message.internetMessageHeaders = [
+          { name: 'In-Reply-To', value: opts.inReplyTo },
+          { name: 'References',  value: opts.inReplyTo },
+        ];
+      }
       const res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -175,7 +182,7 @@ async function getBestSenderEmail(): Promise<string | null> {
 }
 
 // ── Send helper ────────────────────────────────────────────────────────────────
-async function sendNotification(to: string[], subject: string, html: string, text: string) {
+async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string) {
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
   if (!uniqueTo.length) return;
 
@@ -183,13 +190,18 @@ async function sendNotification(to: string[], subject: string, html: string, tex
   const transporter = getTransporter();
   if (transporter) {
     try {
-      await transporter.sendMail({
+      const mailOpts: any = {
         from:    `"${FROM_NAME}" <${FROM_EMAIL}>`,
         to:      uniqueTo.join(', '),
         subject,
         html,
         text,
-      });
+      };
+      if (inReplyTo) {
+        mailOpts.inReplyTo = inReplyTo;
+        mailOpts.references = inReplyTo;
+      }
+      await transporter.sendMail(mailOpts);
       console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')}`);
     } catch (err: any) {
       console.error(`[Notification] Failed to send "${subject}":`, err.message);
@@ -200,7 +212,7 @@ async function sendNotification(to: string[], subject: string, html: string, tex
   // SMTP not configured — fall back to OAuth (Microsoft Graph API)
   const senderEmail = await getBestSenderEmail();
   if (senderEmail) {
-    await sendViaGraph({ from: senderEmail, to: uniqueTo, subject, html, text });
+    await sendViaGraph({ from: senderEmail, to: uniqueTo, subject, html, text, inReplyTo });
   } else {
     console.warn(`[Notification] Skipping "${subject}" — no SMTP credentials and no OAuth account connected`);
   }
@@ -384,11 +396,22 @@ export async function notifyCommentAdded(issue: {
     actionUrl: issueUrl(issue.key),
   });
 
+  // Look up original email thread ID so the notification lands in the same email thread
+  let sourceMessageId: string | undefined;
+  try {
+    const { Pool } = await import('pg');
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+    const row = await pool.query(`SELECT emailthreadid FROM issues WHERE key = $1 LIMIT 1`, [issue.key]);
+    await pool.end();
+    sourceMessageId = row.rows[0]?.emailthreadid || undefined;
+  } catch { /* non-critical */ }
+
   await sendNotification(
     to,
-    `[${issue.key}] ${authorName} commented - ${issue.summary}`,
+    `Re: [${issue.key}] ${issue.summary}`,
     html,
     `${authorName} commented on ${issue.key}:\n\n${issue.comment.body}\n\nView: ${issueUrl(issue.key)}`,
+    sourceMessageId,
   );
 }
 
