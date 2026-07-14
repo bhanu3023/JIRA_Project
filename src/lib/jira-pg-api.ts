@@ -1957,10 +1957,15 @@ async function _handleJiraPgApi(
     if (!sp) return json({ error: 'Space not found' }, 404);
 
     // Fetch all issue keys for this space to compute max number and dominant prefix.
-    const nums = await db.issue.findMany({ where: { spaceId: sp.id }, select: { key: true } });
+    // Use raw SQL so we catch ALL issues for the space regardless of spaceId mapping.
+    const allKeysRow = await pool.query<{ key: string }>(
+      `SELECT key FROM issues WHERE "spaceId" = $1 OR key LIKE $2`,
+      [sp.id, `${sk}-%`]
+    );
+    const nums = allKeysRow.rows;
     let maxNum = nums.reduce((max, i) => {
       const n = parseInt(i.key.split('-').pop() || '0', 10);
-      return n > max ? n : max;
+      return isNaN(n) ? max : Math.max(max, n);
     }, 0);
 
     // Determine key prefix: subtask = inherit from parent; otherwise use dominant prefix.
