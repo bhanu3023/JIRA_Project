@@ -447,14 +447,12 @@ function SMSidebar({
           label="Board"
           active={pathname.includes('/board')}
         />
-        {canManageSpace && (
-          <SideNavItem
-            href={`/spaces/${spaceKey}/settings?tab=sla`}
-            icon={<Clock size={15} />}
-            label="SLAs"
-            active={pathname.includes('tab=sla')}
-          />
-        )}
+        <SideNavItem
+          href={`/spaces/${spaceKey}/settings?tab=sla`}
+          icon={<Clock size={15} />}
+          label="SLAs"
+          active={pathname.includes('tab=sla')}
+        />
         <div className="my-2 h-px bg-gray-100" />
         <SideNavItem
           href={`/spaces/${spaceKey}/settings`}
