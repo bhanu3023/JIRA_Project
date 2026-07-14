@@ -2024,8 +2024,8 @@ async function _handleJiraPgApi(
 
       try {
         if (!isEmailCreated && !requestedDept) {
-          // Manual creation with no explicit dept â†' assign to the creator
-          resolvedAssigneeId = userId || null;
+          // Manual creation with no explicit dept -- leave unassigned (RR only triggers on email or dept selection)
+          resolvedAssigneeId = null;
         } else if (requestedDept) {
           // Ticket with an explicit queue/department â†' RR for that dept
           rrDepartment = requestedDept;
@@ -2099,11 +2099,11 @@ async function _handleJiraPgApi(
         comments: { include: { author: true } },
       },
         });
-        break; // success — exit retry loop
+        break; // success -- exit retry loop
       } catch (err: any) {
         const isUniqueViolation = err?.code === 'P2002' || err?.message?.includes('Unique constraint');
         if (!isUniqueViolation || attempt === 4) throw err;
-        // Key collision (race condition) — try next number
+        // Key collision (race condition) -- try next number
       }
     }
     if (!issue) return json({ error: 'Failed to generate unique issue key' }, 500);
@@ -2111,7 +2111,7 @@ async function _handleJiraPgApi(
     // Set original_dept and assign next CF key at creation time
     try {
       if (issue?.id) {
-        // current_department is a raw ALTER TABLE column — Prisma doesn't know it, so set via raw SQL
+        // current_department is a raw ALTER TABLE column -- Prisma doesn't know it, so set via raw SQL
         const deptToSet = body.department ? String(body.department) : (rrDepartment || null);
         if (deptToSet) {
           await pool.query(
@@ -2750,7 +2750,7 @@ async function _handleJiraPgApi(
       );
       await startDeptSLA(key, null, 'Migration');
 
-      // Ticket returned to Migration — remove 'passed' worked-on entries since work continues
+      // Ticket returned to Migration -- remove 'passed' worked-on entries since work continues
       pool.query(
         `DELETE FROM user_worked_on_tickets WHERE issue_id=(SELECT id FROM issues WHERE key=$1) AND reason='passed'`,
         [key]
@@ -4066,8 +4066,8 @@ async function _handleJiraPgApi(
     }
   }
 
-  // GET /custom-queues/:spaceKey — load queues from DB
-  // PUT /custom-queues/:spaceKey — save queues to DB
+  // GET /custom-queues/:spaceKey -- load queues from DB
+  // PUT /custom-queues/:spaceKey -- save queues to DB
   if (path.startsWith('custom-queues/')) {
     const spaceKey = path.split('/')[1];
     await pool.query(
