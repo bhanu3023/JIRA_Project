@@ -555,8 +555,9 @@ export async function POST(req: NextRequest) {
 
     const existingIssue = await db.issue.findUnique({ where: { key: existingTicketKey }, select: { id: true } });
     if (existingIssue) {
-      // Strip quoted/forwarded content — keep only the new reply text
-      const cleanBody = stripQuotedContent(body);
+      // Strip quoted/forwarded content — use full HTML-aware pipeline so
+      // Outlook-style quote blocks (From:/Sent:/To:/Subject: divs) are removed too
+      const cleanBody = cleanMimeBody(body) || stripQuotedContent(body);
       if (cleanBody) {
         await db.comment.create({
           data: {
