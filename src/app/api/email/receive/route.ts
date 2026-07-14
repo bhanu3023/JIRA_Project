@@ -555,9 +555,26 @@ export async function POST(req: NextRequest) {
 
     const existingIssue = await db.issue.findUnique({ where: { key: existingTicketKey }, select: { id: true } });
     if (existingIssue) {
-      // Strip quoted/forwarded content — use full HTML-aware pipeline so
-      // Outlook-style quote blocks (From:/Sent:/To:/Subject: divs) are removed too
-      const cleanBody = cleanMimeBody(body) || stripQuotedContent(body);
+      // For reply comments: extract plain text → run text-based quote stripper
+      // (more reliable than HTML parsing — Outlook's reply HTML structure varies,
+      // but the plain-text From:/Sent:/To:/Subject: block is always consistent)
+      let cleanBody: string;
+      const isHtml = /<[a-zA-Z]/.test(body);
+      if (isHtml) {
+        const plainText = body
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+          .replace(/\s{2,}/g, ' ').replace(/ \n/g, '\n').replace(/\n /g, '\n')
+          .trim();
+        const stripped = stripQuotedContent(plainText);
+        cleanBody = stripped.split(/\n\n+/)
+          .map(p => p.trim() ? `<p>${p.trim().replace(/\n/g, '<br/>')}</p>` : '')
+          .filter(Boolean).join('') || stripped;
+      } else {
+        cleanBody = stripQuotedContent(body);
+      }
       if (cleanBody) {
         await db.comment.create({
           data: {
