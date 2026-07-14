@@ -709,10 +709,36 @@ function parseDateRange(range: string): { from: Date; to: Date } {
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ On-demand Jira import Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-const JIRA_BASE_URL = 'https://cf2020.atlassian.net';
-const JIRA_EMAIL    = 'sujana.manapuram@cloudfuze.com';
-const JIRA_TOKEN    = 'REDACTED_API_TOKEN';
+const JIRA_BASE_URL = process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net';
+const JIRA_EMAIL    = process.env.JIRA_EMAIL    || 'sujana.manapuram@cloudfuze.com';
+const JIRA_TOKEN    = process.env.JIRA_TOKEN    || 'REDACTED_API_TOKEN';
 const JIRA_AUTH_HDR = 'Basic ' + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString('base64');
+
+// Lazily loaded Jira credentials from app_settings DB (set during import)
+let _cachedJiraBase:  string | null = null;
+let _cachedJiraEmail: string | null = null;
+let _cachedJiraToken: string | null = null;
+let _credCacheTime = 0;
+async function getJiraCredentials(): Promise<{ base: string; email: string; token: string; authHdr: string }> {
+  const now = Date.now();
+  if (_cachedJiraToken && now - _credCacheTime < 5 * 60 * 1000) {
+    return { base: _cachedJiraBase!, email: _cachedJiraEmail!, token: _cachedJiraToken!, authHdr: 'Basic ' + Buffer.from(`${_cachedJiraEmail}:${_cachedJiraToken}`).toString('base64') };
+  }
+  try {
+    const rows = await pool.query(`SELECT key, value FROM app_settings WHERE key IN ('jira_url','jira_email','jira_token')`);
+    const s: Record<string, string> = {};
+    for (const r of rows.rows) s[r.key] = r.value;
+    if (s.jira_token) {
+      _cachedJiraBase  = s.jira_url   || JIRA_BASE_URL;
+      _cachedJiraEmail = s.jira_email || JIRA_EMAIL;
+      _cachedJiraToken = s.jira_token;
+      _credCacheTime   = now;
+      return { base: _cachedJiraBase, email: _cachedJiraEmail, token: _cachedJiraToken, authHdr: 'Basic ' + Buffer.from(`${_cachedJiraEmail}:${_cachedJiraToken}`).toString('base64') };
+    }
+  } catch { /* fall through */ }
+  // Fallback to env/hardcoded
+  return { base: JIRA_BASE_URL, email: JIRA_EMAIL, token: JIRA_TOKEN, authHdr: JIRA_AUTH_HDR };
+}
 
 // Map issue key prefix Ã¢â€ ' { jiraProject, spaceKey }
 const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> = {
@@ -805,10 +831,11 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
 
     const jiraKey = localKey; // key prefix matches Jira project for all other boards
 
+    const creds = await getJiraCredentials();
     const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,${JIRA_CUSTOM_FIELDS}`;
-    const url = `${JIRA_BASE_URL}/rest/api/3/issue/${jiraKey}?fields=${fields}&expand=changelog`;
+    const url = `${creds.base}/rest/api/3/issue/${jiraKey}?fields=${fields}&expand=changelog`;
     const res = await fetch(url, {
-      headers: { Authorization: JIRA_AUTH_HDR, Accept: 'application/json' },
+      headers: { Authorization: creds.authHdr, Accept: 'application/json' },
     });
     console.log(`[importIssueFromJira] Fetching ${jiraKey} from Jira, status: ${res.status}`);
     if (!res.ok) return null;
@@ -2588,14 +2615,15 @@ async function _handleJiraPgApi(
         const prefix = key.split('-')[0];
         const meta = PREFIX_TO_META[prefix];
         if (meta) {
-          const jiraKey = prefix === 'L1BOAR' ? null : key; // L1BOAR keys don't match CFITS keys
+          const creds = await getJiraCredentials();
+          const jiraKey = prefix === 'L1BOAR' ? null : key;
           let jiraFields: Record<string, string | null> | null = null;
 
           if (jiraKey) {
             // Direct lookup by key for L2B / L3B
             const cfRes = await fetch(
-              `${JIRA_BASE_URL}/rest/api/3/issue/${jiraKey}?fields=${JIRA_CUSTOM_FIELDS}`,
-              { headers: { Authorization: JIRA_AUTH_HDR, Accept: 'application/json' } }
+              `${creds.base}/rest/api/3/issue/${jiraKey}?fields=${JIRA_CUSTOM_FIELDS}`,
+              { headers: { Authorization: creds.authHdr, Accept: 'application/json' } }
             );
             if (cfRes.ok) {
               const d = await cfRes.json();
@@ -2613,8 +2641,8 @@ async function _handleJiraPgApi(
             const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
             const jql = encodeURIComponent(`project=CFITS AND summary ~ "${issue.summary.replace(/"/g, ' ').slice(0, 80)}" ORDER BY updated DESC`);
             const srRes = await fetch(
-              `${JIRA_BASE_URL}/rest/api/3/search/jql?jql=${jql}&maxResults=5&fields=summary,${JIRA_CUSTOM_FIELDS}`,
-              { headers: { Authorization: JIRA_AUTH_HDR, Accept: 'application/json' } }
+              `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=5&fields=summary,${JIRA_CUSTOM_FIELDS}`,
+              { headers: { Authorization: creds.authHdr, Accept: 'application/json' } }
             );
             if (srRes.ok) {
               const srData = await srRes.json();
@@ -2643,7 +2671,6 @@ async function _handleJiraPgApi(
             }
             if (Object.keys(updateData).length > 0) {
               await db.issue.update({ where: { id: issue.id }, data: updateData });
-              // Merge into in-memory issue so the response includes fresh values
               Object.assign(issue, updateData);
             }
           }

@@ -258,6 +258,14 @@ export default function ImportPage() {
         localStorage.setItem('jira_cred_email', email);
         localStorage.setItem('jira_cred_token', apiToken);
       } catch {}
+      // Also persist to DB so server-side code can use them for auto-refresh
+      try {
+        await fetch('/api/app-settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}` },
+          body: JSON.stringify({ jira_url: jiraUrl.replace(/\/$/, ''), jira_email: email, jira_token: apiToken }),
+        });
+      } catch {}
       setStep(1);
       // Load issue counts in background
       setLoadingCounts(true);

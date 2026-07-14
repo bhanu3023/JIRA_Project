@@ -13,6 +13,19 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { Pool } from 'pg';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+
+async function getStoredJiraCreds(): Promise<{ url: string; email: string; token: string } | null> {
+  try {
+    const rows = await pool.query(`SELECT key, value FROM app_settings WHERE key IN ('jira_url','jira_email','jira_token')`);
+    const s: Record<string, string> = {};
+    for (const r of rows.rows) s[r.key] = r.value;
+    if (s.jira_token) return { url: s.jira_url || DEFAULT_JIRA_BASE, email: s.jira_email || DEFAULT_JIRA_EMAIL, token: s.jira_token };
+  } catch {}
+  return null;
+}
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -163,9 +176,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
     }
 
-    const jiraBase  = String(body.jiraUrl  || DEFAULT_JIRA_BASE).replace(/\/$/, '').replace(/\/jira$/, '');
-    const jiraEmail = String(body.email    || DEFAULT_JIRA_EMAIL);
-    const jiraToken = String(body.apiToken || DEFAULT_JIRA_TOKEN);
+    // Use credentials from request body, fall back to app_settings DB, then env defaults
+    const stored = (!body.apiToken) ? await getStoredJiraCreds() : null;
+    const jiraBase  = String(body.jiraUrl  || stored?.url   || DEFAULT_JIRA_BASE).replace(/\/$/, '').replace(/\/jira$/, '');
+    const jiraEmail = String(body.email    || stored?.email || DEFAULT_JIRA_EMAIL);
+    const jiraToken = String(body.apiToken || stored?.token || DEFAULT_JIRA_TOKEN);
 
     const results: Record<string, any> = {};
     for (const { spaceKey, jiraProject } of BOARDS) {
