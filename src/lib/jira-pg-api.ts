@@ -1,4 +1,4 @@
-﻿/**
+/**
  * jira-pg-api.ts
  * PostgreSQL-backed API handler replacing the in-memory jira-dev-mock for
  * heavy data routes (auth, users, spaces, issues).
@@ -4458,6 +4458,84 @@ async function _handleJiraPgApi(
         const atts = await (db as any).attachment.findMany({ where: { issueId: issueRow.rows[0].id }, orderBy: { createdAt: 'asc' } });
         return json(atts.map((a: any) => ({ id: a.id, url: a.url, originalName: a.filename, mimeType: a.mimeType, size: a.size, createdAt: a.createdAt })));
       } catch { return json([]); }
+    }
+  }
+
+
+  // ── email-addresses/:spaceKey  ─────────────────────────────────────────────
+  const emailAddrList = path.match(/^email-addresses\/([^/]+)$/);
+  if (emailAddrList) {
+    const sk = emailAddrList[1].toUpperCase();
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS email_configs (
+        id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        space_key TEXT NOT NULL, address TEXT NOT NULL,
+        imap_host TEXT NOT NULL DEFAULT 'outlook.office365.com', imap_port INT NOT NULL DEFAULT 993,
+        smtp_host TEXT NOT NULL DEFAULT 'smtp.office365.com',   smtp_port INT NOT NULL DEFAULT 587,
+        password_enc TEXT, auto_reply BOOLEAN DEFAULT true,
+        auto_reply_text TEXT, department TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(space_key, address)
+      )
+    `);
+    await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`);
+
+    if (method === 'GET') {
+      const rows = await pool.query(
+        `SELECT id, address, imap_host, smtp_host, auto_reply, department, created_at FROM email_configs WHERE space_key = $1 ORDER BY created_at`,
+        [sk]
+      );
+      return json(rows.rows.map((r: any) => ({
+        id: r.id, address: r.address,
+        imapHost: r.imap_host, smtpHost: r.smtp_host,
+        autoReply: r.auto_reply, department: r.department,
+        requestType: 'Emailed request',
+        createdAt: r.created_at,
+      })));
+    }
+
+    if (method === 'POST') {
+      const body = await req.json().catch(() => ({}));
+      const addr = (body.address || '').toLowerCase().trim();
+      if (!addr) return json({ error: 'address required' }, 400);
+      const res = await pool.query(
+        `INSERT INTO email_configs (space_key, address, department)
+         VALUES ($1,$2,$3)
+         ON CONFLICT (space_key, address) DO UPDATE SET department=EXCLUDED.department
+         RETURNING id, address, department`,
+        [sk, addr, body.department || null]
+      );
+      return json({ id: res.rows[0].id, address: res.rows[0].address, department: res.rows[0].department, requestType: 'Emailed request' });
+    }
+  }
+
+  const emailAddrItem = path.match(/^email-addresses\/([^/]+)\/([^/]+)$/);
+  if (emailAddrItem) {
+    const sk = emailAddrItem[1].toUpperCase();
+    const id = emailAddrItem[2];
+
+    if (method === 'PATCH') {
+      const body = await req.json().catch(() => ({}));
+      const updates: string[] = [];
+      const params: any[] = [];
+      if ('department' in body)  { params.push(body.department ?? null); updates.push(`department=$${params.length}`); }
+      if ('autoReply' in body)   { params.push(body.autoReply);          updates.push(`auto_reply=$${params.length}`); }
+      if (updates.length === 0)  return json({ ok: true });
+      params.push(id);
+      await pool.query(`UPDATE email_configs SET ${updates.join(',')} WHERE id=$${params.length}`, params);
+      const row = await pool.query(`SELECT id, address, auto_reply, department FROM email_configs WHERE id=$1`, [id]);
+      return json(row.rows[0] ? { id: row.rows[0].id, address: row.rows[0].address, department: row.rows[0].department, requestType: 'Emailed request' } : { ok: true });
+    }
+
+    if (method === 'DELETE') {
+      const row = await pool.query(`SELECT address FROM email_configs WHERE id=$1`, [id]);
+      if (row.rows[0]) {
+        await pool.query(`DELETE FROM email_configs WHERE id=$1`, [id]);
+        try {
+          const { stopImapPollerForEmail } = await import('@/lib/email-service');
+          stopImapPollerForEmail(row.rows[0].address);
+        } catch {}
+      }
+      return json({ ok: true });
     }
   }
 
