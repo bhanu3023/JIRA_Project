@@ -182,7 +182,7 @@ async function getBestSenderEmail(): Promise<string | null> {
 }
 
 // ── Send helper ────────────────────────────────────────────────────────────────
-async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string) {
+async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string) {
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
   if (!uniqueTo.length) return;
 
@@ -210,7 +210,8 @@ async function sendNotification(to: string[], subject: string, html: string, tex
   }
 
   // SMTP not configured — fall back to OAuth (Microsoft Graph API)
-  const senderEmail = await getBestSenderEmail();
+  // Use the specified inbox email (so replies come back to the right address), or fall back to first connected account
+  const senderEmail = fromEmail || await getBestSenderEmail();
   if (senderEmail) {
     await sendViaGraph({ from: senderEmail, to: uniqueTo, subject, html, text, inReplyTo });
   } else {
@@ -376,14 +377,25 @@ export async function notifyCommentAdded(issue: {
   const to = Array.from(new Set([...assigneeEmails, ...reporterEmails])).filter(Boolean);
   if (!to.length) return;
 
-  // Look up original email thread ID so the notification lands in the same email thread
+  // Look up original email thread ID AND the inbox email address for this ticket's space.
+  // We send FROM the inbox email (e.g. L1board@cloudfuze.com) so that when the customer
+  // replies, it goes back to that inbox and the IMAP poller picks it up as a comment.
   let sourceMessageId: string | undefined;
+  let inboxEmail: string | undefined;
   try {
     const { Pool } = await import('pg');
     const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
-    const row = await pool.query(`SELECT emailthreadid FROM issues WHERE key = $1 LIMIT 1`, [issue.key]);
+    const row = await pool.query(`
+      SELECT i.emailthreadid, ec.address AS inbox_email
+      FROM issues i
+      JOIN spaces s ON i."spaceId" = s.id
+      LEFT JOIN email_configs ec ON LOWER(ec.space_key) = LOWER(s.key)
+      WHERE i.key = $1
+      LIMIT 1
+    `, [issue.key]);
     await pool.end();
     sourceMessageId = row.rows[0]?.emailthreadid || undefined;
+    inboxEmail = row.rows[0]?.inbox_email || undefined;
   } catch { /* non-critical */ }
 
   // Send a plain reply email — just the comment text, no ticket template
@@ -397,6 +409,7 @@ export async function notifyCommentAdded(issue: {
     commentHtml,
     commentText,
     sourceMessageId,
+    inboxEmail,
   );
 }
 
