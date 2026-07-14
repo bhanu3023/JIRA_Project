@@ -19,9 +19,9 @@ export const maxDuration = 300;
 
 const SECRET = process.env.ADMIN_BULK_SECRET || 'cf-admin-sync-2024';
 
-const JIRA_BASE = process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net';
-const JIRA_EMAIL = process.env.JIRA_EMAIL || 'sujana.manapuram@cloudfuze.com';
-const JIRA_TOKEN = process.env.JIRA_TOKEN || 'REDACTED_API_TOKEN';
+const DEFAULT_JIRA_BASE  = process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net';
+const DEFAULT_JIRA_EMAIL = process.env.JIRA_EMAIL    || 'sujana.manapuram@cloudfuze.com';
+const DEFAULT_JIRA_TOKEN = process.env.JIRA_TOKEN    || '';
 
 const FIELD_MAP: Record<string, string> = {
   customerName:   'customfield_10401',
@@ -56,8 +56,11 @@ function normalize(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-async function syncBoard(spaceKey: string, jiraProject: string): Promise<{ updated: number; total: number; log: string[] }> {
-  const auth = Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString('base64');
+async function syncBoard(
+  spaceKey: string, jiraProject: string,
+  jiraBase: string, jiraEmail: string, jiraToken: string,
+): Promise<{ updated: number; total: number; log: string[] }> {
+  const auth = Buffer.from(`${jiraEmail}:${jiraToken}`).toString('base64');
   const headers = { Authorization: `Basic ${auth}`, Accept: 'application/json' };
   const jiraFieldIds = Object.values(FIELD_MAP).join(',');
 
@@ -90,7 +93,7 @@ async function syncBoard(spaceKey: string, jiraProject: string): Promise<{ updat
   let startAt = 0;
 
   while (true) {
-    const url = `${JIRA_BASE}/rest/api/3/search/jql?jql=${jql}&startAt=${startAt}&maxResults=100&fields=summary,${jiraFieldIds}`;
+    const url = `${jiraBase}/rest/api/3/search/jql?jql=${jql}&startAt=${startAt}&maxResults=100&fields=summary,${jiraFieldIds}`;
     const res = await fetch(url, { headers });
     if (!res.ok) {
       const err = await res.text();
@@ -160,9 +163,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
     }
 
+    const jiraBase  = String(body.jiraUrl  || DEFAULT_JIRA_BASE).replace(/\/$/, '').replace(/\/jira$/, '');
+    const jiraEmail = String(body.email    || DEFAULT_JIRA_EMAIL);
+    const jiraToken = String(body.apiToken || DEFAULT_JIRA_TOKEN);
+
     const results: Record<string, any> = {};
     for (const { spaceKey, jiraProject } of BOARDS) {
-      results[spaceKey] = await syncBoard(spaceKey, jiraProject);
+      results[spaceKey] = await syncBoard(spaceKey, jiraProject, jiraBase, jiraEmail, jiraToken);
     }
 
     const totalUpdated = Object.values(results).reduce((s: number, r: any) => s + (r.updated || 0), 0);

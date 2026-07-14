@@ -92,19 +92,26 @@ function SyncMsPhotosButton({ onDone }: { onDone: () => void }) {
 function SyncBoardFieldsButton() {
   const [syncing, setSyncing] = useState(false);
   const [result, setResult] = useState<{ totalUpdated: number; boards: Record<string, { updated: number; total: number }> } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleSync() {
     setSyncing(true);
     setResult(null);
+    setError(null);
+    // Read Jira credentials saved during import
+    const jiraUrl   = localStorage.getItem('jira_cred_url')   || 'https://cf2020.atlassian.net';
+    const email     = localStorage.getItem('jira_cred_email') || 'sujana.manapuram@cloudfuze.com';
+    const apiToken  = localStorage.getItem('jira_cred_token') || '';
     try {
       const res = await fetch('/api/admin/sync-board-fields', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ secret: 'cf-admin-sync-2024' }),
+        body: JSON.stringify({ secret: 'cf-admin-sync-2024', jiraUrl, email, apiToken }),
       });
       const data = await res.json();
       if (data.ok) setResult({ totalUpdated: data.totalUpdated, boards: data.boards });
-    } catch {}
+      else setError(data.error || 'Sync failed');
+    } catch (e: any) { setError(e.message); }
     setSyncing(false);
   }
 
@@ -127,6 +134,7 @@ function SyncBoardFieldsButton() {
             : 'All field values already up to date'}
         </span>
       )}
+      {error && <span className="text-[11.5px] text-red-500">{error}</span>}
     </div>
   );
 }
