@@ -2808,7 +2808,9 @@ export default function IssueDetailPage() {
                 'Project Manager': 'projectManager',
               };
 
-              return customFields.filter(cf => !pinnedFields.includes(`cf_${cf.id}`) && cf.fieldType !== 'department-routing' && cf.type !== 'department-routing').map(cf => {
+              // Skip fields already rendered in the l1bFields section above (native columns)
+              const ALREADY_SHOWN = new Set(Object.keys(NATIVE_FIELD_MAP));
+              return customFields.filter(cf => !pinnedFields.includes(`cf_${cf.id}`) && cf.fieldType !== 'department-routing' && cf.type !== 'department-routing' && !ALREADY_SHOWN.has(cf.name)).map(cf => {
                 // Use fieldType or type (mock stores as 'type', DB stores as 'fieldType')
                 const effectiveType = cf.fieldType || cf.type || '';
                 // Merge DB options with known options fallback
