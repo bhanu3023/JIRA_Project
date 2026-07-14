@@ -144,7 +144,7 @@ export default function BreachedPage() {
     setLoading(true);
     try {
       const headers = { Authorization: `Bearer ${getToken()}` };
-      const spacesData = await fetch('/api/spaces', { headers }).then(r => r.ok ? r.json() : {});
+      const spacesData: any = await fetch('/api/spaces', { headers }).then(r => r.ok ? r.json() : {});
       const allSpaces: any[] = spacesData?.spaces || spacesData || [];
       const deskSpaces = allSpaces.filter((s: any) => s.type === 'service_desk' || s.type === 'dept_queue');
       setSpaces(deskSpaces.map((s: any) => ({ key: s.key, name: s.name })));

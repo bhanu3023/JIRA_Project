@@ -17,7 +17,7 @@ async function getAppUrl(): Promise<string> {
     await pool.end();
     if (res.rows[0]?.value) {
       cachedAppUrl = res.rows[0].value.replace(/\/$/, '');
-      return cachedAppUrl;
+      return cachedAppUrl!;
     }
   } catch { /* fall through to env */ }
   cachedAppUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
