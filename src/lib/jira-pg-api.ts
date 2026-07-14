@@ -2579,6 +2579,78 @@ async function _handleJiraPgApi(
       return json({ error: 'Issue not found' }, 404);
     }
 
+    // Auto-refresh custom fields from Jira if all 5 are null (never synced)
+    if (
+      issue.customerName === null && issue.clientName === null &&
+      issue.projectManager === null && issue.productType === null && issue.combination === null
+    ) {
+      try {
+        const prefix = key.split('-')[0];
+        const meta = PREFIX_TO_META[prefix];
+        if (meta) {
+          const jiraKey = prefix === 'L1BOAR' ? null : key; // L1BOAR keys don't match CFITS keys
+          let jiraFields: Record<string, string | null> | null = null;
+
+          if (jiraKey) {
+            // Direct lookup by key for L2B / L3B
+            const cfRes = await fetch(
+              `${JIRA_BASE_URL}/rest/api/3/issue/${jiraKey}?fields=${JIRA_CUSTOM_FIELDS}`,
+              { headers: { Authorization: JIRA_AUTH_HDR, Accept: 'application/json' } }
+            );
+            if (cfRes.ok) {
+              const d = await cfRes.json();
+              const f = d.fields || {};
+              jiraFields = {
+                customerName:   extractJiraValue(f.customfield_10401),
+                clientName:     extractJiraValue(f.customfield_10883),
+                projectManager: extractJiraValue(f.customfield_11380),
+                productType:    extractJiraValue(f.customfield_10203),
+                combination:    extractJiraValue(f.customfield_10236),
+              };
+            }
+          } else if (issue.summary) {
+            // Title-based search in CFITS for L1BOAR tickets
+            const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+            const jql = encodeURIComponent(`project=CFITS AND summary ~ "${issue.summary.replace(/"/g, ' ').slice(0, 80)}" ORDER BY updated DESC`);
+            const srRes = await fetch(
+              `${JIRA_BASE_URL}/rest/api/3/search/jql?jql=${jql}&maxResults=5&fields=summary,${JIRA_CUSTOM_FIELDS}`,
+              { headers: { Authorization: JIRA_AUTH_HDR, Accept: 'application/json' } }
+            );
+            if (srRes.ok) {
+              const srData = await srRes.json();
+              const localNorm = norm(issue.summary);
+              const match = (srData.issues || []).find((ji: any) => {
+                const jNorm = norm(ji.fields?.summary || '');
+                return jNorm === localNorm || (jNorm.length >= 15 && (jNorm.includes(localNorm.slice(0, 60)) || localNorm.includes(jNorm.slice(0, 60))));
+              });
+              if (match) {
+                const f = match.fields || {};
+                jiraFields = {
+                  customerName:   extractJiraValue(f.customfield_10401),
+                  clientName:     extractJiraValue(f.customfield_10883),
+                  projectManager: extractJiraValue(f.customfield_11380),
+                  productType:    extractJiraValue(f.customfield_10203),
+                  combination:    extractJiraValue(f.customfield_10236),
+                };
+              }
+            }
+          }
+
+          if (jiraFields) {
+            const updateData: Record<string, string | null> = {};
+            for (const [k, v] of Object.entries(jiraFields)) {
+              if (v !== null && v !== '') updateData[k] = v;
+            }
+            if (Object.keys(updateData).length > 0) {
+              await db.issue.update({ where: { id: issue.id }, data: updateData });
+              // Merge into in-memory issue so the response includes fresh values
+              Object.assign(issue, updateData);
+            }
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+
     // Load attachments, history, links (both directions)
     const dbAttachments = await (db as any).attachment.findMany({
       where: { issueId: issue.id },
