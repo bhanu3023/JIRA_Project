@@ -177,22 +177,10 @@ function SpaceDetailContent() {
     });
   }, [spaceKey]);
 
-  // Active custom queue object (loaded from DB when queueFilter is a custom queue id)
-  const [activeCustomQueue, setActiveCustomQueue] = useState<{ id: string; name: string; memberIds: string[] } | null>(null);
-  useEffect(() => {
-    if (!queueFilter.startsWith('cq_')) { setActiveCustomQueue(null); return; }
-    api.request<any[]>(`custom-queues/${spaceKey}`).then((queues) => {
-      if (Array.isArray(queues)) setActiveCustomQueue(queues.find((q: any) => q.id === queueFilter) || null);
-    }).catch(() => {
-      try {
-        const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
-        if (stored) {
-          const queues: { id: string; name: string; memberIds: string[] }[] = JSON.parse(stored);
-          setActiveCustomQueue(queues.find(q => q.id === queueFilter) || null);
-        }
-      } catch { setActiveCustomQueue(null); }
-    });
-  }, [queueFilter, spaceKey]);
+  // Active custom queue object — resolved synchronously from already-loaded allCustomQueues (no extra API call)
+  const activeCustomQueue = queueFilter.startsWith('cq_')
+    ? (allCustomQueues.find(q => q.id === queueFilter) || null)
+    : null;
   const [rrDepartments, setRrDepartments] = useState<string[]>([]); // from RR config
 
   // Load departments from both RR config + Department Routing custom fields

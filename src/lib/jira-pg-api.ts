@@ -1,4 +1,4 @@
-﻿/**
+/**
  * jira-pg-api.ts
  * PostgreSQL-backed API handler replacing the in-memory jira-dev-mock for
  * heavy data routes (auth, users, spaces, issues).
@@ -598,7 +598,7 @@ function formatIssue(issue: any) {
 
   const issueNum = parseInt(String(issue.key || '').split('-').pop() || '1', 10) || 1;
 
-  // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" â†’ "L2B-12718")
+  // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" â†' "L2B-12718")
   const normalizedKey = issue.key?.includes(':') ? issue.key.split(':')[0] : issue.key;
 
   return {
@@ -714,7 +714,7 @@ const JIRA_EMAIL    = 'sujana.manapuram@cloudfuze.com';
 const JIRA_TOKEN    = 'REDACTED_API_TOKEN';
 const JIRA_AUTH_HDR = 'Basic ' + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString('base64');
 
-// Map issue key prefix â†’ { jiraProject, spaceKey }
+// Map issue key prefix â†' { jiraProject, spaceKey }
 const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> = {
   L1BOAR:  { jiraProject: 'CFITS',  spaceKey: 'L1BOAR'   },
   L2B:     { jiraProject: 'L2B',    spaceKey: 'L2BOARD'  },
@@ -822,7 +822,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
     });
     if (!space) return null;
 
-    // Map Jira status â†’ local status
+    // Map Jira status â†' local status
     const jiraStatusName: string = f.status?.name || 'Open';
     const localStatus = space.statuses.find(
       (s: any) => s.name.toLowerCase() === jiraStatusName.toLowerCase()
@@ -1078,7 +1078,7 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // OAuth SSO login â€” called by OAuth callback to exchange email â†’ JWT token
+  // OAuth SSO login â€” called by OAuth callback to exchange email â†' JWT token
   if (path === 'auth/oauth-token' && method === 'POST') {
     const body = await readJson(req);
     const rawEmail = String(body.email || '').toLowerCase().trim();
@@ -1520,7 +1520,7 @@ async function _handleJiraPgApi(
     const reporters     = url.searchParams.get('reporters') || url.searchParams.get('reporter');
     const labelsParam   = url.searchParams.get('labels');
     const rawSearchQ    = url.searchParams.get('q');
-    // Normalize CF key searches: "CF - 27210" â†’ "CF-27210"
+    // Normalize CF key searches: "CF - 27210" â†' "CF-27210"
     const searchQ       = rawSearchQ ? rawSearchQ.replace(/\s*-\s*/g, '-').trim() : rawSearchQ;
     const createdRange  = url.searchParams.get('createdRange');
     const updatedRange  = url.searchParams.get('updatedRange');
@@ -1852,7 +1852,7 @@ async function _handleJiraPgApi(
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
       let allSpaceIds: string[] = [];
-      let spaceKeyMap: Record<string, string> = {}; // spaceId â†’ spaceKey
+      let spaceKeyMap: Record<string, string> = {}; // spaceId â†' spaceKey
       try {
         const spaceRow = await pool.query(
           `SELECT id, key, COALESCE(sub_board_keys, '{}') AS sub_board_keys FROM spaces WHERE key = $1`,
@@ -1956,20 +1956,14 @@ async function _handleJiraPgApi(
     });
     if (!sp) return json({ error: 'Space not found' }, 404);
 
-    // Compute next issue number â€” query ALL issues in this space so we don't
-    // restart from 1 when the space key and the historical key prefix differ
-    // (e.g. space key = SOPSBOARD but existing tickets are SOPS-*).
-    const nums = await db.issue.findMany({
-      where: { spaceId: sp.id },
-      select: { key: true },
-    });
-    const maxNum = nums.reduce((max, i) => {
+    // Fetch all issue keys for this space to compute max number and dominant prefix.
+    const nums = await db.issue.findMany({ where: { spaceId: sp.id }, select: { key: true } });
+    let maxNum = nums.reduce((max, i) => {
       const n = parseInt(i.key.split('-').pop() || '0', 10);
       return n > max ? n : max;
     }, 0);
 
-    // Determine key prefix: subtask â†’ inherit from parent; otherwise detect
-    // dominant prefix from existing tickets (handles SOPSBOARD space â†’ SOPS-* keys).
+    // Determine key prefix: subtask = inherit from parent; otherwise use dominant prefix.
     let keyPrefix = sk;
     if (body.parentKey) {
       const parentKeyStr = String(body.parentKey).toUpperCase();
@@ -1989,7 +1983,7 @@ async function _handleJiraPgApi(
       if (dominant) keyPrefix = dominant[0];
     }
 
-    const issueKey = `${keyPrefix}-${maxNum + 1}`;
+    // issueKey is determined inside the retry loop below (race-condition safe)
 
     // Resolve status
     const stId = String(body.statusId || '');
@@ -2016,8 +2010,8 @@ async function _handleJiraPgApi(
     }
 
     // Assignment logic:
-    // 1. Manual creation (userId present, not from email) â†’ assign to creator
-    // 2. Email ticket or queue-transfer â†’ round-robin for the department
+    // 1. Manual creation (userId present, not from email) â†' assign to creator
+    // 2. Email ticket or queue-transfer â†' round-robin for the department
     let rrDepartment: string | null = null;
     if (!resolvedAssigneeId) {
       const isEmailCreated = !userId || body.fromEmail === true || !!body.reporterEmail;
@@ -2025,15 +2019,15 @@ async function _handleJiraPgApi(
 
       try {
         if (!isEmailCreated && !requestedDept) {
-          // Manual creation with no explicit dept â†’ assign to the creator
+          // Manual creation with no explicit dept â†' assign to the creator
           resolvedAssigneeId = userId || null;
         } else if (requestedDept) {
-          // Ticket with an explicit queue/department â†’ RR for that dept
+          // Ticket with an explicit queue/department â†' RR for that dept
           rrDepartment = requestedDept;
           const nextAgent = await getNextAgent(sp.id, requestedDept);
           if (nextAgent) resolvedAssigneeId = nextAgent.userId;
         } else if (isEmailCreated) {
-          // Email ticket with no dept â†’ use the default department RR
+          // Email ticket with no dept â†' use the default department RR
           const defaultDept = await getDefaultDepartment(sp.id);
           if (defaultDept) {
             rrDepartment = defaultDept;
@@ -2065,7 +2059,12 @@ async function _handleJiraPgApi(
     const openStatus = sp.statuses[0];
     const finalStatus = body.parentKey ? openStatus : st;
 
-    const issue = await db.issue.create({
+    // Retry loop: handles race condition where two concurrent creates pick the same key number.
+    let issue: any;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const issueKey = `${keyPrefix}-${maxNum + 1 + attempt}`;
+      try {
+        issue = await db.issue.create({
       data: {
         id: rid(),
         key: issueKey,
@@ -2094,7 +2093,15 @@ async function _handleJiraPgApi(
         space: { select: { key: true, name: true } },
         comments: { include: { author: true } },
       },
-    });
+        });
+        break; // success — exit retry loop
+      } catch (err: any) {
+        const isUniqueViolation = err?.code === 'P2002' || err?.message?.includes('Unique constraint');
+        if (!isUniqueViolation || attempt === 4) throw err;
+        // Key collision (race condition) — try next number
+      }
+    }
+    if (!issue) return json({ error: 'Failed to generate unique issue key' }, 500);
 
     // Set original_dept and assign next CF key at creation time
     try {
@@ -2228,7 +2235,7 @@ async function _handleJiraPgApi(
   const issueDeptMatch = path.match(/^issues\/([^/]+)\/department$/);
   if (issueDeptMatch && method === 'PATCH') {
     let key = issueDeptMatch[1].toUpperCase();
-    // Resolve CF-key â†’ Prisma key
+    // Resolve CF-key â†' Prisma key
     if (key.startsWith('CF-')) {
       const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
       if (cfRow.rows[0]) key = cfRow.rows[0].key;
@@ -2288,7 +2295,7 @@ async function _handleJiraPgApi(
       }
       deptAssignees[newDept] = null; // new dept starts unassigned
 
-      // Per-dept statuses: old dept â†’ "Waiting for Dev", new dept â†’ "To Do"
+      // Per-dept statuses: old dept â†' "Waiting for Dev", new dept â†' "To Do"
       const existingStatuses = await pool.query(`SELECT dept_statuses FROM issues WHERE key=$1`, [key]);
       const deptStatuses: Record<string, any> = existingStatuses.rows[0]?.dept_statuses || {};
       if (oldDept) deptStatuses[oldDept] = oldDeptStatusObj;
@@ -2439,7 +2446,7 @@ async function _handleJiraPgApi(
       || await getNextAgent(targetSpaceId, newDept);
 
     // Generate next key for target board
-    // Use the SAME number from the source key (e.g. L1BOAR-5618 â†’ L2BOARD-5618)
+    // Use the SAME number from the source key (e.g. L1BOAR-5618 â†' L2BOARD-5618)
     const sourceNum = key.split('-').pop() || '1';
     const newKey = `${targetSpace.key}-${sourceNum}`;
     const newId = rid();
@@ -2510,12 +2517,12 @@ async function _handleJiraPgApi(
     await pool.query(`UPDATE issues SET "partnerKey"=$1 WHERE key=$2`, [newKey, key]);
     await pool.query(`UPDATE issues SET "partnerKey"=$1 WHERE key=$2`, [key, newKey]);
 
-    // History on ORIGINAL ticket: "Passed to Dev â†’ L2BOARD (new ticket: L2BOARD-5618)"
+    // History on ORIGINAL ticket: "Passed to Dev â†' L2BOARD (new ticket: L2BOARD-5618)"
     await (db as any).issueHistory.create({
       data: {
         id: rid(), issueId: issue.id, field: 'department',
         oldValue: (issue as any).current_department || 'None',
-        newValue: `Passed to ${newDept} â†’ ${targetSpace.key} (${newKey})`,
+        newValue: `Passed to ${newDept} â†' ${targetSpace.key} (${newKey})`,
         authorName, createdAt: new Date(),
       },
     });
@@ -2536,9 +2543,9 @@ async function _handleJiraPgApi(
   const issueKeyMatch = path.match(/^issues\/([^/]+)$/);
   if (issueKeyMatch && method === 'GET') {
     const rawKey = issueKeyMatch[1].toUpperCase();
-    // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" â†’ "L2B-12718")
+    // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" â†' "L2B-12718")
     let key = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-    // Resolve CF key to actual Jira key (e.g. "CF-1" â†’ "L2B-5112")
+    // Resolve CF key to actual Jira key (e.g. "CF-1" â†' "L2B-5112")
     if (key.startsWith('CF-')) {
       try {
         const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
@@ -2586,7 +2593,7 @@ async function _handleJiraPgApi(
       }),
     ]);
 
-    // Normalize colon-suffix keys in link records (e.g. "L2B-12718:1" â†’ "L2B-12718")
+    // Normalize colon-suffix keys in link records (e.g. "L2B-12718:1" â†' "L2B-12718")
     const normalizeKey = (k: string) => k?.includes(':') ? k.split(':')[0] : k;
     const outLinks = outLinksRaw.map(l => ({ ...l, targetKey: normalizeKey(l.targetKey), sourceKey: normalizeKey(l.sourceKey) }));
     const inLinks  = inLinksRaw.map(l => ({ ...l, targetKey: normalizeKey(l.targetKey), sourceKey: normalizeKey(l.sourceKey) }));
@@ -2897,7 +2904,7 @@ async function _handleJiraPgApi(
       if (body.clientName !== undefined)       track('client name',       (issue as any).clientName,       data.clientName as string);
       if (body.projectManager !== undefined)   track('project manager',   (issue as any).projectManager,   data.projectManager as string);
 
-      // Labels (array â†’ comma string)
+      // Labels (array â†' comma string)
       if (body.labels !== undefined) {
         const oldL = ((issue.labels ?? []) as string[]).join(', ');
         const newL = ((data.labels ?? []) as string[]).join(', ');
@@ -2933,13 +2940,13 @@ async function _handleJiraPgApi(
           }
           deptAssigneesSt[targetDept] = null;
 
-          // Per-dept statuses: current dept paused â†’ "Waiting for X"; target dept â†’ "In Progress"
+          // Per-dept statuses: current dept paused â†' "Waiting for X"; target dept â†' "In Progress"
           try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
           const existingStatusesSt = await pool.query(`SELECT dept_statuses FROM issues WHERE id=$1`, [issue.id]);
           const deptStatusesSt: Record<string, any> = existingStatusesSt.rows[0]?.dept_statuses || {};
-          // Current dept status â†’ "Waiting for [target]"
+          // Current dept status â†' "Waiting for [target]"
           deptStatusesSt[oldDeptSt] = { id: '', name: newStatusName, category: 'todo', color: '#F59E0B' };
-          // Target dept status â†’ "In Progress"
+          // Target dept status â†' "In Progress"
           const inProgressSt = await db.status.findFirst({
             where: { spaceId: issue.spaceId, category: 'in_progress' },
             orderBy: { order: 'asc' },
@@ -3022,9 +3029,9 @@ async function _handleJiraPgApi(
       await notifyUsers(
         [updated.assigneeId, updated.reporterId],
         userId,
-        { type: 'STATUS_CHANGED', title: `${updated.key} status â†’ ${issueForNotif.status.name}`, message: updated.summary, issueKey: updated.key }
+        { type: 'STATUS_CHANGED', title: `${updated.key} status â†' ${issueForNotif.status.name}`, message: updated.summary, issueKey: updated.key }
       );
-      await notifyWatchers(updated.key, userId, { title: `${updated.key} status â†’ ${issueForNotif.status.name}`, message: updated.summary });
+      await notifyWatchers(updated.key, userId, { title: `${updated.key} status â†' ${issueForNotif.status.name}`, message: updated.summary });
     }
     // Assignee changed?
     else if (body.assigneeId !== undefined && issue.assigneeId !== data.assigneeId) {
@@ -3165,7 +3172,7 @@ async function _handleJiraPgApi(
   const issueComments = path.match(/^issues\/([^/]+)\/comments$/);
   if (issueComments && method === 'POST') {
     let key = issueComments[1].toUpperCase();
-    // Resolve CF-key â†’ Prisma key
+    // Resolve CF-key â†' Prisma key
     if (key.startsWith('CF-')) {
       const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
       if (cfRow.rows[0]) key = cfRow.rows[0].key;
@@ -3415,7 +3422,7 @@ async function _handleJiraPgApi(
       orderBy: { updatedAt: 'desc' },
     });
 
-    // Combine: exact â†’ startsWith â†’ contains, deduplicated
+    // Combine: exact â†' startsWith â†' contains, deduplicated
     const seen = new Set<string>();
     const issues: any[] = [];
     for (const issue of [...exactMatches, ...startsWithMatches, ...containsMatches]) {
@@ -3591,7 +3598,7 @@ async function _handleJiraPgApi(
 
   // â”€â”€ Workflow Routes (DB-backed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-  // GET /workflows?spaceKey=XXX  â†’ return "virtual" workflow for the space
+  // GET /workflows?spaceKey=XXX  â†' return "virtual" workflow for the space
   if (path === 'workflows' && method === 'GET') {
     const sk = url.searchParams.get('spaceKey')?.toUpperCase();
     if (!sk) return json([]);
@@ -3600,11 +3607,11 @@ async function _handleJiraPgApi(
     return json([{ id: `wf_${sk.toLowerCase()}`, name: `${space.name} Workflow`, spaceKey: sk }]);
   }
 
-  // GET /workflows/:id/statuses  â†’ real statuses + transitions from DB
+  // GET /workflows/:id/statuses  â†' real statuses + transitions from DB
   const wfStatuses = path.match(/^workflows\/([^/]+)\/statuses$/);
   if (wfStatuses && method === 'GET') {
     const wfId = wfStatuses[1];
-    // wfId = 'wf_psmboard' â†’ spaceKey = 'PSMBOARD'
+    // wfId = 'wf_psmboard' â†' spaceKey = 'PSMBOARD'
     const sk = wfId.replace(/^wf_/, '').toUpperCase();
     const space = await db.space.findUnique({ where: { key: sk } });
     if (!space) return json({ statuses: [], transitions: [] });
@@ -3618,7 +3625,7 @@ async function _handleJiraPgApi(
     return json({ statuses, transitions });
   }
 
-  // POST /workflows/:id/statuses  â†’ add a new status to the space
+  // POST /workflows/:id/statuses  â†' add a new status to the space
   if (wfStatuses && method === 'POST') {
     const wfId = wfStatuses[1];
     const sk = wfId.replace(/^wf_/, '').toUpperCase();
@@ -3697,7 +3704,7 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // POST /workflows/:id/transitions/defaults  â†’ create all â†’ all transitions
+  // POST /workflows/:id/transitions/defaults  â†' create all â†' all transitions
   const wfDefaults = path.match(/^workflows\/([^/]+)\/transitions\/defaults$/);
   if (wfDefaults && method === 'POST') {
     const wfId = wfDefaults[1];
@@ -3712,7 +3719,7 @@ async function _handleJiraPgApi(
         try {
           await (db as any).workflowTransition.upsert({
             where: { spaceId_fromStatusId_toStatusId: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id } },
-            create: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id, name: `â†’ ${to.name}` },
+            create: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id, name: `â†' ${to.name}` },
             update: {},
           });
           created++;
@@ -4307,7 +4314,7 @@ async function _handleJiraPgApi(
     return json(logs);
   }
 
-  // â”€â”€ All other routes â†’ delegate to in-memory mock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // â”€â”€ All other routes â†' delegate to in-memory mock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // (sprints, labels, automation, filters, custom-fields, email, etc.)
   return handleJiraDevMock(req, segments, method);
 }

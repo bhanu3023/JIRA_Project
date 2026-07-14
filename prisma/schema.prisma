@@ -135,6 +135,7 @@ model Issue {
   history     IssueHistory[]
 
   @@index([spaceId])
+  @@index([spaceId, createdAt(sort: Desc)])
   @@index([assigneeId])
   @@index([statusId])
   @@index([type])

@@ -8,6 +8,10 @@ let authEpoch = 0;
 let loadSpacesInflight: Promise<void> | null = null;
 let loadNotificationsInflight: Promise<void> | null = null;
 
+// Queue results cache: key → {issues, total, page, ts}
+const issuesCache = new Map<string, { issues: any[]; total: number; page: number; ts: number }>();
+const CACHE_TTL = 30_000; // 30 seconds stale-while-revalidate
+
 interface AppState {
   // Auth
   user: User | null;
@@ -147,8 +151,19 @@ export const useStore = create<AppState>((set, get) => ({
   issueTotal: 0,
   issuePage: 1,
   loadIssues: async (params = {}) => {
-    set({ loading: true });
+    const cacheKey = JSON.stringify(params);
+    const cached = issuesCache.get(cacheKey);
+    if (cached) {
+      // Show cached data instantly
+      set({ issues: cached.issues, issueTotal: cached.total, issuePage: cached.page, loading: false });
+      // If fresh enough, skip the network fetch
+      if (Date.now() - cached.ts < CACHE_TTL) return;
+      // Stale: refresh in background without showing spinner
+    } else {
+      set({ loading: true });
+    }
     const data = await api.getIssues(params);
+    issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
     set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
   },
   loadIssue: async (key) => {
@@ -160,10 +175,12 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   createIssue: async (data) => {
+    issuesCache.clear();
     const issue = await api.createIssue(data);
     return issue;
   },
   updateIssue: async (key, data) => {
+    issuesCache.clear();
     await api.updateIssue(key, data);
   },
   clearCurrentIssue: () => set({ currentIssue: null }),
