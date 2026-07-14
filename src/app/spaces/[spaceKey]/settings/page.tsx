@@ -658,11 +658,23 @@ function SLADetailView({ sla, onBack, onSave, spaceStatuses = [] }: { sla: SLAIt
           </div>
           <div className="flex items-center gap-3">
             <span className="text-sm text-gray-500 font-medium">{totalGoals} goal{totalGoals !== 1 ? 's' : ''}</span>
-            <Badge color={data.status === 'active' ? 'green' : 'gray'}>{data.status}</Badge>
-            {editing && (
-              <button onClick={() => setData(d => ({ ...d, status: d.status === 'active' ? 'inactive' : 'active' }))}
-                className="text-xs text-blue-600 hover:underline">Toggle</button>
-            )}
+            <button
+              onClick={() => {
+                const next = data.status === 'active' ? 'inactive' : 'active';
+                const updated = { ...data, status: next as 'active' | 'inactive' };
+                setData(updated);
+                onSave(updated);
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
+                data.status === 'active'
+                  ? 'bg-green-50 text-green-700 border-green-200 hover:bg-red-50 hover:text-red-700 hover:border-red-200'
+                  : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-green-50 hover:text-green-700 hover:border-green-200'
+              }`}
+              title={data.status === 'active' ? 'Click to disable SLA' : 'Click to enable SLA'}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${data.status === 'active' ? 'bg-green-500' : 'bg-gray-400'}`} />
+              {data.status === 'active' ? 'Enabled' : 'Disabled'}
+            </button>
           </div>
         </div>
 
@@ -3725,7 +3737,24 @@ function SpaceSettingsContent() {
                           </td>
                           <td className="px-5 py-3.5"><Badge color="blue">{totalGoals} goal{totalGoals !== 1 ? 's' : ''}</Badge></td>
                           <td className="px-5 py-3.5 text-sm text-gray-500">{sla.startCondition}</td>
-                          <td className="px-5 py-3.5"><Badge color={sla.status === 'active' ? 'green' : 'gray'}>{sla.status}</Badge></td>
+                          <td className="px-5 py-3.5" onClick={e => e.stopPropagation()}>
+                            <button
+                              onClick={async () => {
+                                const next = sla.status === 'active' ? 'inactive' : 'active';
+                                const updated = { ...sla, status: next as 'active' | 'inactive' };
+                                try { await api.updateSLA(spaceKey, sla.id, { status: next }); } catch {}
+                                setSlas(prev => prev.map(s => s.id === sla.id ? updated : s));
+                              }}
+                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-all ${
+                                sla.status === 'active'
+                                  ? 'bg-green-50 text-green-700 border-green-200 hover:bg-red-50 hover:text-red-700 hover:border-red-200'
+                                  : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-green-50 hover:text-green-700 hover:border-green-200'
+                              }`}
+                            >
+                              <span className={`w-1.5 h-1.5 rounded-full ${sla.status === 'active' ? 'bg-green-500' : 'bg-gray-400'}`} />
+                              {sla.status === 'active' ? 'Enabled' : 'Disabled'}
+                            </button>
+                          </td>
                           <td className="px-5 py-3.5 text-right" onClick={e => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                               <button onClick={() => setSelectedSLA(sla)} className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><Edit2 size={13} /></button>
