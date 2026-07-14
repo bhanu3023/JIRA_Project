@@ -447,19 +447,25 @@ function SMSidebar({
           label="Board"
           active={pathname.includes('/board')}
         />
-        <SideNavItem
-          href={`/spaces/${spaceKey}/settings?tab=sla`}
-          icon={<Clock size={15} />}
-          label="SLAs"
-          active={pathname.includes('tab=sla')}
-        />
-        <div className="my-2 h-px bg-gray-100" />
-        <SideNavItem
-          href={`/spaces/${spaceKey}/settings`}
-          icon={<Settings size={15} />}
-          label="Settings"
-          active={pathname.includes('/settings')}
-        />
+        {canManageSpace && (
+          <SideNavItem
+            href={`/spaces/${spaceKey}/settings?tab=sla`}
+            icon={<Clock size={15} />}
+            label="SLAs"
+            active={pathname.includes('tab=sla')}
+          />
+        )}
+        {canManageSpace && (
+          <>
+            <div className="my-2 h-px bg-gray-100" />
+            <SideNavItem
+              href={`/spaces/${spaceKey}/settings`}
+              icon={<Settings size={15} />}
+              label="Settings"
+              active={pathname.includes('/settings')}
+            />
+          </>
+        )}
       </nav>
     </div>
   );
@@ -536,13 +542,17 @@ function SoftwareSidebar({
           label="Workflows"
           active={pathname.includes('/workflow')}
         />
-        <div className="my-2 h-px bg-gray-100" />
-        <SideNavItem
-          href={`/spaces/${spaceKey}/settings`}
-          icon={<Settings size={15} />}
-          label="Settings"
-          active={pathname.includes('/settings')}
-        />
+        {canManageSpace && (
+          <>
+            <div className="my-2 h-px bg-gray-100" />
+            <SideNavItem
+              href={`/spaces/${spaceKey}/settings`}
+              icon={<Settings size={15} />}
+              label="Settings"
+              active={pathname.includes('/settings')}
+            />
+          </>
+        )}
       </nav>
     </div>
   );
@@ -1037,13 +1047,13 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                           <ClipboardList size={12} className={cn('flex-shrink-0', queueActive(q.id) ? 'text-blue-500' : 'text-gray-400')} />
                           <span className="flex-1 truncate">{q.name}</span>
                         </Link>
-                        {/* Three-dot menu — shown on hover, overlays chevron */}
+                        {/* Three-dot menu — admin/manager only */}
                         <div className="relative flex-shrink-0">
-                          <button
+                          {canManageSpace && <button
                             onClick={e => { e.stopPropagation(); setQueueMenuOpen(isMenuOpen ? null : q.id); setQueuePanelOpen(null); }}
                             className="hidden group-hover:flex w-6 h-6 items-center justify-center rounded text-gray-400 hover:text-gray-700 hover:bg-gray-200">
                             <MoreHorizontal size={13} />
-                          </button>
+                          </button>}
                           {isMenuOpen && (
                             <div className="absolute right-0 top-7 z-50 w-44 bg-white border border-gray-200 rounded-lg shadow-lg py-1"
                               onMouseLeave={() => setQueueMenuOpen(null)}>

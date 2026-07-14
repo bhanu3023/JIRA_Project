@@ -1032,10 +1032,12 @@ function SpaceDetailContent() {
                 <ClipboardList size={13} /> Backlog
               </Link>
             )}
-            <Link href={`/spaces/${spaceKey}/settings`}
-              className="w-8 h-8 border border-gray-300 rounded-md flex items-center justify-center text-gray-500 hover:bg-gray-50 transition-colors">
-              <Settings size={14} />
-            </Link>
+            {isAdmin && (
+              <Link href={`/spaces/${spaceKey}/settings`}
+                className="w-8 h-8 border border-gray-300 rounded-md flex items-center justify-center text-gray-500 hover:bg-gray-50 transition-colors">
+                <Settings size={14} />
+              </Link>
+            )}
             <button onClick={() => setShowCreate(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-[12.5px] font-medium rounded-md hover:bg-blue-700 transition-colors">
               <Plus size={13} /> New Issue
