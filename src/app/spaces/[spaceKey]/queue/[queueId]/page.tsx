@@ -442,9 +442,10 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
   const unlinkEmail = async (emailId: string) => {
     setSaving(emailId);
     try {
-      await api.request(`/email-addresses/${spaceKey}/${emailId}`, { method: 'PATCH', body: JSON.stringify({ department: null }) });
-      setAllEmails(prev => prev.map(e => e.id === emailId ? { ...e, department: null } : e));
-      flash('Unlinked');
+      // DELETE fully removes the email config and stops the IMAP poller
+      await api.request(`/email-addresses/${spaceKey}/${emailId}`, { method: 'DELETE' });
+      setAllEmails(prev => prev.filter(e => e.id !== emailId));
+      flash('Email disconnected');
     } catch { flash('Failed'); }
     setSaving(null);
   };

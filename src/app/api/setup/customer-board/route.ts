@@ -101,13 +101,27 @@ export async function GET() {
     await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS emailthreadid TEXT`).catch(() => {});
     log.push('✅ issues.emailthreadid column ensured');
 
+    // 7. Check if OAuth tokens exist for L1board@cloudfuze.com
+    let oauthStatus = 'NOT CONNECTED';
+    try {
+      const { getOAuthTokens } = await import('@/lib/oauth-service');
+      const tokens = getOAuthTokens('l1board@cloudfuze.com');
+      oauthStatus = tokens ? '✅ OAuth tokens found — poller can start' : '❌ No OAuth tokens — must connect via Microsoft OAuth';
+    } catch { oauthStatus = 'unknown'; }
+    log.push(`OAuth status: ${oauthStatus}`);
+
     await pool.end();
+
+    const needsOAuth = oauthStatus.includes('❌');
     return NextResponse.json({
       ok: true,
       spaceKey: realSpace.key,
       spaceId: realSpace.id,
       log,
-      next: `Now go to: /spaces/${realSpace.key}/settings?tab=email and connect L1board@cloudfuze.com with Microsoft OAuth to start the email poller.`
+      oauthConnected: !needsOAuth,
+      next: needsOAuth
+        ? `⚠️ REQUIRED: Go to https://neutaraticketing.cftools.live/spaces/${realSpace.key}/settings?tab=email and click "Connect with Microsoft" for L1board@cloudfuze.com to start the email poller.`
+        : `✅ All done! Email poller should be running. Test by sending an email to L1board@cloudfuze.com.`
     });
 
   } catch (err: any) {
