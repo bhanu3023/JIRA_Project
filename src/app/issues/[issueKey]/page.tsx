@@ -1165,15 +1165,29 @@ export default function IssueDetailPage() {
               <div className="flex flex-wrap gap-3">
                 {issue.attachments.map((a: any) => {
                   const isImage = a.mimeType?.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(a.originalName || '');
-                  const href = a.url?.startsWith('http') ? a.url : a.url;
+                  const rawUrl: string = a.url || '';
+                  // Chrome 92+ blocks data: PDFs — convert to blob URL on click
+                  const openAttachment = (e: React.MouseEvent) => {
+                    if (!rawUrl.startsWith('data:')) return;
+                    e.preventDefault();
+                    try {
+                      const [meta, b64] = rawUrl.split(',');
+                      const mime = meta.split(':')[1]?.split(';')[0] || 'application/octet-stream';
+                      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+                      window.open(blobUrl, '_blank');
+                      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+                    } catch { window.open(rawUrl, '_blank'); }
+                  };
+                  const href = rawUrl.startsWith('data:') ? '#' : rawUrl;
                   return isImage ? (
-                    <a key={a.id} href={href} target="_blank" rel="noopener noreferrer"
+                    <a key={a.id} href={href} target="_blank" rel="noopener noreferrer" onClick={openAttachment}
                       className="block rounded-xl overflow-hidden border border-gray-200 hover:border-indigo-300 shadow-sm transition-all group">
-                      <img src={href} alt={a.originalName} className="w-32 h-24 object-cover group-hover:opacity-90 transition-opacity" onError={(e) => { (e.target as HTMLImageElement).style.display='none'; }} />
+                      <img src={rawUrl} alt={a.originalName} className="w-32 h-24 object-cover group-hover:opacity-90 transition-opacity" onError={(e) => { (e.target as HTMLImageElement).style.display='none'; }} />
                       <div className="px-2 py-1 bg-white text-[10px] text-gray-500 truncate max-w-[128px]">{a.originalName}</div>
                     </a>
                   ) : (
-                    <a key={a.id} href={href} target="_blank" rel="noopener noreferrer"
+                    <a key={a.id} href={href} target="_blank" rel="noopener noreferrer" onClick={openAttachment}
                       className="flex items-center gap-2.5 px-4 py-2.5 bg-white border border-gray-200 rounded-xl hover:bg-indigo-50 hover:border-indigo-200 transition-all text-sm shadow-sm group">
                       <Paperclip size={14} className="text-gray-400 group-hover:text-indigo-500 transition-colors flex-shrink-0" />
                       <span className="text-indigo-600 font-medium truncate max-w-[180px]">{a.originalName}</span>
