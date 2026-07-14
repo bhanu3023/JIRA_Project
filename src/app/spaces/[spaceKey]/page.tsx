@@ -1075,7 +1075,7 @@ function SpaceDetailContent() {
 
       {/* ── Queues overview — default landing when clicking a space ── */}
       {queueFilter === 'queues' && (() => {
-        const isDeptQueue = currentSpace?.type === 'dept_queue';
+        const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
         // Service Desk: standard ITSM queues only (no custom queues, no Sent/Watching)
         const serviceDeskQueues = [
           { id: 'all-open',     label: 'All open',       desc: 'All unresolved tickets in this space'    },

@@ -844,7 +844,8 @@ export default function Sidebar() {
 type CustomQueue = { id: string; name: string; memberIds: string[]; suspendedIds?: string[]; sla?: { timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' } };
 
 function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pathname: string; spaceType?: string }) {
-  const isDeptQueue = spaceType === 'dept_queue';
+  // treat as dept_queue if explicitly typed OR if it has custom queues (backward compat for pre-existing spaces)
+  const [isDeptQueue, setIsDeptQueue] = useState(spaceType === 'dept_queue');
   const [queuesOpen, setQueuesOpen] = useState(true);
   const [defaultOpen, setDefaultOpen] = useState(true);
   const [counts, setCounts] = useState({ allOpen: 0, assigned: 0, total: 0, unassigned: 0 });
@@ -903,6 +904,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     api.request<any[]>(`custom-queues/${spaceKey}`).then((q) => {
       if (Array.isArray(q) && q.length > 0) {
         setCustomQueues(q);
+        setIsDeptQueue(true);
       } else {
         // DB is empty — check localStorage and migrate
         try {
@@ -911,6 +913,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
             const local = JSON.parse(stored);
             if (Array.isArray(local) && local.length > 0) {
               setCustomQueues(local);
+              setIsDeptQueue(true);
               // Push to DB so server has them too
               api.request(`custom-queues/${spaceKey}`, { method: 'PUT', body: JSON.stringify(local) }).catch(() => {});
             }
