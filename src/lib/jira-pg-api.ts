@@ -1,4 +1,4 @@
-/**
+﻿/**
  * jira-pg-api.ts
  * PostgreSQL-backed API handler replacing the in-memory jira-dev-mock for
  * heavy data routes (auth, users, spaces, issues).
@@ -57,14 +57,14 @@ import {
   notifyMentioned,
 } from '@/lib/notification-service';
 
-// â”€â”€ Global safety net: prevent IMAP/socket uncaughtExceptions from killing the server â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Global safety net: prevent IMAP/socket uncaughtExceptions from killing the server Ã¢â€â‚¬Ã¢â€â‚¬
 if (typeof process !== 'undefined') {
   const _handled = (process as any).__imap_crash_guard_installed;
   if (!_handled) {
     (process as any).__imap_crash_guard_installed = true;
     process.on('uncaughtException', (err: any) => {
       const msg = err?.message || String(err);
-      // IMAP / socket errors â€” log and continue, do NOT crash
+      // IMAP / socket errors Ã¢â‚¬â€ log and continue, do NOT crash
       if (msg.includes('ECONNRESET') || msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('EPIPE') || msg.includes('imap') || msg.includes('ImapFlow')) {
         console.error('[SafetyNet] Caught IMAP/socket uncaughtException (server kept alive):', msg);
         return;
@@ -84,13 +84,13 @@ if (typeof process !== 'undefined') {
   }
 }
 
-// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status });
 }
 
-// â”€â”€ In-app notification helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ In-app notification helper Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 async function createNotification({
   userId, type, title, message, issueKey,
 }: { userId: string; type: string; title: string; message?: string; issueKey?: string }) {
@@ -118,7 +118,7 @@ async function userWantsNotif(userId: string, type: string): Promise<boolean> {
   } catch { return true; }
 }
 
-// Create notification for multiple users (dedup â€” don't notify the actor, respect preferences)
+// Create notification for multiple users (dedup Ã¢â‚¬â€ don't notify the actor, respect preferences)
 async function notifyUsers(userIds: (string | null | undefined)[], actorId: string | null | undefined, opts: { type: string; title: string; message?: string; issueKey?: string }) {
   const seen = new Set<string>();
   for (const uid of userIds) {
@@ -149,7 +149,7 @@ async function getSpaceLeadUserIds(spaceId: string, dept?: string | null): Promi
 // Find previously RESOLVED issues with a similar summary (to detect recurring issues)
 async function findPreviouslyResolvedSimilar(spaceId: string, excludeId: string, summary: string): Promise<Array<{ key: string; cf_key: string; summary: string }>> {
   try {
-    // Try pg_trgm similarity first (threshold 0.3) â€” only resolved/done tickets
+    // Try pg_trgm similarity first (threshold 0.3) Ã¢â‚¬â€ only resolved/done tickets
     const res = await pool.query(
       `SELECT i.key, i.cf_key, i.summary
        FROM issues i
@@ -255,21 +255,21 @@ function generateApiToken(): string {
   return `nta_${result}`;
 }
 
-/** Resolve userId â€” verifies JWT signature + DB session, rejects forged tokens */
+/** Resolve userId Ã¢â‚¬â€ verifies JWT signature + DB session, rejects forged tokens */
 async function resolveUserId(auth: string | null, reqIp?: string): Promise<string | null> {
   if (!auth?.startsWith('Bearer ')) return null;
   const t = auth.slice(7).trim();
 
-  // Legacy unsigned tokens (dev.) â€” still support during transition, but log warning
+  // Legacy unsigned tokens (dev.) Ã¢â‚¬â€ still support during transition, but log warning
   if (t.startsWith('dev.')) {
     try {
       const payload = JSON.parse(Buffer.from(t.slice(4), 'base64url').toString('utf8')) as { sub: string };
-      console.warn('[Security] Legacy unsigned token used â€” user should re-login');
+      console.warn('[Security] Legacy unsigned token used Ã¢â‚¬â€ user should re-login');
       return payload.sub || null;
     } catch { return null; }
   }
 
-  // Signed JWT tokens (new format â€” starts with eyJ)
+  // Signed JWT tokens (new format Ã¢â‚¬â€ starts with eyJ)
   if (t.startsWith('eyJ')) {
     try {
       const jwt = require('jsonwebtoken');
@@ -598,7 +598,7 @@ function formatIssue(issue: any) {
 
   const issueNum = parseInt(String(issue.key || '').split('-').pop() || '1', 10) || 1;
 
-  // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" â†' "L2B-12718")
+  // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" Ã¢â€ ' "L2B-12718")
   const normalizedKey = issue.key?.includes(':') ? issue.key.split(':')[0] : issue.key;
 
   return {
@@ -669,7 +669,7 @@ function formatIssue(issue: any) {
   };
 }
 
-// â”€â”€ Date range parser (same logic as mock) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Date range parser (same logic as mock) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function parseDateRange(range: string): { from: Date; to: Date } {
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -707,14 +707,14 @@ function parseDateRange(range: string): { from: Date; to: Date } {
   }
 }
 
-// â”€â”€ On-demand Jira import â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ On-demand Jira import Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const JIRA_BASE_URL = 'https://cf2020.atlassian.net';
 const JIRA_EMAIL    = 'sujana.manapuram@cloudfuze.com';
 const JIRA_TOKEN    = 'REDACTED_API_TOKEN';
 const JIRA_AUTH_HDR = 'Basic ' + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString('base64');
 
-// Map issue key prefix â†' { jiraProject, spaceKey }
+// Map issue key prefix Ã¢â€ ' { jiraProject, spaceKey }
 const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> = {
   L1BOAR:  { jiraProject: 'CFITS',  spaceKey: 'L1BOAR'   },
   L2B:     { jiraProject: 'L2B',    spaceKey: 'L2BOARD'  },
@@ -800,7 +800,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
     const meta = PREFIX_TO_META[prefix];
     if (!meta) return null;
 
-    // L1BOAR keys don't match CFITS keys â€” can't look up by key directly
+    // L1BOAR keys don't match CFITS keys Ã¢â‚¬â€ can't look up by key directly
     if (prefix === 'L1BOAR') return null;
 
     const jiraKey = localKey; // key prefix matches Jira project for all other boards
@@ -822,7 +822,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
     });
     if (!space) return null;
 
-    // Map Jira status â†' local status
+    // Map Jira status Ã¢â€ ' local status
     const jiraStatusName: string = f.status?.name || 'Open';
     const localStatus = space.statuses.find(
       (s: any) => s.name.toLowerCase() === jiraStatusName.toLowerCase()
@@ -958,7 +958,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
   }
 }
 
-// â”€â”€ Main handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Main handler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 export async function handleJiraPgApi(
   req: NextRequest,
@@ -997,7 +997,7 @@ async function _handleJiraPgApi(
   const url = new URL(req.url);
   const path = segments.join('/');
 
-  // â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Auth Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'auth/login' && method === 'POST') {
     const body = await readJson(req);
@@ -1041,7 +1041,7 @@ async function _handleJiraPgApi(
 
   if (path === 'auth/me' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
-    // Dev: skip DB entirely â€” decode real identity from JWT claims if present
+    // Dev: skip DB entirely Ã¢â‚¬â€ decode real identity from JWT claims if present
     if (process.env.NODE_ENV === 'development') {
       try {
         const jwt = require('jsonwebtoken');
@@ -1065,7 +1065,7 @@ async function _handleJiraPgApi(
     return json(formatUser(user));
   }
 
-  // Logout â€” revoke session in DB
+  // Logout Ã¢â‚¬â€ revoke session in DB
   if (path === 'auth/logout' && method === 'POST') {
     const t = auth?.slice(7).trim();
     if (t?.startsWith('eyJ')) {
@@ -1078,7 +1078,7 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // OAuth SSO login â€” called by OAuth callback to exchange email â†' JWT token
+  // OAuth SSO login Ã¢â‚¬â€ called by OAuth callback to exchange email Ã¢â€ ' JWT token
   if (path === 'auth/oauth-token' && method === 'POST') {
     const body = await readJson(req);
     const rawEmail = String(body.email || '').toLowerCase().trim();
@@ -1098,7 +1098,7 @@ async function _handleJiraPgApi(
     }
 
     if (!user) {
-      // No user found â€” return generic error (don't expose email details)
+      // No user found Ã¢â‚¬â€ return generic error (don't expose email details)
       return json({ error: `No account found for ${rawEmail}. Please contact your administrator.` }, 404);
     }
     // Save Microsoft profile photo if provided and user doesn't have one yet
@@ -1125,7 +1125,7 @@ async function _handleJiraPgApi(
   const currentUser = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
   const isAdmin = currentUser?.role === 'admin';
 
-  // â”€â”€ Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Stats Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'stats' && method === 'GET') {
     const [totalTickets, totalAgents, totalBoards] = await Promise.all([
@@ -1136,7 +1136,7 @@ async function _handleJiraPgApi(
     return json({ totalTickets, totalAgents, totalBoards });
   }
 
-  // â”€â”€ Users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Users Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'users' && method === 'GET') {
     // All authenticated users can list users (needed for queue member search)
@@ -1215,7 +1215,7 @@ async function _handleJiraPgApi(
     }
   }
 
-  // â”€â”€ Spaces â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Spaces Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'spaces' && method === 'GET') {
     const spaces = await db.space.findMany({
@@ -1290,7 +1290,7 @@ async function _handleJiraPgApi(
     return json(result);
   }
 
-  // GET /spaces/:key/field-values?field=customerName  â€” distinct non-null values for a field
+  // GET /spaces/:key/field-values?field=customerName  Ã¢â‚¬â€ distinct non-null values for a field
   const fieldValuesMatch = path.match(/^spaces\/([^/]+)\/field-values$/);
   if (fieldValuesMatch && method === 'GET') {
     const spaceKeyFv = fieldValuesMatch[1].toUpperCase();
@@ -1382,7 +1382,7 @@ async function _handleJiraPgApi(
     return json(formatSpace(updated));
   }
 
-  // PATCH /spaces/{key}/members/{userId} â€” update role or department
+  // PATCH /spaces/{key}/members/{userId} Ã¢â‚¬â€ update role or department
   const spaceMemberPatch = path.match(/^spaces\/([^/]+)\/members\/([^/]+)$/);
   if (spaceMemberPatch && method === 'PATCH') {
     const key = spaceMemberPatch[1].toUpperCase();
@@ -1432,7 +1432,7 @@ async function _handleJiraPgApi(
     return json(formatSpace(updated));
   }
 
-  // â”€â”€ Round Robin Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Round Robin Config Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   const rrConfigMatch = path.match(/^spaces\/([^/]+)\/rr-config$/);
   if (rrConfigMatch && method === 'GET') {
@@ -1454,7 +1454,7 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // â”€â”€ Sub-boards config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Sub-boards config Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   const subBoardsMatch = path.match(/^spaces\/([^/]+)\/sub-boards$/);
   if (subBoardsMatch && method === 'POST') {
     const sk = subBoardsMatch[1].toUpperCase();
@@ -1469,7 +1469,7 @@ async function _handleJiraPgApi(
     return json({ subBoardKeys: row.rows[0]?.keys || [] });
   }
 
-  // â”€â”€ Dept-Queue Closed Tickets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Dept-Queue Closed Tickets Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   const deptQueueClosedMatch = path.match(/^spaces\/([^/]+)\/dept-queue\/closed$/);
   if (deptQueueClosedMatch && method === 'GET') {
@@ -1507,7 +1507,7 @@ async function _handleJiraPgApi(
     }
   }
 
-  // â”€â”€ Issues â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Issues Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'issues' && method === 'GET') {
     const spaceKey  = url.searchParams.get('spaceKey');
@@ -1520,7 +1520,7 @@ async function _handleJiraPgApi(
     const reporters     = url.searchParams.get('reporters') || url.searchParams.get('reporter');
     const labelsParam   = url.searchParams.get('labels');
     const rawSearchQ    = url.searchParams.get('q');
-    // Normalize CF key searches: "CF - 27210" â†' "CF-27210"
+    // Normalize CF key searches: "CF - 27210" Ã¢â€ ' "CF-27210"
     const searchQ       = rawSearchQ ? rawSearchQ.replace(/\s*-\s*/g, '-').trim() : rawSearchQ;
     const createdRange  = url.searchParams.get('createdRange');
     const updatedRange  = url.searchParams.get('updatedRange');
@@ -1528,7 +1528,7 @@ async function _handleJiraPgApi(
     const page  = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
     const limit = Math.min(2000, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10)));
 
-    // Bulk fetch by specific keys (for Viewed tab â€” single request instead of N calls)
+    // Bulk fetch by specific keys (for Viewed tab Ã¢â‚¬â€ single request instead of N calls)
     const keysParam = url.searchParams.get('keys');
     if (keysParam) {
       const keyList = keysParam.split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
@@ -1566,7 +1566,7 @@ async function _handleJiraPgApi(
       where.spaceId = { in: spaces.map((s: any) => s.id) };
     }
 
-    // Assignee filter â€” look up by ID or email
+    // Assignee filter Ã¢â‚¬â€ look up by ID or email
     if (unassignedOnly) {
       where.assigneeId = null;
     } else if (assignees) {
@@ -1598,7 +1598,7 @@ async function _handleJiraPgApi(
       where.statusId = { in: catStatuses.map((s) => s.id) };
     }
 
-    // Status filter â€” look up status IDs by name
+    // Status filter Ã¢â‚¬â€ look up status IDs by name
     if (statusParam) {
       const names = statusParam.split(',').map((s) => s.trim());
       const statusWhere: Record<string, unknown> = { name: { in: names, mode: 'insensitive' } };
@@ -1646,7 +1646,7 @@ async function _handleJiraPgApi(
       where.updatedAt = { gte: from, lte: to };
     }
 
-    // Custom text field filters â€” support comma-separated multi-select values
+    // Custom text field filters Ã¢â‚¬â€ support comma-separated multi-select values
     // Values come from DB dropdown so they match exactly (no case transform needed)
     const applyMultiField = (param: string | null, field: string) => {
       if (!param) return;
@@ -1667,7 +1667,7 @@ async function _handleJiraPgApi(
     applyMultiField(manageClientParam,   'manageClientName');
     applyMultiField(customerPlanParam,   'customerPlan');
 
-    // Exclude done statuses â€” fetches done status IDs for the space and excludes them
+    // Exclude done statuses Ã¢â‚¬â€ fetches done status IDs for the space and excludes them
     if (excludeDone) {
       const doneStatuses = await db.status.findMany({
         where: {
@@ -1682,7 +1682,7 @@ async function _handleJiraPgApi(
       }
     }
 
-    // Count and paginate â€” sort descending by issue number (extracted from key suffix)
+    // Count and paginate Ã¢â‚¬â€ sort descending by issue number (extracted from key suffix)
     const [total, issues] = await Promise.all([
       db.issue.count({ where: where as any }),
       db.issue.findMany({
@@ -1714,7 +1714,7 @@ async function _handleJiraPgApi(
       }
     } catch { /* ignore */ }
 
-    // sentDept filter â€” shows all tickets that MOVED OUT of this dept (to another dept)
+    // sentDept filter Ã¢â‚¬â€ shows all tickets that MOVED OUT of this dept (to another dept)
     // Uses issue_dept_transitions (tracked moves) + queue_closed_tickets fallback for historical data
     const sentDeptParam = url.searchParams.get('sentDept');
     if (sentDeptParam) {
@@ -1845,14 +1845,14 @@ async function _handleJiraPgApi(
       } catch { /* fall through to normal path */ }
     }
 
-    // Filter by dept param if provided â€” use raw SQL count so total is accurate
+    // Filter by dept param if provided Ã¢â‚¬â€ use raw SQL count so total is accurate
     const deptParam = url.searchParams.get('dept');
     let enrichedIssues = issues.map((i: any) => formatIssue({ ...i, ...(deptMap[i.key] || {}) }));
     let deptTotal = total;
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
       let allSpaceIds: string[] = [];
-      let spaceKeyMap: Record<string, string> = {}; // spaceId â†' spaceKey
+      let spaceKeyMap: Record<string, string> = {}; // spaceId Ã¢â€ ' spaceKey
       try {
         const spaceRow = await pool.query(
           `SELECT id, key, COALESCE(sub_board_keys, '{}') AS sub_board_keys FROM spaces WHERE key = $1`,
@@ -1998,7 +1998,7 @@ async function _handleJiraPgApi(
       ? sp.statuses.find((x) => x.id === stId) || sp.statuses[0]
       : sp.statuses[0];
 
-    // Resolve reporter â€” use explicit reporterEmail > reporterEmail from body > logged-in user
+    // Resolve reporter Ã¢â‚¬â€ use explicit reporterEmail > reporterEmail from body > logged-in user
     let resolvedReporterId: string | null = null;
     if (body.reporterEmail) {
       const ru = await db.user.findFirst({ where: { email: { equals: String(body.reporterEmail), mode: 'insensitive' } } });
@@ -2017,8 +2017,8 @@ async function _handleJiraPgApi(
     }
 
     // Assignment logic:
-    // 1. Manual creation (userId present, not from email) â†' assign to creator
-    // 2. Email ticket or queue-transfer â†' round-robin for the department
+    // 1. Manual creation (userId present, not from email) Ã¢â€ ' assign to creator
+    // 2. Email ticket or queue-transfer Ã¢â€ ' round-robin for the department
     let rrDepartment: string | null = null;
     if (!resolvedAssigneeId) {
       const isEmailCreated = !userId || body.fromEmail === true || !!body.reporterEmail;
@@ -2029,12 +2029,12 @@ async function _handleJiraPgApi(
           // Manual creation with no explicit dept -- leave unassigned (RR only triggers on email or dept selection)
           resolvedAssigneeId = null;
         } else if (requestedDept) {
-          // Ticket with an explicit queue/department â†' RR for that dept
+          // Ticket with an explicit queue/department Ã¢â€ ' RR for that dept
           rrDepartment = requestedDept;
           const nextAgent = await getNextAgent(sp.id, requestedDept);
           if (nextAgent) resolvedAssigneeId = nextAgent.userId;
         } else if (isEmailCreated) {
-          // Email ticket with no dept â†' use the default department RR
+          // Email ticket with no dept Ã¢â€ ' use the default department RR
           const defaultDept = await getDefaultDepartment(sp.id);
           if (defaultDept) {
             rrDepartment = defaultDept;
@@ -2186,13 +2186,13 @@ async function _handleJiraPgApi(
       const prevResolved = await findPreviouslyResolvedSimilar(sp.id, issue.id, issue.summary);
       if (prevResolved.length > 0) {
         const newKey = (issue as any).cf_key || issue.key;
-        const refs = prevResolved.map((s) => `${s.cf_key || s.key} â€” ${s.summary.substring(0, 80)}`).join('\nâ€¢ ');
+        const refs = prevResolved.map((s) => `${s.cf_key || s.key} Ã¢â‚¬â€ ${s.summary.substring(0, 80)}`).join('\nÃ¢â‚¬Â¢ ');
         const leadIds = await getSpaceLeadUserIds(sp.id, issueDept);
         const recipients = [issue.reporterId, issue.assigneeId, ...leadIds];
         await notifyUsers(recipients, null, {
           type: 'DUPLICATE_ALERT',
           title: `Recurring issue: ${newKey}`,
-          message: `This issue was previously reported and resolved:\nâ€¢ ${refs}\n\nPlease check if the fix is still in place.`,
+          message: `This issue was previously reported and resolved:\nÃ¢â‚¬Â¢ ${refs}\n\nPlease check if the fix is still in place.`,
           issueKey: newKey,
         });
       }
@@ -2235,21 +2235,21 @@ async function _handleJiraPgApi(
     return json(formatIssue(issue));
   }
 
-  // â”€â”€ Department Change (COPY / PASS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Department Change (COPY / PASS) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   // Original ticket stays untouched on source board.
   // A NEW ticket is created on the target board with same content, new key, RR assignee, reset status.
   // History entry is added to the original ticket.
   const issueDeptMatch = path.match(/^issues\/([^/]+)\/department$/);
   if (issueDeptMatch && method === 'PATCH') {
     let key = issueDeptMatch[1].toUpperCase();
-    // Resolve CF-key â†' Prisma key
+    // Resolve CF-key Ã¢â€ ' Prisma key
     if (key.startsWith('CF-')) {
       const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
       if (cfRow.rows[0]) key = cfRow.rows[0].key;
     }
     const body = await readJson(req);
     const newDept = String(body.department || '');
-    // targetBoard may be comma-separated (multi-board mapping) â€” use the first board
+    // targetBoard may be comma-separated (multi-board mapping) Ã¢â‚¬â€ use the first board
     const rawTargetBoard = String(body.targetBoard || '');
     const targetBoardKey = rawTargetBoard.split(',')[0].trim().toUpperCase();
 
@@ -2260,7 +2260,7 @@ async function _handleJiraPgApi(
     });
     if (!issue) return json({ error: 'Not found' }, 404);
 
-    // â”€â”€ Single-board mode: no targetBoard or same board as source â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Single-board mode: no targetBoard or same board as source Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (!targetBoardKey || targetBoardKey === issue.space?.key?.toUpperCase()) {
       // Ensure columns exist
       try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIMESTAMPTZ`); } catch {}
@@ -2286,7 +2286,7 @@ async function _handleJiraPgApi(
         : { id: '', name: 'Open', category: 'todo', color: '#6B7280' };
 
       // Build per-dept assignee map: save current assignee under old dept, clear new dept
-      // Fetch current_department from raw SQL â€” Prisma doesn't return raw ALTER TABLE columns
+      // Fetch current_department from raw SQL Ã¢â‚¬â€ Prisma doesn't return raw ALTER TABLE columns
       const existingMap = await pool.query(`SELECT dept_assignees, current_department FROM issues WHERE key=$1`, [key]);
       const oldDept: string = existingMap.rows[0]?.current_department || '';
       const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
@@ -2302,7 +2302,7 @@ async function _handleJiraPgApi(
       }
       deptAssignees[newDept] = null; // new dept starts unassigned
 
-      // Per-dept statuses: old dept â†' "Waiting for Dev", new dept â†' "To Do"
+      // Per-dept statuses: old dept Ã¢â€ ' "Waiting for Dev", new dept Ã¢â€ ' "To Do"
       const existingStatuses = await pool.query(`SELECT dept_statuses FROM issues WHERE key=$1`, [key]);
       const deptStatuses: Record<string, any> = existingStatuses.rows[0]?.dept_statuses || {};
       if (oldDept) deptStatuses[oldDept] = oldDeptStatusObj;
@@ -2313,7 +2313,7 @@ async function _handleJiraPgApi(
       let rrAgentName: string | null = null;
       const savedAssigneeForNewDept = deptAssignees[newDept];
       if (savedAssigneeForNewDept?.id) {
-        // Dept was visited before â€” restore the saved assignee
+        // Dept was visited before Ã¢â‚¬â€ restore the saved assignee
         rrAssigneeId = savedAssigneeForNewDept.id;
         rrAgentName = savedAssigneeForNewDept.displayName || null;
       } else {
@@ -2404,7 +2404,7 @@ async function _handleJiraPgApi(
         data: {
           id: rid(), issueId: issue.id, field: 'department',
           oldValue: oldDept2,
-          newValue: `Transferred to ${newDept} â€” waiting for assignment (SLA started)`,
+          newValue: `Transferred to ${newDept} Ã¢â‚¬â€ waiting for assignment (SLA started)`,
           authorName: authorName2, createdAt: new Date(),
         },
       });
@@ -2430,7 +2430,7 @@ async function _handleJiraPgApi(
       }).catch(() => {});
       return json({ ok: true, department: newDept, sameBoard: true, newStatus: newStatusName, assigneeName: rrAgentName, boardKey: issue.space?.key || '', issue: updatedIssue ? formatIssue({ ...updatedIssue, ...extraCols }) : null });
     }
-    // â”€â”€ Multi-board mode continues below â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Multi-board mode continues below Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     // Resolve target space
     let targetSpace = issue.space;
@@ -2453,7 +2453,7 @@ async function _handleJiraPgApi(
       || await getNextAgent(targetSpaceId, newDept);
 
     // Generate next key for target board
-    // Use the SAME number from the source key (e.g. L1BOAR-5618 â†' L2BOARD-5618)
+    // Use the SAME number from the source key (e.g. L1BOAR-5618 Ã¢â€ ' L2BOARD-5618)
     const sourceNum = key.split('-').pop() || '1';
     const newKey = `${targetSpace.key}-${sourceNum}`;
     const newId = rid();
@@ -2461,7 +2461,7 @@ async function _handleJiraPgApi(
     // If a ticket with this key already exists on target board, just update it
     const existingOnTarget = await pool.query(`SELECT id FROM issues WHERE key = $1`, [newKey]);
     if (existingOnTarget.rows[0]) {
-      // Already passed before â€” update assignee + status
+      // Already passed before Ã¢â‚¬â€ update assignee + status
       await pool.query(
         `UPDATE issues SET "assigneeId"=$1,"statusId"=$2,current_department=$3,"updatedAt"=NOW() WHERE key=$4`,
         [rrAgent?.userId || issue.assigneeId, newStatusId, newDept, newKey]
@@ -2520,16 +2520,16 @@ async function _handleJiraPgApi(
       }
     } catch {}
 
-    // Link original â†” new ticket as partners so comments are shared between them
+    // Link original Ã¢â€ â€ new ticket as partners so comments are shared between them
     await pool.query(`UPDATE issues SET "partnerKey"=$1 WHERE key=$2`, [newKey, key]);
     await pool.query(`UPDATE issues SET "partnerKey"=$1 WHERE key=$2`, [key, newKey]);
 
-    // History on ORIGINAL ticket: "Passed to Dev â†' L2BOARD (new ticket: L2BOARD-5618)"
+    // History on ORIGINAL ticket: "Passed to Dev Ã¢â€ ' L2BOARD (new ticket: L2BOARD-5618)"
     await (db as any).issueHistory.create({
       data: {
         id: rid(), issueId: issue.id, field: 'department',
         oldValue: (issue as any).current_department || 'None',
-        newValue: `Passed to ${newDept} â†' ${targetSpace.key} (${newKey})`,
+        newValue: `Passed to ${newDept} Ã¢â€ ' ${targetSpace.key} (${newKey})`,
         authorName, createdAt: new Date(),
       },
     });
@@ -2539,7 +2539,7 @@ async function _handleJiraPgApi(
       data: {
         id: rid(), issueId: newId, field: 'department',
         oldValue: 'Created',
-        newValue: `Passed from ${issue.space?.key || ''} (${key}) Â· Assignee: ${assigneeName} (Round Robin)`,
+        newValue: `Passed from ${issue.space?.key || ''} (${key}) Ã‚Â· Assignee: ${assigneeName} (Round Robin)`,
         authorName: 'System', createdAt: new Date(),
       },
     });
@@ -2550,9 +2550,9 @@ async function _handleJiraPgApi(
   const issueKeyMatch = path.match(/^issues\/([^/]+)$/);
   if (issueKeyMatch && method === 'GET') {
     const rawKey = issueKeyMatch[1].toUpperCase();
-    // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" â†' "L2B-12718")
+    // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" Ã¢â€ ' "L2B-12718")
     let key = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-    // Resolve CF key to actual Jira key (e.g. "CF-1" â†' "L2B-5112")
+    // Resolve CF key to actual Jira key (e.g. "CF-1" Ã¢â€ ' "L2B-5112")
     if (key.startsWith('CF-')) {
       try {
         const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
@@ -2600,7 +2600,7 @@ async function _handleJiraPgApi(
       }),
     ]);
 
-    // Normalize colon-suffix keys in link records (e.g. "L2B-12718:1" â†' "L2B-12718")
+    // Normalize colon-suffix keys in link records (e.g. "L2B-12718:1" Ã¢â€ ' "L2B-12718")
     const normalizeKey = (k: string) => k?.includes(':') ? k.split(':')[0] : k;
     const outLinks = outLinksRaw.map(l => ({ ...l, targetKey: normalizeKey(l.targetKey), sourceKey: normalizeKey(l.sourceKey) }));
     const inLinks  = inLinksRaw.map(l => ({ ...l, targetKey: normalizeKey(l.targetKey), sourceKey: normalizeKey(l.sourceKey) }));
@@ -2693,7 +2693,7 @@ async function _handleJiraPgApi(
       if (rawRow.rows[0]) rawDeptData = rawRow.rows[0];
     } catch { /* ignore if columns don't exist */ }
 
-    // Merge comments from partner tickets â€” only tickets explicitly linked via partnerKey
+    // Merge comments from partner tickets Ã¢â‚¬â€ only tickets explicitly linked via partnerKey
     // (set during department pass). This prevents accidentally merging comments from
     // unrelated tickets that happen to share the same number suffix.
     let allComments = [...(issue.comments || [])];
@@ -2732,7 +2732,7 @@ async function _handleJiraPgApi(
     }
     const body = await readJson(req);
 
-    // Handle recall â€” return ticket to Migration dept
+    // Handle recall Ã¢â‚¬â€ return ticket to Migration dept
     if (body.recall === true) {
       // Fetch full state BEFORE modifying anything
       const recallRow = await pool.query(
@@ -2810,7 +2810,7 @@ async function _handleJiraPgApi(
     if (body.clientName !== undefined) data.clientName = body.clientName === null ? null : String(body.clientName);
     if (body.projectManager !== undefined) data.projectManager = body.projectManager === null ? null : String(body.projectManager);
 
-    // Assignee â€” accept assigneeId, assignee object, or assigneeEmail
+    // Assignee Ã¢â‚¬â€ accept assigneeId, assignee object, or assigneeEmail
     if (body.assigneeId !== undefined) {
       data.assigneeId = body.assigneeId === null ? null : String(body.assigneeId);
     } else if (body.assigneeEmail) {
@@ -2828,7 +2828,7 @@ async function _handleJiraPgApi(
       }
     }
 
-    // Reporter â€” accept reporterEmail
+    // Reporter Ã¢â‚¬â€ accept reporterEmail
     if (body.reporterEmail) {
       const ru = await db.user.findFirst({ where: { email: { equals: String(body.reporterEmail), mode: 'insensitive' } } });
       if (ru) data.reporterId = ru.id;
@@ -2875,7 +2875,7 @@ async function _handleJiraPgApi(
       },
     });
 
-    // â”€â”€ Auto-record history for every changed field â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Auto-record history for every changed field Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     try {
       const authorName = currentUser
         ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
@@ -2911,7 +2911,7 @@ async function _handleJiraPgApi(
       if (body.clientName !== undefined)       track('client name',       (issue as any).clientName,       data.clientName as string);
       if (body.projectManager !== undefined)   track('project manager',   (issue as any).projectManager,   data.projectManager as string);
 
-      // Labels (array â†' comma string)
+      // Labels (array Ã¢â€ ' comma string)
       if (body.labels !== undefined) {
         const oldL = ((issue.labels ?? []) as string[]).join(', ');
         const newL = ((data.labels ?? []) as string[]).join(', ');
@@ -2925,7 +2925,7 @@ async function _handleJiraPgApi(
         const newSt = (statuses as any[]).find((s: any) => s.id === data.statusId);
         histRecs.push({ issueId: issue.id, field: 'status', oldValue: oldSt?.name ?? null, newValue: newSt?.name ?? null, authorName, authorEmail, createdAt: now });
 
-        // â”€â”€ Dept handoff on "Waiting for [Dept]" status change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬ Dept handoff on "Waiting for [Dept]" status change Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // When status name is "Waiting for X", auto-switch dept to X, clear assignee, start X's SLA
         const newStatusName = (newSt?.name || '').trim();
         const waitMatch = newStatusName.match(/^waiting\s+for\s+(.+)$/i);
@@ -2934,7 +2934,7 @@ async function _handleJiraPgApi(
           try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIMESTAMPTZ`); } catch {}
           try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`); } catch {}
           // Save current dept's assignee before handing off
-          // Fetch current_department from raw SQL â€” Prisma doesn't return raw ALTER TABLE columns
+          // Fetch current_department from raw SQL Ã¢â‚¬â€ Prisma doesn't return raw ALTER TABLE columns
           const existingMapSt = await pool.query(`SELECT dept_assignees, "assigneeId", current_department FROM issues WHERE id=$1`, [issue.id]);
           const oldDeptSt: string = existingMapSt.rows[0]?.current_department || '';
           const deptAssigneesSt: Record<string, any> = existingMapSt.rows[0]?.dept_assignees || {};
@@ -2947,13 +2947,13 @@ async function _handleJiraPgApi(
           }
           deptAssigneesSt[targetDept] = null;
 
-          // Per-dept statuses: current dept paused â†' "Waiting for X"; target dept â†' "In Progress"
+          // Per-dept statuses: current dept paused Ã¢â€ ' "Waiting for X"; target dept Ã¢â€ ' "In Progress"
           try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
           const existingStatusesSt = await pool.query(`SELECT dept_statuses FROM issues WHERE id=$1`, [issue.id]);
           const deptStatusesSt: Record<string, any> = existingStatusesSt.rows[0]?.dept_statuses || {};
-          // Current dept status â†' "Waiting for [target]"
+          // Current dept status Ã¢â€ ' "Waiting for [target]"
           deptStatusesSt[oldDeptSt] = { id: '', name: newStatusName, category: 'todo', color: '#F59E0B' };
-          // Target dept status â†' "In Progress"
+          // Target dept status Ã¢â€ ' "In Progress"
           const inProgressSt = await db.status.findFirst({
             where: { spaceId: issue.spaceId, category: 'in_progress' },
             orderBy: { order: 'asc' },
@@ -2974,7 +2974,7 @@ async function _handleJiraPgApi(
           histRecs.push({
             issueId: issue.id, field: 'department',
             oldValue: (issue as any).current_department || null,
-            newValue: `Handed to ${targetDept} â€” SLA started`,
+            newValue: `Handed to ${targetDept} Ã¢â‚¬â€ SLA started`,
             authorName, authorEmail, createdAt: now,
           });
           // Record worked-on: agent who was handling this in oldDeptSt passed it along
@@ -2985,7 +2985,7 @@ async function _handleJiraPgApi(
             ).catch(() => {});
           }
         }
-        // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       }
 
       // Assignee (resolve display names)
@@ -3001,7 +3001,7 @@ async function _handleJiraPgApi(
         await (db as any).issueHistory.createMany({ data: histRecs });
       }
     } catch (_e) { /* history tracking should never break the main response */ }
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     // Send notifications (fire-and-forget)
     const spaceKey = updated.space?.key ?? '';
@@ -3036,9 +3036,9 @@ async function _handleJiraPgApi(
       await notifyUsers(
         [updated.assigneeId, updated.reporterId],
         userId,
-        { type: 'STATUS_CHANGED', title: `${updated.key} status â†' ${issueForNotif.status.name}`, message: updated.summary, issueKey: updated.key }
+        { type: 'STATUS_CHANGED', title: `${updated.key} status Ã¢â€ ' ${issueForNotif.status.name}`, message: updated.summary, issueKey: updated.key }
       );
-      await notifyWatchers(updated.key, userId, { title: `${updated.key} status â†' ${issueForNotif.status.name}`, message: updated.summary });
+      await notifyWatchers(updated.key, userId, { title: `${updated.key} status Ã¢â€ ' ${issueForNotif.status.name}`, message: updated.summary });
     }
     // Assignee changed?
     else if (body.assigneeId !== undefined && issue.assigneeId !== data.assigneeId) {
@@ -3104,7 +3104,7 @@ async function _handleJiraPgApi(
   if (issueKeyMatch && method === 'DELETE') {
     const rawKey = issueKeyMatch[1].toUpperCase();
     let key = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-    // CF-xxxxx is the cf_key (raw SQL column) â€” resolve to the Prisma key first
+    // CF-xxxxx is the cf_key (raw SQL column) Ã¢â‚¬â€ resolve to the Prisma key first
     if (key.startsWith('CF-')) {
       const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
       if (cfRow.rows[0]) key = cfRow.rows[0].key;
@@ -3145,7 +3145,7 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // â”€â”€ Issue Links â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Issue Links Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   const issueLinksPost = path.match(/^issues\/([^/]+)\/links$/);
   if (issueLinksPost && method === 'POST') {
@@ -3174,12 +3174,12 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // â”€â”€ Issue Comments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Issue Comments Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   const issueComments = path.match(/^issues\/([^/]+)\/comments$/);
   if (issueComments && method === 'POST') {
     let key = issueComments[1].toUpperCase();
-    // Resolve CF-key â†' Prisma key
+    // Resolve CF-key Ã¢â€ ' Prisma key
     if (key.startsWith('CF-')) {
       const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
       if (cfRow.rows[0]) key = cfRow.rows[0].key;
@@ -3291,7 +3291,7 @@ async function _handleJiraPgApi(
     );
     await notifyWatchers(issue.key, userId, { title: `New comment on ${issue.key}`, message: commentPreview });
 
-    // Detect @mentions â€” extract data-userid from mention spans (most reliable)
+    // Detect @mentions Ã¢â‚¬â€ extract data-userid from mention spans (most reliable)
     // Falls back to regex on plain text for non-rich-text comments
     const mentionedUserIds = new Set<string>();
     // 1. Extract from <span data-userid="..."> HTML mentions
@@ -3347,7 +3347,7 @@ async function _handleJiraPgApi(
     });
   }
 
-  // â”€â”€ Comment Update / Delete â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Comment Update / Delete Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   const commentById = path.match(/^comments\/([^/]+)$/);
   if (commentById) {
@@ -3374,7 +3374,7 @@ async function _handleJiraPgApi(
     }
   }
 
-  // â”€â”€ Search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Search Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'search' && method === 'POST') {
     const body = await readJson(req);
@@ -3429,7 +3429,7 @@ async function _handleJiraPgApi(
       orderBy: { updatedAt: 'desc' },
     });
 
-    // Combine: exact â†' startsWith â†' contains, deduplicated
+    // Combine: exact Ã¢â€ ' startsWith Ã¢â€ ' contains, deduplicated
     const seen = new Set<string>();
     const issues: any[] = [];
     for (const issue of [...exactMatches, ...startsWithMatches, ...containsMatches]) {
@@ -3440,7 +3440,7 @@ async function _handleJiraPgApi(
     return json({ issues: sorted.slice(0, 20).map(formatIssue), total: issues.length, page: 1, totalPages: 1 });
   }
 
-  // â”€â”€ Reports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Reports Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'reports/dashboard' && method === 'GET') {
     const totalIssues = await db.issue.count();
@@ -3562,7 +3562,7 @@ async function _handleJiraPgApi(
     const assigneeIds: string[] = (issueGroups as any[]).map((r: any) => r.assigneeId).filter(Boolean);
     if (assigneeIds.length === 0) return json([]);
 
-    // Step 2: load those users (no isActive filter â€” include everyone who has tickets)
+    // Step 2: load those users (no isActive filter Ã¢â‚¬â€ include everyone who has tickets)
     const users = await db.user.findMany({
       where: { id: { in: assigneeIds } },
       orderBy: { firstName: 'asc' },
@@ -3603,9 +3603,9 @@ async function _handleJiraPgApi(
     return json(results);
   }
 
-  // â”€â”€ Workflow Routes (DB-backed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Workflow Routes (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-  // GET /workflows?spaceKey=XXX  â†' return "virtual" workflow for the space
+  // GET /workflows?spaceKey=XXX  Ã¢â€ ' return "virtual" workflow for the space
   if (path === 'workflows' && method === 'GET') {
     const sk = url.searchParams.get('spaceKey')?.toUpperCase();
     if (!sk) return json([]);
@@ -3614,11 +3614,11 @@ async function _handleJiraPgApi(
     return json([{ id: `wf_${sk.toLowerCase()}`, name: `${space.name} Workflow`, spaceKey: sk }]);
   }
 
-  // GET /workflows/:id/statuses  â†' real statuses + transitions from DB
+  // GET /workflows/:id/statuses  Ã¢â€ ' real statuses + transitions from DB
   const wfStatuses = path.match(/^workflows\/([^/]+)\/statuses$/);
   if (wfStatuses && method === 'GET') {
     const wfId = wfStatuses[1];
-    // wfId = 'wf_psmboard' â†' spaceKey = 'PSMBOARD'
+    // wfId = 'wf_psmboard' Ã¢â€ ' spaceKey = 'PSMBOARD'
     const sk = wfId.replace(/^wf_/, '').toUpperCase();
     const space = await db.space.findUnique({ where: { key: sk } });
     if (!space) return json({ statuses: [], transitions: [] });
@@ -3632,7 +3632,7 @@ async function _handleJiraPgApi(
     return json({ statuses, transitions });
   }
 
-  // POST /workflows/:id/statuses  â†' add a new status to the space
+  // POST /workflows/:id/statuses  Ã¢â€ ' add a new status to the space
   if (wfStatuses && method === 'POST') {
     const wfId = wfStatuses[1];
     const sk = wfId.replace(/^wf_/, '').toUpperCase();
@@ -3711,7 +3711,7 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // POST /workflows/:id/transitions/defaults  â†' create all â†' all transitions
+  // POST /workflows/:id/transitions/defaults  Ã¢â€ ' create all Ã¢â€ ' all transitions
   const wfDefaults = path.match(/^workflows\/([^/]+)\/transitions\/defaults$/);
   if (wfDefaults && method === 'POST') {
     const wfId = wfDefaults[1];
@@ -3726,7 +3726,7 @@ async function _handleJiraPgApi(
         try {
           await (db as any).workflowTransition.upsert({
             where: { spaceId_fromStatusId_toStatusId: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id } },
-            create: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id, name: `â†' ${to.name}` },
+            create: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id, name: `Ã¢â€ ' ${to.name}` },
             update: {},
           });
           created++;
@@ -3736,7 +3736,7 @@ async function _handleJiraPgApi(
     return json({ ok: true, created });
   }
 
-  // â”€â”€ API Tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ API Tokens Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'api-tokens' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
@@ -3761,7 +3761,7 @@ async function _handleJiraPgApi(
       `INSERT INTO api_tokens (id, "userId", name, "tokenHash", prefix, "expiresAt") VALUES ($1,$2,$3,$4,$5,$6)`,
       [id, userId, name, tokenHash, prefix, expiresAt]
     );
-    // Return full token ONCE â€” it will never be shown again
+    // Return full token ONCE Ã¢â‚¬â€ it will never be shown again
     return json({ id, name, prefix, token, createdAt: new Date().toISOString(), lastUsedAt: null, expiresAt: expiresAt?.toISOString() ?? null }, 201);
   }
 
@@ -3778,21 +3778,21 @@ async function _handleJiraPgApi(
     return json({ success: true });
   }
 
-  // â”€â”€ Worked-on tickets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Worked-on tickets Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-  // GET /worked-on â€” tickets the user passed to another dept or closed
+  // GET /worked-on Ã¢â‚¬â€ tickets the user passed to another dept or closed
   if (path === 'worked-on' && method === 'GET') {
     if (!userId) return json({ issues: [] });
     const targetUserId = url.searchParams.get('userId') || userId;
     const rows = await pool.query(
       `SELECT w.issue_id, w.dept, w.reason, w.worked_at,
-              i.key, i.summary, i.type, i.priority, i.”statusId”,
+              i.key, i.summary, i.type, i.priority, i.â€statusIdâ€,
               s.name AS status_name, s.category AS status_category, s.color AS status_color,
               sp.key AS space_key, sp.name AS space_name
        FROM user_worked_on_tickets w
        JOIN issues i ON i.id = w.issue_id
-       LEFT JOIN statuses s ON s.id = i.”statusId”
-       LEFT JOIN spaces sp ON sp.id = i.”spaceId”
+       LEFT JOIN statuses s ON s.id = i.â€statusIdâ€
+       LEFT JOIN spaces sp ON sp.id = i.â€spaceIdâ€
        WHERE w.user_id = $1
        ORDER BY w.worked_at DESC
        LIMIT 100`,
@@ -3813,9 +3813,9 @@ async function _handleJiraPgApi(
     return json({ issues });
   }
 
-  // â”€â”€ Notifications (DB-backed) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Notifications (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-  // GET /notifications â€” list for current user
+  // GET /notifications Ã¢â‚¬â€ list for current user
   if (path === 'notifications' && method === 'GET') {
     if (!userId) return json({ notifications: [], unreadCount: 0 });
     const unreadOnly = url.searchParams.get('unreadOnly') === 'true';
@@ -3827,7 +3827,7 @@ async function _handleJiraPgApi(
     return json({ notifications: notifs, unreadCount });
   }
 
-  // PATCH /notifications/:id/read â€” mark single as read
+  // PATCH /notifications/:id/read Ã¢â‚¬â€ mark single as read
   const notifReadMatch = path.match(/^notifications\/([^/]+)\/read$/);
   if (notifReadMatch && method === 'PATCH') {
     const id = notifReadMatch[1];
@@ -3835,7 +3835,7 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // POST /notifications/read-all â€” mark all as read for current user
+  // POST /notifications/read-all Ã¢â‚¬â€ mark all as read for current user
   if (path === 'notifications/read-all' && method === 'POST') {
     if (userId) {
       await (db as any).notification.updateMany({ where: { userId, isRead: false }, data: { isRead: true, readAt: new Date() } });
@@ -3843,9 +3843,9 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // â”€â”€ Issue Watch / Unwatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Issue Watch / Unwatch Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-  // POST /issues/:key/watch  â€” start watching
+  // POST /issues/:key/watch  Ã¢â‚¬â€ start watching
   const watchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchMatch && method === 'POST') {
     const key = watchMatch[1].toUpperCase();
@@ -3858,7 +3858,7 @@ async function _handleJiraPgApi(
     return json({ watching: true });
   }
 
-  // DELETE /issues/:key/watch  â€” stop watching
+  // DELETE /issues/:key/watch  Ã¢â‚¬â€ stop watching
   const unwatchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (unwatchMatch && method === 'DELETE') {
     const key = unwatchMatch[1].toUpperCase();
@@ -3867,7 +3867,7 @@ async function _handleJiraPgApi(
     return json({ watching: false });
   }
 
-  // GET /issues/:key/watch  â€” check if watching
+  // GET /issues/:key/watch  Ã¢â‚¬â€ check if watching
   const watchCheckMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchCheckMatch && method === 'GET') {
     const key = watchCheckMatch[1].toUpperCase();
@@ -3879,16 +3879,16 @@ async function _handleJiraPgApi(
     return json({ watching: !!watch, count });
   }
 
-  // â”€â”€ Notification Preferences â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Notification Preferences Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-  // GET /notification-preferences  â€” get current user prefs
+  // GET /notification-preferences  Ã¢â‚¬â€ get current user prefs
   if (path === 'notification-preferences' && method === 'GET') {
     if (!userId) return json(defaultPrefs());
     const prefs = await (db as any).notificationPreference.findUnique({ where: { userId } });
     return json(prefs ?? { ...defaultPrefs(), userId });
   }
 
-  // PATCH /notification-preferences  â€” update prefs
+  // PATCH /notification-preferences  Ã¢â‚¬â€ update prefs
   if (path === 'notification-preferences' && method === 'PATCH') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     const body = await readJson(req);
@@ -3903,8 +3903,8 @@ async function _handleJiraPgApi(
     return json(prefs);
   }
 
-  // â”€â”€ Due Date Reminder Check (manual trigger) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // POST /due-date-check  â€” check overdue/due-today issues and create notifications
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Due Date Reminder Check (manual trigger) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // POST /due-date-check  Ã¢â‚¬â€ check overdue/due-today issues and create notifications
   if (path === 'due-date-check' && method === 'POST') {
     const now = new Date();
     const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1);
@@ -3946,14 +3946,14 @@ async function _handleJiraPgApi(
     return json({ sent: count });
   }
 
-  // â”€â”€ SLA Breach Warning Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // POST /monitor-agent â€” combined: SLA breach warnings + duplicate scan on recent tickets
+  // Ã¢â€â‚¬Ã¢â€â‚¬ SLA Breach Warning Check Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // POST /monitor-agent Ã¢â‚¬â€ combined: SLA breach warnings + duplicate scan on recent tickets
   if (path === 'monitor-agent' && method === 'POST') {
     const results = { slaNotified: 0, duplicatesFound: 0 };
     const warnMs = 30 * 60 * 1000;
 
     try {
-      // â”€â”€ 1. SLA breach warnings (30 min before) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 1. SLA breach warnings (30 min before) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       const activeIssues = await pool.query(
         `SELECT i.*, s.category AS status_category
          FROM issues i
@@ -4010,7 +4010,7 @@ async function _handleJiraPgApi(
     } catch (e: any) { console.error('[MonitorAgent:SLA]', e?.message); }
 
     try {
-      // â”€â”€ 2. Duplicate scan â€” check tickets created in the last 24h â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ 2. Duplicate scan Ã¢â‚¬â€ check tickets created in the last 24h Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       const recentIssues = await pool.query(
         `SELECT i.id, i.key, i.cf_key, i.summary, i."spaceId", i."reporterId", i."assigneeId"
          FROM issues i
@@ -4027,12 +4027,12 @@ async function _handleJiraPgApi(
         const prevResolved = await findPreviouslyResolvedSimilar(row.spaceId, row.id, row.summary);
         if (prevResolved.length > 0) {
           const newKey = row.cf_key || row.key;
-          const refs = prevResolved.map((s: any) => `${s.cf_key || s.key} â€” ${s.summary.substring(0, 80)}`).join('\nâ€¢ ');
+          const refs = prevResolved.map((s: any) => `${s.cf_key || s.key} Ã¢â‚¬â€ ${s.summary.substring(0, 80)}`).join('\nÃ¢â‚¬Â¢ ');
           const leadIds = await getSpaceLeadUserIds(row.spaceId);
           await notifyUsers([row.reporterId, row.assigneeId, ...leadIds], null, {
             type: 'DUPLICATE_ALERT',
             title: `Recurring issue: ${newKey}`,
-            message: `This issue was previously reported and resolved:\nâ€¢ ${refs}\n\nPlease check if the fix is still in place.`,
+            message: `This issue was previously reported and resolved:\nÃ¢â‚¬Â¢ ${refs}\n\nPlease check if the fix is still in place.`,
             issueKey: newKey,
           });
           results.duplicatesFound++;
@@ -4043,8 +4043,8 @@ async function _handleJiraPgApi(
     return json(results);
   }
 
-  // GET /app-settings â€” return all key/value app settings
-  // PUT /app-settings â€” upsert a key/value setting
+  // GET /app-settings Ã¢â‚¬â€ return all key/value app settings
+  // PUT /app-settings Ã¢â‚¬â€ upsert a key/value setting
   if (path === 'app-settings') {
     await pool.query(
       `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`
@@ -4090,7 +4090,7 @@ async function _handleJiraPgApi(
     }
   }
 
-  // POST /sla-breach-check â€” notify assignee, reporter, leads/shift leads 30 min before breach
+  // POST /sla-breach-check Ã¢â‚¬â€ notify assignee, reporter, leads/shift leads 30 min before breach
   if (path === 'sla-breach-check' && method === 'POST') {
     const warnMs = 30 * 60 * 1000; // 30 minutes
     let notified = 0;
@@ -4161,7 +4161,7 @@ async function _handleJiraPgApi(
     return json({ notified });
   }
 
-  // â”€â”€ SLA routes â€” persisted to PostgreSQL via raw pg (avoids Prisma cache issues) â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ SLA routes Ã¢â‚¬â€ persisted to PostgreSQL via raw pg (avoids Prisma cache issues) Ã¢â€â‚¬
   const slaListMatch = path.match(/^sla\/([^/]+)$/);
   if (slaListMatch) {
     const spKey = slaListMatch[1].toUpperCase();
@@ -4249,7 +4249,7 @@ async function _handleJiraPgApi(
     }
   }
 
-  // â”€â”€ Connectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Connectors Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   if (path === 'connectors' && method === 'GET') {
     const rows = await listConnectors();
     return json(rows);
@@ -4321,12 +4321,53 @@ async function _handleJiraPgApi(
     return json(logs);
   }
 
-  // â”€â”€ All other routes â†' delegate to in-memory mock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Attachments: POST /issues/{issueKey}/attachments  GET /issues/{issueKey}/attachments
+  const attachMatch = path.match(/^issues\/([^/]+)\/attachments$/);
+  if (attachMatch) {
+    const issueKey = attachMatch[1].toUpperCase();
+    if (method === 'POST') {
+      try {
+        const formData = await req.formData();
+        const file = formData.get('file') as File | null;
+        if (!file) return json({ error: 'No file provided' }, 400);
+        const issueRow = await pool.query(`SELECT id FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`, [issueKey]);
+        if (!issueRow.rows[0]) return json({ error: 'Issue not found' }, 404);
+        const issueId = issueRow.rows[0].id;
+        const { writeFile, mkdir } = await import('fs/promises');
+        const { join, extname } = await import('path');
+        const uploadDir = join(process.cwd(), 'public', 'uploads');
+        await mkdir(uploadDir, { recursive: true });
+        const ext = extname(file.name) || '';
+        const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+        const filePath = join(uploadDir, uniqueName);
+        const buffer = Buffer.from(await file.arrayBuffer());
+        await writeFile(filePath, buffer);
+        const url = `/uploads/${uniqueName}`;
+        const att = await (db as any).attachment.create({
+          data: { issueId, filename: file.name, url, mimeType: file.type || null, size: file.size || null },
+        });
+        return json({ id: att.id, url: att.url, originalName: att.filename, mimeType: att.mimeType, size: att.size, createdAt: att.createdAt });
+      } catch (e: any) {
+        console.error('[attachments] upload error:', e);
+        return json({ error: 'Upload failed', detail: e?.message }, 500);
+      }
+    }
+    if (method === 'GET') {
+      try {
+        const issueRow = await pool.query(`SELECT id FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`, [issueKey]);
+        if (!issueRow.rows[0]) return json([]);
+        const atts = await (db as any).attachment.findMany({ where: { issueId: issueRow.rows[0].id }, orderBy: { createdAt: 'asc' } });
+        return json(atts.map((a: any) => ({ id: a.id, url: a.url, originalName: a.filename, mimeType: a.mimeType, size: a.size, createdAt: a.createdAt })));
+      } catch { return json([]); }
+    }
+  }
+
+  // Ã¢â€â‚¬Ã¢â€â‚¬ All other routes Ã¢â€ ' delegate to in-memory mock Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   // (sprints, labels, automation, filters, custom-fields, email, etc.)
   return handleJiraDevMock(req, segments, method);
 }
 
-// â”€â”€ Helper: resolve user IDs from a list of email/name/id strings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Helper: resolve user IDs from a list of email/name/id strings Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async function resolveUserIds(ids: string[]): Promise<string[]> {
   if (!ids.length) return [];
@@ -4371,4 +4412,3 @@ async function resolveUserIds(ids: string[]): Promise<string[]> {
 
   return Array.from(foundIds);
 }
-
