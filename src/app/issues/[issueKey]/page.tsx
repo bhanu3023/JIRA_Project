@@ -1155,48 +1155,87 @@ export default function IssueDetailPage() {
           })()}
 
           {/* Attachments Section */}
-          {issue.attachments && issue.attachments.length > 0 && (
-            <div className="mb-7">
-              <div className="flex items-center gap-2 mb-3">
-                <Paperclip size={14} className="text-indigo-500" />
-                <h3 className="text-[13px] font-bold text-gray-900 uppercase tracking-wide">Attachments</h3>
-                <span className="text-xs text-gray-400 font-medium bg-gray-100 px-2 py-0.5 rounded-full">{issue.attachments.length}</span>
+          {issue.attachments && issue.attachments.length > 0 && (() => {
+            const [previewAttach, setPreviewAttach] = React.useState<{url: string; name: string; mime: string} | null>(null);
+
+            const toBlobUrl = (rawUrl: string, mime: string): string => {
+              if (!rawUrl.startsWith('data:')) return rawUrl;
+              try {
+                const b64 = rawUrl.split(',')[1];
+                const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                return URL.createObjectURL(new Blob([bytes], { type: mime }));
+              } catch { return rawUrl; }
+            };
+
+            const openPreview = (e: React.MouseEvent, a: any) => {
+              e.preventDefault();
+              const mime = a.mimeType || (a.originalName?.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+              const url = toBlobUrl(a.url || '', mime);
+              setPreviewAttach({ url, name: a.originalName || 'attachment', mime });
+            };
+
+            return (
+              <div className="mb-7">
+                <div className="flex items-center gap-2 mb-3">
+                  <Paperclip size={14} className="text-indigo-500" />
+                  <h3 className="text-[13px] font-bold text-gray-900 uppercase tracking-wide">Attachments</h3>
+                  <span className="text-xs text-gray-400 font-medium bg-gray-100 px-2 py-0.5 rounded-full">{issue.attachments.length}</span>
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  {issue.attachments.map((a: any) => {
+                    const isImage = a.mimeType?.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(a.originalName || '');
+                    return isImage ? (
+                      <button key={a.id} onClick={(e) => openPreview(e, a)}
+                        className="block rounded-xl overflow-hidden border border-gray-200 hover:border-indigo-300 shadow-sm transition-all group text-left">
+                        <img src={a.url} alt={a.originalName} className="w-32 h-24 object-cover group-hover:opacity-90 transition-opacity" onError={(e) => { (e.target as HTMLImageElement).style.display='none'; }} />
+                        <div className="px-2 py-1 bg-white text-[10px] text-gray-500 truncate max-w-[128px]">{a.originalName}</div>
+                      </button>
+                    ) : (
+                      <button key={a.id} onClick={(e) => openPreview(e, a)}
+                        className="flex items-center gap-2.5 px-4 py-2.5 bg-white border border-gray-200 rounded-xl hover:bg-indigo-50 hover:border-indigo-200 transition-all text-sm shadow-sm group">
+                        <Paperclip size={14} className="text-gray-400 group-hover:text-indigo-500 transition-colors flex-shrink-0" />
+                        <span className="text-indigo-600 font-medium truncate max-w-[180px]">{a.originalName}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Inline preview modal */}
+                {previewAttach && (
+                  <div className="fixed inset-0 z-[300] flex flex-col bg-black/80" onClick={() => setPreviewAttach(null)}>
+                    {/* Header bar */}
+                    <div className="flex items-center justify-between px-5 py-3 bg-gray-900 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                      <div className="flex items-center gap-3">
+                        <Paperclip size={15} className="text-gray-400" />
+                        <span className="text-white text-sm font-medium truncate max-w-[400px]">{previewAttach.name}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <a href={previewAttach.url} download={previewAttach.name}
+                          className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors"
+                          onClick={e => e.stopPropagation()}>
+                          Download
+                        </a>
+                        <button onClick={() => setPreviewAttach(null)}
+                          className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors">
+                          ✕ Close
+                        </button>
+                      </div>
+                    </div>
+                    {/* Preview content */}
+                    <div className="flex-1 overflow-hidden" onClick={e => e.stopPropagation()}>
+                      {previewAttach.mime.startsWith('image/') ? (
+                        <div className="w-full h-full flex items-center justify-center p-6">
+                          <img src={previewAttach.url} alt={previewAttach.name} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
+                        </div>
+                      ) : (
+                        <iframe src={previewAttach.url} className="w-full h-full border-0" title={previewAttach.name} />
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
-              <div className="flex flex-wrap gap-3">
-                {issue.attachments.map((a: any) => {
-                  const isImage = a.mimeType?.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(a.originalName || '');
-                  const rawUrl: string = a.url || '';
-                  // Chrome 92+ blocks data: PDFs — convert to blob URL on click
-                  const openAttachment = (e: React.MouseEvent) => {
-                    if (!rawUrl.startsWith('data:')) return;
-                    e.preventDefault();
-                    try {
-                      const [meta, b64] = rawUrl.split(',');
-                      const mime = meta.split(':')[1]?.split(';')[0] || 'application/octet-stream';
-                      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-                      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
-                      window.open(blobUrl, '_blank');
-                      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
-                    } catch { window.open(rawUrl, '_blank'); }
-                  };
-                  const href = rawUrl.startsWith('data:') ? '#' : rawUrl;
-                  return isImage ? (
-                    <a key={a.id} href={href} target="_blank" rel="noopener noreferrer" onClick={openAttachment}
-                      className="block rounded-xl overflow-hidden border border-gray-200 hover:border-indigo-300 shadow-sm transition-all group">
-                      <img src={rawUrl} alt={a.originalName} className="w-32 h-24 object-cover group-hover:opacity-90 transition-opacity" onError={(e) => { (e.target as HTMLImageElement).style.display='none'; }} />
-                      <div className="px-2 py-1 bg-white text-[10px] text-gray-500 truncate max-w-[128px]">{a.originalName}</div>
-                    </a>
-                  ) : (
-                    <a key={a.id} href={href} target="_blank" rel="noopener noreferrer" onClick={openAttachment}
-                      className="flex items-center gap-2.5 px-4 py-2.5 bg-white border border-gray-200 rounded-xl hover:bg-indigo-50 hover:border-indigo-200 transition-all text-sm shadow-sm group">
-                      <Paperclip size={14} className="text-gray-400 group-hover:text-indigo-500 transition-colors flex-shrink-0" />
-                      <span className="text-indigo-600 font-medium truncate max-w-[180px]">{a.originalName}</span>
-                    </a>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* ── TESTBOARD: Test Details (Jira Xray-style layout) ── */}
           {issue.spaceKey === 'TESTBOARD' && (() => {
