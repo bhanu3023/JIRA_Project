@@ -88,6 +88,49 @@ function SyncMsPhotosButton({ onDone }: { onDone: () => void }) {
   );
 }
 
+// ── Sync Jira Board Fields button ────────────────────────────────────────────
+function SyncBoardFieldsButton() {
+  const [syncing, setSyncing] = useState(false);
+  const [result, setResult] = useState<{ totalUpdated: number; boards: Record<string, { updated: number; total: number }> } | null>(null);
+
+  async function handleSync() {
+    setSyncing(true);
+    setResult(null);
+    try {
+      const res = await fetch('/api/admin/sync-board-fields', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret: 'cf-admin-sync-2024' }),
+      });
+      const data = await res.json();
+      if (data.ok) setResult({ totalUpdated: data.totalUpdated, boards: data.boards });
+    } catch {}
+    setSyncing(false);
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <button
+        onClick={handleSync}
+        disabled={syncing}
+        title="Sync field values (productType, combination, projectManager, customerName, clientName) from Jira to L1/L2/L3 boards"
+        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors disabled:opacity-60"
+      >
+        {syncing
+          ? <><div className="w-3 h-3 border-2 border-blue-400 border-t-blue-700 rounded-full animate-spin" /> Syncing Fields…</>
+          : <><RefreshCw size={12} /> Sync Jira Field Values</>}
+      </button>
+      {result && (
+        <span className={`text-[11.5px] font-medium ${result.totalUpdated > 0 ? 'text-green-600' : 'text-gray-500'}`}>
+          {result.totalUpdated > 0
+            ? `✓ ${result.totalUpdated} tickets updated (L1:${result.boards['L1BOAR']?.updated ?? 0} L2:${result.boards['L2BOARD']?.updated ?? 0} L3:${result.boards['L3BOARD']?.updated ?? 0})`
+            : 'All field values already up to date'}
+        </span>
+      )}
+    </div>
+  );
+}
+
 type SettingsView = 'main' | 'general' | 'notifications' | 'system' | 'apps' | 'spaces' | 'work-items' | 'marketplace' | 'operations' | 'users' | 'billing' | 'permissions' | 'sites' | 'api' | 'connectors';
 
 interface Site {
@@ -2024,6 +2067,7 @@ function SettingsContent() {
                 <RefreshCw size={13} className={usersLoading ? 'animate-spin' : ''} />
               </button>
               <SyncMsPhotosButton onDone={() => loadUsers()} />
+              <SyncBoardFieldsButton />
             </div>
 
             <p className="text-xs text-gray-500 mb-3">
