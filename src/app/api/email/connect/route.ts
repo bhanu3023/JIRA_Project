@@ -90,6 +90,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'Password is required (or use OAuth).' }, { status: 400 });
   }
 
+  // testOnly=true: verify credentials and return without saving or starting poller
+  if (body.testOnly) {
+    if (isOAuth) return NextResponse.json({ ok: true, message: 'OAuth token is valid.' });
+    const imapTest = await testImapConnection(config.imap);
+    if (!imapTest.ok) {
+      return NextResponse.json({ ok: false, error: imapTest.error || 'IMAP connection failed. Check credentials.' });
+    }
+    return NextResponse.json({ ok: true, message: `Connected to ${config.imap.host}. ${imapTest.unread ?? 0} unread emails found.`, unread: imapTest.unread });
+  }
+
   // For OAuth connections, skip IMAP/SMTP tests (token already validated by OAuth server).
   // For password connections we also skip hard-failing — Microsoft 365 has disabled basic
   // auth for IMAP so the test always fails even with valid credentials. The poller itself
@@ -150,7 +160,7 @@ export async function POST(req: NextRequest) {
       )
     `);
     await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`);
-    const dept = (config as any).department || null;
+    const dept = body.department || (config as any).department || null;
     await pool.query(`
       INSERT INTO email_configs (space_key, address, imap_host, imap_port, smtp_host, smtp_port, password_enc, auto_reply, auto_reply_text, department)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)

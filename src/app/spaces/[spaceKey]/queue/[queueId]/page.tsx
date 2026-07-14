@@ -5,7 +5,8 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import {
   ArrowLeft, Users, Clock, Plus, X, Check, Search,
-  Trash2, Calendar, ChevronRight, Edit2, AlertCircle, RefreshCw, Mail, Link2, Unlink
+  Trash2, Calendar, ChevronRight, Edit2, AlertCircle, RefreshCw, Mail, Link2, Unlink,
+  Eye, EyeOff, Wifi, WifiOff, Loader2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -408,9 +409,15 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
   const [loading, setLoading]     = useState(true);
   const [saving, setSaving]       = useState<string | null>(null);
   const [savedMsg, setSavedMsg]   = useState('');
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [showPwd, setShowPwd]     = useState(false);
+  const [form, setForm]           = useState({ email: '', password: '', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' });
+  const [testing, setTesting]     = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [adding, setAdding]       = useState(false);
 
-  const linked    = allEmails.filter(e => e.department?.toLowerCase() === queueName.toLowerCase());
-  const unlinked  = allEmails.filter(e => !e.department || e.department.toLowerCase() !== queueName.toLowerCase());
+  const linked   = allEmails.filter(e => e.department?.toLowerCase() === queueName.toLowerCase());
+  const unlinked = allEmails.filter(e => !e.department || e.department.toLowerCase() !== queueName.toLowerCase());
 
   useEffect(() => {
     api.request<any[]>(`/email-addresses/${spaceKey}`)
@@ -419,7 +426,7 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
       .finally(() => setLoading(false));
   }, [spaceKey]);
 
-  const flash = (msg: string) => { setSavedMsg(msg); setTimeout(() => setSavedMsg(''), 2000); };
+  const flash = (msg: string) => { setSavedMsg(msg); setTimeout(() => setSavedMsg(''), 2500); };
 
   const linkEmail = async (emailId: string) => {
     setSaving(emailId);
@@ -441,6 +448,43 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
     setSaving(null);
   };
 
+  const testConnection = async () => {
+    setTesting(true); setTestResult(null);
+    try {
+      const res = await fetch('/api/email/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: form.email, password: form.password, imapHost: form.imapHost, smtpHost: form.smtpHost, spaceKey, testOnly: true, appUrl: window.location.origin }),
+      });
+      const data = await res.json();
+      setTestResult({ ok: !!data.ok, message: data.ok ? `Connected successfully to ${form.imapHost}` : (data.error || 'Connection failed') });
+    } catch {
+      setTestResult({ ok: false, message: 'Network error — check your credentials' });
+    }
+    setTesting(false);
+  };
+
+  const addAndLink = async () => {
+    setAdding(true);
+    try {
+      const res = await fetch('/api/email/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: form.email, password: form.password, imapHost: form.imapHost, smtpHost: form.smtpHost, spaceKey, department: queueName, appUrl: window.location.origin }),
+      });
+      const data = await res.json();
+      if (!data.ok) { setTestResult({ ok: false, message: data.error || 'Failed to add email' }); setAdding(false); return; }
+      // Reload email list
+      const rows = await api.request<any[]>(`/email-addresses/${spaceKey}`).catch(() => []);
+      setAllEmails(rows || []);
+      setShowAddForm(false);
+      setForm({ email: '', password: '', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' });
+      setTestResult(null);
+      flash('Email added & linked');
+    } catch { setTestResult({ ok: false, message: 'Failed to add email' }); }
+    setAdding(false);
+  };
+
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-400 text-[13px]">Loading…</div>;
 
   return (
@@ -449,15 +493,98 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
         <div>
           <h1 className="text-[20px] font-bold text-gray-900">Email</h1>
           <p className="text-[13px] text-gray-500 mt-1">
-            Link email addresses to the <strong>{queueName}</strong> queue. Incoming emails to a linked address will create tickets here and be auto-assigned via Round Robin.
+            Link email addresses to the <strong>{queueName}</strong> queue. Incoming emails will create tickets here automatically.
           </p>
         </div>
-        {savedMsg && <span className="flex items-center gap-1.5 text-[12.5px] font-medium text-emerald-600"><Check size={14} />{savedMsg}</span>}
+        <div className="flex items-center gap-3">
+          {savedMsg && <span className="flex items-center gap-1.5 text-[12.5px] font-medium text-emerald-600"><Check size={14} />{savedMsg}</span>}
+          <button onClick={() => { setShowAddForm(v => !v); setTestResult(null); }}
+            className="flex items-center gap-1.5 text-[12.5px] font-semibold text-white bg-blue-600 hover:bg-blue-700 px-3.5 py-2 rounded-lg transition-colors">
+            {showAddForm ? <X size={13} /> : <Plus size={13} />}
+            {showAddForm ? 'Cancel' : 'Add Email'}
+          </button>
+        </div>
       </div>
 
-      <p className="text-[12px] text-blue-700 bg-blue-50 border border-blue-100 rounded-xl px-4 py-3 mb-6">
-        To add new email addresses, go to <strong>Space Settings → Email</strong>. Once added, link them to this queue below.
-      </p>
+      {/* ── Add Email Form ── */}
+      {showAddForm && (
+        <div className="mb-6 border border-blue-200 bg-blue-50/40 rounded-xl overflow-hidden">
+          <div className="flex items-center gap-2 px-5 py-3 border-b border-blue-100 bg-blue-50">
+            <Mail size={14} className="text-blue-600" />
+            <span className="text-[13px] font-semibold text-blue-800">Connect a new email address</span>
+          </div>
+          <div className="px-5 py-5 space-y-4">
+            {/* Provider quick-select */}
+            <div>
+              <label className="block text-[11.5px] font-semibold text-gray-600 uppercase tracking-wide mb-2">Provider</label>
+              <div className="flex gap-2">
+                {[
+                  { label: 'Gmail', imap: 'imap.gmail.com', smtp: 'smtp.gmail.com' },
+                  { label: 'Outlook / 365', imap: 'outlook.office365.com', smtp: 'smtp.office365.com' },
+                  { label: 'Yahoo', imap: 'imap.mail.yahoo.com', smtp: 'smtp.mail.yahoo.com' },
+                  { label: 'Other', imap: '', smtp: '' },
+                ].map(p => (
+                  <button key={p.label} type="button"
+                    onClick={() => setForm(f => ({ ...f, imapHost: p.imap, smtpHost: p.smtp }))}
+                    className={`px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors ${form.imapHost === p.imap && p.imap ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300'}`}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[11.5px] font-semibold text-gray-600 uppercase tracking-wide mb-1.5">Email Address</label>
+                <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="you@example.com"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-300" />
+              </div>
+              <div>
+                <label className="block text-[11.5px] font-semibold text-gray-600 uppercase tracking-wide mb-1.5">Password / App Password</label>
+                <div className="relative">
+                  <input type={showPwd ? 'text' : 'password'} value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} placeholder="App password"
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 pr-9 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                  <button type="button" onClick={() => setShowPwd(v => !v)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                    {showPwd ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11.5px] font-semibold text-gray-600 uppercase tracking-wide mb-1.5">IMAP Host</label>
+                <input type="text" value={form.imapHost} onChange={e => setForm(f => ({ ...f, imapHost: e.target.value }))} placeholder="imap.yourprovider.com"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-300" />
+              </div>
+              <div>
+                <label className="block text-[11.5px] font-semibold text-gray-600 uppercase tracking-wide mb-1.5">SMTP Host</label>
+                <input type="text" value={form.smtpHost} onChange={e => setForm(f => ({ ...f, smtpHost: e.target.value }))} placeholder="smtp.yourprovider.com"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-300" />
+              </div>
+            </div>
+
+            {/* Test result banner */}
+            {testResult && (
+              <div className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-[12.5px] font-medium ${testResult.ok ? 'bg-emerald-50 border border-emerald-200 text-emerald-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+                {testResult.ok ? <Wifi size={14} /> : <WifiOff size={14} />}
+                {testResult.message}
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 pt-1">
+              <button onClick={testConnection} disabled={testing || !form.email || !form.password || !form.imapHost}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-gray-300 bg-white text-[12.5px] font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-40 transition-colors">
+                {testing ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
+                {testing ? 'Testing…' : 'Test Connection'}
+              </button>
+              <button onClick={addAndLink} disabled={adding || !form.email || !form.password || !form.imapHost}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white text-[12.5px] font-semibold hover:bg-blue-700 disabled:opacity-40 transition-colors">
+                {adding ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                {adding ? 'Connecting…' : 'Add & Link to Queue'}
+              </button>
+              <p className="text-[11.5px] text-gray-400 ml-auto">Use an App Password for Gmail/Outlook 2FA accounts</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Linked emails */}
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden mb-6">
@@ -470,7 +597,7 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
           <div className="flex flex-col items-center py-10 text-center">
             <Mail size={24} className="text-gray-200 mb-2" />
             <p className="text-[13px] text-gray-400">No email addresses linked yet</p>
-            <p className="text-[12px] text-gray-400 mt-0.5">Link an address from the list below.</p>
+            <p className="text-[12px] text-gray-400 mt-0.5">Add an email above or link one from the list below.</p>
           </div>
         ) : linked.map(email => (
           <div key={email.id} className="flex items-center justify-between px-5 py-3.5 border-b border-gray-50 last:border-0 hover:bg-gray-50">
@@ -480,7 +607,9 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
               </div>
               <div>
                 <p className="text-[13px] font-medium text-gray-800">{email.address}</p>
-                <p className="text-[11.5px] text-gray-400">{email.requestType || 'Emailed request'}</p>
+                <p className="text-[11.5px] text-gray-400 flex items-center gap-1">
+                  <Wifi size={11} className="text-emerald-500" /> Active · {email.requestType || 'Emailed request'}
+                </p>
               </div>
             </div>
             <button onClick={() => unlinkEmail(email.id)} disabled={saving === email.id}
