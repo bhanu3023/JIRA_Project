@@ -46,14 +46,16 @@ export async function GET(req: NextRequest) {
   const internalBase = process.env.NEXT_PUBLIC_APP_URL || appUrl;
 
   // Decode state
-  let spaceKey  = 'INFRA';
-  let returnUrl = `/spaces/INFRA/settings?tab=email`;
-  let mode      = 'email'; // 'login' | 'email'
+  let spaceKey   = 'INFRA';
+  let returnUrl  = `/spaces/INFRA/settings?tab=email`;
+  let mode       = 'email'; // 'login' | 'email'
+  let department = '';
   try {
     const parsed = JSON.parse(Buffer.from(state, 'base64url').toString());
-    spaceKey  = parsed.spaceKey  || spaceKey;
-    returnUrl = parsed.returnUrl || returnUrl;
-    mode      = parsed.mode      || mode;
+    spaceKey   = parsed.spaceKey   || spaceKey;
+    returnUrl  = parsed.returnUrl  || returnUrl;
+    mode       = parsed.mode       || mode;
+    department = parsed.department || '';
   } catch {}
 
   const failUrl = `${appUrl}${mode === 'login' ? '/auth/login' : returnUrl}?oauth_error=${encodeURIComponent(error || 'unknown_error')}`;
@@ -136,7 +138,7 @@ export async function GET(req: NextRequest) {
         email: result.email, oauthAccessToken: result.tokens.accessToken,
         oauthRefreshToken: result.tokens.refreshToken, oauthProvider: 'microsoft',
         imapHost: 'outlook.office365.com', smtpHost: 'smtp.office365.com',
-        spaceKey, autoReply: true, appUrl: internalBase,
+        spaceKey, department: department || undefined, autoReply: true, appUrl: internalBase,
       }),
     });
     const cd = await connectRes.json().catch(() => ({}));

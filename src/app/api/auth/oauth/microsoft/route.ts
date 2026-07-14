@@ -31,7 +31,8 @@ export async function GET(req: NextRequest) {
   const redirectUri = `${appUrl}/api/auth/oauth/microsoft/callback`;
   const mode        = searchParams.get('mode') || 'email';
   const loginHint   = searchParams.get('loginHint') || '';
-  const state       = Buffer.from(JSON.stringify({ spaceKey, returnUrl, mode, loginHint, ts: Date.now() })).toString('base64url');
+  const department  = searchParams.get('department') || '';
+  const state       = Buffer.from(JSON.stringify({ spaceKey, returnUrl, mode, loginHint, department, ts: Date.now() })).toString('base64url');
 
   return NextResponse.redirect(getMicrosoftAuthUrl(redirectUri, state, loginHint));
 }
