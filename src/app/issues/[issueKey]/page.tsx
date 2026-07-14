@@ -2101,11 +2101,12 @@ export default function IssueDetailPage() {
               ) : <span className="text-[13px] text-gray-400 px-1.5 py-1">None</span>}
             </PropRow>}
 
-            {/* Department */}
+            {/* Department — only shown when the field is assigned to this space */}
             <DepartmentField
               issueKey={issueKey}
               currentDepartment={(issue as any).current_department || null}
               spaceKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
+              spaceId={issue.spaceId}
               currentBoardKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
               onChanged={() => loadIssue(issueKey)}
             />
@@ -3250,10 +3251,11 @@ export default function IssueDetailPage() {
 }
 
 /* ===== Department Field ===== */
-function DepartmentField({ issueKey, currentDepartment, spaceKey, currentBoardKey, onChanged }: {
+function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, onChanged }: {
   issueKey: string;
   currentDepartment: string | null;
   spaceKey: string;
+  spaceId?: string;
   currentBoardKey?: string;
   onChanged: () => void;
 }) {
@@ -3283,9 +3285,15 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, currentBoardKe
       // 1. From Department Routing custom fields (options encoded as "DeptName|boardKey|emp1,emp2")
       if (cfRes.status === 'fulfilled' && cfRes.value) {
         const fields: any[] = cfRes.value?.fields || cfRes.value || [];
-        const deptFields = fields.filter((f: any) =>
-          f.fieldType === 'department-routing' || f.type === 'Department Routing'
-        );
+        const deptFields = fields.filter((f: any) => {
+          if (f.fieldType !== 'department-routing' && f.type !== 'Department Routing') return false;
+          // Only show if this space is assigned to the field (Manage boards checkbox)
+          if (spaceId) {
+            const assignedIds: string[] = Array.isArray(f.spaceIds) ? f.spaceIds : [];
+            if (assignedIds.length > 0 && !assignedIds.includes(spaceId)) return false;
+          }
+          return true;
+        });
         for (const field of deptFields) {
           for (const opt of (field.options || [])) {
             const parts = String(opt).split('|');
@@ -3352,6 +3360,9 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, currentBoardKe
     }
     setSaving(false);
   };
+
+  // Hide the field entirely if no options loaded (space not assigned) and no existing department
+  if (deptOptions.length === 0 && !displayDept) return null;
 
   return (
     <div className="flex items-start gap-2 py-1.5 border-b border-gray-100 last:border-0 group relative">
