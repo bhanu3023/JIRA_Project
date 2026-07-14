@@ -3260,6 +3260,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   onChanged: () => void;
 }) {
   const [deptOptions, setDeptOptions] = React.useState<{ name: string; boardKey: string }[]>([]);
+  const [spaceAssigned, setSpaceAssigned] = React.useState<boolean | null>(null);
   const [showDrop, setShowDrop] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [optimisticDept, setOptimisticDept] = React.useState<string | null>(null);
@@ -3285,8 +3286,10 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
       // 1. From Department Routing custom fields (options encoded as "DeptName|boardKey|emp1,emp2")
       if (cfRes.status === 'fulfilled' && cfRes.value) {
         const fields: any[] = cfRes.value?.fields || cfRes.value || [];
-        const deptFields = fields.filter((f: any) => {
-          if (f.fieldType !== 'department-routing' && f.type !== 'Department Routing') return false;
+        const allDeptFields = fields.filter((f: any) =>
+          f.fieldType === 'department-routing' || f.type === 'Department Routing'
+        );
+        const deptFields = allDeptFields.filter((f: any) => {
           // Only show if this space is assigned to the field (Manage boards checkbox)
           if (spaceId) {
             const assignedIds: string[] = Array.isArray(f.spaceIds) ? f.spaceIds : [];
@@ -3294,6 +3297,10 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
           }
           return true;
         });
+        // If a dept-routing field exists but this space is not assigned, mark as not assigned
+        if (allDeptFields.length > 0) {
+          setSpaceAssigned(deptFields.length > 0);
+        }
         for (const field of deptFields) {
           for (const opt of (field.options || [])) {
             const parts = String(opt).split('|');
@@ -3361,8 +3368,10 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
     setSaving(false);
   };
 
-  // Hide the field entirely if no options loaded (space not assigned) and no existing department
-  if (deptOptions.length === 0 && !displayDept) return null;
+  // Hide if this space is explicitly not assigned to the dept-routing field
+  if (spaceAssigned === false) return null;
+  // Hide if no options and no existing department
+  if (spaceAssigned === null && deptOptions.length === 0 && !displayDept) return null;
 
   return (
     <div className="flex items-start gap-2 py-1.5 border-b border-gray-100 last:border-0 group relative">
