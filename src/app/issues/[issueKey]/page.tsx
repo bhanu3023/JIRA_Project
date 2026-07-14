@@ -3368,10 +3368,8 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
     setSaving(false);
   };
 
-  // Hide if this space is explicitly not assigned to the dept-routing field
-  if (spaceAssigned === false) return null;
-  // Hide if no options and no existing department
-  if (spaceAssigned === null && deptOptions.length === 0 && !displayDept) return null;
+  // Wait until we know assignment status (null = still loading)
+  if (spaceAssigned !== true) return null;
 
   return (
     <div className="flex items-start gap-2 py-1.5 border-b border-gray-100 last:border-0 group relative">
