@@ -366,9 +366,11 @@ export async function notifyStatusChanged(issue: {
   newStatus: { name: string; category: string };
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
-  changedBy?: { firstName?: string; lastName?: string } | null;
+  changedBy?: { email?: string | null; firstName?: string; lastName?: string } | null;
 }) {
-  const to = recipients(issue.assignee, issue.reporter);
+  const changerEmail = (issue.changedBy as any)?.email?.toLowerCase() || '';
+  // Don't notify the person who made the change (no self-spam)
+  const to = recipients(issue.assignee, issue.reporter).filter(e => e !== changerEmail);
   if (!to.length) return;
 
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
@@ -413,12 +415,12 @@ export async function notifyCommentAdded(issue: {
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
   comment: { body: string; author?: { email?: string | null; firstName?: string; lastName?: string } | null };
 }) {
-  // Always notify the reporter (they are the customer who sent the email).
-  // Only skip the commenter from the assignee side (agents don't need self-notifications).
   const commenterEmail = (issue.comment.author?.email || '').toLowerCase();
   const reporterEmail  = (issue.reporter?.email || '').toLowerCase();
+  // Assignee gets notified unless they wrote the comment
   const assigneeEmails = recipients(issue.assignee).filter(e => e !== commenterEmail);
-  const reporterEmails = reporterEmail ? [reporterEmail] : [];
+  // Reporter (customer) gets notified unless THEY wrote the comment (no echo back)
+  const reporterEmails = (reporterEmail && reporterEmail !== commenterEmail) ? [reporterEmail] : [];
   const to = Array.from(new Set([...assigneeEmails, ...reporterEmails])).filter(Boolean);
   if (!to.length) return;
 
