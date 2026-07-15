@@ -196,6 +196,27 @@ async function getInboxEmailForSpace(spaceKey: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// ── Look up emailthreadid + inbox email for a ticket in one query ──────────────
+async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: string; inboxEmail?: string }> {
+  try {
+    const { Pool } = await import('pg');
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+    const row = await pool.query(`
+      SELECT i.emailthreadid, ec.address AS inbox_email
+      FROM issues i
+      JOIN spaces s ON i."spaceId" = s.id
+      LEFT JOIN email_configs ec ON LOWER(ec.space_key) = LOWER(s.key)
+      WHERE i.key = $1
+      LIMIT 1
+    `, [issueKey]);
+    await pool.end();
+    return {
+      emailthreadid: row.rows[0]?.emailthreadid || undefined,
+      inboxEmail:    row.rows[0]?.inbox_email    || undefined,
+    };
+  } catch { return {}; }
+}
+
 // ── Send helper ────────────────────────────────────────────────────────────────
 async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string) {
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
@@ -309,7 +330,7 @@ export async function notifyIssueAssigned(issue: {
 
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const prevName     = issue.previousAssignee ? `${issue.previousAssignee.firstName} ${issue.previousAssignee.lastName}`.trim() : 'Unassigned';
-  const inboxEmail = await getInboxEmailForSpace(issue.spaceKey);
+  const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const html = buildEmailHtml({
     title:        'Issue Assigned',
@@ -333,8 +354,8 @@ export async function notifyIssueAssigned(issue: {
     `[${issue.key}] Assigned to ${assigneeName} - ${issue.summary}`,
     html,
     `${issue.key} has been assigned to ${assigneeName}.\nView: ${issueUrl(issue.key)}`,
-    undefined,
-    inboxEmail || undefined,
+    emailthreadid,
+    inboxEmail,
   );
 }
 
@@ -352,7 +373,7 @@ export async function notifyStatusChanged(issue: {
 
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
   const isResolved = ['done'].includes(issue.newStatus.category);
-  const inboxEmail = await getInboxEmailForSpace(issue.spaceKey);
+  const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const html = buildEmailHtml({
     title:        'Status Changed',
@@ -379,8 +400,8 @@ export async function notifyStatusChanged(issue: {
     subject,
     html,
     `${issue.key} status changed: ${issue.oldStatus.name} → ${issue.newStatus.name}\nView: ${issueUrl(issue.key)}`,
-    undefined,
-    inboxEmail || undefined,
+    emailthreadid,
+    inboxEmail,
   );
 }
 
@@ -401,26 +422,7 @@ export async function notifyCommentAdded(issue: {
   const to = Array.from(new Set([...assigneeEmails, ...reporterEmails])).filter(Boolean);
   if (!to.length) return;
 
-  // Look up original email thread ID AND the inbox email address for this ticket's space.
-  // We send FROM the inbox email (e.g. L1board@cloudfuze.com) so that when the customer
-  // replies, it goes back to that inbox and the IMAP poller picks it up as a comment.
-  let sourceMessageId: string | undefined;
-  let inboxEmail: string | undefined;
-  try {
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
-    const row = await pool.query(`
-      SELECT i.emailthreadid, ec.address AS inbox_email
-      FROM issues i
-      JOIN spaces s ON i."spaceId" = s.id
-      LEFT JOIN email_configs ec ON LOWER(ec.space_key) = LOWER(s.key)
-      WHERE i.key = $1
-      LIMIT 1
-    `, [issue.key]);
-    await pool.end();
-    sourceMessageId = row.rows[0]?.emailthreadid || undefined;
-    inboxEmail = row.rows[0]?.inbox_email || undefined;
-  } catch { /* non-critical */ }
+  const { emailthreadid: sourceMessageId, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   // Send a plain reply email — just the comment text, no ticket template
   // This looks like a normal email reply so the recipient can reply back
@@ -450,7 +452,7 @@ export async function notifyIssueUpdated(issue: {
   if (!to.length) return;
 
   const updatedByName = issue.updatedBy ? `${issue.updatedBy.firstName} ${issue.updatedBy.lastName}`.trim() : 'Someone';
-  const inboxEmail = await getInboxEmailForSpace(issue.spaceKey);
+  const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const changeFields = issue.changes.map(c => ({
     label: c.field,
@@ -477,8 +479,8 @@ export async function notifyIssueUpdated(issue: {
     `[${issue.key}] Updated by ${updatedByName} - ${issue.summary}`,
     html,
     `${issue.key} was updated by ${updatedByName}.\nView: ${issueUrl(issue.key)}`,
-    undefined,
-    inboxEmail || undefined,
+    emailthreadid,
+    inboxEmail,
   );
 }
 
