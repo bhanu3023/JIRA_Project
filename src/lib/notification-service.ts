@@ -131,13 +131,51 @@ function buildEmailHtml(opts: {
 </html>`;
 }
 
+// ── Get a Graph-Mail-scoped token from the stored refresh token ───────────────
+// getValidAccessToken() returns an IMAP-scoped token (aud: outlook.office365.com)
+// which cannot call graph.microsoft.com/sendMail (403). We must explicitly
+// exchange the refresh token for a Graph-scoped token.
+async function getGraphMailToken(email: string): Promise<string | null> {
+  try {
+    const { getOAuthTokens } = await import('@/lib/oauth-service');
+    const tokens = getOAuthTokens(email);
+    if (!tokens?.refreshToken) return null;
+    const clientId     = process.env.MICROSOFT_CLIENT_ID;
+    const clientSecret = process.env.MICROSOFT_CLIENT_SECRET;
+    if (!clientId || !clientSecret) return null;
+    const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type:    'refresh_token',
+        client_id:     clientId,
+        client_secret: clientSecret,
+        refresh_token: tokens.refreshToken,
+        scope:         'https://graph.microsoft.com/Mail.Send offline_access email openid profile',
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      console.error(`[Notification] Graph token refresh failed for ${email}: ${res.status} ${err.slice(0, 200)}`);
+      return null;
+    }
+    const data = await res.json();
+    return data.access_token || null;
+  } catch (e: any) {
+    console.error('[Notification] getGraphMailToken error:', e?.message);
+    return null;
+  }
+}
+
 // ── Send via Microsoft Graph API (OAuth fallback when SMTP not configured) ─────
 async function sendViaGraph(opts: { from: string; to: string[]; subject: string; html: string; text: string; inReplyTo?: string }) {
   try {
-    const { getValidAccessToken, getOAuthTokens } = await import('@/lib/oauth-service');
+    const { getOAuthTokens } = await import('@/lib/oauth-service');
     const tokens = getOAuthTokens(opts.from);
     if (!tokens) return false;
-    const accessToken = await getValidAccessToken(opts.from).catch(() => null);
+    // Always get a Graph-Mail-scoped token — IMAP tokens (aud: outlook.office365.com)
+    // cannot call graph.microsoft.com/sendMail and return 403.
+    const accessToken = await getGraphMailToken(opts.from);
     if (!accessToken) return false;
 
     for (const recipient of opts.to) {
