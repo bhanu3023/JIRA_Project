@@ -10,7 +10,7 @@ let loadNotificationsInflight: Promise<void> | null = null;
 
 // Queue results cache: key → {issues, total, page, ts}
 const issuesCache = new Map<string, { issues: any[]; total: number; page: number; ts: number }>();
-const CACHE_TTL = 30_000; // 30 seconds stale-while-revalidate
+const CACHE_TTL = 60_000; // 60 seconds stale-while-revalidate
 
 interface AppState {
   // Auth
@@ -135,8 +135,8 @@ export const useStore = create<AppState>((set, get) => ({
     return loadSpacesInflight;
   },
   loadSpace: async (key) => {
-    // Don't clear currentSpace before fetching — keeps old data visible instantly
-    // while fresh data loads, eliminating the blank-spinner flash on navigation.
+    // Skip if already loaded for this key — avoids redundant network call on every re-render
+    if (get().currentSpace?.key?.toUpperCase() === key?.toUpperCase()) return;
     const space = await api.getSpace(key);
     set({ currentSpace: space });
   },
@@ -162,9 +162,15 @@ export const useStore = create<AppState>((set, get) => ({
     } else {
       set({ loading: true });
     }
-    const data = await api.getIssues(params);
-    issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
-    set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
+    try {
+      const data = await api.getIssues(params);
+      issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
+      set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
+    } catch (e) {
+      // Always clear the spinner — stuck loading is worse than showing stale data
+      set({ loading: false });
+      throw e;
+    }
   },
   loadIssue: async (key) => {
     try {
