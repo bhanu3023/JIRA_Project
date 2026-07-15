@@ -461,6 +461,18 @@ function SpaceDetailContent() {
     return () => { cancelled = true; };
   }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, user?.id]);
 
+  // Auto-refresh every 30s for Customer_Board so new email-tickets appear without manual refresh
+  useEffect(() => {
+    if (spaceKey !== 'CUSTM') return;
+    const id = setInterval(() => {
+      const params: Record<string, string> = { spaceKey };
+      if (queueFilter && queueFilter !== 'all-requests') params.queue = queueFilter;
+      if (currentPage > 1) params.page = String(currentPage);
+      loadIssues(params).catch(() => {});
+    }, 30000);
+    return () => clearInterval(id);
+  }, [spaceKey, queueFilter, currentPage, loadIssues]);
+
   // Load custom fields assigned to this space → dynamic columns
   useEffect(() => {
     if (!currentSpace?.id) return;
