@@ -25,8 +25,8 @@ export default function BoardPage() {
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
 
   useEffect(() => {
-    loadSpace(spaceKey);
-    loadIssues({ spaceKey });
+    loadSpace(spaceKey).catch(console.error);
+    loadIssues({ spaceKey }).catch(console.error);
   }, [spaceKey, loadSpace, loadIssues]);
 
   const handleDragStart = (e: React.DragEvent, issue: Issue) => {

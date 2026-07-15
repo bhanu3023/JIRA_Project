@@ -345,7 +345,12 @@ function SpaceDetailContent() {
     orderedVisibleCols.reduce((sum, c) => sum + parseInt(c.width), 0) + 32;
 
   // Always load space metadata (needed for breadcrumb etc.)
-  useEffect(() => { if (spaceKey) loadSpace(spaceKey); }, [spaceKey]);
+  useEffect(() => {
+    if (!spaceKey) return;
+    loadSpace(spaceKey).catch((err: any) => {
+      setLoadError(err?.message || 'Failed to load space. Please try refreshing.');
+    });
+  }, [spaceKey, loadSpace]);
 
   useEffect(() => {
     if (!spaceKey || queueFilter === 'queues') return;
