@@ -112,10 +112,18 @@ function saveTokensToDisk(store: Map<string, OAuthTokens>) {
 // ── Initialise: load from file first (sync, fast), then overlay DB (async) ────
 if (!globalThis.__oauthTokenStore) {
   globalThis.__oauthTokenStore = loadTokensFromDisk();
-  // Async: overlay with DB tokens (DB wins — it has the latest after a rebuild)
+  // Async: overlay with DB tokens (DB wins — it has the latest after a rebuild).
+  // Also migrate any file-only tokens to DB so they survive future container rebuilds.
   loadTokensFromDB().then(dbTokens => {
     for (const [k, v] of dbTokens.entries()) {
       globalThis.__oauthTokenStore!.set(k, v);
+    }
+    // Migration: save tokens that are in the file but not yet in DB
+    for (const [k, v] of globalThis.__oauthTokenStore!.entries()) {
+      if (!dbTokens.has(k)) {
+        console.log(`[OAuthService] Migrating file token to DB for ${k}`);
+        saveTokensToDB(k, v);
+      }
     }
   }).catch(() => {});
 }
