@@ -7,12 +7,16 @@ export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
   // Wait for server to be ready to accept requests
-  await new Promise(res => setTimeout(res, 5000));
+  await new Promise(res => setTimeout(res, 8000));
 
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
+  // Use internal localhost URL — NEXT_PUBLIC_APP_URL is the public domain and
+  // may not be reachable from inside the Docker container during startup.
+  // PORT defaults to 3000 in Next.js; override via INTERNAL_PORT env if needed.
+  const internalPort = process.env.INTERNAL_PORT || process.env.PORT || '3000';
+  const internalUrl = `http://localhost:${internalPort}`;
 
   try {
-    const res = await fetch(`${appUrl}/api/email/restart-pollers`, {
+    const res = await fetch(`${internalUrl}/api/email/restart-pollers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),

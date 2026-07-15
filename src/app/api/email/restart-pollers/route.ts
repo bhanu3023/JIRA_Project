@@ -6,15 +6,41 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Pool } from 'pg';
 import { startImapPoller, isPollerActiveForEmail } from '@/lib/email-service';
-import { getOAuthTokens, getValidAccessToken } from '@/lib/oauth-service';
+import { getOAuthTokens, getValidAccessToken, storeOAuthTokens, type OAuthTokens } from '@/lib/oauth-service';
 
 export const runtime = 'nodejs';
 
 const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
 
+/** Load OAuth tokens directly from DB and merge into in-memory store */
+async function loadOAuthTokensFromDB(): Promise<void> {
+  try {
+    const pool = new Pool({ connectionString: DB_URL });
+    const rows = await pool.query(`SELECT email, tokens_json FROM oauth_tokens`).catch(() => ({ rows: [] as any[] }));
+    await pool.end();
+    for (const row of rows.rows) {
+      try {
+        const tokens = JSON.parse(row.tokens_json) as OAuthTokens;
+        // Only load into memory if not already there (don't overwrite fresher in-memory tokens)
+        if (!getOAuthTokens(row.email)) {
+          storeOAuthTokens(row.email, tokens);
+        }
+      } catch {}
+    }
+    console.log(`[RestartPollers] Pre-loaded ${rows.rows.length} OAuth token(s) from DB`);
+  } catch (e) {
+    console.error('[RestartPollers] Failed to load OAuth tokens from DB:', e);
+  }
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const targetAddress = body.address ? String(body.address).toLowerCase() : null;
+
+  // Ensure OAuth tokens are in memory before we check them below.
+  // This is critical on startup: the async DB load in oauth-service may not have
+  // completed yet when instrumentation.ts calls us 5 seconds after boot.
+  await loadOAuthTokensFromDB();
 
   const pool = new Pool({ connectionString: DB_URL });
   let rows: any[] = [];
