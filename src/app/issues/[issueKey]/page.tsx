@@ -60,6 +60,8 @@ export default function IssueDetailPage() {
   const isDragging = useRef(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
+  const knownCommentIds = useRef<Set<string>>(new Set());
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const [showSubtaskModal, setShowSubtaskModal] = useState(false);
   const [subtaskSummary, setSubtaskSummary] = useState('');
   const [subtaskType, setSubtaskType] = useState('subtask');
@@ -412,6 +414,64 @@ export default function IssueDetailPage() {
     return () => clearInterval(interval);
   }, [currentIssue?.id, currentIssue?.spaceId, currentIssue?.key]);
 
+  // ── Notification sound + polling for new comments on CUSTM (Customer_Board) ──
+  const playNotificationSound = () => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      // Two-tone chime: higher note then lower note
+      const notes = [880, 660];
+      notes.forEach((freq, i) => {
+        const osc  = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + i * 0.18);
+        gain.gain.setValueAtTime(0, ctx.currentTime + i * 0.18);
+        gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + i * 0.18 + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.18 + 0.35);
+        osc.start(ctx.currentTime + i * 0.18);
+        osc.stop(ctx.currentTime + i * 0.18 + 0.36);
+      });
+    } catch { /* AudioContext not available */ }
+  };
+
+  useEffect(() => {
+    // Only poll for CUSTM (Customer_Board) tickets
+    if (!currentIssue?.spaceKey || currentIssue.spaceKey !== 'CUSTM') return;
+
+    // Seed known IDs from current comments on mount (no sound for existing)
+    const seed = (currentIssue.comments || []).map((c: any) => c.id);
+    knownCommentIds.current = new Set(seed);
+
+    const poll = setInterval(async () => {
+      try {
+        const fresh = await api.getIssue(issueKey);
+        const freshComments = (fresh?.comments || []).filter(
+          (c: any) => c.authorName !== 'System' && c.author?.email !== 'system'
+        );
+        let hasNew = false;
+        for (const c of freshComments) {
+          if (!knownCommentIds.current.has(c.id)) {
+            knownCommentIds.current.add(c.id);
+            // Only sound for comments by someone other than the current user
+            const commenterEmail = (c.author?.email || '').toLowerCase();
+            const myEmail = (user?.email || '').toLowerCase();
+            if (commenterEmail !== myEmail) hasNew = true;
+          }
+        }
+        if (hasNew) {
+          playNotificationSound();
+          // Also refresh the issue so the new comment appears
+          loadIssue(issueKey);
+        }
+      } catch { /* ignore polling errors */ }
+    }, 15000);
+
+    return () => clearInterval(poll);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIssue?.spaceKey, currentIssue?.id, issueKey]);
+
   const handleAddComment = async () => {
     if (!commentText.trim() || submittingComment) return;
     setSubmittingComment(true);
@@ -420,6 +480,8 @@ export default function IssueDetailPage() {
     try {
       const saved = await api.addComment(issueKey, { body: textToSubmit, isInternal });
       setIsInternal(false);
+      // Mark this comment as known so the poll doesn't fire a sound for our own comment
+      if (saved?.id) knownCommentIds.current.add(saved.id);
       // Optimistically append the new comment so the UI updates instantly
       const optimisticComment = saved || {
         id: `opt-${Date.now()}`,
