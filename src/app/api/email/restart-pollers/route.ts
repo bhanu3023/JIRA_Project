@@ -54,6 +54,45 @@ export async function POST(req: NextRequest) {
     await pool.end();
   }
 
+  // ── Fallback: if email_configs is empty, rebuild from oauth_tokens ───────────
+  // This happens when an admin "unlinks" an email in settings (which deletes the
+  // email_configs row) but the OAuth tokens are still valid in the oauth_tokens table.
+  if (rows.length === 0) {
+    const pool2 = new Pool({ connectionString: DB_URL });
+    try {
+      const tokenRows = await pool2.query(`SELECT email, tokens_json FROM oauth_tokens`);
+      for (const tr of tokenRows.rows) {
+        try {
+          const t = JSON.parse(tr.tokens_json) as OAuthTokens;
+          if (!t.spaceKey) continue; // skip tokens not tied to a space
+          // Re-insert email_configs row so the poller can start
+          await pool2.query(`
+            CREATE TABLE IF NOT EXISTS email_configs (
+              id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+              space_key TEXT NOT NULL, address TEXT NOT NULL,
+              imap_host TEXT NOT NULL DEFAULT 'outlook.office365.com',
+              imap_port INT NOT NULL DEFAULT 993,
+              smtp_host TEXT NOT NULL DEFAULT 'smtp.office365.com',
+              smtp_port INT NOT NULL DEFAULT 587,
+              password_enc TEXT, auto_reply BOOLEAN DEFAULT true,
+              auto_reply_text TEXT, department TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
+              UNIQUE(space_key, address)
+            )
+          `).catch(() => {});
+          await pool2.query(`
+            INSERT INTO email_configs (space_key, address, imap_host, imap_port, smtp_host, smtp_port, auto_reply)
+            VALUES ($1,$2,'outlook.office365.com',993,'smtp.office365.com',587,true)
+            ON CONFLICT (space_key, address) DO NOTHING
+          `, [t.spaceKey, tr.email]);
+          rows.push({ space_key: t.spaceKey, address: tr.email, imap_host: 'outlook.office365.com', imap_port: 993, smtp_host: 'smtp.office365.com', smtp_port: 587, password_enc: null, auto_reply: true, auto_reply_text: null, department: null });
+          console.log(`[RestartPollers] Auto-restored email_configs for ${tr.email} → space ${t.spaceKey}`);
+        } catch {}
+      }
+    } finally {
+      await pool2.end();
+    }
+  }
+
   if (rows.length === 0) {
     return NextResponse.json({ ok: false, error: 'No email configs found in DB' });
   }
