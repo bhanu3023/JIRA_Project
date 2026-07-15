@@ -58,8 +58,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'No email configs found in DB' });
   }
 
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || `${req.headers.get('x-forwarded-proto') || 'http'}://${req.headers.get('host')}`;
-  const webhookUrl = `${appUrl}/api/email/receive`;
+  // Always use internal localhost URL for the webhook — the poller runs inside
+  // the same container, so calling the public domain adds an unnecessary external
+  // round-trip through nginx that can fail or be slow under load.
+  const internalPort = process.env.INTERNAL_PORT || process.env.PORT || '3000';
+  const webhookUrl   = `http://localhost:${internalPort}/api/email/receive`;
 
   const results: { address: string; status: string }[] = [];
 
