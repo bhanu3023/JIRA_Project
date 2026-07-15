@@ -347,10 +347,10 @@ function SpaceDetailContent() {
   // Always load space metadata (needed for breadcrumb etc.)
   useEffect(() => {
     if (!spaceKey) return;
-    loadSpace(spaceKey).catch((err: any) => {
-      setLoadError(err?.message || 'Failed to load space. Please try refreshing.');
+    loadSpace(spaceKey).catch(() => {
+      router.replace('/spaces');
     });
-  }, [spaceKey, loadSpace]);
+  }, [spaceKey, loadSpace, router]);
 
   useEffect(() => {
     if (!spaceKey || queueFilter === 'queues') return;
