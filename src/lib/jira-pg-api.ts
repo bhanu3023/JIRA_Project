@@ -55,6 +55,7 @@ import {
   notifyIssueUpdated,
   notifyIssueDeleted,
   notifyMentioned,
+  notifySLABreach,
 } from '@/lib/notification-service';
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Global safety net: prevent IMAP/socket uncaughtExceptions from killing the server Ã¢â€â‚¬Ã¢â€â‚¬
@@ -4252,6 +4253,24 @@ async function _handleJiraPgApi(
               message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes. Issue: ${row.summary || row.key}`,
               issueKey: row.key,
             });
+            // Also send email notification to assignee + reporter
+            const emailRecipients = await db.user.findMany({
+              where: { id: { in: [row.assigneeId, row.reporterId].filter(Boolean) } },
+              select: { email: true },
+            });
+            const assigneeEmails = emailRecipients.map((u: any) => u.email).filter(Boolean);
+            const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
+            if (assigneeEmails.length && spaceRow) {
+              notifySLABreach({
+                issueKey: row.key,
+                issueSummary: row.summary || row.key,
+                spaceKey: spaceRow.key,
+                spaceName: spaceRow.name,
+                slaName: policy.name || 'SLA',
+                minsLeft,
+                assigneeEmails,
+              }).catch(() => {});
+            }
             notified++;
           }
         }

@@ -181,6 +181,21 @@ async function getBestSenderEmail(): Promise<string | null> {
   } catch { return null; }
 }
 
+// ── Look up the inbox email address for a space (e.g. L1board@cloudfuze.com for CUSTM) ──
+async function getInboxEmailForSpace(spaceKey: string): Promise<string | null> {
+  if (!spaceKey) return null;
+  try {
+    const { Pool } = await import('pg');
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+    const row = await pool.query(
+      `SELECT address FROM email_configs WHERE LOWER(space_key) = LOWER($1) LIMIT 1`,
+      [spaceKey]
+    );
+    await pool.end();
+    return row.rows[0]?.address || null;
+  } catch { return null; }
+}
+
 // ── Send helper ────────────────────────────────────────────────────────────────
 async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string) {
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
@@ -249,6 +264,7 @@ export async function notifyIssueCreated(issue: {
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const reporterName = issue.reporter ? `${issue.reporter.firstName} ${issue.reporter.lastName}`.trim() : 'Unknown';
   const displayKey = issue.cfKey || issue.key;
+  const inboxEmail = await getInboxEmailForSpace(issue.spaceKey);
 
   const html = buildEmailHtml({
     title:        'Issue Created',
@@ -274,6 +290,8 @@ export async function notifyIssueCreated(issue: {
     `[${displayKey}] ${issue.summary}`,
     html,
     `New issue created: ${displayKey} (${issue.key}) - ${issue.summary}\nAssignee: ${assigneeName}\nView: ${issueUrl(issue.key)}`,
+    undefined,
+    inboxEmail || undefined,
   );
 }
 
@@ -291,6 +309,7 @@ export async function notifyIssueAssigned(issue: {
 
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const prevName     = issue.previousAssignee ? `${issue.previousAssignee.firstName} ${issue.previousAssignee.lastName}`.trim() : 'Unassigned';
+  const inboxEmail = await getInboxEmailForSpace(issue.spaceKey);
 
   const html = buildEmailHtml({
     title:        'Issue Assigned',
@@ -314,6 +333,8 @@ export async function notifyIssueAssigned(issue: {
     `[${issue.key}] Assigned to ${assigneeName} - ${issue.summary}`,
     html,
     `${issue.key} has been assigned to ${assigneeName}.\nView: ${issueUrl(issue.key)}`,
+    undefined,
+    inboxEmail || undefined,
   );
 }
 
@@ -331,6 +352,7 @@ export async function notifyStatusChanged(issue: {
 
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
   const isResolved = ['done'].includes(issue.newStatus.category);
+  const inboxEmail = await getInboxEmailForSpace(issue.spaceKey);
 
   const html = buildEmailHtml({
     title:        'Status Changed',
@@ -357,6 +379,8 @@ export async function notifyStatusChanged(issue: {
     subject,
     html,
     `${issue.key} status changed: ${issue.oldStatus.name} → ${issue.newStatus.name}\nView: ${issueUrl(issue.key)}`,
+    undefined,
+    inboxEmail || undefined,
   );
 }
 
@@ -426,6 +450,7 @@ export async function notifyIssueUpdated(issue: {
   if (!to.length) return;
 
   const updatedByName = issue.updatedBy ? `${issue.updatedBy.firstName} ${issue.updatedBy.lastName}`.trim() : 'Someone';
+  const inboxEmail = await getInboxEmailForSpace(issue.spaceKey);
 
   const changeFields = issue.changes.map(c => ({
     label: c.field,
@@ -452,6 +477,8 @@ export async function notifyIssueUpdated(issue: {
     `[${issue.key}] Updated by ${updatedByName} - ${issue.summary}`,
     html,
     `${issue.key} was updated by ${updatedByName}.\nView: ${issueUrl(issue.key)}`,
+    undefined,
+    inboxEmail || undefined,
   );
 }
 
@@ -564,4 +591,46 @@ export async function notifyMentioned(opts: {
     html,
     `${opts.mentionedBy} mentioned you in ${opts.issueKey}:\n\n${opts.commentPreview}\n\nView: ${issueUrl(opts.issueKey)}`,
   );
+}
+
+export async function notifySLABreach(opts: {
+  issueKey: string;
+  issueSummary: string;
+  spaceKey: string;
+  spaceName: string;
+  slaName: string;
+  minsLeft: number;
+  assigneeEmails: string[];
+}) {
+  if (!opts.assigneeEmails.length) return;
+  const inboxEmail = await getInboxEmailForSpace(opts.spaceKey);
+  const isBreached = opts.minsLeft <= 0;
+  const timeLabel  = isBreached ? 'SLA Breached' : `SLA breaching in ${opts.minsLeft} min`;
+  const eventColor = isBreached ? '#EF4444' : '#F59E0B';
+
+  const html = buildEmailHtml({
+    title:        timeLabel,
+    issueKey:     opts.issueKey,
+    issueSummary: opts.issueSummary,
+    spaceKey:     opts.spaceKey,
+    spaceName:    opts.spaceName,
+    eventLabel:   isBreached ? '🔴 SLA BREACHED' : `⚠ SLA Warning — ${opts.minsLeft} min left`,
+    eventColor,
+    fields: [
+      { label: 'SLA Policy', value: opts.slaName },
+      { label: 'Board',      value: opts.spaceName },
+      { label: 'Status',     value: isBreached ? 'BREACHED' : `${opts.minsLeft} minutes remaining`, color: eventColor },
+    ],
+    actionUrl: issueUrl(opts.issueKey),
+  });
+
+  await sendNotification(
+    opts.assigneeEmails,
+    `[${opts.issueKey}] ${timeLabel}: ${opts.slaName} — ${opts.issueSummary}`,
+    html,
+    `${timeLabel} for ${opts.issueKey}.\nSLA: ${opts.slaName}\nView: ${issueUrl(opts.issueKey)}`,
+    undefined,
+    inboxEmail || undefined,
+  );
+  console.log(`[Notification] SLA breach alert for ${opts.issueKey} → ${opts.assigneeEmails.join(', ')}`);
 }
