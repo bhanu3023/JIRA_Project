@@ -60,8 +60,12 @@ export async function GET(req: NextRequest) {
 
   // redirectUri must match what was registered in Azure AD
   const redirectUri = `${appUrl}/api/auth/oauth/microsoft/callback`;
+  console.log(`[OAuthCallback] mode=${mode} redirectUri=${redirectUri}`);
   const result = await exchangeMicrosoftCode(code, redirectUri, mode === 'login' ? 'login' : 'email');
-  if (!result) return NextResponse.redirect(`${appUrl}/auth/login?oauth_error=token_exchange_failed`);
+  if (!result) {
+    console.error(`[OAuthCallback] exchangeMicrosoftCode returned null for mode=${mode} redirectUri=${redirectUri}`);
+    return NextResponse.redirect(`${appUrl}/auth/login?oauth_error=token_exchange_failed&debug_uri=${encodeURIComponent(redirectUri)}`);
+  }
 
   // ── LOGIN MODE: look up user directly in DB, mint JWT locally ─────────────
   if (mode === 'login') {
