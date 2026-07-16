@@ -373,7 +373,7 @@ function SpaceDetailContent() {
           }
         } else {
           params.page  = '1';
-          params.limit = '500';
+          params.limit = '100';
           // Exclude done issues at DB level for open queues
           if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-dept' || queueFilter === 'my-queue') {
             params.excludeDone = 'true';
@@ -385,7 +385,7 @@ function SpaceDetailContent() {
           }
           // Sent/Watching — show all tickets that moved OUT of this dept (no reporter filter)
           if (queueFilter === 'sent-watching') {
-            params.limit = '500';
+            params.limit = '100';
             if (deptParam) params.sentDept = deptParam;
           }
           // Dept sub-queue: all open tickets in dept (any assignee)
@@ -465,6 +465,24 @@ function SpaceDetailContent() {
     })();
     return () => { cancelled = true; };
   }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, user?.id]);
+
+  // Prefetch common queues in background so switching feels instant (< 1s)
+  useEffect(() => {
+    if (!spaceKey || !user?.id) return;
+    const QUEUES_TO_PREFETCH = ['all-open', 'assigned', 'unassigned', 'my-queue', 'all-requests'];
+    // Stagger prefetches so they don't all hit the server at once
+    QUEUES_TO_PREFETCH.forEach((q, i) => {
+      setTimeout(() => {
+        const p: Record<string, string> = { spaceKey, page: '1', limit: '100' };
+        if (q === 'all-open' || q === 'assigned' || q === 'unassigned' || q === 'my-queue') p.excludeDone = 'true';
+        if (q === 'unassigned') p.unassigned = 'true';
+        if (q === 'assigned' && user?.id) p.assignee = user.id;
+        if (q === 'all-requests') { p.limit = '50'; }
+        loadIssues(p).catch(() => {});
+      }, (i + 1) * 800); // stagger by 800ms each
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spaceKey, user?.id]);
 
   // Auto-refresh every 30s for Customer_Board so new email-tickets appear without manual refresh
   useEffect(() => {

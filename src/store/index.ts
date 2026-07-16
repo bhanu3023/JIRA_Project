@@ -10,7 +10,7 @@ let loadNotificationsInflight: Promise<void> | null = null;
 
 // Queue results cache: key → {issues, total, page, ts}
 const issuesCache = new Map<string, { issues: any[]; total: number; page: number; ts: number }>();
-const CACHE_TTL = 60_000; // 60 seconds stale-while-revalidate
+const CACHE_TTL = 120_000; // 2 minutes stale-while-revalidate
 
 interface AppState {
   // Auth
