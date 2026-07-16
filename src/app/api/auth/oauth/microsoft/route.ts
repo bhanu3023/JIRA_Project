@@ -30,5 +30,5 @@ export async function GET(req: NextRequest) {
   const department  = searchParams.get('department') || '';
   const state       = Buffer.from(JSON.stringify({ spaceKey, returnUrl, mode, loginHint, department, ts: Date.now() })).toString('base64url');
 
-  return NextResponse.redirect(getMicrosoftAuthUrl(redirectUri, state, loginHint));
+  return NextResponse.redirect(getMicrosoftAuthUrl(redirectUri, state, loginHint, mode === 'login' ? 'login' : 'email'));
 }

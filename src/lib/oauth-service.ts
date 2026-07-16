@@ -243,13 +243,17 @@ async function refreshGoogleToken(tokens: OAuthTokens): Promise<string | null> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-export function getMicrosoftAuthUrl(redirectUri: string, state: string, loginHint = ''): string {
+export function getMicrosoftAuthUrl(redirectUri: string, state: string, loginHint = '', mode: 'login' | 'email' = 'email'): string {
+  // Login only needs identity scopes. Email mode also needs Mail scopes for IMAP/Graph.
+  const scope = mode === 'login'
+    ? 'openid profile email offline_access'
+    : 'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile';
   const params = new URLSearchParams({
     client_id:     process.env.MICROSOFT_CLIENT_ID!,
     response_type: 'code',
     response_mode: 'query',
     redirect_uri:  redirectUri,
-    scope:         'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile',
+    scope,
     prompt:        'select_account',
     state,
   });
@@ -282,7 +286,10 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   }
 }
 
-export async function exchangeMicrosoftCode(code: string, redirectUri: string): Promise<{ tokens: OAuthTokens; email: string; name: string } | null> {
+export async function exchangeMicrosoftCode(code: string, redirectUri: string, mode: 'login' | 'email' = 'email'): Promise<{ tokens: OAuthTokens; email: string; name: string } | null> {
+  const scope = mode === 'login'
+    ? 'openid profile email offline_access'
+    : 'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile';
   const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
     method:  'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -292,7 +299,7 @@ export async function exchangeMicrosoftCode(code: string, redirectUri: string): 
       client_secret: process.env.MICROSOFT_CLIENT_SECRET!,
       code,
       redirect_uri:  redirectUri,
-      scope:         'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile',
+      scope,
     }),
   });
   if (!res.ok) {
