@@ -21,13 +21,9 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Behind a reverse proxy (nginx), req.url is localhost:port internally.
-  // Use x-forwarded headers to reconstruct the public URL, falling back to env var.
-  const fwdHost  = req.headers.get('x-forwarded-host');
-  const fwdProto = req.headers.get('x-forwarded-proto') || 'https';
-  const appUrl   = fwdHost
-    ? `${fwdProto}://${fwdHost}`
-    : (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin);
+  // Always use the configured public URL for redirectUri — must match Azure AD exactly.
+  // Never compute from request headers (x-forwarded-host can differ between proxy layers).
+  const appUrl      = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://neutaraticketing.cftools.live').replace(/\/$/, '');
   const redirectUri = `${appUrl}/api/auth/oauth/microsoft/callback`;
   const mode        = searchParams.get('mode') || 'email';
   const loginHint   = searchParams.get('loginHint') || '';

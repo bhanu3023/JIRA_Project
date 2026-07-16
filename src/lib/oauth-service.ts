@@ -295,7 +295,11 @@ export async function exchangeMicrosoftCode(code: string, redirectUri: string): 
       scope:         'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile',
     }),
   });
-  if (!res.ok) { return null; }
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    console.error(`[OAuthService] exchangeMicrosoftCode FAILED (${res.status}):`, errText);
+    return null;
+  }
   const data = await res.json() as Record<string, unknown>;
 
   // ── 1. Try id_token claims first (no extra network call) ───────────────────

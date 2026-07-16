@@ -35,15 +35,12 @@ export async function GET(req: NextRequest) {
   const state = searchParams.get('state') || '';
   const error = searchParams.get('error');
 
-  // Behind a reverse proxy (nginx), req.url is localhost:port internally.
-  // Use x-forwarded headers to get the real public origin for browser redirects.
-  const fwdHost  = req.headers.get('x-forwarded-host');
-  const fwdProto = req.headers.get('x-forwarded-proto') || 'https';
-  const appUrl   = fwdHost
-    ? `${fwdProto}://${fwdHost}`
-    : (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin);
-  // For internal server→server fetches use the env var (reachable within Docker network)
-  const internalBase = process.env.NEXT_PUBLIC_APP_URL || appUrl;
+  // Always use the configured public URL for redirectUri — must match Azure AD exactly.
+  // Never compute from request headers (x-forwarded-host can differ between proxy layers).
+  const appUrl       = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://neutaraticketing.cftools.live').replace(/\/$/, '');
+  // For internal server→server fetches use localhost (reachable within Docker network)
+  const internalPort = process.env.PORT || '3000';
+  const internalBase = `http://localhost:${internalPort}`;
 
   // Decode state
   let spaceKey   = 'INFRA';
