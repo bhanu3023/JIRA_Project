@@ -166,9 +166,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [spaceStatuses, setSpaceStatuses]       = useState<WorkflowStatus[]>(statuses);
   const [createIssueFields, setCreateIssueFields] = useState<any[]>([]);
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
+  const [spaceQueues, setSpaceQueues] = useState<{ id: string; label: string; dept?: string }[]>([]);
+  const [selectedQueueId, setSelectedQueueId] = useState('');
   const [form, setForm] = useState({
     summary: '', description: '', type: 'task', priority: 'medium',
-    assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: '',
+    assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: '', department: initialDept || '',
   });
   const [summaryError, setSummaryError] = useState(false);
   const [error, setError]               = useState('');
@@ -190,6 +192,23 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
       setSpaceMembers(members);
       setSpaceStatuses(statuses);
     }
+  }, [selectedSpaceKey]);
+
+  // Load queues for the selected space
+  useEffect(() => {
+    const builtIn = [
+      { id: 'all-open',      label: 'All Open' },
+      { id: 'unassigned',    label: 'Unassigned' },
+      { id: 'assigned',      label: 'Assigned' },
+      { id: 'my-queue',      label: 'My Queue' },
+      { id: 'all-requests',  label: 'All Requests' },
+    ];
+    api.request<any[]>(`custom-queues/${selectedSpaceKey}`).then((q) => {
+      const custom = (q || []).map((cq: any) => ({ id: cq.id, label: cq.name, dept: cq.name }));
+      setSpaceQueues([...builtIn, ...custom]);
+    }).catch(() => {
+      setSpaceQueues(builtIn);
+    });
   }, [selectedSpaceKey]);
 
   // Load custom fields enabled for Create Issue for the selected space
@@ -228,11 +247,10 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         type: form.type,
         priority: form.priority,
         assigneeId: form.assigneeId || undefined,
-        storyPoints: form.storyPoints ? parseInt(form.storyPoints) : undefined,
         dueDate: form.dueDate || undefined,
         statusId: form.statusId || undefined,
         combination: form.combination || undefined,
-        ...(initialDept ? { department: initialDept } : {}),
+        ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
       });
       // Save custom field values
       if (newIssue?.id) {
@@ -243,7 +261,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         );
       }
       if (createAnother) {
-        setForm(f => ({ ...f, summary: '', description: '', storyPoints: '', dueDate: '', combination: '' }));
+        setForm(f => ({ ...f, summary: '', description: '', dueDate: '', combination: '' }));
         setCustomFieldValues({});
         setSummaryError(false);
       } else {
@@ -433,6 +451,32 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
               </div>
             </div>
 
+            {/* Queue */}
+            {spaceQueues.length > 0 && (
+              <div className="mb-4">
+                <label className="block text-[12px] font-semibold text-gray-500 mb-1">Queue</label>
+                <div className="relative">
+                  <select
+                    value={selectedQueueId}
+                    onChange={e => {
+                      const id = e.target.value;
+                      setSelectedQueueId(id);
+                      const q = spaceQueues.find(x => x.id === id);
+                      if (q?.dept) setForm(f => ({ ...f, department: q.dept! }));
+                      else if (!id) setForm(f => ({ ...f, department: initialDept || '' }));
+                    }}
+                    className="w-full px-3 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Select queue…</option>
+                    {spaceQueues.map(q => (
+                      <option key={q.id} value={q.id}>{q.label}</option>
+                    ))}
+                  </select>
+                  <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+            )}
+
             {/* Work type */}
             <div className="mb-4">
               <label className="block text-[12px] font-semibold text-gray-500 mb-1">
@@ -516,17 +560,6 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
             <hr className="my-3 border-gray-200" />
 
-            {/* Story Points & Due Date */}
-            <div className="mb-3">
-              <label className="block text-[12px] font-semibold text-gray-500 mb-1">Story Points</label>
-              <input
-                type="number"
-                value={form.storyPoints}
-                onChange={e => update('storyPoints', e.target.value)}
-                className="w-full px-3 py-1.5 border border-gray-200 rounded-lg text-[12px] bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                min="0" max="100" placeholder="0"
-              />
-            </div>
             <div className="mb-4">
               <label className="block text-[12px] font-semibold text-gray-500 mb-1">Due Date</label>
               <input
