@@ -304,8 +304,9 @@ export default function IssueDetailPage() {
       };
 
       if (dept) {
-        // Search dept_queue spaces (via localStorage cache first, then API) for a queue
-        // whose name matches current_department — that space owns this dept's workflow.
+        // Search dept_queue spaces for a queue whose name matches current_department.
+        // If the queue has a workflowSpaceKey configured, use THAT space's workflow.
+        // Otherwise fall back to the dept_queue space's own workflow.
         const deptQueueSpaces = (spaces as any[]).filter(s => s.type === 'dept_queue');
         let found = false;
         for (const s of deptQueueSpaces) {
@@ -313,8 +314,11 @@ export default function IssueDetailPage() {
             const stored = localStorage.getItem(`custom_queues_${s.key}`);
             if (stored) {
               const queues: any[] = JSON.parse(stored);
-              if (queues.some(q => (q.name || '').toLowerCase() === dept.toLowerCase())) {
-                loadStatusesForSpace(s.key);
+              const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
+              if (matchedQueue) {
+                // Use the queue's configured workflow source, or the parent space if unset
+                const effectiveKey = matchedQueue.workflowSpaceKey || s.key;
+                loadStatusesForSpace(effectiveKey);
                 found = true;
                 break;
               }
@@ -327,9 +331,13 @@ export default function IssueDetailPage() {
             for (const s of deptQueueSpaces) {
               try {
                 const queues = await api.request<any[]>(`custom-queues/${s.key}`);
-                if (Array.isArray(queues) && queues.some(q => (q.name || '').toLowerCase() === dept.toLowerCase())) {
-                  loadStatusesForSpace(s.key);
-                  return;
+                if (Array.isArray(queues)) {
+                  const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
+                  if (matchedQueue) {
+                    const effectiveKey = matchedQueue.workflowSpaceKey || s.key;
+                    loadStatusesForSpace(effectiveKey);
+                    return;
+                  }
                 }
               } catch {}
             }

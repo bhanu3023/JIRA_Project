@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import {
   ArrowLeft, Users, Clock, Plus, X, Check, Search,
   Trash2, Calendar, ChevronRight, Edit2, AlertCircle, RefreshCw, Mail, Link2, Unlink,
-  Eye, EyeOff, Wifi, WifiOff, Loader2
+  Eye, EyeOff, Wifi, WifiOff, Loader2, GitMerge, Network
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -20,6 +20,7 @@ type CustomQueue = {
   id: string; name: string; memberIds: string[]; suspendedIds?: string[];
   sla?: { timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' };
   slaPolicies?: SLAPolicy[];
+  workflowSpaceKey?: string;
 };
 
 const ALL_PRIORITIES = ['Highest', 'High', 'Medium', 'Low', 'Lowest'];
@@ -908,9 +909,11 @@ export default function QueueSettingsPage() {
   const searchParams = useSearchParams();
   const spaceKey = (params?.spaceKey as string || '').toUpperCase();
   const queueId = params?.queueId as string || '';
-  const initialTab = (searchParams?.get('tab') || 'people') as 'people' | 'sla' | 'rr' | 'email';
+  const initialTab = (searchParams?.get('tab') || 'people') as 'people' | 'sla' | 'rr' | 'email' | 'workflow';
 
-  const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email'>(initialTab);
+  const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email' | 'workflow'>(initialTab);
+  const [allSpaces, setAllSpaces] = useState<{ key: string; name: string }[]>([]);
+  const [workflowSaving, setWorkflowSaving] = useState(false);
   const [queue, setQueue] = useState<CustomQueue | null>(null);
   const [spaceMembers, setSpaceMembers] = useState<any[]>([]);
   const [allUsers, setAllUsers] = useState<any[]>([]);
@@ -950,9 +953,11 @@ export default function QueueSettingsPage() {
       setSpaceName(sp?.name || spaceKey);
       setSpaceMembers(sp?.members || []);
     }).catch(() => {});
-    // Load ALL users so invited users (not yet in space) also appear in search
     api.request<any[]>('users').then((users) => {
       if (Array.isArray(users)) setAllUsers(users);
+    }).catch(() => {});
+    api.getSpaces().then((spaces: any[]) => {
+      setAllSpaces(spaces.map((s: any) => ({ key: s.key, name: s.name })));
     }).catch(() => {});
   }, [spaceKey]);
 
@@ -1078,6 +1083,12 @@ export default function QueueSettingsPage() {
             <Mail size={15} className={tab === 'email' ? 'text-blue-600' : 'text-gray-400'} />
             Email
           </button>
+          <button onClick={() => setTab('workflow')}
+            className={cn('flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
+              tab === 'workflow' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900')}>
+            <GitMerge size={15} className={tab === 'workflow' ? 'text-blue-600' : 'text-gray-400'} />
+            Workflow
+          </button>
         </nav>
       </div>
 
@@ -1200,6 +1211,103 @@ export default function QueueSettingsPage() {
         {/* ── Email ── */}
         {tab === 'email' && (
           <QueueEmailTab spaceKey={spaceKey} queueName={queue.name} />
+        )}
+
+        {/* ── Workflow ── */}
+        {tab === 'workflow' && (
+          <div className="max-w-3xl mx-auto px-8 py-8">
+            <div className="mb-6">
+              <h1 className="text-[20px] font-bold text-gray-900">Workflow Source</h1>
+              <p className="text-[13px] text-gray-500 mt-1">
+                Choose which board&apos;s status workflow applies to tickets in the <strong>{queue.name}</strong> queue.
+                The selected board&apos;s statuses and transition rules will appear on every ticket routed here.
+              </p>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+              <div className="flex items-center gap-2 px-6 py-4 border-b border-gray-100 bg-gray-50">
+                <Network size={15} className="text-blue-500" />
+                <span className="text-[13px] font-semibold text-gray-800">Board Workflow</span>
+                {queue.workflowSpaceKey && (
+                  <span className="ml-auto text-[11px] font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-0.5">
+                    Active: {queue.workflowSpaceKey}
+                  </span>
+                )}
+              </div>
+              <div className="px-6 py-5">
+                <p className="text-[12.5px] text-gray-500 mb-4">
+                  Currently using: <span className="font-semibold text-gray-800">{queue.workflowSpaceKey || 'Default (parent space)'}</span>
+                </p>
+                <div className="grid grid-cols-2 gap-2 max-h-80 overflow-y-auto pr-1">
+                  {/* Default option */}
+                  <button
+                    onClick={async () => {
+                      if (!queue) return;
+                      setWorkflowSaving(true);
+                      const updated = { ...queue, workflowSpaceKey: '' };
+                      await persistQueue(updated);
+                      setWorkflowSaving(false);
+                      setSavedMsg('Saved!');
+                      setTimeout(() => setSavedMsg(''), 2000);
+                    }}
+                    className={cn(
+                      'flex items-center gap-3 px-4 py-3 rounded-xl border-2 text-left transition-all',
+                      !queue.workflowSpaceKey
+                        ? 'border-blue-500 bg-blue-50'
+                        : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50'
+                    )}>
+                    <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
+                      <GitMerge size={15} className="text-gray-500" />
+                    </div>
+                    <div>
+                      <p className="text-[13px] font-semibold text-gray-800">Default (parent space)</p>
+                      <p className="text-[11px] text-gray-400">Use this dept_queue space&apos;s own workflow</p>
+                    </div>
+                    {!queue.workflowSpaceKey && <Check size={15} className="ml-auto text-blue-600 flex-shrink-0" />}
+                  </button>
+
+                  {allSpaces.filter(s => s.key !== spaceKey).map(s => (
+                    <button
+                      key={s.key}
+                      onClick={async () => {
+                        if (!queue) return;
+                        setWorkflowSaving(true);
+                        const updated = { ...queue, workflowSpaceKey: s.key };
+                        await persistQueue(updated);
+                        setWorkflowSaving(false);
+                        setSavedMsg('Saved!');
+                        setTimeout(() => setSavedMsg(''), 2000);
+                      }}
+                      className={cn(
+                        'flex items-center gap-3 px-4 py-3 rounded-xl border-2 text-left transition-all',
+                        queue.workflowSpaceKey === s.key
+                          ? 'border-blue-500 bg-blue-50'
+                          : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50'
+                      )}>
+                      <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center flex-shrink-0">
+                        <span className="text-[10px] font-bold text-indigo-700">{s.key.slice(0, 3)}</span>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[13px] font-semibold text-gray-800 truncate">{s.name}</p>
+                        <p className="text-[11px] text-gray-400">{s.key}</p>
+                      </div>
+                      {queue.workflowSpaceKey === s.key && <Check size={15} className="ml-auto text-blue-600 flex-shrink-0" />}
+                    </button>
+                  ))}
+                </div>
+                {workflowSaving && (
+                  <div className="flex items-center gap-2 mt-4 text-[12.5px] text-blue-600">
+                    <Loader2 size={13} className="animate-spin" /> Saving…
+                  </div>
+                )}
+                {savedMsg && !workflowSaving && (
+                  <div className="flex items-center gap-1.5 mt-4 text-[12.5px] text-emerald-600">
+                    <Check size={13} /> {savedMsg}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>
