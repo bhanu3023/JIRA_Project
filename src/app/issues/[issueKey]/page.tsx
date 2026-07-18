@@ -288,8 +288,13 @@ export default function IssueDetailPage() {
     if (currentIssue?.spaceKey) {
       api.getSpace(currentIssue.spaceKey).then(space => {
         setSpaceStatuses(space.statuses || []);
-        setWorkflowTransitions(space.transitions || []);
         setSpaceMembers(space.members || []);
+        // Also fetch transitions from the dedicated workflow endpoint for accuracy
+        api.request<any>(`workflows/wf_${currentIssue.spaceKey}/statuses`).then(wf => {
+          setWorkflowTransitions(wf.transitions || space.transitions || []);
+        }).catch(() => {
+          setWorkflowTransitions(space.transitions || []);
+        });
       }).catch(() => {});
     }
     if (currentIssue?.spaceId && currentIssue?.id) {
@@ -1806,6 +1811,7 @@ export default function IssueDetailPage() {
                           return status ? { status, transitionName: tr?.name || '' } : null;
                         })
                         .filter(Boolean) as { status: any; transitionName: string }[])
+                        .filter(o => o.status.id !== issueStat.id)
                     : spaceStatuses
                         .filter((s: any) => s.id !== issueStat.id)
                         .map((s: any) => ({ status: s, transitionName: '' }));
