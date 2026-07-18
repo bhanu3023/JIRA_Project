@@ -162,14 +162,16 @@ export const useStore = create<AppState>((set, get) => ({
       if (Date.now() - cached.ts < CACHE_TTL) return;
       // Stale: refresh in background without showing spinner
     } else {
-      set({ loading: true });
+      // Don't clear current issues or show a spinner — keep showing whatever is on screen
+      // while the new queue loads. The swap happens silently when data arrives.
+      // Only show spinner if there are truly no issues at all (very first load).
+      if (get().issues.length === 0) set({ loading: true });
     }
     try {
       const data = await api.getIssues(params);
       issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
       set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
     } catch (e) {
-      // Always clear the spinner — stuck loading is worse than showing stale data
       set({ loading: false });
       throw e;
     }
