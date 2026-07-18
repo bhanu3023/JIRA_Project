@@ -526,29 +526,35 @@ export default function IssueDetailPage() {
     // Check if moving to a "done" category status — validate required fields
     const targetStatus = spaceStatuses.find(s => s.id === statusId);
     if (targetStatus?.category === 'done') {
-      // Collect all required fields for this space
-      const requiredFields = customFields.filter(cf => cf.required);
-      // Also check core required fields
-      const coreRequired: { name: string; getValue: () => any }[] = [
-        { name: 'Assignee', getValue: () => issue?.assignee },
-      ];
       const missing: string[] = [];
-      // Check custom required fields
-      for (const cf of requiredFields) {
-        const nativeKey: Record<string, string> = {
-          'Customer Name': 'customerName', 'Client Name': 'clientName',
-          'Work Type': 'workType', 'Product Type': 'productType',
-          'Combination': 'combination', 'Project Manager': 'projectManager',
-        };
+
+      // Always-required fields before resolving a ticket
+      const alwaysRequired: { name: string; key: string }[] = [
+        { name: 'Project Manager', key: 'projectManager' },
+        { name: 'Product Type',    key: 'productType'    },
+        { name: 'Combination',     key: 'combination'    },
+      ];
+      for (const f of alwaysRequired) {
+        const cfEntry = customFields.find(cf => cf.name?.toLowerCase() === f.name.toLowerCase());
+        const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
+        if (!val || val.toString().trim() === '') missing.push(f.name);
+      }
+
+      // Any other custom fields explicitly marked required
+      const nativeKey: Record<string, string> = {
+        'Customer Name': 'customerName', 'Client Name': 'clientName',
+        'Work Type': 'workType', 'Product Type': 'productType',
+        'Combination': 'combination', 'Project Manager': 'projectManager',
+      };
+      for (const cf of customFields.filter(c => c.required)) {
+        if (alwaysRequired.some(a => a.name.toLowerCase() === cf.name?.toLowerCase())) continue; // already checked
         const val = customFieldValues[cf.id] || (nativeKey[cf.name] ? (issue as any)?.[nativeKey[cf.name]] : null);
-        if (!val || val.toString().trim() === '') {
-          missing.push(cf.name);
-        }
+        if (!val || val.toString().trim() === '') missing.push(cf.name);
       }
-      // Check core required fields
-      for (const f of coreRequired) {
-        if (!f.getValue()) missing.push(f.name);
-      }
+
+      // Assignee must be set
+      if (!issue?.assignee) missing.push('Assignee');
+
       if (missing.length > 0) {
         setMandatoryModal({ missingFields: missing, pendingStatusId: statusId });
         return;
@@ -3275,7 +3281,7 @@ export default function IssueDetailPage() {
               </div>
             </div>
             <div className="px-6 py-4">
-              <p className="text-[13px] text-gray-700 mb-3">The following fields are mandatory and must be filled before the status can be changed to <span className="font-semibold text-gray-900">Done</span>:</p>
+              <p className="text-[13px] text-gray-700 mb-3">The following fields are mandatory and must be filled before resolving this ticket:</p>
               <ul className="space-y-2">
                 {mandatoryModal.missingFields.map(field => (
                   <li key={field} className="flex items-center gap-2.5 px-3 py-2 bg-red-50 border border-red-100 rounded-lg">
@@ -3289,15 +3295,7 @@ export default function IssueDetailPage() {
             <div className="flex justify-end gap-3 px-6 py-4 bg-gray-50 border-t border-gray-100">
               <button onClick={() => setMandatoryModal(null)}
                 className="px-4 py-2 text-[13px] font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-white transition-colors">
-                Cancel
-              </button>
-              <button onClick={async () => {
-                const id = mandatoryModal.pendingStatusId;
-                setMandatoryModal(null);
-                await handleUpdate('statusId', id);
-              }}
-                className="px-4 py-2 text-[13px] font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors">
-                Close anyway
+                Go back &amp; fill fields
               </button>
             </div>
           </div>
