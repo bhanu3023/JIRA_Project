@@ -1950,7 +1950,7 @@ async function _handleJiraPgApi(
           countParams
         );
         deptTotal = countRow.rows[0]?.cnt ?? 0;
-      } catch { /* use original total as fallback */ }
+      } catch (err) { console.error('[dept count query failed]', err); deptTotal = 0; }
 
       try {
         const rowParams: any[] = [allSpaceIds, deptParam];
@@ -2114,7 +2114,7 @@ async function _handleJiraPgApi(
     }
 
     // For subtasks: always use the first (Open) status regardless of what parent has
-    const openStatus = sp.statuses[0];
+    const openStatus = sp.statuses.find(s => s.category === 'todo') || sp.statuses[0];
     const finalStatus = body.parentKey ? openStatus : st;
 
     // Retry loop: handles race condition where two concurrent creates pick the same key number.
@@ -2167,9 +2167,14 @@ async function _handleJiraPgApi(
         // current_department is a raw ALTER TABLE column -- Prisma doesn't know it, so set via raw SQL
         const deptToSet = body.department ? String(body.department) : (rrDepartment || null);
         if (deptToSet) {
+          // Also seed dept_statuses so the queue shows the initial "open" status
+          const initStatus = openStatus || sp.statuses[0];
+          const initDeptStatuses = initStatus
+            ? JSON.stringify({ [deptToSet]: { id: initStatus.id, name: initStatus.name, color: initStatus.color, category: initStatus.category } })
+            : '{}';
           await pool.query(
-            `UPDATE issues SET current_department=$1, original_dept=$1 WHERE id=$2`,
-            [deptToSet, issue.id]
+            `UPDATE issues SET current_department=$1, original_dept=$1, dept_statuses=$2::jsonb WHERE id=$3`,
+            [deptToSet, initDeptStatuses, issue.id]
           );
         } else {
           await pool.query(
@@ -2955,6 +2960,26 @@ async function _handleJiraPgApi(
     if (body.reporterEmail) {
       const ru = await db.user.findFirst({ where: { email: { equals: String(body.reporterEmail), mode: 'insensitive' } } });
       if (ru) data.reporterId = ru.id;
+    }
+
+    // Custom queue status (qst_...) — stored in dept_statuses, not issue.statusId
+    if (body.queueStatusId) {
+      try {
+        const qRow = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE key=$1 LIMIT 1`, [key]);
+        const dept: string = qRow.rows[0]?.current_department;
+        if (dept) {
+          const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
+          deptStatuses[dept] = {
+            id: String(body.queueStatusId),
+            name: String(body.queueStatusName || ''),
+            color: String(body.queueStatusColor || '#64748B'),
+            category: String(body.queueStatusCategory || 'todo'),
+          };
+          await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(deptStatuses), key]);
+          const refreshed = await db.issue.findUnique({ where: { key }, include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } }, comments: { include: { author: true }, orderBy: { createdAt: 'asc' } } } });
+          if (refreshed) return json(formatIssue(refreshed));
+        }
+      } catch (e) { console.error('[queueStatus update failed]', e); }
     }
 
     // Status

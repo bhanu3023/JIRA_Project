@@ -21,6 +21,9 @@ type CustomQueue = {
   sla?: { timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' };
   slaPolicies?: SLAPolicy[];
   workflowSpaceKey?: string;
+  statusIds?: string[];
+  queueStatuses?: { id: string; name: string; color: string; category: string; order: number }[];
+  queueTransitions?: { from: string; to: string }[];
 };
 
 const ALL_PRIORITIES = ['Highest', 'High', 'Medium', 'Low', 'Lowest'];
@@ -912,9 +915,10 @@ export default function QueueSettingsPage() {
   const initialTab = (searchParams?.get('tab') || 'people') as 'people' | 'sla' | 'rr' | 'email' | 'workflow';
 
   const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email' | 'workflow'>(initialTab);
+  const [queue, setQueue] = useState<CustomQueue | null>(null);
+  const [spaceStatuses, setSpaceStatuses] = useState<{ id: string; name: string; color: string; category: string }[]>([]);
   const [allSpaces, setAllSpaces] = useState<{ key: string; name: string }[]>([]);
   const [workflowSaving, setWorkflowSaving] = useState(false);
-  const [queue, setQueue] = useState<CustomQueue | null>(null);
   const [spaceMembers, setSpaceMembers] = useState<any[]>([]);
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [memberSearch, setMemberSearch] = useState('');
@@ -952,6 +956,7 @@ export default function QueueSettingsPage() {
     api.getSpace(spaceKey).then((sp: any) => {
       setSpaceName(sp?.name || spaceKey);
       setSpaceMembers(sp?.members || []);
+      setSpaceStatuses(sp?.statuses || []);
     }).catch(() => {});
     api.request<any[]>('users').then((users) => {
       if (Array.isArray(users)) setAllUsers(users);
@@ -1215,97 +1220,147 @@ export default function QueueSettingsPage() {
 
         {/* ── Workflow ── */}
         {tab === 'workflow' && (
-          <div className="max-w-3xl mx-auto px-8 py-8">
-            <div className="mb-6">
-              <h1 className="text-[20px] font-bold text-gray-900">Workflow Source</h1>
+          <div className="max-w-3xl mx-auto px-8 py-8 space-y-6">
+            <div className="mb-2">
+              <h1 className="text-[20px] font-bold text-gray-900">Queue Workflow</h1>
               <p className="text-[13px] text-gray-500 mt-1">
-                Choose which board&apos;s status workflow applies to tickets in the <strong>{queue.name}</strong> queue.
-                The selected board&apos;s statuses and transition rules will appear on every ticket routed here.
+                Configure the status workflow for tickets in the <strong>{queue.name}</strong> queue.
               </p>
             </div>
 
+            {/* Step 1 — Board source */}
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
               <div className="flex items-center gap-2 px-6 py-4 border-b border-gray-100 bg-gray-50">
                 <Network size={15} className="text-blue-500" />
-                <span className="text-[13px] font-semibold text-gray-800">Board Workflow</span>
+                <span className="text-[13px] font-semibold text-gray-800">Step 1 — Select Workflow Source Board</span>
                 {queue.workflowSpaceKey && (
                   <span className="ml-auto text-[11px] font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-0.5">
-                    Active: {queue.workflowSpaceKey}
+                    {queue.workflowSpaceKey}
                   </span>
                 )}
               </div>
-              <div className="px-6 py-5">
-                <p className="text-[12.5px] text-gray-500 mb-4">
-                  Currently using: <span className="font-semibold text-gray-800">{queue.workflowSpaceKey || 'Default (parent space)'}</span>
+              <div className="px-6 py-4">
+                <p className="text-[12.5px] text-gray-500 mb-3">
+                  Choose which board&apos;s statuses &amp; transitions this queue uses.
+                  Currently: <span className="font-semibold text-gray-800">{queue.workflowSpaceKey || 'Default (this space)'}</span>
                 </p>
-                <div className="grid grid-cols-2 gap-2 max-h-80 overflow-y-auto pr-1">
-                  {/* Default option */}
+                <div className="grid grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
                   <button
                     onClick={async () => {
-                      if (!queue) return;
                       setWorkflowSaving(true);
-                      const updated = { ...queue, workflowSpaceKey: '' };
-                      await persistQueue(updated);
+                      await persistQueue({ ...queue, workflowSpaceKey: '' });
                       setWorkflowSaving(false);
-                      setSavedMsg('Saved!');
-                      setTimeout(() => setSavedMsg(''), 2000);
+                      setSavedMsg('Saved!'); setTimeout(() => setSavedMsg(''), 2000);
                     }}
                     className={cn(
                       'flex items-center gap-3 px-4 py-3 rounded-xl border-2 text-left transition-all',
-                      !queue.workflowSpaceKey
-                        ? 'border-blue-500 bg-blue-50'
-                        : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50'
+                      !queue.workflowSpaceKey ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50'
                     )}>
-                    <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
-                      <GitMerge size={15} className="text-gray-500" />
+                    <div className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
+                      <GitMerge size={13} className="text-gray-500" />
                     </div>
                     <div>
-                      <p className="text-[13px] font-semibold text-gray-800">Default (parent space)</p>
-                      <p className="text-[11px] text-gray-400">Use this dept_queue space&apos;s own workflow</p>
+                      <p className="text-[13px] font-semibold text-gray-800">Default (this space)</p>
+                      <p className="text-[11px] text-gray-400">Use this queue space&apos;s own workflow</p>
                     </div>
-                    {!queue.workflowSpaceKey && <Check size={15} className="ml-auto text-blue-600 flex-shrink-0" />}
+                    {!queue.workflowSpaceKey && <Check size={14} className="ml-auto text-blue-600 flex-shrink-0" />}
                   </button>
-
                   {allSpaces.filter(s => s.key !== spaceKey).map(s => (
                     <button
                       key={s.key}
                       onClick={async () => {
-                        if (!queue) return;
                         setWorkflowSaving(true);
-                        const updated = { ...queue, workflowSpaceKey: s.key };
-                        await persistQueue(updated);
+                        await persistQueue({ ...queue, workflowSpaceKey: s.key });
                         setWorkflowSaving(false);
-                        setSavedMsg('Saved!');
-                        setTimeout(() => setSavedMsg(''), 2000);
+                        setSavedMsg('Saved!'); setTimeout(() => setSavedMsg(''), 2000);
                       }}
                       className={cn(
                         'flex items-center gap-3 px-4 py-3 rounded-xl border-2 text-left transition-all',
-                        queue.workflowSpaceKey === s.key
-                          ? 'border-blue-500 bg-blue-50'
-                          : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50'
+                        queue.workflowSpaceKey === s.key ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50'
                       )}>
-                      <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center flex-shrink-0">
+                      <div className="w-7 h-7 rounded-lg bg-indigo-100 flex items-center justify-center flex-shrink-0">
                         <span className="text-[10px] font-bold text-indigo-700">{s.key.slice(0, 3)}</span>
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-[13px] font-semibold text-gray-800 truncate">{s.name}</p>
                         <p className="text-[11px] text-gray-400">{s.key}</p>
                       </div>
-                      {queue.workflowSpaceKey === s.key && <Check size={15} className="ml-auto text-blue-600 flex-shrink-0" />}
+                      {queue.workflowSpaceKey === s.key && <Check size={14} className="ml-auto text-blue-600 flex-shrink-0" />}
                     </button>
                   ))}
                 </div>
                 {workflowSaving && (
-                  <div className="flex items-center gap-2 mt-4 text-[12.5px] text-blue-600">
+                  <div className="flex items-center gap-2 mt-3 text-[12.5px] text-blue-600">
                     <Loader2 size={13} className="animate-spin" /> Saving…
                   </div>
                 )}
                 {savedMsg && !workflowSaving && (
-                  <div className="flex items-center gap-1.5 mt-4 text-[12.5px] text-emerald-600">
+                  <div className="flex items-center gap-1.5 mt-3 text-[12.5px] text-emerald-600">
                     <Check size={13} /> {savedMsg}
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Step 2 — Status filter */}
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-gray-50">
+                <div className="flex items-center gap-2">
+                  <GitMerge size={15} className="text-blue-500" />
+                  <span className="text-[13px] font-semibold text-gray-800">Step 2 — Select Visible Statuses</span>
+                  {queue.statusIds?.length ? (
+                    <span className="text-[11px] font-semibold text-blue-600 bg-blue-50 border border-blue-200 rounded-full px-2.5 py-0.5">
+                      {queue.statusIds.length} selected
+                    </span>
+                  ) : (
+                    <span className="text-[11px] font-semibold text-gray-400 bg-gray-100 border border-gray-200 rounded-full px-2.5 py-0.5">
+                      All
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => { persistQueue({ ...queue, statusIds: spaceStatuses.map(s => s.id) }); setSavedMsg('Saved!'); setTimeout(() => setSavedMsg(''), 2000); }}
+                    className="text-[12px] font-medium text-blue-600 hover:text-blue-800 px-3 py-1.5 rounded-lg border border-blue-200 hover:bg-blue-50 transition-colors"
+                  >Select All</button>
+                  <button
+                    onClick={() => { persistQueue({ ...queue, statusIds: [] }); setSavedMsg('Saved!'); setTimeout(() => setSavedMsg(''), 2000); }}
+                    className="text-[12px] font-medium text-gray-500 hover:text-gray-700 px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-100 transition-colors"
+                  >Clear All</button>
+                </div>
+              </div>
+              <p className="text-[12px] text-gray-500 px-6 pt-3 pb-1">
+                Check only the statuses that should be visible for this queue. Unchecked statuses won&apos;t appear in the ticket status dropdown.
+              </p>
+              {spaceStatuses.length === 0 ? (
+                <div className="flex flex-col items-center py-10 text-center">
+                  <p className="text-[13px] text-gray-400">No statuses found for this space.</p>
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-50">
+                  {spaceStatuses.map(st => {
+                    const isChecked = !queue.statusIds?.length || queue.statusIds.includes(st.id);
+                    return (
+                      <label key={st.id} className="flex items-center gap-4 px-6 py-3.5 hover:bg-gray-50 cursor-pointer transition-colors">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => {
+                            const current = queue.statusIds?.length ? queue.statusIds : spaceStatuses.map(s => s.id);
+                            const next = isChecked ? current.filter(id => id !== st.id) : [...current, st.id];
+                            persistQueue({ ...queue, statusIds: next });
+                            setSavedMsg('Saved!'); setTimeout(() => setSavedMsg(''), 2000);
+                          }}
+                          className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                        />
+                        <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: st.color || '#94a3b8' }} />
+                        <span className="flex-1 text-[13.5px] font-medium text-gray-800">{st.name}</span>
+                        <span className="text-[11px] text-gray-400 capitalize">{(st.category || '').replace('_', ' ')}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}

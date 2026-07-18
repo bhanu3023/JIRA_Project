@@ -875,7 +875,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
   const _deptParam = useSearchParams()?.get('dept') || '';
   const [expandedQueueSub, setExpandedQueueSub] = useState<string | null>(null);
   const [rrConfig, setRrConfig] = useState<any>(null);
-  const { user } = useStore(useShallow((s) => ({ user: s.user })));
+  const { user, currentIssue } = useStore(useShallow((s) => ({ user: s.user, currentIssue: s.currentIssue })));
   const searchParams = useSearchParams();
   const router = useRouter();
   const canManageSpace = isManager(user?.role);
@@ -980,7 +980,18 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     }).catch(() => {});
   }, [spaceKey, user?.id]);
 
-  const queueActive = (q: string) => (searchParams?.get('queue') || 'all-open') === q;
+  const queueActive = (queueId: string) => {
+    if ((searchParams?.get('queue') || 'all-open') === queueId) return true;
+    // When on an issue page, highlight the queue matching the ticket's current_department
+    if (pathname?.startsWith('/issues/')) {
+      const dept = (currentIssue as any)?.current_department;
+      if (dept) {
+        const matchedQueue = customQueues.find(q => q.id === queueId);
+        if (matchedQueue && matchedQueue.name.toLowerCase() === dept.toLowerCase()) return true;
+      }
+    }
+    return false;
+  };
 
   // Queues this user is a member of
   const userQueues = customQueues.filter(q => q.memberIds.includes(user?.id || ''));

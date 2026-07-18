@@ -291,9 +291,14 @@ export default function IssueDetailPage() {
 
       // When a ticket is routed to a department, find the dept_queue space that owns
       // the custom queue with that name, and load statuses/workflow from THAT space.
-      const loadStatusesForSpace = (spaceKey: string) => {
+      const loadStatusesForSpace = (spaceKey: string, statusIds?: string[]) => {
         api.getSpace(spaceKey).then(space => {
-          setSpaceStatuses(space.statuses || []);
+          const allStatuses = space.statuses || [];
+          // If queue has specific statusIds configured, filter to only those
+          const filtered = statusIds?.length
+            ? allStatuses.filter((s: any) => statusIds.includes(s.id))
+            : allStatuses;
+          setSpaceStatuses(filtered);
           setSpaceMembers(space.members || []);
           api.request<any>(`workflows/wf_${spaceKey}/statuses`).then(wf => {
             setWorkflowTransitions(wf.transitions || space.transitions || []);
@@ -304,21 +309,34 @@ export default function IssueDetailPage() {
       };
 
       if (dept) {
-        // Search dept_queue spaces for a queue whose name matches current_department.
-        // If the queue has a workflowSpaceKey configured, use THAT space's workflow.
-        // Otherwise fall back to the dept_queue space's own workflow.
-        const deptQueueSpaces = (spaces as any[]).filter(s => s.type === 'dept_queue');
+        // Search all spaces for a queue matching current_department.
+        // Check issue's own space first (most likely), then remaining spaces.
+        // No type filter — CloudFuze Board may not have type='dept_queue'.
+        const allSpaceKeys = [
+          currentIssue.spaceKey,
+          ...(spaces as any[]).map((s: any) => s.key).filter((k: string) => k !== currentIssue.spaceKey),
+        ];
         let found = false;
-        for (const s of deptQueueSpaces) {
+        for (const spKey of allSpaceKeys) {
           try {
-            const stored = localStorage.getItem(`custom_queues_${s.key}`);
+            const stored = localStorage.getItem(`custom_queues_${spKey}`);
             if (stored) {
               const queues: any[] = JSON.parse(stored);
               const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
               if (matchedQueue) {
-                // Use the queue's configured workflow source, or the parent space if unset
-                const effectiveKey = matchedQueue.workflowSpaceKey || s.key;
-                loadStatusesForSpace(effectiveKey);
+                const qSt = matchedQueue.queueStatuses;
+                const qTr = matchedQueue.queueTransitions;
+                if (qSt?.length) {
+                  setSpaceStatuses(qSt);
+                  setWorkflowTransitions((qTr || []).map((t: any) => ({
+                    fromStatusId: t.fromStatusId ?? t.from,
+                    toStatusId: t.toStatusId ?? t.to,
+                  })));
+                  found = true;
+                  break;
+                }
+                const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
+                loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
                 found = true;
                 break;
               }
@@ -326,16 +344,26 @@ export default function IssueDetailPage() {
           } catch {}
         }
         if (!found) {
-          // Fallback: try API for each dept_queue space (async, picks first match)
+          // Fallback: try API — check own space first, then all spaces
           (async () => {
-            for (const s of deptQueueSpaces) {
+            for (const spKey of allSpaceKeys) {
               try {
-                const queues = await api.request<any[]>(`custom-queues/${s.key}`);
+                const queues = await api.request<any[]>(`custom-queues/${spKey}`);
                 if (Array.isArray(queues)) {
                   const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
                   if (matchedQueue) {
-                    const effectiveKey = matchedQueue.workflowSpaceKey || s.key;
-                    loadStatusesForSpace(effectiveKey);
+                    const qSt = matchedQueue.queueStatuses;
+                    const qTr = matchedQueue.queueTransitions;
+                    if (qSt?.length) {
+                      setSpaceStatuses(qSt);
+                      setWorkflowTransitions((qTr || []).map((t: any) => ({
+                    fromStatusId: t.fromStatusId ?? t.from,
+                    toStatusId: t.toStatusId ?? t.to,
+                  })));
+                      return;
+                    }
+                    const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
+                    loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
                     return;
                   }
                 }
@@ -427,7 +455,7 @@ export default function IssueDetailPage() {
         } catch { /* ignore */ }
       })();
     }
-  }, [currentIssue?.spaceKey, currentIssue?.id, currentIssue?.spaceId]);
+  }, [currentIssue?.spaceKey, currentIssue?.id, currentIssue?.spaceId, spaces]);
 
   // Periodically re-check SLA breach status every 30s and sync custom fields
   useEffect(() => {
@@ -612,6 +640,21 @@ export default function IssueDetailPage() {
         return;
       }
     }
+    // Custom queue status (qst_...) — can't set as issue.statusId (not a DB record).
+    // Store in dept_statuses[current_department] instead.
+    if (statusId.startsWith('qst_') && targetStatus) {
+      const dept = (issue as any).current_department;
+      if (dept) {
+        await api.updateIssue(issueKey, {
+          queueStatusId: statusId,
+          queueStatusName: (targetStatus as any).name,
+          queueStatusColor: (targetStatus as any).color || '#64748B',
+          queueStatusCategory: (targetStatus as any).category || 'todo',
+        } as any);
+        loadIssue(issueKey);
+        return;
+      }
+    }
     await handleUpdate('statusId', statusId);
   };
 
@@ -671,6 +714,25 @@ export default function IssueDetailPage() {
     return role === 'admin' || role === 'administrator' || role === 'owner';
   }, [user, spaceMembers]);
 
+  // Resolve the correct per-queue workflow URL for a ticket with current_department.
+  // Checks the issue's own space first, then all loaded spaces — no type filter needed.
+  const resolveQueueWorkflowHref = React.useCallback((issueSpaceKey: string, dept: string | undefined): string => {
+    if (dept) {
+      const keysToSearch = [issueSpaceKey, ...(spaces as any[]).map((s: any) => s.key).filter((k: string) => k !== issueSpaceKey)];
+      for (const key of keysToSearch) {
+        try {
+          const stored = localStorage.getItem(`custom_queues_${key}`);
+          if (stored) {
+            const qs: any[] = JSON.parse(stored);
+            const q = qs.find((q: any) => (q.name || '').toLowerCase() === dept.toLowerCase());
+            if (q) return `/spaces/${key}/queue/${q.id}/workflow`;
+          }
+        } catch {}
+      }
+    }
+    return `/spaces/${issueSpaceKey}/workflow`;
+  }, [spaces]);
+
   const handleDelete = async () => {
     setDeleting(true);
     try {
@@ -710,7 +772,14 @@ export default function IssueDetailPage() {
   );
 
   const issue = currentIssue;
-  const issueStat = getIssueStatus(issue);
+  // Use per-queue custom status from dept_statuses when the issue is in a queue
+  // and the stored status is a custom queue status (qst_... ID).
+  const rawDeptStatuses = (issue as any).dept_statuses || {};
+  const currentIssueDept = (issue as any).current_department;
+  const deptQueueSt = currentIssueDept ? rawDeptStatuses[currentIssueDept] : null;
+  const issueStat = (deptQueueSt && typeof deptQueueSt.id === 'string' && deptQueueSt.id.startsWith('qst_'))
+    ? (deptQueueSt as any)
+    : getIssueStatus(issue);
   const t = typeIcons[issue.type] || typeIcons.task;
 
   /** Real-time SLA breach value for "Time to First Response" / "Time to Resolution" custom fields */
@@ -1888,7 +1957,7 @@ export default function IssueDetailPage() {
 
                     {options.length === 0 ? (
                       <p className="px-3 py-3 text-[12px] text-gray-400 italic">
-                        No transitions defined. <Link href={`/spaces/${issue.spaceKey}/workflow`} className="text-blue-500 underline">Set up workflow</Link>
+                        No transitions defined. {isSpaceAdmin && <Link href={resolveQueueWorkflowHref(issue.spaceKey, (issue as any).current_department)} className="text-blue-500 underline">Set up workflow</Link>}
                       </p>
                     ) : (
                       <div className="py-1">
@@ -1916,16 +1985,18 @@ export default function IssueDetailPage() {
                       </div>
                     )}
 
-                    {/* View workflow link */}
-                    <div className="border-t border-gray-100">
-                      <Link
-                        href={`/spaces/${issue.spaceKey}/workflow`}
-                        onClick={() => setShowStatusDropdown(false)}
-                        className="flex items-center gap-2 px-3 py-2 text-[11.5px] text-gray-400 hover:text-blue-600 hover:bg-gray-50 transition-colors"
-                      >
-                        <Settings size={11} /> View workflow
-                      </Link>
-                    </div>
+                    {/* View workflow link — admin/owner only */}
+                    {isSpaceAdmin && (
+                      <div className="border-t border-gray-100">
+                        <Link
+                          href={resolveQueueWorkflowHref(issue.spaceKey, (issue as any).current_department)}
+                          onClick={() => setShowStatusDropdown(false)}
+                          className="flex items-center gap-2 px-3 py-2 text-[11.5px] text-gray-400 hover:text-blue-600 hover:bg-gray-50 transition-colors"
+                        >
+                          <Settings size={11} /> View workflow
+                        </Link>
+                      </div>
+                    )}
                   </Dropdown>
                 );
               })()}

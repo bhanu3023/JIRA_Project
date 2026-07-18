@@ -356,6 +356,8 @@ function SpaceDetailContent() {
     if (!spaceKey || queueFilter === 'queues') return;
     // For custom queues, wait until allCustomQueues has loaded so activeCustomQueue is resolved
     if (queueFilter.startsWith('cq_') && customQueuesLoadedFor !== spaceKey) return;
+    // If queue ID is known but can't be resolved to a queue object, don't load without dept filter
+    if (queueFilter.startsWith('cq_') && !activeCustomQueue) return;
     let cancelled = false;
     setLoadError(null);
     (async () => {
@@ -494,6 +496,9 @@ function SpaceDetailContent() {
         params.dept = activeCustomQueue.name;
         params.page = String(currentPage);
         params.limit = '50';
+      } else if (queueFilter.startsWith('cq_')) {
+        // Queue not yet resolved — skip this refresh tick
+        return;
       } else if (queueFilter === 'all-requests') {
         params.page = String(currentPage);
         params.limit = '50';
