@@ -1304,10 +1304,12 @@ async function _handleJiraPgApi(
       include: {
         statuses: { orderBy: { order: 'asc' } },
         members: { include: { user: true } },
+        workflowTransitions: true,
       },
     });
     if (!sp) return json({ error: 'Space not found' }, 404);
     const result = formatSpace(sp);
+    result.transitions = (sp as any).workflowTransitions || [];
     // Merge raw department column (not in Prisma schema)
     try {
       const deptRows = await pool.query(`SELECT "userId", department FROM space_members WHERE "spaceId"=$1`, [sp.id]);
