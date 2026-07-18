@@ -1923,7 +1923,7 @@ async function _handleJiraPgApi(
            FROM issues i
            LEFT JOIN statuses s ON i."statusId" = s.id
            WHERE i."spaceId" = ANY($1::text[])
-             AND (LOWER(i.current_department) = LOWER($2) OR i.current_department IS NULL OR i.current_department = '')
+             AND LOWER(i.current_department) = LOWER($2)
            ${deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : ''}
            ${deptSearchClause}`,
           countParams
@@ -1949,7 +1949,7 @@ async function _handleJiraPgApi(
            LEFT JOIN users a ON i."assigneeId" = a.id
            LEFT JOIN users r ON i."reporterId" = r.id
            WHERE i."spaceId" = ANY($1::text[])
-             AND (LOWER(i.current_department) = LOWER($2) OR i.current_department IS NULL OR i.current_department = '')
+             AND LOWER(i.current_department) = LOWER($2)
            ${deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : ''}
            ${deptSearchClause}
            ORDER BY i."updatedAt" DESC, i."createdAt" DESC
