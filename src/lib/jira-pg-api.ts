@@ -507,10 +507,21 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
     } catch { /* notifications table may not have issueKey column */ }
 
     await pool.end();
-    const policies = res.rows;
+    const allPolicies = res.rows;
+    if (!allPolicies.length) return [];
+
+    // Only apply policies that target this issue's dept (or have no dept restriction)
+    const issueDept = ((issue as any).current_department || '').trim().toLowerCase();
+    const policies = allPolicies.filter((p: any) => {
+      const pDept = (p.dept_name || '').trim().toLowerCase();
+      return !pDept || pDept === issueDept;
+    });
     if (!policies.length) return [];
+
     const priority = (issue.priority || 'medium').toLowerCase();
     const isResolved = issue.status?.category === 'done';
+    const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
+
     return policies.map((policy: any) => {
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
       const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
@@ -530,17 +541,27 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
           break;
         }
       }
+
+      // Check if current status is a pause status for this policy
+      const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
+        ? policy.pauseStatuses.map((s: string) => s.trim().toLowerCase())
+        : [];
+      const isPaused = !isResolved && pauseStatuses.includes(currentStatusName);
+
       const startedAt = (issue as any).dept_sla_started_at
         ? new Date((issue as any).dept_sla_started_at).toISOString()
         : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
       const dueTime = new Date(new Date(startedAt).getTime() + durationMs).toISOString();
-      const isBreached = !isResolved && new Date(dueTime) < new Date();
+      // Paused SLAs are never breached — clock stopped
+      const isBreached = !isResolved && !isPaused && new Date(dueTime) < new Date();
       return {
         id: `sla_${policy.id}_${issue.key}`,
         policyId: policy.id,
         policyName: policy.name || 'SLA',
+        deptName: policy.dept_name || null,
         dueTime,
         isBreached,
+        isPaused,
         isCompleted: isResolved,
         startedAt,
         goalDurationMs: durationMs,
