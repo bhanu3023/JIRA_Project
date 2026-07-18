@@ -287,28 +287,59 @@ export default function IssueDetailPage() {
 
   useEffect(() => {
     if (currentIssue?.spaceKey) {
-      // When a ticket is routed to a department, show that department's board statuses/workflow
-      const DEPT_BOARD: Record<string, string> = {
-        'Dev': 'L2BOARD',
-        'Migration': 'L1BOAR',
-        'QA': 'QABOAR',
-        'Infra': 'INFRABOARD',
-      };
       const dept = (currentIssue as any).current_department as string | undefined;
-      const effectiveSpaceKey = (dept && DEPT_BOARD[dept]) ? DEPT_BOARD[dept] : currentIssue.spaceKey;
-      api.getSpace(effectiveSpaceKey).then(space => {
-        setSpaceStatuses(space.statuses || []);
-        setSpaceMembers(prev => {
-          // Keep members from original space (for assignee picker), merge with dept board members
-          return space.members || prev;
-        });
-        // Also fetch transitions from the dedicated workflow endpoint for accuracy
-        api.request<any>(`workflows/wf_${effectiveSpaceKey}/statuses`).then(wf => {
-          setWorkflowTransitions(wf.transitions || space.transitions || []);
-        }).catch(() => {
-          setWorkflowTransitions(space.transitions || []);
-        });
-      }).catch(() => {});
+
+      // When a ticket is routed to a department, find the dept_queue space that owns
+      // the custom queue with that name, and load statuses/workflow from THAT space.
+      const loadStatusesForSpace = (spaceKey: string) => {
+        api.getSpace(spaceKey).then(space => {
+          setSpaceStatuses(space.statuses || []);
+          setSpaceMembers(space.members || []);
+          api.request<any>(`workflows/wf_${spaceKey}/statuses`).then(wf => {
+            setWorkflowTransitions(wf.transitions || space.transitions || []);
+          }).catch(() => {
+            setWorkflowTransitions(space.transitions || []);
+          });
+        }).catch(() => {});
+      };
+
+      if (dept) {
+        // Search dept_queue spaces (via localStorage cache first, then API) for a queue
+        // whose name matches current_department — that space owns this dept's workflow.
+        const deptQueueSpaces = (spaces as any[]).filter(s => s.type === 'dept_queue');
+        let found = false;
+        for (const s of deptQueueSpaces) {
+          try {
+            const stored = localStorage.getItem(`custom_queues_${s.key}`);
+            if (stored) {
+              const queues: any[] = JSON.parse(stored);
+              if (queues.some(q => (q.name || '').toLowerCase() === dept.toLowerCase())) {
+                loadStatusesForSpace(s.key);
+                found = true;
+                break;
+              }
+            }
+          } catch {}
+        }
+        if (!found) {
+          // Fallback: try API for each dept_queue space (async, picks first match)
+          (async () => {
+            for (const s of deptQueueSpaces) {
+              try {
+                const queues = await api.request<any[]>(`custom-queues/${s.key}`);
+                if (Array.isArray(queues) && queues.some(q => (q.name || '').toLowerCase() === dept.toLowerCase())) {
+                  loadStatusesForSpace(s.key);
+                  return;
+                }
+              } catch {}
+            }
+            // Nothing found — fall back to the original space
+            loadStatusesForSpace(currentIssue.spaceKey);
+          })();
+        }
+      } else {
+        loadStatusesForSpace(currentIssue.spaceKey);
+      }
     }
     if (currentIssue?.spaceId && currentIssue?.id) {
       // Load custom fields for this space — also include any that were auto-copied by automation
