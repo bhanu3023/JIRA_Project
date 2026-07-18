@@ -287,11 +287,23 @@ export default function IssueDetailPage() {
 
   useEffect(() => {
     if (currentIssue?.spaceKey) {
-      api.getSpace(currentIssue.spaceKey).then(space => {
+      // When a ticket is routed to a department, show that department's board statuses/workflow
+      const DEPT_BOARD: Record<string, string> = {
+        'Dev': 'L2BOARD',
+        'Migration': 'L1BOAR',
+        'QA': 'QABOAR',
+        'Infra': 'INFRABOARD',
+      };
+      const dept = (currentIssue as any).current_department as string | undefined;
+      const effectiveSpaceKey = (dept && DEPT_BOARD[dept]) ? DEPT_BOARD[dept] : currentIssue.spaceKey;
+      api.getSpace(effectiveSpaceKey).then(space => {
         setSpaceStatuses(space.statuses || []);
-        setSpaceMembers(space.members || []);
+        setSpaceMembers(prev => {
+          // Keep members from original space (for assignee picker), merge with dept board members
+          return space.members || prev;
+        });
         // Also fetch transitions from the dedicated workflow endpoint for accuracy
-        api.request<any>(`workflows/wf_${currentIssue.spaceKey}/statuses`).then(wf => {
+        api.request<any>(`workflows/wf_${effectiveSpaceKey}/statuses`).then(wf => {
           setWorkflowTransitions(wf.transitions || space.transitions || []);
         }).catch(() => {
           setWorkflowTransitions(space.transitions || []);
