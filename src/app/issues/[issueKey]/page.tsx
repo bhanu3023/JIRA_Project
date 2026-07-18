@@ -2356,6 +2356,14 @@ export default function IssueDetailPage() {
               currentStatusName={issueStat?.name}
               onChanged={() => loadIssue(issueKey)}
               onDeptChangeBlocked={() => setDeptBlockModal(true)}
+              onSetWaitingStatus={async (deptName: string) => {
+                const waitingStatus = spaceStatuses.find((s: any) =>
+                  (s.name || '').toLowerCase() === `waiting for ${deptName.toLowerCase()}`
+                );
+                if (waitingStatus) {
+                  await handleStatusChange(waitingStatus.id, waitingStatus);
+                }
+              }}
             />
 
             {/* Priority */}
@@ -3534,7 +3542,7 @@ export default function IssueDetailPage() {
 }
 
 /* ===== Department Field ===== */
-function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, currentStatusName, onChanged, onDeptChangeBlocked }: {
+function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, currentStatusName, onChanged, onDeptChangeBlocked, onSetWaitingStatus }: {
   issueKey: string;
   currentDepartment: string | null;
   spaceKey: string;
@@ -3543,6 +3551,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   currentStatusName?: string;
   onChanged: () => void;
   onDeptChangeBlocked?: () => void;
+  onSetWaitingStatus?: (deptName: string) => Promise<void>;
 }) {
   const [deptOptions, setDeptOptions] = React.useState<{ name: string; boardKey: string }[]>([]);
   const [spaceAssigned, setSpaceAssigned] = React.useState<boolean | null>(null);
@@ -3550,6 +3559,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   const [saving, setSaving] = React.useState(false);
   const [optimisticDept, setOptimisticDept] = React.useState<string | null>(null);
   const [deptToast, setDeptToast] = React.useState<{ dept: string; board: string; newKey: string; assignee: string; queueUrl?: string } | null>(null);
+  const [pendingDept, setPendingDept] = React.useState<{ name: string; boardKey: string } | null>(null);
 
   // When parent updates currentDepartment, clear the optimistic value
   React.useEffect(() => { setOptimisticDept(null); }, [currentDepartment]);
@@ -3617,17 +3627,13 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   }, [spaceKey]);
 
   const changeDept = async (dept: { name: string; boardKey: string }) => {
-    if (dept.name.toUpperCase() === (currentDepartment || '').toUpperCase()) { setShowDrop(false); return; }
-    // Block department change unless current status is "Waiting for Dev"
-    if ((currentStatusName || '').trim().toLowerCase() !== 'waiting for dev') {
-      setShowDrop(false);
-      onDeptChangeBlocked?.();
-      return;
-    }
+    if (dept.name.toUpperCase() === (currentDepartment || '').toUpperCase()) { return; }
     setSaving(true);
     setShowDrop(false);
     const prevDept = optimisticDept ?? currentDepartment;
     setOptimisticDept(dept.name); // Show new value immediately
+    // Set status to "Waiting for [dept]" before changing department
+    try { await onSetWaitingStatus?.(dept.name); } catch {}
     try {
       // Always single-board: no targetBoard so dept changes on the same ticket
       const res = await fetch(`/api/issues/${issueKey}/department`, {
@@ -3734,6 +3740,37 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
           </div>
         )}
 
+        {/* Department change confirmation popup */}
+        {pendingDept && (
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40">
+            <div className="bg-white rounded-2xl shadow-2xl w-[380px] overflow-hidden">
+              <div className="h-1 bg-gradient-to-r from-amber-400 to-orange-500" />
+              <div className="px-6 py-5">
+                <h3 className="text-[15px] font-semibold text-gray-900 mb-1">Change Department?</h3>
+                <p className="text-[13px] text-gray-600 mt-2 leading-relaxed">
+                  The current status in <span className="font-semibold text-gray-800">{currentDepartment || 'Dev'}</span> will
+                  first be set to <span className="font-semibold text-amber-600">Waiting for {pendingDept.name}</span>,
+                  then the ticket will move to <span className="font-semibold text-blue-700">{pendingDept.name}</span>.
+                </p>
+                <div className="flex items-center justify-end gap-2 mt-5">
+                  <button
+                    onClick={() => setPendingDept(null)}
+                    className="px-4 py-1.5 text-[13px] text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-100 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => { const d = pendingDept; setPendingDept(null); changeDept(d); }}
+                    className="px-4 py-1.5 text-[13px] font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    Yes, Change Department
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {showDrop && (
           <div className="absolute top-full left-0 z-50 bg-white border border-gray-200 rounded-xl shadow-lg w-64 py-1 mt-1">
             <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">
@@ -3753,7 +3790,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
                 return (
                   <button
                     key={d.name}
-                    onClick={() => changeDept(d)}
+                    onClick={() => { setShowDrop(false); setPendingDept(d); }}
                     className={`w-full text-left px-3 py-2.5 text-[12.5px] hover:bg-gray-50 flex items-center gap-2 ${isActive ? 'text-blue-600 font-medium bg-blue-50/40' : 'text-gray-700'}`}
                   >
                     {isActive

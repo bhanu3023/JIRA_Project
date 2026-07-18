@@ -2409,6 +2409,14 @@ async function _handleJiraPgApi(
             [issue.assigneeId, issue.id, oldDept]
           ).catch(() => {});
         }
+        // When ticket returns to Dev (or any dept that has a saved assignee), also record worked-on for that dept
+        const devAssignee = deptAssignees[newDept];
+        if (devAssignee?.id) {
+          pool.query(
+            `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'returned') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='returned', worked_at=NOW()`,
+            [devAssignee.id, issue.id, newDept]
+          ).catch(() => {});
+        }
       } catch {}
 
       // Notifications on dept change
