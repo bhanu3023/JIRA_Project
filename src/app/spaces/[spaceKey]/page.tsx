@@ -484,17 +484,26 @@ function SpaceDetailContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaceKey, user?.id]);
 
-  // Auto-refresh every 30s for Customer_Board so new email-tickets appear without manual refresh
+  // Auto-refresh every 15s for all dept_queue spaces so new tickets appear without manual refresh
   useEffect(() => {
-    if (spaceKey !== 'CUSTM') return;
+    const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
+    if (!isDeptQueue) return;
     const id = setInterval(() => {
       const params: Record<string, string> = { spaceKey };
-      if (queueFilter && queueFilter !== 'all-requests') params.queue = queueFilter;
-      if (currentPage > 1) params.page = String(currentPage);
+      if (queueFilter.startsWith('cq_') && activeCustomQueue?.name) {
+        params.dept = activeCustomQueue.name;
+        params.page = String(currentPage);
+        params.limit = '50';
+      } else if (queueFilter === 'all-requests') {
+        params.page = String(currentPage);
+        params.limit = '50';
+      } else if (queueFilter && queueFilter !== 'queues') {
+        params.queue = queueFilter;
+      }
       loadIssues(params).catch(() => {});
-    }, 30000);
+    }, 15000);
     return () => clearInterval(id);
-  }, [spaceKey, queueFilter, currentPage, loadIssues]);
+  }, [spaceKey, queueFilter, currentPage, activeCustomQueue, currentSpace?.type, allCustomQueues.length, loadIssues]);
 
   // Load custom fields assigned to this space → dynamic columns
   useEffect(() => {
