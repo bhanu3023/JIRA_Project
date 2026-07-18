@@ -847,7 +847,15 @@ type CustomQueue = { id: string; name: string; memberIds: string[]; suspendedIds
 
 function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pathname: string; spaceType?: string }) {
   // treat as dept_queue if explicitly typed OR if it has custom queues (backward compat for pre-existing spaces)
-  const [isDeptQueue, setIsDeptQueue] = useState(spaceType === 'dept_queue');
+  // Read localStorage immediately so the correct layout renders on first paint (no flash)
+  const [isDeptQueue, setIsDeptQueue] = useState(() => {
+    if (spaceType === 'dept_queue') return true;
+    try {
+      const stored = typeof window !== 'undefined' ? localStorage.getItem(`custom_queues_${spaceKey}`) : null;
+      if (stored) { const q = JSON.parse(stored); return Array.isArray(q) && q.length > 0; }
+    } catch {}
+    return false;
+  });
   const [queuesOpen, setQueuesOpen] = useState(true);
   const [defaultOpen, setDefaultOpen] = useState(true);
   const [counts, setCounts] = useState({ allOpen: 0, assigned: 0, total: 0, unassigned: 0 });
