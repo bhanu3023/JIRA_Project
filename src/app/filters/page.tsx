@@ -443,12 +443,61 @@ function DateDropBtn({
 
 // All available "extra" filter options that can be added to the bar from More filters
 const EXTRA_FILTER_OPTIONS = [
-  { id: 'reporter', label: 'Reporter',     group: 'People' },
-  { id: 'priority', label: 'Priority',     group: 'Issue' },
-  { id: 'label',    label: 'Label',        group: 'Issue' },
-  { id: 'created',  label: 'Created date', group: 'Date' },
-  { id: 'updated',  label: 'Updated date', group: 'Date' },
+  { id: 'reporter',       label: 'Reporter',        group: 'People' },
+  { id: 'projectManager', label: 'Project Manager', group: 'People' },
+  { id: 'priority',       label: 'Priority',        group: 'Issue' },
+  { id: 'label',          label: 'Label',           group: 'Issue' },
+  { id: 'department',     label: 'Department',      group: 'Issue' },
+  { id: 'sprint',         label: 'Sprint',          group: 'Issue' },
+  { id: 'productType',    label: 'Product Type',    group: 'Issue' },
+  { id: 'combination',    label: 'Combination',     group: 'Issue' },
+  { id: 'customerName',   label: 'Customer Name',   group: 'Issue' },
+  { id: 'clientName',     label: 'Client Name',     group: 'Issue' },
+  { id: 'created',        label: 'Created date',    group: 'Date' },
+  { id: 'updated',        label: 'Updated date',    group: 'Date' },
+  { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
 ];
+
+/* ─── Simple text filter button ─── */
+function TextFilterBtn({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { setDraft(value); }, [value]);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+  const active = Boolean(value);
+  return (
+    <div ref={ref} className="relative flex-shrink-0">
+      <button onClick={() => setOpen(v => !v)}
+        className={cn('flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
+          active ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50')}>
+        {active ? `${label}: ${value}` : label}
+        {active
+          ? <span onClick={(e) => { e.stopPropagation(); onChange(''); }} className="ml-0.5 text-blue-400 hover:text-blue-700 cursor-pointer"><X size={11} /></span>
+          : <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />}
+      </button>
+      {open && (
+        <div className="absolute top-full mt-1 z-[200] w-56 rounded-lg border border-gray-200 bg-white shadow-2xl p-3">
+          <input autoFocus value={draft} onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { onChange(draft); setOpen(false); } if (e.key === 'Escape') setOpen(false); }}
+            placeholder={`Filter by ${label.toLowerCase()}…`}
+            className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-[12.5px] outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+          <div className="flex gap-2 mt-2">
+            <button onClick={() => { onChange(draft); setOpen(false); }}
+              className="flex-1 rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-blue-700">Apply</button>
+            {value && <button onClick={() => { onChange(''); setDraft(''); setOpen(false); }}
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] text-gray-600 hover:bg-gray-50">Clear</button>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* ─── More filters dropdown — all filters are "add to bar" style ─── */
 function MoreFiltersBtn({
@@ -565,6 +614,14 @@ export default function FiltersPage() {
   const [selLabels, setSelLabels]         = useState<string[]>([]);
   const [selCreated, setSelCreated]       = useState('');
   const [selUpdated, setSelUpdated]       = useState('');
+  const [selDueDate, setSelDueDate]       = useState('');
+  const [selDepartment, setSelDepartment] = useState('');
+  const [selSprint, setSelSprint]         = useState('');
+  const [selProductType, setSelProductType] = useState('');
+  const [selCombination, setSelCombination] = useState('');
+  const [selCustomerName, setSelCustomerName] = useState('');
+  const [selClientName, setSelClientName] = useState('');
+  const [selProjectManager, setSelProjectManager] = useState('');
 
   /* issues */
   const [issues, setIssues]   = useState<any[]>([]);
@@ -586,12 +643,19 @@ export default function FiltersPage() {
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
       if (prev.includes(key)) {
-        // remove from bar — also clear its value
-        if (key === 'created')  setSelCreated('');
-        if (key === 'updated')  setSelUpdated('');
-        if (key === 'reporter') setSelReporters([]);
-        if (key === 'priority') setSelPriorities([]);
-        if (key === 'label')    setSelLabels([]);
+        if (key === 'created')        setSelCreated('');
+        if (key === 'updated')        setSelUpdated('');
+        if (key === 'dueDate')        setSelDueDate('');
+        if (key === 'reporter')       setSelReporters([]);
+        if (key === 'priority')       setSelPriorities([]);
+        if (key === 'label')          setSelLabels([]);
+        if (key === 'department')     setSelDepartment('');
+        if (key === 'sprint')         setSelSprint('');
+        if (key === 'productType')    setSelProductType('');
+        if (key === 'combination')    setSelCombination('');
+        if (key === 'customerName')   setSelCustomerName('');
+        if (key === 'clientName')     setSelClientName('');
+        if (key === 'projectManager') setSelProjectManager('');
         return prev.filter((k) => k !== key);
       }
       return [...prev, key];
@@ -621,7 +685,8 @@ export default function FiltersPage() {
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length || selLabels.length ||
-    selCreated || selUpdated,
+    selCreated || selUpdated || selDueDate || selDepartment || selSprint ||
+    selProductType || selCombination || selCustomerName || selClientName || selProjectManager,
   );
 
   /* fetch issues — all filtering done server-side for accuracy */
@@ -680,6 +745,16 @@ export default function FiltersPage() {
         // Date ranges
         if (selCreated) params.createdRange = selCreated;
         if (selUpdated) params.updatedRange = selUpdated;
+        if (selDueDate) params.dueDateRange = selDueDate;
+
+        // Extra text/field filters
+        if (selDepartment)     params.department     = selDepartment;
+        if (selSprint)         params.sprint         = selSprint;
+        if (selProductType)    params.productType    = selProductType;
+        if (selCombination)    params.combination    = selCombination;
+        if (selCustomerName)   params.customerName   = selCustomerName;
+        if (selClientName)     params.clientName     = selClientName;
+        if (selProjectManager) params.projectManager = selProjectManager;
 
         // Text search
         if (text.trim()) params.q = text.trim();
@@ -690,7 +765,7 @@ export default function FiltersPage() {
       } catch { setIssues([]); setTotal(0); }
       setLoadingIssues(false);
     }, 400);
-  }, [text, selSpaces, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selLabels, selCreated, selUpdated, spaces]);
+  }, [text, selSpaces, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selLabels, selCreated, selUpdated, selDueDate, selDepartment, selSprint, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, spaces]);
 
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
 
@@ -712,7 +787,9 @@ export default function FiltersPage() {
   const clearAll = () => {
     setText(''); setSelSpaces([]); setSelAssignees([]); setSelReporters([]);
     setSelTypes([]); setSelStatuses([]); setSelPriorities([]); setSelLabels([]);
-    setSelCreated(''); setSelUpdated('');
+    setSelCreated(''); setSelUpdated(''); setSelDueDate('');
+    setSelDepartment(''); setSelSprint(''); setSelProductType('');
+    setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager('');
     setActiveExtras([]);
     setActiveFilterId(null);
   };
@@ -1085,6 +1162,48 @@ export default function FiltersPage() {
                 </button>
               </div>
             )}
+            {activeExtras.includes('department') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Department" value={selDepartment} onChange={setSelDepartment} />
+                <button onClick={() => toggleExtra('department')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('sprint') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Sprint" value={selSprint} onChange={setSelSprint} />
+                <button onClick={() => toggleExtra('sprint')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('productType') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Product Type" value={selProductType} onChange={setSelProductType} />
+                <button onClick={() => toggleExtra('productType')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('combination') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Combination" value={selCombination} onChange={setSelCombination} />
+                <button onClick={() => toggleExtra('combination')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('customerName') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Customer Name" value={selCustomerName} onChange={setSelCustomerName} />
+                <button onClick={() => toggleExtra('customerName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('clientName') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Client Name" value={selClientName} onChange={setSelClientName} />
+                <button onClick={() => toggleExtra('clientName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('projectManager') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Project Manager" value={selProjectManager} onChange={setSelProjectManager} />
+                <button onClick={() => toggleExtra('projectManager')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
             {activeExtras.includes('created') && (
               <div className="flex items-center gap-1">
                 <DateDropBtn
@@ -1099,14 +1218,14 @@ export default function FiltersPage() {
             )}
             {activeExtras.includes('updated') && (
               <div className="flex items-center gap-1">
-                <DateDropBtn
-                  label="Updated"
-                  selected={selUpdated}
-                  onChange={setSelUpdated}
-                />
-                <button onClick={() => toggleExtra('updated')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors">
-                  <X size={11} />
-                </button>
+                <DateDropBtn label="Updated" selected={selUpdated} onChange={setSelUpdated} />
+                <button onClick={() => toggleExtra('updated')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('dueDate') && (
+              <div className="flex items-center gap-1">
+                <DateDropBtn label="Due Date" selected={selDueDate} onChange={setSelDueDate} />
+                <button onClick={() => toggleExtra('dueDate')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
           </div>
