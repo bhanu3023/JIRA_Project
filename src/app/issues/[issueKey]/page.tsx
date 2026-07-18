@@ -1418,12 +1418,12 @@ export default function IssueDetailPage() {
             try {
               const cfg = JSON.parse(localStorage.getItem('migrated_field_config') || '{}');
               const curSpace = spaces.find(s => s.key === issue.spaceKey);
-              const rcEnabled = cfg['Root Cause']
+              const rcEnabled = (cfg['Root Cause']
                 ? (curSpace ? cfg['Root Cause'].spaceIds.includes(curSpace.id) : false)
-                : RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept;
-              const fdEnabled = cfg['Fix Description']
+                : RC_FD_DEFAULTS.includes(issue.spaceKey)) || isDevDept;
+              const fdEnabled = (cfg['Fix Description']
                 ? (curSpace ? cfg['Fix Description'].spaceIds.includes(curSpace.id) : false)
-                : RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept;
+                : RC_FD_DEFAULTS.includes(issue.spaceKey)) || isDevDept;
               return rcEnabled || fdEnabled;
             } catch { return RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept; }
           })() && (
@@ -1435,9 +1435,9 @@ export default function IssueDetailPage() {
                 try {
                   const cfg = JSON.parse(localStorage.getItem('migrated_field_config') || '{}');
                   const curSpace = spaces.find(s => s.key === issue.spaceKey);
-                  return cfg['Root Cause']
+                  return (cfg['Root Cause']
                     ? (curSpace ? cfg['Root Cause'].spaceIds.includes(curSpace.id) : false)
-                    : RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept;
+                    : RC_FD_DEFAULTS.includes(issue.spaceKey)) || isDevDept;
                 } catch { return RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept; }
               })() && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
@@ -1475,9 +1475,9 @@ export default function IssueDetailPage() {
                 try {
                   const cfg = JSON.parse(localStorage.getItem('migrated_field_config') || '{}');
                   const curSpace = spaces.find(s => s.key === issue.spaceKey);
-                  return cfg['Fix Description']
+                  return (cfg['Fix Description']
                     ? (curSpace ? cfg['Fix Description'].spaceIds.includes(curSpace.id) : false)
-                    : RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept;
+                    : RC_FD_DEFAULTS.includes(issue.spaceKey)) || isDevDept;
                 } catch { return RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept; }
               })() && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
