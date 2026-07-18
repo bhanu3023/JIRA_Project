@@ -115,6 +115,7 @@ export default function IssueDetailPage() {
   const [copiedLink, setCopiedLink]     = useState(false);
   const [customFields, setCustomFields] = useState<any[]>([]);
   const [mandatoryModal, setMandatoryModal] = useState<{ missingFields: string[]; pendingStatusId: string } | null>(null);
+  const [deptBlockModal, setDeptBlockModal] = useState(false);
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
   const [editingCustomField, setEditingCustomField] = useState<string | null>(null);
   const [customFieldEditValue, setCustomFieldEditValue] = useState('');
@@ -2227,7 +2228,9 @@ export default function IssueDetailPage() {
               spaceKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
               spaceId={issue.spaceId}
               currentBoardKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
+              currentStatusName={issueStat?.name}
               onChanged={() => loadIssue(issueKey)}
+              onDeptChangeBlocked={() => setDeptBlockModal(true)}
             />
 
             {/* Priority */}
@@ -3302,6 +3305,35 @@ export default function IssueDetailPage() {
         </div>
       )}
 
+      {deptBlockModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4" style={{ background: 'rgba(9,30,66,0.54)' }}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden">
+            <div className="flex items-center gap-3 px-6 pt-6 pb-4 border-b border-gray-100">
+              <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle size={18} className="text-amber-600" />
+              </div>
+              <div>
+                <h3 className="text-[15px] font-bold text-gray-900">Status change required</h3>
+                <p className="text-[12.5px] text-gray-500 mt-0.5">You must change the status first.</p>
+              </div>
+            </div>
+            <div className="px-6 py-4">
+              <p className="text-[13.5px] text-gray-600 leading-relaxed">
+                Please change the status to{' '}
+                <span className="font-semibold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">Waiting for Dev</span>{' '}
+                before changing the department.
+              </p>
+            </div>
+            <div className="flex justify-end px-6 py-4 bg-gray-50 border-t border-gray-100">
+              <button onClick={() => setDeptBlockModal(false)}
+                className="px-5 py-2 text-[13px] font-semibold text-white bg-gray-900 rounded-lg hover:bg-gray-700 transition-colors">
+                OK, got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showDeleteModal && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4" style={{ background: 'rgba(9,30,66,0.54)' }}>
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
@@ -3377,13 +3409,15 @@ export default function IssueDetailPage() {
 }
 
 /* ===== Department Field ===== */
-function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, onChanged }: {
+function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, currentStatusName, onChanged, onDeptChangeBlocked }: {
   issueKey: string;
   currentDepartment: string | null;
   spaceKey: string;
   spaceId?: string;
   currentBoardKey?: string;
+  currentStatusName?: string;
   onChanged: () => void;
+  onDeptChangeBlocked?: () => void;
 }) {
   const [deptOptions, setDeptOptions] = React.useState<{ name: string; boardKey: string }[]>([]);
   const [spaceAssigned, setSpaceAssigned] = React.useState<boolean | null>(null);
@@ -3459,6 +3493,12 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
 
   const changeDept = async (dept: { name: string; boardKey: string }) => {
     if (dept.name.toUpperCase() === (currentDepartment || '').toUpperCase()) { setShowDrop(false); return; }
+    // Block department change unless current status is "Waiting for Dev"
+    if ((currentStatusName || '').trim().toLowerCase() !== 'waiting for dev') {
+      setShowDrop(false);
+      onDeptChangeBlocked?.();
+      return;
+    }
     setSaving(true);
     setShowDrop(false);
     const prevDept = optimisticDept ?? currentDepartment;
