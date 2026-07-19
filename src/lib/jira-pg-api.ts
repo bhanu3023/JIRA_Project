@@ -3438,6 +3438,11 @@ async function _handleJiraPgApi(
     });
     // Update issue updatedAt
     await db.issue.update({ where: { key }, data: { updatedAt: new Date() } });
+    // DEBUG: log dept state after comment to detect any corruption
+    try {
+      const dbg = await pool.query('SELECT current_department, original_dept, dept_statuses FROM issues WHERE key=$1', [key]);
+      console.log('[COMMENT DEBUG] key=' + key + ' current_dept=' + dbg.rows[0]?.current_department + ' original_dept=' + dbg.rows[0]?.original_dept + ' dept_statuses=' + JSON.stringify(dbg.rows[0]?.dept_statuses));
+    } catch(e: any) { console.log('[COMMENT DEBUG ERROR]', e?.message); }
 
     // Mirror comment to all partner tickets (only explicitly linked via partnerKey)
     try {
