@@ -2167,7 +2167,7 @@ function SpaceDetailContent() {
                     )}
 
                     {/* Full comment thread */}
-                    {queueFilter !== 'sent-watching' && comments.length > 0 && (
+                    {comments.length > 0 && (
                       <div className="mx-4 mb-3 flex flex-col gap-1.5">
                         {comments.map((c: any, ci: number) => {
                           const firstName = c.author?.firstName || c.authorName?.split(' ')[0] || '?';
@@ -2191,14 +2191,14 @@ function SpaceDetailContent() {
                         })}
                       </div>
                     )}
-                    {queueFilter !== 'sent-watching' && comments.length === 0 && hasUpdate && (
+                    {comments.length === 0 && hasUpdate && (
                       <div className="mx-4 mb-3 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100 text-[12px] text-gray-500">
                         Status changed to <strong>{st?.name}</strong> · {timeAgo(issue.updatedAt!)}
                       </div>
                     )}
 
-                    {/* Inline comment area — hidden in Sent/Watching */}
-                    {queueFilter !== 'sent-watching' && <div className="mx-4 mb-3" onClick={e => e.stopPropagation()}>
+                    {/* Inline comment area */}
+                    <div className="mx-4 mb-3" onClick={e => e.stopPropagation()}>
                       {commentingOn === issue.key ? (
                         <div className="border border-blue-200 rounded-xl overflow-hidden shadow-sm bg-white">
                           <RichTextEditor
@@ -2237,7 +2237,7 @@ function SpaceDetailContent() {
                           <span>Add a comment…</span>
                         </button>
                       )}
-                    </div>}
+                    </div>
                   </div>
                 );
               })}
