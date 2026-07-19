@@ -1822,23 +1822,50 @@ async function _handleJiraPgApi(
           try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
           try { await pool.query(`WITH first_dept AS (SELECT DISTINCT ON (issue_id) issue_id, from_dept FROM issue_dept_transitions WHERE from_dept != '' ORDER BY issue_id, moved_at ASC) UPDATE issues i SET original_dept = COALESCE((SELECT fd.from_dept FROM first_dept fd WHERE fd.issue_id = i.id), i.current_department) WHERE i.original_dept IS NULL`); } catch {}
 
+          // Backfill queue_closed_tickets from dept_statuses keys (case-insensitive) so OR2 is always reliable
+          try {
+            await pool.query(
+              `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id)
+               SELECT i."spaceId", k.key, i.id
+               FROM issues i, jsonb_object_keys(COALESCE(i.dept_statuses, '{}'::jsonb)) AS k(key)
+               WHERE i."spaceId" = ANY($1::text[])
+                 AND LOWER(k.key) = LOWER($2)
+                 AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
+               ON CONFLICT DO NOTHING`,
+              [allSpaceIds, sentDeptParam]
+            );
+          } catch {}
+
+          // Backfill queue_closed_tickets from issue_dept_transitions
+          try {
+            await pool.query(
+              `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id)
+               SELECT t.space_id, t.from_dept, t.issue_id
+               FROM issue_dept_transitions t
+               WHERE t.space_id = ANY($1::text[])
+                 AND LOWER(t.from_dept) = LOWER($2)
+                 AND t.from_dept != ''
+               ON CONFLICT DO NOTHING`,
+              [allSpaceIds, sentDeptParam]
+            );
+          } catch {}
+
           const sentExistsClause = `(
             EXISTS (
+              SELECT 1 FROM queue_closed_tickets qct
+              WHERE qct.issue_id = i.id
+                AND LOWER(qct.dept_name) = LOWER($2)
+                AND i."spaceId" = ANY($1::text[])
+            )
+            OR EXISTS (
               SELECT 1 FROM issue_dept_transitions t
               WHERE t.issue_id = i.id
                 AND LOWER(t.from_dept) = LOWER($2)
                 AND LOWER(t.to_dept) != LOWER($2)
             )
             OR EXISTS (
-              SELECT 1 FROM queue_closed_tickets qct
-              WHERE qct.issue_id = i.id
-                AND LOWER(qct.dept_name) = LOWER($2)
-                AND i."spaceId" = ANY($1::text[])
-            )
-            OR (
-              i.dept_statuses IS NOT NULL
-              AND jsonb_exists(i.dept_statuses, $2)
-              AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
+              SELECT 1 FROM jsonb_object_keys(COALESCE(i.dept_statuses, '{}'::jsonb)) k
+              WHERE LOWER(k) = LOWER($2)
             )
             OR (
               LOWER(COALESCE(i.original_dept,'')) = LOWER($2)
