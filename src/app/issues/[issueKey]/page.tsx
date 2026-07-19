@@ -777,7 +777,9 @@ export default function IssueDetailPage() {
   const rawDeptStatuses = (issue as any).dept_statuses || {};
   const currentIssueDept = (issue as any).current_department;
   const deptQueueSt = currentIssueDept ? rawDeptStatuses[currentIssueDept] : null;
-  const issueStat = (deptQueueSt && typeof deptQueueSt.id === 'string' && deptQueueSt.id.startsWith('qst_'))
+  // Show dept_statuses[currentDept] if it's a qst_ status OR a virtual status (id='') with a name.
+  // Virtual statuses appear when a ticket first arrives in a dept (e.g. "Waiting for Migration").
+  const issueStat = (deptQueueSt && typeof deptQueueSt.id === 'string' && (deptQueueSt.id.startsWith('qst_') || (deptQueueSt.id === '' && deptQueueSt.name)))
     ? (deptQueueSt as any)
     : getIssueStatus(issue);
   const t = typeIcons[issue.type] || typeIcons.task;
