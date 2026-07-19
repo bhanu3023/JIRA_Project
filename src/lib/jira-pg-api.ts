@@ -1924,7 +1924,7 @@ async function _handleJiraPgApi(
           } catch { return null; } }))).filter(Boolean as any);
           return json({ issues: sentEnriched, total: sentDeptTotal, page, totalPages: Math.max(1, Math.ceil(sentDeptTotal / limit)) });
         }
-      } catch { return json({ issues: [], total: 0, page, totalPages: 1 }); }
+      } catch (sentErr: any) { console.error('[SentWatching ERROR]', sentErr?.message || sentErr); return json({ issues: [], total: 0, page, totalPages: 1 }); }
     }
 
     // Filter by dept param if provided Ã¢â‚¬â€ use raw SQL count so total is accurate
