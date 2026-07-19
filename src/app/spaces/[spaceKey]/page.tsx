@@ -2545,7 +2545,7 @@ function SpaceDetailContent() {
       {showCreate && (
         <CreateIssueModal spaceKey={spaceKey} statuses={currentSpace.statuses || []} members={currentSpace.members || []}
           initialDept={
-            (['dept_all','dept_unassigned','dept_assigned'].includes(queueFilter) && deptParam)
+            deptParam
               ? deptParam
               : (queueFilter.startsWith('cq_') && activeCustomQueue?.name)
                 ? activeCustomQueue.name

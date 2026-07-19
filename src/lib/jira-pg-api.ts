@@ -1863,9 +1863,14 @@ async function _handleJiraPgApi(
                 AND LOWER(t.from_dept) = LOWER($2)
                 AND LOWER(t.to_dept) != LOWER($2)
             )
-            OR EXISTS (
-              SELECT 1 FROM jsonb_object_keys(COALESCE(i.dept_statuses, '{}'::jsonb)) k
-              WHERE LOWER(k) = LOWER($2)
+            OR (
+              i.dept_statuses IS NOT NULL
+              AND (
+                jsonb_exists(i.dept_statuses, $2)
+                OR jsonb_exists(i.dept_statuses, LOWER($2))
+                OR jsonb_exists(i.dept_statuses, INITCAP(LOWER($2)))
+              )
+              AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
             )
             OR (
               LOWER(COALESCE(i.original_dept,'')) = LOWER($2)
