@@ -3707,7 +3707,9 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
           fromDept: fromDeptVal,
           fromSpaceKey: spaceKey,
         });
-        onChanged();
+        // Do NOT call onChanged() here — that would reload the issue with the new dept
+        // and make the sidebar jump to Dev while the popup is still showing.
+        // Navigation on OK click handles the transition.
       } else {
         setOptimisticDept(prevDept);
       }
