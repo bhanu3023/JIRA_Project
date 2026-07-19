@@ -1,4 +1,4 @@
-/**
+﻿/**
  * jira-pg-api.ts
  * PostgreSQL-backed API handler replacing the in-memory jira-dev-mock for
  * heavy data routes (auth, users, spaces, issues).
@@ -24,7 +24,7 @@ pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'acti
 // Backfill: invited users (isActive=false, no prior login) stay 'invited'; active users get 'active'
 pool.query(`UPDATE users SET status='active' WHERE status IS NULL OR status='' OR (status='active' AND "isActive"=true)`).catch(() => {});
 pool.query(`UPDATE users SET status='inactive' WHERE "isActive"=false AND status='active'`).catch(() => {});
-pool.query(`UPDATE issues SET original_dept = current_department WHERE original_dept IS NULL AND current_department IS NOT NULL`).catch(() => {});
+pool.query(`WITH first_dept AS (SELECT DISTINCT ON (issue_id) issue_id, from_dept FROM issue_dept_transitions WHERE from_dept != '' ORDER BY issue_id, moved_at ASC) UPDATE issues i SET original_dept = COALESCE((SELECT fd.from_dept FROM first_dept fd WHERE fd.issue_id = i.id), i.current_department) WHERE i.original_dept IS NULL`).catch(() => {});
 
 // Track dept transitions for accurate Sent/Watching
 pool.query(`CREATE TABLE IF NOT EXISTS issue_dept_transitions (
@@ -1814,7 +1814,7 @@ async function _handleJiraPgApi(
           //   covers tickets whose transition record may be missing (e.g. moved before logging existed).
           // Ensure columns exist before using them in queries
           try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`); } catch {}
-          try { await pool.query(`UPDATE issues SET original_dept = current_department WHERE original_dept IS NULL AND current_department IS NOT NULL`); } catch {}
+          try { await pool.query(`WITH first_dept AS (SELECT DISTINCT ON (issue_id) issue_id, from_dept FROM issue_dept_transitions WHERE from_dept != '' ORDER BY issue_id, moved_at ASC) UPDATE issues i SET original_dept = COALESCE((SELECT fd.from_dept FROM first_dept fd WHERE fd.issue_id = i.id), i.current_department) WHERE i.original_dept IS NULL`); } catch {}
 
           const sentExistsClause = `(
             EXISTS (
@@ -1839,6 +1839,21 @@ async function _handleJiraPgApi(
               AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
             )
           )`;
+          // DEBUG: log sent/watching state for troubleshooting
+          try {
+            const debugRows = await pool.query(
+              SELECT i.key, i.current_department, i.original_dept, i.dept_statuses,
+                EXISTS(SELECT 1 FROM issue_dept_transitions t WHERE t.issue_id=i.id AND LOWER(t.from_dept)=LOWER() AND LOWER(t.to_dept)!=LOWER()) AS or1,
+                EXISTS(SELECT 1 FROM queue_closed_tickets qct WHERE qct.issue_id=i.id AND LOWER(qct.dept_name)=LOWER() AND i."spaceId"=ANY(::text[])) AS or2,
+                (i.dept_statuses IS NOT NULL AND jsonb_exists(i.dept_statuses, ) AND LOWER(COALESCE(i.current_department,''))!=LOWER()) AS or3,
+                (LOWER(COALESCE(i.original_dept,''))=LOWER() AND LOWER(COALESCE(i.current_department,''))!=LOWER()) AS or4
+               FROM issues i WHERE i."spaceId"=ANY(::text[]) AND LOWER(COALESCE(i.current_department,''))!=LOWER()
+               LIMIT 10,
+              [allSpaceIds, sentDeptParam]
+            );
+            console.log('[SentWatching DEBUG] sentDept='+sentDeptParam+' rows:', JSON.stringify(debugRows.rows));
+          } catch(de: any) { console.log('[SentWatching DEBUG] error:', de?.message); }
+
           const countRow = await pool.query(
             `SELECT COUNT(DISTINCT i.id)::int AS cnt
              FROM issues i
@@ -2370,8 +2385,16 @@ async function _handleJiraPgApi(
 
       // Build per-dept assignee map: save current assignee under old dept, clear new dept
       // Fetch current_department from raw SQL Ã¢â‚¬â€ Prisma doesn't return raw ALTER TABLE columns
-      const existingMap = await pool.query(`SELECT dept_assignees, current_department FROM issues WHERE key=$1`, [key]);
-      const oldDept: string = existingMap.rows[0]?.current_department || fromDeptBody || '';
+      const existingMap = await pool.query(`SELECT dept_assignees, current_department, dept_statuses, original_dept FROM issues WHERE key=$1`, [key]);
+      let oldDept: string = existingMap.rows[0]?.current_department || fromDeptBody || '';
+      if (!oldDept) {
+        const dsKeys = Object.keys(existingMap.rows[0]?.dept_statuses || {}).filter((k: string) => k.toLowerCase() !== newDept.toLowerCase());
+        if (dsKeys.length === 1) { oldDept = dsKeys[0]; }
+        else if (dsKeys.length > 1) {
+          const activeKey = dsKeys.find((k: string) => (existingMap.rows[0]?.dept_statuses[k]?.category || '') !== 'done');
+          if (activeKey) { oldDept = activeKey; }
+        }
+      }
       const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
       if (oldDept && issue.assignee) {
         deptAssignees[oldDept] = {
@@ -2438,8 +2461,8 @@ async function _handleJiraPgApi(
       // Pause old dept SLA (save elapsed), then reset timer for new dept
       await pauseDeptSLA(key, null, oldDept);
       await pool.query(
-        `UPDATE issues SET current_department=$1, "assigneeId"=$2, "statusId"=$3, dept_sla_started_at=NOW(), dept_assignees=$4::jsonb, dept_statuses=$5::jsonb, "updatedAt"=NOW() WHERE key=$6`,
-        [newDept, rrAssigneeId, newStatusId, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), key]
+        `UPDATE issues SET current_department=$1, "assigneeId"=$2, "statusId"=$3, dept_sla_started_at=NOW(), dept_assignees=$4::jsonb, dept_statuses=$5::jsonb, original_dept=COALESCE(original_dept,$7), "updatedAt"=NOW() WHERE key=$6`,
+        [newDept, rrAssigneeId, newStatusId, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), key, oldDept || null]
       );
       await startDeptSLA(key, null, newDept);
 
