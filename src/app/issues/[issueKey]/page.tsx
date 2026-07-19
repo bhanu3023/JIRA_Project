@@ -3607,7 +3607,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   const [showDrop, setShowDrop] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [optimisticDept, setOptimisticDept] = React.useState<string | null>(null);
-  const [deptToast, setDeptToast] = React.useState<{ dept: string; board: string; newKey: string; assignee: string; queueUrl?: string } | null>(null);
+  const [deptToast, setDeptToast] = React.useState<{ dept: string; board: string; newKey: string; assignee: string; queueUrl?: string; fromDept?: string; fromSpaceKey?: string } | null>(null);
   const [pendingDept, setPendingDept] = React.useState<{ name: string; boardKey: string } | null>(null);
 
   // When parent updates currentDepartment, clear the optimistic value
@@ -3694,6 +3694,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
       });
       if (res.ok) {
         const data = await res.json();
+        const fromDeptVal = currentDepartment || (issue as any).current_department || '';
         setDeptToast({
           dept: dept.name,
           board: data.sameBoard ? (data.boardKey || spaceKey) : (data.targetBoardKey || firstBoard || dept.name),
@@ -3701,9 +3702,9 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
           assignee: data.sameBoard
             ? (data.assigneeName ? `${data.assigneeName} (Round Robin)` : 'Unassigned — waiting for agent')
             : (data.assignee?.name || ''),
-          queueUrl: data.sameBoard
-            ? `/spaces/${data.boardKey || spaceKey}?queue=dept_all&dept=${encodeURIComponent(dept.name)}`
-            : '',
+          queueUrl: '',
+          fromDept: fromDeptVal,
+          fromSpaceKey: spaceKey,
         });
         onChanged();
       } else {
@@ -3766,7 +3767,16 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
                 </div>
                 <div className="flex justify-end mt-5">
                   <button
-                    onClick={() => { setDeptToast(null); router.back(); }}
+                    onClick={() => {
+                      const sk = deptToast?.fromSpaceKey;
+                      const fd = deptToast?.fromDept;
+                      setDeptToast(null);
+                      if (sk && fd) {
+                        router.push(`/spaces/${sk}?queue=dept_all&dept=${encodeURIComponent(fd)}`);
+                      } else {
+                        router.back();
+                      }
+                    }}
                     className="px-5 py-1.5 text-[13px] font-semibold bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
                   >
                     OK
