@@ -1008,6 +1008,7 @@ export default function IssueDetailPage() {
                   onChange={setEditValue}
                   placeholder="Add a description... (paste or drag images, use toolbar to format)"
                   minHeight="180px"
+                  members={allMembers}
                 />
                 <div className="flex gap-2 mt-2">
                   <button onClick={() => handleUpdate('description', editValue)}
