@@ -2587,21 +2587,26 @@ function SpaceDetailContent() {
           <button
             onClick={() => {
               const text = createdToast.cfKey;
-              if (navigator.clipboard) {
-                navigator.clipboard.writeText(text).catch(() => {
+              const doCopy = () => {
+                if (navigator.clipboard) {
+                  navigator.clipboard.writeText(text).catch(() => {
+                    const el = document.createElement('textarea');
+                    el.value = text; document.body.appendChild(el); el.select();
+                    document.execCommand('copy'); document.body.removeChild(el);
+                  });
+                } else {
                   const el = document.createElement('textarea');
                   el.value = text; document.body.appendChild(el); el.select();
                   document.execCommand('copy'); document.body.removeChild(el);
-                });
-              } else {
-                const el = document.createElement('textarea');
-                el.value = text; document.body.appendChild(el); el.select();
-                document.execCommand('copy'); document.body.removeChild(el);
-              }
+                }
+              };
+              doCopy();
+              setCreatedToast(t => t ? { ...t, copied: true } : t);
+              setTimeout(() => setCreatedToast(t => t ? { ...t, copied: false } : t), 2000);
             }}
-            className="ml-1 px-2 py-0.5 text-xs bg-white/10 hover:bg-white/20 rounded-md transition-colors"
+            className={`ml-1 px-2 py-0.5 text-xs rounded-md transition-colors ${(createdToast as any).copied ? 'bg-green-500 text-white' : 'bg-white/10 hover:bg-white/20'}`}
             title="Copy ticket key"
-          >Copy</button>
+          >{(createdToast as any).copied ? '✓ Copied!' : 'Copy'}</button>
           <button onClick={() => setCreatedToast(null)} className="ml-1 text-white/50 hover:text-white text-lg leading-none">×</button>
         </div>
       )}
