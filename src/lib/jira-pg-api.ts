@@ -1743,6 +1743,7 @@ async function _handleJiraPgApi(
           assignee: true,
           reporter: true,
           space: { select: { key: true, name: true } },
+          comments: { include: { author: true }, orderBy: { createdAt: 'asc' } },
         },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * limit,
@@ -1851,7 +1852,7 @@ async function _handleJiraPgApi(
             );
             for (const c of cRows.rows) {
               if (!commentsMap[c.issueId]) commentsMap[c.issueId] = [];
-              const toIso = (v: any) => v ? (v instanceof Date ? v.toISOString() : new Date(v + (String(v).includes('+') || String(v).endsWith('Z') ? '' : ' UTC')).toISOString()) : null;
+              const toIso = (v: any) => { if (!v) return null; try { if (v instanceof Date) return v.toISOString(); const s = String(v); const adj = s.includes('+') || s.endsWith('Z') ? s : s + ' UTC'; const d = new Date(adj); return isNaN(d.getTime()) ? null : d.toISOString(); } catch { return null; } };
               commentsMap[c.issueId].push({
                 id: c.id, body: c.body, createdAt: toIso(c.createdAt), updatedAt: toIso(c.updatedAt),
                 author: c.authorId ? { id: c.authorId, firstName: c.firstName, lastName: c.lastName, email: c.user_email, avatarUrl: c.avatarUrl } : null,
