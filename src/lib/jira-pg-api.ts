@@ -1,4 +1,4 @@
-﻿/**
+/**
  * jira-pg-api.ts
  * PostgreSQL-backed API handler replacing the in-memory jira-dev-mock for
  * heavy data routes (auth, users, spaces, issues).
@@ -1818,13 +1818,16 @@ async function _handleJiraPgApi(
                 AND LOWER(qct.dept_name) = LOWER($2)
                 AND i."spaceId" = ANY($1::text[])
             )
+            OR (
+              i.dept_statuses IS NOT NULL
+              AND i.dept_statuses ? $2
+              AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
+            )
           )`;
           const countRow = await pool.query(
             `SELECT COUNT(DISTINCT i.id)::int AS cnt
              FROM issues i
              WHERE i."spaceId" = ANY($1::text[])
-               AND i.current_department IS NOT NULL
-               AND i.current_department != ''
                AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
                AND ${sentExistsClause}`,
             [allSpaceIds, sentDeptParam]
@@ -1842,8 +1845,6 @@ async function _handleJiraPgApi(
              LEFT JOIN users a ON i."assigneeId" = a.id
              LEFT JOIN users r ON i."reporterId" = r.id
              WHERE i."spaceId" = ANY($1::text[])
-               AND i.current_department IS NOT NULL
-               AND i.current_department != ''
                AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
                AND ${sentExistsClause}
              ORDER BY i.id, i."updatedAt" DESC, i."createdAt" DESC
