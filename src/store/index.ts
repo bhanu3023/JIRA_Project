@@ -36,6 +36,7 @@ interface AppState {
   issueTotal: number;
   issuePage: number;
   loadIssues: (params?: Record<string, string>) => Promise<void>;
+  clearIssuesCache: (params?: Record<string, string>) => void;
   loadIssue: (key: string) => Promise<void>;
   createIssue: (data: any) => Promise<any>;
   updateIssue: (key: string, data: any) => Promise<void>;
@@ -174,6 +175,13 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       set({ loading: false });
       throw e;
+    }
+  },
+  clearIssuesCache: (params) => {
+    if (params) {
+      issuesCache.delete(JSON.stringify(params));
+    } else {
+      issuesCache.clear();
     }
   },
   loadIssue: async (key) => {

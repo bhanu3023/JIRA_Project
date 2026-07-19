@@ -114,13 +114,14 @@ function SpaceDetailContent() {
       : Array.isArray(rawKey)
         ? (rawKey[0] || '').toUpperCase()
         : '';
-  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, loading, user } = useStore(
+  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, clearIssuesCache, loading, user } = useStore(
     useShallow((s) => ({
       currentSpace: s.currentSpace,
       loadSpace: s.loadSpace,
       issues: s.issues,
       issueTotal: s.issueTotal,
       loadIssues: s.loadIssues,
+      clearIssuesCache: s.clearIssuesCache,
       loading: s.loading,
       user: s.user,
     })),
@@ -716,6 +717,7 @@ function SpaceDetailContent() {
       } else {
         params.reporter = user?.id || '';
       }
+      clearIssuesCache(params);
       await loadIssues(params);
     } catch (e) { console.error(e); }
     finally { setSubmittingComment(false); }
