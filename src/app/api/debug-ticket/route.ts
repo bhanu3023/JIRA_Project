@@ -20,11 +20,11 @@ export async function GET(req: NextRequest) {
        FROM issues i WHERE i.key=$1`,
       [key, dept]
     );
-    // Also list recent tickets for diagnosis
-    const recent = await dbPool.query(
-      `SELECT key, summary, current_department, original_dept, "createdAt" FROM issues ORDER BY "createdAt" DESC LIMIT 10`
+    // Check space IDs for common space keys
+    const spaces = await dbPool.query(
+      `SELECT key, id, COALESCE(sub_board_keys,'{}') AS sub_board_keys FROM spaces ORDER BY "createdAt" DESC LIMIT 20`
     );
-    return Response.json({ ok: true, data: r.rows[0] ?? null, recent: recent.rows });
+    return Response.json({ ok: true, data: r.rows[0] ?? null, spaces: spaces.rows });
   } catch (e: any) {
     return Response.json({ ok: false, error: e?.message });
   }
