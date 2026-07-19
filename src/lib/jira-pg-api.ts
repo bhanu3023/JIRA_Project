@@ -1774,17 +1774,25 @@ async function _handleJiraPgApi(
         let allSpaceIds: string[] = [];
         const spaceKeyForSent = spaceKey || (spaceKeys ? spaceKeys.split(',')[0].trim().toUpperCase() : '');
         if (spaceKeyForSent) {
-          const spaceRow = await pool.query(
-            `SELECT id, COALESCE(sub_board_keys, '{}') AS sub_board_keys FROM spaces WHERE key = $1`,
-            [spaceKeyForSent]
-          );
-          if (spaceRow.rows[0]) {
-            allSpaceIds.push(spaceRow.rows[0].id);
-            const subKeys: string[] = spaceRow.rows[0].sub_board_keys || [];
-            if (subKeys.length > 0) {
-              const subRows = await pool.query(`SELECT id FROM spaces WHERE key = ANY($1::text[])`, [subKeys]);
-              for (const sub of subRows.rows) allSpaceIds.push(sub.id);
+          try {
+            const spaceRow = await pool.query(
+              `SELECT id, COALESCE(sub_board_keys, '{}') AS sub_board_keys FROM spaces WHERE key = $1`,
+              [spaceKeyForSent]
+            );
+            if (spaceRow.rows[0]) {
+              allSpaceIds.push(spaceRow.rows[0].id);
+              const subKeys: string[] = spaceRow.rows[0].sub_board_keys || [];
+              if (subKeys.length > 0) {
+                const subRows = await pool.query(`SELECT id FROM spaces WHERE key = ANY($1::text[])`, [subKeys]);
+                for (const sub of subRows.rows) allSpaceIds.push(sub.id);
+              }
             }
+          } catch {
+            // sub_board_keys column may not exist yet — fall back to simple lookup
+            try {
+              const spaceRow = await pool.query(`SELECT id FROM spaces WHERE key = $1`, [spaceKeyForSent]);
+              if (spaceRow.rows[0]) allSpaceIds.push(spaceRow.rows[0].id);
+            } catch { /* ignore */ }
           }
         }
         if (allSpaceIds.length === 0) {
@@ -1793,10 +1801,24 @@ async function _handleJiraPgApi(
         }
 
         if (allSpaceIds.length > 0) {
-          // Sent/Watching: tickets that were explicitly sent FROM this dept to another.
-          // Uses issue_dept_transitions to identify the source dept accurately.
-          // A ticket only appears here if it has a recorded transition with from_dept = sentDept
-          // AND is currently in a different dept (not recalled back).
+          // Sent/Watching: tickets that moved OUT of this dept.
+          // Primary source: issue_dept_transitions (explicit move log).
+          // Fallback source: queue_closed_tickets (ticket was in this dept's closed list)
+          //   covers tickets whose transition record may be missing (e.g. moved before logging existed).
+          const sentExistsClause = `(
+            EXISTS (
+              SELECT 1 FROM issue_dept_transitions t
+              WHERE t.issue_id = i.id
+                AND LOWER(t.from_dept) = LOWER($2)
+                AND LOWER(t.to_dept) != LOWER($2)
+            )
+            OR EXISTS (
+              SELECT 1 FROM queue_closed_tickets qct
+              WHERE qct.issue_id = i.id
+                AND LOWER(qct.dept_name) = LOWER($2)
+                AND i."spaceId" = ANY($1::text[])
+            )
+          )`;
           const countRow = await pool.query(
             `SELECT COUNT(DISTINCT i.id)::int AS cnt
              FROM issues i
@@ -1804,12 +1826,7 @@ async function _handleJiraPgApi(
                AND i.current_department IS NOT NULL
                AND i.current_department != ''
                AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
-               AND EXISTS (
-                 SELECT 1 FROM issue_dept_transitions t
-                 WHERE t.issue_id = i.id
-                   AND LOWER(t.from_dept) = LOWER($2)
-                   AND LOWER(t.to_dept) != LOWER($2)
-               )`,
+               AND ${sentExistsClause}`,
             [allSpaceIds, sentDeptParam]
           );
           const sentDeptTotal = countRow.rows[0]?.cnt ?? 0;
@@ -1828,12 +1845,7 @@ async function _handleJiraPgApi(
                AND i.current_department IS NOT NULL
                AND i.current_department != ''
                AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
-               AND EXISTS (
-                 SELECT 1 FROM issue_dept_transitions t
-                 WHERE t.issue_id = i.id
-                   AND LOWER(t.from_dept) = LOWER($2)
-                   AND LOWER(t.to_dept) != LOWER($2)
-               )
+               AND ${sentExistsClause}
              ORDER BY i.id, i."updatedAt" DESC, i."createdAt" DESC
              LIMIT $3 OFFSET $4`,
             [allSpaceIds, sentDeptParam, limit, (page - 1) * limit]
