@@ -498,18 +498,22 @@ function SpaceDetailContent() {
         params.page = String(currentPage);
         params.limit = '50';
       } else if (queueFilter.startsWith('cq_')) {
-        // Queue not yet resolved — skip this refresh tick
         return;
       } else if (queueFilter === 'all-requests') {
         params.page = String(currentPage);
         params.limit = '50';
+      } else if (queueFilter === 'sent-watching') {
+        params.page = '1';
+        params.limit = '100';
+        if (deptParam) params.sentDept = deptParam;
       } else if (queueFilter && queueFilter !== 'queues') {
         params.queue = queueFilter;
       }
+      clearIssuesCache(params);
       loadIssues(params).catch(() => {});
     }, 15000);
     return () => clearInterval(id);
-  }, [spaceKey, queueFilter, currentPage, activeCustomQueue, currentSpace?.type, allCustomQueues.length, loadIssues]);
+  }, [spaceKey, queueFilter, deptParam, currentPage, activeCustomQueue, currentSpace?.type, allCustomQueues.length, loadIssues, clearIssuesCache]);
 
   // Load custom fields assigned to this space → dynamic columns
   useEffect(() => {
@@ -702,9 +706,9 @@ function SpaceDetailContent() {
       setRichCommentHtml('');
       setCommentingOn(null);
       // Reload with current queue params (not a hardcoded reporter filter)
-      const params: Record<string, string> = { spaceKey, page: '1', limit: '500' };
-      if (queueFilter === 'sent-watching' && deptParam) {
-        params.sentDept = deptParam;
+      const params: Record<string, string> = { spaceKey, page: '1', limit: '100' };
+      if (queueFilter === 'sent-watching') {
+        if (deptParam) params.sentDept = deptParam;
       } else if (queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
         params.excludeDone = 'true';
         if (deptParam) params.dept = deptParam;
