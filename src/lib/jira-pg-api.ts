@@ -2518,6 +2518,7 @@ async function _handleJiraPgApi(
         const r = await pool.query(`SELECT current_department, dept_assignees, dept_sla_started_at, dept_statuses, dept_sla_log, cf_key FROM issues WHERE key=$1 LIMIT 1`, [key]);
         if (r.rows[0]) extraCols = r.rows[0];
       } catch {}
+      const newStatusName = newDeptStatusObj?.name || 'Open';
       fireConnectorEvent({
         event: 'issue.department_changed', timestamp: new Date().toISOString(),
         issue: {
