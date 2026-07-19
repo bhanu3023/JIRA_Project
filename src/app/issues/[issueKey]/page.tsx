@@ -2069,10 +2069,13 @@ export default function IssueDetailPage() {
                             </button>
                             {user && (
                               <button onClick={() => { handleAssigneeChange(user.id); setAssigneeSearch(''); }}
-                                className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 ${issue.assignee?.id === user.id ? 'text-blue-600 font-medium' : 'text-gray-700'}`}>
-                                <div className="w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center text-white text-[8px] font-bold">{getInitials((user as any).firstName, (user as any).lastName)}</div>
-                                <span className="flex-1 text-left">Assign to me</span>
-                                {issue.assignee?.id === user.id && <Check size={11} className="ml-auto text-blue-600" />}
+                                className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-blue-50 ${issue.assignee?.id === user.id ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
+                                <div className="w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center text-white text-[8px] font-bold flex-shrink-0">{getInitials((user as any).firstName, (user as any).lastName)}</div>
+                                <span className="flex-1 text-left truncate">
+                                  {(user as any).firstName} {(user as any).lastName}
+                                  <span className="ml-1 text-[11px] text-blue-500 font-normal">(Assign to me)</span>
+                                </span>
+                                {issue.assignee?.id === user.id && <Check size={11} className="ml-auto text-blue-600 flex-shrink-0" />}
                               </button>
                             )}
                           </>
