@@ -6,79 +6,74 @@ const dbPool = new Pool({
 });
 
 export async function GET(req: NextRequest) {
-  const key = req.nextUrl.searchParams.get('key') || 'L2B-15087';
   const dept = req.nextUrl.searchParams.get('dept') || 'Migration';
   const spaceKey = req.nextUrl.searchParams.get('spaceKey') || 'TESTIN';
 
   try {
-    // Get the space ID for this spaceKey
-    const spaceRow = await dbPool.query(`SELECT id, key FROM spaces WHERE UPPER(key) = UPPER($1)`, [spaceKey]);
+    const spaceRow = await dbPool.query(`SELECT id FROM spaces WHERE UPPER(key) = UPPER($1)`, [spaceKey]);
     const spaceId = spaceRow.rows[0]?.id ?? null;
+    if (!spaceId) return Response.json({ ok: false, error: `Space ${spaceKey} not found` });
 
-    // Get ticket data
-    const ticketRow = await dbPool.query(
-      `SELECT i.id, i.key, i."spaceId", i.current_department, i.original_dept, i.dept_statuses,
-        (SELECT json_agg(row_to_json(t)) FROM issue_dept_transitions t WHERE t.issue_id=i.id) AS transitions,
-        (SELECT json_agg(row_to_json(q)) FROM queue_closed_tickets q WHERE q.issue_id=i.id) AS closed_tickets
-       FROM issues i WHERE i.key=$1`,
-      [key]
-    );
-    const ticket = ticketRow.rows[0] ?? null;
+    const allSpaceIds = [spaceId];
 
-    // Run the exact Sent/Watching count query
-    let countResult = null;
-    let countError = null;
-    if (spaceId) {
-      try {
-        const sentExistsClause = `(
-          EXISTS (
-            SELECT 1 FROM queue_closed_tickets qct
-            WHERE qct.issue_id = i.id
-              AND LOWER(qct.dept_name) = LOWER($2)
-              AND i."spaceId" = ANY($1::text[])
-          )
-          OR EXISTS (
-            SELECT 1 FROM issue_dept_transitions t
-            WHERE t.issue_id = i.id
-              AND LOWER(t.from_dept) = LOWER($2)
-              AND LOWER(t.to_dept) != LOWER($2)
-          )
-          OR (
-            i.dept_statuses IS NOT NULL
-            AND (
-              jsonb_exists(i.dept_statuses, $2)
-              OR jsonb_exists(i.dept_statuses, LOWER($2))
-              OR jsonb_exists(i.dept_statuses, INITCAP(LOWER($2)))
-            )
-            AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
-          )
-          OR (
-            LOWER(COALESCE(i.original_dept,'')) = LOWER($2)
-            AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
-          )
-        )`;
-        const cr = await dbPool.query(
-          `SELECT i.key, i."spaceId", i.current_department, i.original_dept,
-            (${sentExistsClause}) AS sent_match
-           FROM issues i
-           WHERE i."spaceId" = ANY($1::text[])
-             AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)`,
-          [[spaceId], dept]
-        );
-        countResult = { total: cr.rows.filter((r:any) => r.sent_match).length, rows: cr.rows };
-      } catch(e: any) {
-        countError = e?.message;
-      }
-    }
+    const sentExistsClause = `(
+      EXISTS (
+        SELECT 1 FROM queue_closed_tickets qct
+        WHERE qct.issue_id = i.id
+          AND LOWER(qct.dept_name) = LOWER($2)
+          AND i."spaceId" = ANY($1::text[])
+      )
+      OR EXISTS (
+        SELECT 1 FROM issue_dept_transitions t
+        WHERE t.issue_id = i.id
+          AND LOWER(t.from_dept) = LOWER($2)
+          AND LOWER(t.to_dept) != LOWER($2)
+      )
+      OR (
+        i.dept_statuses IS NOT NULL
+        AND (
+          jsonb_exists(i.dept_statuses, $2)
+          OR jsonb_exists(i.dept_statuses, LOWER($2))
+          OR jsonb_exists(i.dept_statuses, INITCAP(LOWER($2)))
+        )
+        AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
+      )
+      OR (
+        LOWER(COALESCE(i.original_dept,'')) = LOWER($2)
+        AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
+      )
+    )`;
 
-    return Response.json({
-      ok: true,
-      spaceId,
-      ticket,
-      ticketSpaceIdMatchesSpace: ticket ? ticket.spaceId === spaceId : null,
-      countResult,
-      countError,
-    });
+    // Run exact count query
+    let countResult = null, countError = null;
+    try {
+      const cr = await dbPool.query(
+        `SELECT COUNT(DISTINCT i.id)::int AS cnt FROM issues i
+         WHERE i."spaceId" = ANY($1::text[])
+           AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
+           AND ${sentExistsClause}`,
+        [allSpaceIds, dept]
+      );
+      countResult = cr.rows[0]?.cnt;
+    } catch(e: any) { countError = e?.message; }
+
+    // Run exact rows query
+    let rowsResult = null, rowsError = null;
+    try {
+      const rr = await dbPool.query(
+        `SELECT DISTINCT ON (i.id) i.key, i.current_department, i.original_dept, i."spaceId"
+         FROM issues i
+         WHERE i."spaceId" = ANY($1::text[])
+           AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
+           AND ${sentExistsClause}
+         ORDER BY i.id, i."updatedAt" DESC, i."createdAt" DESC
+         LIMIT 100 OFFSET 0`,
+        [allSpaceIds, dept]
+      );
+      rowsResult = rr.rows;
+    } catch(e: any) { rowsError = e?.message; }
+
+    return Response.json({ ok: true, spaceId, allSpaceIds, dept, countResult, countError, rowsResult, rowsError });
   } catch (e: any) {
     return Response.json({ ok: false, error: e?.message });
   }
