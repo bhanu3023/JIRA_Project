@@ -20,7 +20,11 @@ export async function GET(req: NextRequest) {
        FROM issues i WHERE i.key=$1`,
       [key, dept]
     );
-    return Response.json({ ok: true, data: r.rows[0] ?? null });
+    // Also list recent tickets for diagnosis
+    const recent = await dbPool.query(
+      `SELECT key, summary, current_department, original_dept, "createdAt" FROM issues ORDER BY "createdAt" DESC LIMIT 10`
+    );
+    return Response.json({ ok: true, data: r.rows[0] ?? null, recent: recent.rows });
   } catch (e: any) {
     return Response.json({ ok: false, error: e?.message });
   }
