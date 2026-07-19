@@ -3449,9 +3449,17 @@ export default function IssueDetailPage() {
             <div className="px-6 py-5">
               <h3 className="text-[15px] font-semibold text-gray-900 mb-1">Change Department?</h3>
               <p className="text-[13px] text-gray-600 mt-2 leading-relaxed">
-                The current status in <span className="font-semibold text-gray-800">{(issue as any).current_department || 'current'}</span> will
-                first be set to <span className="font-semibold text-amber-600">Waiting for {pendingDeptChange.dept.name}</span>,
-                then the ticket will move to <span className="font-semibold text-blue-700">{pendingDeptChange.dept.name}</span>.
+                {(() => {
+                  const waitingName = `Waiting for ${pendingDeptChange.dept.name}`;
+                  const alreadyWaiting = issueStat?.name?.toLowerCase() === waitingName.toLowerCase();
+                  return alreadyWaiting ? (
+                    <>The ticket will move to <span className="font-semibold text-blue-700">{pendingDeptChange.dept.name}</span>.</>
+                  ) : (
+                    <>The current status in <span className="font-semibold text-gray-800">{(issue as any).current_department || 'current'}</span> will
+                    first be set to <span className="font-semibold text-amber-600">{waitingName}</span>,
+                    then the ticket will move to <span className="font-semibold text-blue-700">{pendingDeptChange.dept.name}</span>.</>
+                  );
+                })()}
               </p>
               <div className="flex items-center justify-end gap-2 mt-5">
                 <button
