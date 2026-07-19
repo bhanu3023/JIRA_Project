@@ -3602,6 +3602,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   onSetWaitingStatus?: (deptName: string) => Promise<void>;
   onRequestDeptChange?: (dept: { name: string; boardKey: string }, execute: () => void) => void;
 }) {
+  const router = useRouter();
   const [deptOptions, setDeptOptions] = React.useState<{ name: string; boardKey: string }[]>([]);
   const [spaceAssigned, setSpaceAssigned] = React.useState<boolean | null>(null);
   const [showDrop, setShowDrop] = React.useState(false);
