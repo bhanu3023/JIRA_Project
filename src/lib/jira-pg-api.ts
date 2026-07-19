@@ -1827,10 +1827,15 @@ async function _handleJiraPgApi(
             )
             OR (
               i.dept_statuses IS NOT NULL
-              AND i.dept_statuses ? $2
+              AND jsonb_exists(i.dept_statuses, $2)
+              AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
+            )
+            OR (
+              LOWER(COALESCE(i.original_dept,'')) = LOWER($2)
               AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
             )
           )`;
+          console.log('[sentDept] allSpaceIds=', allSpaceIds, 'sentDeptParam=', sentDeptParam);
           const countRow = await pool.query(
             `SELECT COUNT(DISTINCT i.id)::int AS cnt
              FROM issues i
@@ -1840,6 +1845,7 @@ async function _handleJiraPgApi(
             [allSpaceIds, sentDeptParam]
           );
           const sentDeptTotal = countRow.rows[0]?.cnt ?? 0;
+          console.log('[sentDept] total=', sentDeptTotal);
 
           const rows = await pool.query(
             `SELECT DISTINCT ON (i.id) i.*, sp.key AS space_key,
