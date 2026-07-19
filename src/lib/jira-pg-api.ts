@@ -3459,24 +3459,6 @@ async function _handleJiraPgApi(
       await (db as any).issueHistory.create({ data: { issueId: issue.id, field: 'comment', oldValue: null, newValue: comment.body.slice(0, 500), authorName: aName, authorEmail: authorUser?.email ?? null, createdAt: new Date() } });
     } catch (_e) {}
 
-    // Track in closed tickets for this dept
-    try {
-      const deptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
-      const dept = deptRow.rows[0]?.current_department;
-      if (dept) {
-        await pool.query(`
-          CREATE TABLE IF NOT EXISTS queue_closed_tickets (
-            id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL,
-            issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(space_id, dept_name, issue_id)
-          )
-        `);
-        await pool.query(
-          `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-          [issue.spaceId, dept, issue.id]
-        );
-      }
-    } catch (e) { /* non-fatal */ }
 
     // Email: notify assignee + reporter (not the commenter)
     notifyCommentAdded({
