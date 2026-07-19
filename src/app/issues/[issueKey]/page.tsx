@@ -378,6 +378,13 @@ export default function IssueDetailPage() {
         loadStatusesForSpace(currentIssue.spaceKey);
       }
     }
+    // Always load members from the issue's own space (not the workflow space which may differ)
+    if (currentIssue?.spaceKey) {
+      api.getSpace(currentIssue.spaceKey).then((sp: any) => {
+        if (sp?.members?.length) setSpaceMembers(sp.members);
+      }).catch(() => {});
+    }
+
     if (currentIssue?.spaceId && currentIssue?.id) {
       // Load custom fields for this space — also include any that were auto-copied by automation
       Promise.all([
