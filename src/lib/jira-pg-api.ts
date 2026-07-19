@@ -1839,20 +1839,6 @@ async function _handleJiraPgApi(
               AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
             )
           )`;
-          // DEBUG: log sent/watching state for troubleshooting
-          try {
-            const debugRows = await pool.query(
-              SELECT i.key, i.current_department, i.original_dept, i.dept_statuses,
-                EXISTS(SELECT 1 FROM issue_dept_transitions t WHERE t.issue_id=i.id AND LOWER(t.from_dept)=LOWER() AND LOWER(t.to_dept)!=LOWER()) AS or1,
-                EXISTS(SELECT 1 FROM queue_closed_tickets qct WHERE qct.issue_id=i.id AND LOWER(qct.dept_name)=LOWER() AND i."spaceId"=ANY(::text[])) AS or2,
-                (i.dept_statuses IS NOT NULL AND jsonb_exists(i.dept_statuses, ) AND LOWER(COALESCE(i.current_department,''))!=LOWER()) AS or3,
-                (LOWER(COALESCE(i.original_dept,''))=LOWER() AND LOWER(COALESCE(i.current_department,''))!=LOWER()) AS or4
-               FROM issues i WHERE i."spaceId"=ANY(::text[]) AND LOWER(COALESCE(i.current_department,''))!=LOWER()
-               LIMIT 10,
-              [allSpaceIds, sentDeptParam]
-            );
-            console.log('[SentWatching DEBUG] sentDept='+sentDeptParam+' rows:', JSON.stringify(debugRows.rows));
-          } catch(de: any) { console.log('[SentWatching DEBUG] error:', de?.message); }
 
           const countRow = await pool.query(
             `SELECT COUNT(DISTINCT i.id)::int AS cnt
