@@ -1,4 +1,4 @@
-/**
+﻿/**
  * jira-pg-api.ts
  * PostgreSQL-backed API handler replacing the in-memory jira-dev-mock for
  * heavy data routes (auth, users, spaces, issues).
@@ -2334,29 +2334,8 @@ async function _handleJiraPgApi(
         ? { id: waitingForNew.id, name: waitingForNew.name, category: waitingForNew.category, color: waitingForNew.color }
         : { id: '', name: `Waiting for ${newDept}`, category: 'todo', color: '#F59E0B' };
 
-      // New dept status: look up the incoming dept's queue config to get its initial qst_ status.
-      // Tickets arriving in a new dept should start as "Waiting for <newDept>" so the receiving
-      // team sees the ticket as newly arrived and needing attention.
-      let newDeptStatusObj: any = null;
-      try {
-        const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
-        for (const row of allQueueRows.rows) {
-          const queues: any[] = row.queues || [];
-          const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === newDept.toLowerCase());
-          if (matchedQ?.queueStatuses?.length) {
-            // Use the first todo-category status, or just the first status, as the arrival status
-            const firstSt = matchedQ.queueStatuses.find((s: any) => s.category === 'todo') || matchedQ.queueStatuses[0];
-            if (firstSt?.id) { newDeptStatusObj = firstSt; break; }
-          }
-        }
-      } catch {}
-      // Fall back to the "Waiting for <newDept>" virtual status so the ticket shows clearly as newly arrived
-      if (!newDeptStatusObj) newDeptStatusObj = oldDeptStatusObj;
-      const freshStatus = await db.status.findFirst({ where: { spaceId: issue.spaceId, category: 'todo' }, orderBy: { order: 'asc' } })
-        || await db.status.findFirst({ where: { spaceId: issue.spaceId }, orderBy: { order: 'asc' } });
       // Keep statusId as waitingForNew (real DB status) or current statusId — don't reset to generic "Open"
       const newStatusId = waitingForNew?.id || issue.statusId;
-      const newStatusName = waitingForNew?.name || (newDeptStatusObj?.name) || 'Open';
 
       // Build per-dept assignee map: save current assignee under old dept, clear new dept
       // Fetch current_department from raw SQL Ã¢â‚¬â€ Prisma doesn't return raw ALTER TABLE columns
@@ -2375,9 +2354,34 @@ async function _handleJiraPgApi(
       }
       deptAssignees[newDept] = null; // new dept starts unassigned
 
-      // Per-dept statuses: old dept Ã¢â€ ' "Waiting for Dev", new dept Ã¢â€ ' "To Do"
+      // Per-dept statuses
       const existingStatuses = await pool.query(`SELECT dept_statuses FROM issues WHERE key=$1`, [key]);
       const deptStatuses: Record<string, any> = existingStatuses.rows[0]?.dept_statuses || {};
+      // Returning ticket (dept visited before) => In Progress; first arrival => Waiting for newDept
+      const isReturningToDept = deptStatuses[newDept] != null;
+
+      let newDeptQueueStatuses: any[] = [];
+      try {
+        const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
+        for (const row of allQueueRows.rows) {
+          const queues: any[] = row.queues || [];
+          const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === newDept.toLowerCase());
+          if (matchedQ?.queueStatuses?.length) { newDeptQueueStatuses = matchedQ.queueStatuses; break; }
+        }
+      } catch {}
+
+      let newDeptStatusObj: any;
+      if (isReturningToDept) {
+        const inProgressSt = newDeptQueueStatuses.find((s: any) => s.category === 'in_progress')
+          || newDeptQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'))
+          || newDeptQueueStatuses.find((s: any) => s.category === 'todo')
+          || newDeptQueueStatuses[0];
+        newDeptStatusObj = inProgressSt || { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+      } else {
+        const firstTodoSt = newDeptQueueStatuses.find((s: any) => s.category === 'todo') || newDeptQueueStatuses[0];
+        newDeptStatusObj = firstTodoSt || oldDeptStatusObj;
+      }
+
       if (oldDept) deptStatuses[oldDept] = oldDeptStatusObj;
       deptStatuses[newDept] = newDeptStatusObj;
 
