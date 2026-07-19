@@ -454,8 +454,15 @@ async function computePausedDeptSLA(
   try {
     const log: Record<string, any> = issueRow.dept_sla_log || {};
     const deptLog = log[dept];
-    if (!deptLog) return null;
-    const elapsed_ms: number = deptLog.elapsed_ms || 0;
+    // Fallback: if no log entry but dept_sla_started_at exists, compute elapsed from that
+    let elapsed_ms: number = 0;
+    if (deptLog) {
+      elapsed_ms = deptLog.elapsed_ms || 0;
+    } else if (issueRow.dept_sla_started_at) {
+      elapsed_ms = Math.max(0, Date.now() - new Date(issueRow.dept_sla_started_at).getTime());
+    } else {
+      return null;
+    }
     if (!slaPolicies.length) return null;
     const priority = (issueRow.priority || 'medium').toLowerCase();
     // Prefer dept-specific SLA policy, fall back to space-wide

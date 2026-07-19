@@ -3704,7 +3704,6 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
             ? `/spaces/${data.boardKey || spaceKey}?queue=dept_all&dept=${encodeURIComponent(dept.name)}`
             : '',
         });
-        setTimeout(() => setDeptToast(null), 4000);
         onChanged();
       } else {
         setOptimisticDept(prevDept);
@@ -3771,7 +3770,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
                 </div>
                 <div className="flex justify-end mt-5">
                   <button
-                    onClick={() => setDeptToast(null)}
+                    onClick={() => { setDeptToast(null); router.back(); }}
                     className="px-5 py-1.5 text-[13px] font-semibold bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
                   >
                     OK
