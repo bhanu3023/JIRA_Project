@@ -1812,6 +1812,10 @@ async function _handleJiraPgApi(
           // Primary source: issue_dept_transitions (explicit move log).
           // Fallback source: queue_closed_tickets (ticket was in this dept's closed list)
           //   covers tickets whose transition record may be missing (e.g. moved before logging existed).
+          // Ensure columns exist before using them in queries
+          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`); } catch {}
+          try { await pool.query(`UPDATE issues SET original_dept = current_department WHERE original_dept IS NULL AND current_department IS NOT NULL`); } catch {}
+
           const sentExistsClause = `(
             EXISTS (
               SELECT 1 FROM issue_dept_transitions t
@@ -1835,14 +1839,6 @@ async function _handleJiraPgApi(
               AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
             )
           )`;
-          console.log('[sentDept] allSpaceIds=', allSpaceIds, 'sentDeptParam=', sentDeptParam);
-          // Debug: check raw counts
-          const dbg1 = await pool.query(`SELECT COUNT(*)::int AS cnt, array_agg(DISTINCT i.current_department) AS depts FROM issues i WHERE i."spaceId" = ANY($1::text[])`, [allSpaceIds]);
-          console.log('[sentDept] total issues in space=', dbg1.rows[0]?.cnt, 'depts=', dbg1.rows[0]?.depts);
-          const dbg2 = await pool.query(`SELECT COUNT(*)::int AS cnt FROM issues i WHERE i."spaceId" = ANY($1::text[]) AND LOWER(COALESCE(i.original_dept,''))=LOWER($2) AND LOWER(COALESCE(i.current_department,''))!=LOWER($2)`, [allSpaceIds, sentDeptParam]);
-          console.log('[sentDept] original_dept match=', dbg2.rows[0]?.cnt);
-          const dbg3 = await pool.query(`SELECT COUNT(*)::int AS cnt FROM issue_dept_transitions t JOIN issues i ON i.id=t.issue_id WHERE i."spaceId"=ANY($1::text[]) AND LOWER(t.from_dept)=LOWER($2)`, [allSpaceIds, sentDeptParam]);
-          console.log('[sentDept] transitions from dept=', dbg3.rows[0]?.cnt);
           const countRow = await pool.query(
             `SELECT COUNT(DISTINCT i.id)::int AS cnt
              FROM issues i
@@ -1852,7 +1848,6 @@ async function _handleJiraPgApi(
             [allSpaceIds, sentDeptParam]
           );
           const sentDeptTotal = countRow.rows[0]?.cnt ?? 0;
-          console.log('[sentDept] final total=', sentDeptTotal);
 
           const rows = await pool.query(
             `SELECT DISTINCT ON (i.id) i.*, sp.key AS space_key,
