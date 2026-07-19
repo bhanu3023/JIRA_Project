@@ -2441,8 +2441,7 @@ function SpaceDetailContent() {
                               <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Move to</div>
                               {options.map(s => (
                                 <button key={s.id} onClick={() => {
-                                  const isInProgress = s.name?.toLowerCase().includes('in progress');
-                                  if (isInProgress && !issue.assignee) {
+                                  if (!issue.assignee) {
                                     setOpenDropdown(null);
                                     setAssigneeRequiredModal(true);
                                     return;
