@@ -1878,6 +1878,21 @@ async function _handleJiraPgApi(
             )
           )`;
 
+          // Debug: log state of specific tickets for diagnosis
+          try {
+            const dbgSent = await pool.query(
+              `SELECT i.key, i.current_department, i.original_dept,
+                EXISTS(SELECT 1 FROM queue_closed_tickets qct WHERE qct.issue_id=i.id AND LOWER(qct.dept_name)=LOWER($2) AND qct.space_id=ANY($1::text[])) AS or1,
+                EXISTS(SELECT 1 FROM issue_dept_transitions t WHERE t.issue_id=i.id AND LOWER(t.from_dept)=LOWER($2) AND LOWER(t.to_dept)!=LOWER($2)) AS or2,
+                (i.dept_statuses IS NOT NULL AND (jsonb_exists(i.dept_statuses,$2) OR jsonb_exists(i.dept_statuses,LOWER($2)))) AS or3,
+                (LOWER(COALESCE(i.original_dept,''))=LOWER($2) AND LOWER(COALESCE(i.current_department,''))!=LOWER($2)) AS or4
+               FROM issues i WHERE i."spaceId"=ANY($1::text[]) AND LOWER(COALESCE(i.current_department,''))!=LOWER($2)
+               LIMIT 5`,
+              [allSpaceIds, sentDeptParam]
+            );
+            console.log('[SENT-DEBUG] spaceIds=' + JSON.stringify(allSpaceIds) + ' dept=' + sentDeptParam + ' rows=' + JSON.stringify(dbgSent.rows));
+          } catch(e: any) { console.log('[SENT-DEBUG ERROR]', e?.message); }
+
           const countRow = await pool.query(
             `SELECT COUNT(DISTINCT i.id)::int AS cnt
              FROM issues i
