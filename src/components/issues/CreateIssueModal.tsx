@@ -61,7 +61,7 @@ const COMBINATION_OPTIONS = [
 ];
 
 // Searchable multi-select dropdown
-function CombinationDropdown({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function CombinationDropdown({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const ref = useRef<HTMLDivElement>(null);
@@ -78,17 +78,32 @@ function CombinationDropdown({ value, onChange }: { value: string; onChange: (v:
     o.toLowerCase().includes(search.toLowerCase())
   );
 
+  const toggle = (opt: string) => {
+    if (value.includes(opt)) onChange(value.filter(v => v !== opt));
+    else onChange([...value, opt]);
+  };
+
   return (
     <div ref={ref} className="relative">
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-3 py-2 bg-white border border-gray-300 rounded text-[13px] hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+        className="w-full min-h-[36px] flex items-center justify-between px-3 py-1.5 bg-white border border-gray-300 rounded text-[13px] hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
       >
-        <span className={value ? 'text-gray-900' : 'text-gray-400'}>
-          {value || 'Select...'}
+        <span className="flex flex-wrap gap-1 flex-1 text-left">
+          {value.length === 0
+            ? <span className="text-gray-400">Select combinations...</span>
+            : value.map(v => (
+                <span key={v} className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 text-[11px] font-medium px-2 py-0.5 rounded-full border border-blue-200">
+                  {v}
+                  <button type="button" onClick={e => { e.stopPropagation(); toggle(v); }} className="hover:text-red-500">
+                    <X size={10} />
+                  </button>
+                </span>
+              ))
+          }
         </span>
-        <ChevronDown size={14} className={`text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown size={14} className={`text-gray-400 flex-shrink-0 ml-1 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
       {open && (
@@ -122,27 +137,29 @@ function CombinationDropdown({ value, onChange }: { value: string; onChange: (v:
                 <button
                   key={opt}
                   type="button"
-                  onClick={() => { onChange(opt); setOpen(false); setSearch(''); }}
-                  className={`w-full flex items-center justify-between px-3 py-2 text-[13px] hover:bg-blue-50 transition-colors ${
-                    value === opt ? 'text-blue-600 bg-blue-50 font-medium' : 'text-gray-700'
+                  onClick={() => toggle(opt)}
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-blue-50 transition-colors ${
+                    value.includes(opt) ? 'text-blue-600 bg-blue-50 font-medium' : 'text-gray-700'
                   }`}
                 >
+                  <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${value.includes(opt) ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                    {value.includes(opt) && <Check size={10} className="text-white" />}
+                  </div>
                   <span>{opt}</span>
-                  {value === opt && <Check size={12} className="text-blue-600 flex-shrink-0" />}
                 </button>
               ))
             )}
           </div>
 
           {/* Clear */}
-          {value && (
+          {value.length > 0 && (
             <div className="border-t border-gray-100 px-2 py-1.5">
               <button
                 type="button"
-                onClick={() => { onChange(''); setOpen(false); setSearch(''); }}
+                onClick={() => { onChange([]); setSearch(''); }}
                 className="w-full text-[12px] text-gray-500 hover:text-red-500 py-1 transition-colors"
               >
-                Clear selection
+                Clear all ({value.length})
               </button>
             </div>
           )}
@@ -170,7 +187,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [selectedQueueId, setSelectedQueueId] = useState('');
   const [form, setForm] = useState({
     summary: '', description: '', type: 'task', priority: 'medium',
-    assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: '', department: initialDept || '',
+    assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
     productType: '', projectManager: '',
   });
   const [summaryError, setSummaryError] = useState(false);
@@ -253,7 +270,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         assigneeId: form.assigneeId || undefined,
         dueDate: form.dueDate || undefined,
         statusId: form.statusId || undefined,
-        combination: form.combination || undefined,
+        combination: form.combination.length > 0 ? form.combination.join(', ') : undefined,
         productType: form.productType || undefined,
         projectManager: form.projectManager || undefined,
         ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
@@ -267,7 +284,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         );
       }
       if (createAnother) {
-        setForm(f => ({ ...f, summary: '', description: '', dueDate: '', combination: '', productType: '', projectManager: '' }));
+        setForm(f => ({ ...f, summary: '', description: '', dueDate: '', combination: [], productType: '', projectManager: '' }));
         setCustomFieldValues({});
         setSummaryError(false);
       } else {
