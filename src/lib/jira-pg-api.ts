@@ -26,6 +26,9 @@ pool.query(`UPDATE users SET status='active' WHERE status IS NULL OR status='' O
 pool.query(`UPDATE users SET status='inactive' WHERE "isActive"=false AND status='active'`).catch(() => {});
 pool.query(`WITH first_dept AS (SELECT DISTINCT ON (issue_id) issue_id, from_dept FROM issue_dept_transitions WHERE from_dept != '' ORDER BY issue_id, moved_at ASC) UPDATE issues i SET original_dept = COALESCE((SELECT fd.from_dept FROM first_dept fd WHERE fd.issue_id = i.id), i.current_department) WHERE i.original_dept IS NULL`).catch(() => {});
 
+// Ensure queue_closed_tickets exists at startup (needed by Sent/Watching query)
+pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`).catch(() => {});
+
 // Track dept transitions for accurate Sent/Watching
 pool.query(`CREATE TABLE IF NOT EXISTS issue_dept_transitions (
   id SERIAL PRIMARY KEY,
@@ -1812,8 +1815,11 @@ async function _handleJiraPgApi(
           // Primary source: issue_dept_transitions (explicit move log).
           // Fallback source: queue_closed_tickets (ticket was in this dept's closed list)
           //   covers tickets whose transition record may be missing (e.g. moved before logging existed).
-          // Ensure columns exist before using them in queries
+          // Ensure tables and columns exist before using them in queries
+          try { await pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`); } catch {}
+          try { await pool.query(`CREATE TABLE IF NOT EXISTS issue_dept_transitions (id SERIAL PRIMARY KEY, issue_id TEXT NOT NULL, space_id TEXT NOT NULL, from_dept TEXT NOT NULL, to_dept TEXT NOT NULL, moved_at TIMESTAMPTZ DEFAULT NOW())`); } catch {}
           try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`); } catch {}
+          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
           try { await pool.query(`WITH first_dept AS (SELECT DISTINCT ON (issue_id) issue_id, from_dept FROM issue_dept_transitions WHERE from_dept != '' ORDER BY issue_id, moved_at ASC) UPDATE issues i SET original_dept = COALESCE((SELECT fd.from_dept FROM first_dept fd WHERE fd.issue_id = i.id), i.current_department) WHERE i.original_dept IS NULL`); } catch {}
 
           const sentExistsClause = `(
