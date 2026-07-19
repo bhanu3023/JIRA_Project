@@ -2333,6 +2333,8 @@ async function _handleJiraPgApi(
     // Ã¢â€â‚¬Ã¢â€â‚¬ Single-board mode: no targetBoard or same board as source Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (!targetBoardKey || targetBoardKey === issue.space?.key?.toUpperCase()) {
       // Ensure columns exist
+      try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS current_department TEXT`); } catch {}
+      try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`); } catch {}
       try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIMESTAMPTZ`); } catch {}
       try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`); } catch {}
       try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
@@ -2491,20 +2493,21 @@ async function _handleJiraPgApi(
         }
       } catch { /* ignore notification errors */ }
 
-      // History entry
-      const authorUser2 = userId
-        ? await db.user.findUnique({ where: { id: userId }, select: { firstName: true, lastName: true } })
-        : null;
-      const authorName2 = authorUser2 ? `${authorUser2.firstName} ${authorUser2.lastName}` : 'System';
-      const oldDept2 = (issue as any).current_department || 'None';
-      await (db as any).issueHistory.create({
-        data: {
-          id: rid(), issueId: issue.id, field: 'department',
-          oldValue: oldDept2,
-          newValue: `Transferred to ${newDept} Ã¢â‚¬â€ waiting for assignment (SLA started)`,
-          authorName: authorName2, createdAt: new Date(),
-        },
-      });
+      // History entry (non-critical)
+      try {
+        const authorUser2 = userId
+          ? await db.user.findUnique({ where: { id: userId }, select: { firstName: true, lastName: true } })
+          : null;
+        const authorName2 = authorUser2 ? `${authorUser2.firstName} ${authorUser2.lastName}` : 'System';
+        await (db as any).issueHistory.create({
+          data: {
+            id: rid(), issueId: issue.id, field: 'department',
+            oldValue: oldDept || 'None',
+            newValue: `Transferred to ${newDept}`,
+            authorName: authorName2, createdAt: new Date(),
+          },
+        });
+      } catch { /* non-critical */ }
 
       const updatedIssue = await db.issue.findUnique({
         where: { key },
