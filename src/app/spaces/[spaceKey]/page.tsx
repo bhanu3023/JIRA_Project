@@ -461,13 +461,16 @@ function SpaceDetailContent() {
         if (filters.projectManager)   params.projectManager   = filters.projectManager;
         if (filters.manageClientName) params.manageClientName = filters.manageClientName;
         if (filters.customerPlan)     params.customerPlan     = filters.customerPlan;
+        // Clear stale cache for THIS exact param set so we never show another queue's issues
+        // while the new fetch is in-flight (e.g. showing 29k migration issues in dept queue).
+        clearIssuesCache(params);
         await loadIssues(params);
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load space');
       }
     })();
     return () => { cancelled = true; };
-  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, user?.id]);
+  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, user?.id]);
 
   // Prefetch common queues in background so switching feels instant (< 1s)
   useEffect(() => {
