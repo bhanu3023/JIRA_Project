@@ -2324,11 +2324,24 @@ export default function IssueDetailPage() {
                     </div>
                     <div className="max-h-52 overflow-y-auto py-1">
                       {!assigneeSearch && (
-                        <button onClick={() => { handleAssigneeChange(null); setAssigneeSearch(''); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 text-gray-500">
-                          <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center"><User size={10} className="text-gray-400" /></div>
-                          Unassigned {!issue.assignee && <Check size={11} className="ml-auto text-blue-600" />}
-                        </button>
+                        <>
+                          <button onClick={() => { handleAssigneeChange(null); setAssigneeSearch(''); }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 text-gray-500">
+                            <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center"><User size={10} className="text-gray-400" /></div>
+                            Unassigned {!issue.assignee && <Check size={11} className="ml-auto text-blue-600" />}
+                          </button>
+                          {user && (
+                            <button onClick={() => { handleAssigneeChange(user.id); setAssigneeSearch(''); }}
+                              className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-blue-50 ${issue.assignee?.id === user.id ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
+                              <div className="w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center text-white text-[8px] font-bold flex-shrink-0">{getInitials(user.firstName, user.lastName)}</div>
+                              <span className="flex-1 text-left truncate">
+                                {user.firstName} {user.lastName}
+                                <span className="ml-1 text-[11px] text-blue-500 font-normal">(Assign to me)</span>
+                              </span>
+                              {issue.assignee?.id === user.id && <Check size={11} className="ml-auto text-blue-600 flex-shrink-0" />}
+                            </button>
+                          )}
+                        </>
                       )}
                       {spaceMembers
                         .filter(m => {
