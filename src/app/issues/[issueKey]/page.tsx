@@ -1553,13 +1553,16 @@ export default function IssueDetailPage() {
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_rootCause' ? (
                       <div className="flex flex-col gap-2">
-                        <textarea value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus rows={4}
-                          className="w-full border border-blue-400 rounded px-3 py-2 text-[13px] focus:outline-none resize-none" />
-                        <div className="flex gap-2">
-                          <button onClick={async () => { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); loadIssue(issueKey); setEditingCustomField(null); }}
-                            className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)}
-                            className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
+                        <textarea value={customFieldEditValue} onChange={e => { const words = e.target.value.trim().split(/\s+/).filter(Boolean); if (words.length <= 500 || e.target.value.length < customFieldEditValue.length) setCustomFieldEditValue(e.target.value); }} autoFocus rows={6}
+                          className="w-full border border-blue-400 rounded px-3 py-2 text-[13px] focus:outline-none resize-y" placeholder="Describe the root cause…" />
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-gray-400">{customFieldEditValue.trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
+                          <div className="flex gap-2">
+                            <button onClick={async () => { try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } }}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">Save</button>
+                            <button onClick={() => setEditingCustomField(null)}
+                              className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
+                          </div>
                         </div>
                       </div>
                     ) : (
@@ -1583,13 +1586,16 @@ export default function IssueDetailPage() {
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_fixDescription' ? (
                       <div className="flex flex-col gap-2">
-                        <textarea value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus rows={4}
-                          className="w-full border border-blue-400 rounded px-3 py-2 text-[13px] focus:outline-none resize-none" />
-                        <div className="flex gap-2">
-                          <button onClick={async () => { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); loadIssue(issueKey); setEditingCustomField(null); }}
-                            className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)}
-                            className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
+                        <textarea value={customFieldEditValue} onChange={e => { const words = e.target.value.trim().split(/\s+/).filter(Boolean); if (words.length <= 500 || e.target.value.length < customFieldEditValue.length) setCustomFieldEditValue(e.target.value); }} autoFocus rows={6}
+                          className="w-full border border-blue-400 rounded px-3 py-2 text-[13px] focus:outline-none resize-y" placeholder="Describe the fix…" />
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-gray-400">{customFieldEditValue.trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
+                          <div className="flex gap-2">
+                            <button onClick={async () => { try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } }}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">Save</button>
+                            <button onClick={() => setEditingCustomField(null)}
+                              className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
+                          </div>
                         </div>
                       </div>
                     ) : (
