@@ -3763,11 +3763,6 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
                       <span className="font-semibold text-gray-800">{deptToast.assignee}</span>
                     </div>
                   )}
-                  {deptToast.queueUrl && (
-                    <a href={deptToast.queueUrl} className="inline-flex items-center gap-1 mt-1 text-[12px] font-medium text-blue-600 hover:text-blue-700 underline">
-                      View in {deptToast.dept} queue →
-                    </a>
-                  )}
                 </div>
                 <div className="flex justify-end mt-5">
                   <button
