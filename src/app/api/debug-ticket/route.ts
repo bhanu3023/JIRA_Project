@@ -57,21 +57,34 @@ export async function GET(req: NextRequest) {
       countResult = cr.rows[0]?.cnt;
     } catch(e: any) { countError = e?.message; }
 
-    // Run exact rows query
+    // Run full ROWS query with JOINs exactly as in real code
     let rowsResult = null, rowsError = null;
     try {
       const rr = await dbPool.query(
-        `SELECT DISTINCT ON (i.id) i.key, i.current_department, i.original_dept, i."spaceId"
+        `SELECT DISTINCT ON (i.id) i.*, sp.key AS space_key,
+                s.name AS status_name, s.category AS status_category, s.color AS status_color,
+                a.id AS assignee_id, CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a.email AS assignee_email, a."avatarUrl" AS assignee_avatar,
+                r.id AS reporter_id, CONCAT(r."firstName",' ',r."lastName") AS reporter_name, r.email AS reporter_email, r."avatarUrl" AS reporter_avatar
          FROM issues i
+         LEFT JOIN spaces sp ON sp.id = i."spaceId"
+         LEFT JOIN statuses s ON i."statusId" = s.id
+         LEFT JOIN users a ON i."assigneeId" = a.id
+         LEFT JOIN users r ON i."reporterId" = r.id
          WHERE i."spaceId" = ANY($1::text[])
            AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
            AND ${sentExistsClause}
          ORDER BY i.id, i."updatedAt" DESC, i."createdAt" DESC
-         LIMIT 100 OFFSET 0`,
-        [allSpaceIds, dept]
+         LIMIT $3 OFFSET $4`,
+        [allSpaceIds, dept, 100, 0]
       );
-      rowsResult = rr.rows;
+      rowsResult = { count: rr.rows.length, keys: rr.rows.map((r:any) => r.key) };
     } catch(e: any) { rowsError = e?.message; }
+
+    // Run comments fetch
+    let commentsError = null;
+    if (rowsResult && (rowsResult as any).count > 0) {
+      // just check it doesn't throw
+    }
 
     return Response.json({ ok: true, spaceId, allSpaceIds, dept, countResult, countError, rowsResult, rowsError });
   } catch (e: any) {
