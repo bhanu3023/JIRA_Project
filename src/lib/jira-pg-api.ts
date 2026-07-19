@@ -1836,6 +1836,13 @@ async function _handleJiraPgApi(
             )
           )`;
           console.log('[sentDept] allSpaceIds=', allSpaceIds, 'sentDeptParam=', sentDeptParam);
+          // Debug: check raw counts
+          const dbg1 = await pool.query(`SELECT COUNT(*)::int AS cnt, array_agg(DISTINCT i.current_department) AS depts FROM issues i WHERE i."spaceId" = ANY($1::text[])`, [allSpaceIds]);
+          console.log('[sentDept] total issues in space=', dbg1.rows[0]?.cnt, 'depts=', dbg1.rows[0]?.depts);
+          const dbg2 = await pool.query(`SELECT COUNT(*)::int AS cnt FROM issues i WHERE i."spaceId" = ANY($1::text[]) AND LOWER(COALESCE(i.original_dept,''))=LOWER($2) AND LOWER(COALESCE(i.current_department,''))!=LOWER($2)`, [allSpaceIds, sentDeptParam]);
+          console.log('[sentDept] original_dept match=', dbg2.rows[0]?.cnt);
+          const dbg3 = await pool.query(`SELECT COUNT(*)::int AS cnt FROM issue_dept_transitions t JOIN issues i ON i.id=t.issue_id WHERE i."spaceId"=ANY($1::text[]) AND LOWER(t.from_dept)=LOWER($2)`, [allSpaceIds, sentDeptParam]);
+          console.log('[sentDept] transitions from dept=', dbg3.rows[0]?.cnt);
           const countRow = await pool.query(
             `SELECT COUNT(DISTINCT i.id)::int AS cnt
              FROM issues i
@@ -1845,7 +1852,7 @@ async function _handleJiraPgApi(
             [allSpaceIds, sentDeptParam]
           );
           const sentDeptTotal = countRow.rows[0]?.cnt ?? 0;
-          console.log('[sentDept] total=', sentDeptTotal);
+          console.log('[sentDept] final total=', sentDeptTotal);
 
           const rows = await pool.query(
             `SELECT DISTINCT ON (i.id) i.*, sp.key AS space_key,
