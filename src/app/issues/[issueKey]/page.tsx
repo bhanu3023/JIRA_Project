@@ -1558,18 +1558,8 @@ export default function IssueDetailPage() {
             } catch { return RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept; }
           })() && (
             <div className="mt-6 space-y-4">
-              {/* Root Cause — shown if enabled for this board */}
-              {(() => {
-                const RC_FD_DEFAULTS = ['L2BOARD', 'L3BOARD'];
-                const isDevDept = (issue as any).current_department === 'Dev';
-                try {
-                  const cfg = JSON.parse(localStorage.getItem('migrated_field_config') || '{}');
-                  const curSpace = spaces.find(s => s.key === issue.spaceKey);
-                  return (cfg['Root Cause']
-                    ? (curSpace ? cfg['Root Cause'].spaceIds.includes(curSpace.id) : false)
-                    : RC_FD_DEFAULTS.includes(issue.spaceKey)) || isDevDept;
-                } catch { return RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept; }
-              })() && (
+              {/* Root Cause — always shown */}
+              {true && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
                     <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">Root Cause</span>
@@ -1598,18 +1588,8 @@ export default function IssueDetailPage() {
                 </div>
               )}
 
-              {/* Fix Description — shown if enabled for this board */}
-              {(() => {
-                const RC_FD_DEFAULTS = ['L2BOARD', 'L3BOARD'];
-                const isDevDept = (issue as any).current_department === 'Dev';
-                try {
-                  const cfg = JSON.parse(localStorage.getItem('migrated_field_config') || '{}');
-                  const curSpace = spaces.find(s => s.key === issue.spaceKey);
-                  return (cfg['Fix Description']
-                    ? (curSpace ? cfg['Fix Description'].spaceIds.includes(curSpace.id) : false)
-                    : RC_FD_DEFAULTS.includes(issue.spaceKey)) || isDevDept;
-                } catch { return RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept; }
-              })() && (
+              {/* Fix Description — always shown */}
+              {true && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
                     <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">Fix Description</span>
