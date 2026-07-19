@@ -3674,11 +3674,13 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
     setSaving(true);
     setShowDrop(false);
     const prevDept = optimisticDept ?? currentDepartment;
-    setOptimisticDept(dept.name); // Show new value immediately
-    // Set status to "Waiting for [dept]" before changing department
-    try { await onSetWaitingStatus?.(dept.name); } catch {}
+    setOptimisticDept(dept.name);
+    // Only set waiting status if not already in it (avoids redundant reload)
+    const alreadyWaiting = (currentStatusName || '').toLowerCase() === `waiting for ${dept.name.toLowerCase()}`;
+    if (!alreadyWaiting) {
+      try { await onSetWaitingStatus?.(dept.name); } catch {}
+    }
     try {
-      // Always single-board: no targetBoard so dept changes on the same ticket
       const res = await fetch(`/api/issues/${issueKey}/department`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
@@ -3697,13 +3699,13 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
             ? `/spaces/${data.boardKey || spaceKey}?queue=dept_all&dept=${encodeURIComponent(dept.name)}`
             : '',
         });
-        setTimeout(() => setDeptToast(null), 7000);
+        setTimeout(() => setDeptToast(null), 4000);
         onChanged();
       } else {
-        setOptimisticDept(prevDept); // Roll back on API error
+        setOptimisticDept(prevDept);
       }
     } catch {
-      setOptimisticDept(prevDept); // Roll back on network error
+      setOptimisticDept(prevDept);
     }
     setSaving(false);
   };
@@ -3733,52 +3735,44 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
           <ChevronDown size={10} className="text-gray-300 ml-auto flex-shrink-0" />
         </button>
 
-        {/* Department pass toast */}
+        {/* Department change success popup */}
         {deptToast && (
-          <div className="fixed bottom-6 right-6 z-[9999] w-80 bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden" style={{animation: 'slideUpFade 0.3s ease-out'}}>
-            {/* Green top bar */}
-            <div className="h-1 bg-gradient-to-r from-green-400 to-emerald-500" />
-            <div className="px-4 py-3.5">
-              {/* Header */}
-              <div className="flex items-center gap-2 mb-2.5">
-                <div className="w-7 h-7 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
-                  <Check size={14} className="text-green-600" />
-                </div>
-                <span className="text-[13px] font-semibold text-gray-800">Ticket Passed Successfully</span>
-              </div>
-              {/* Details */}
-              <div className="space-y-1.5 pl-9">
-                <div className="flex items-center gap-2 text-[12px] text-gray-600">
-                  <span className="w-20 text-gray-400 flex-shrink-0">Department</span>
-                  <span className="font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">{deptToast.dept}</span>
-                </div>
-                {deptToast.board && (
-                  <div className="flex items-center gap-2 text-[12px] text-gray-600">
-                    <span className="w-20 text-gray-400 flex-shrink-0">Board</span>
-                    <span className="font-semibold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200">{deptToast.board}</span>
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40">
+            <div className="bg-white rounded-2xl shadow-2xl w-[400px] overflow-hidden">
+              <div className="h-1 bg-gradient-to-r from-green-400 to-emerald-500" />
+              <div className="px-6 py-5">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-9 h-9 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
+                    <Check size={18} className="text-green-600" />
                   </div>
-                )}
-                {deptToast.newKey && (
-                  <div className="flex items-center gap-2 text-[12px] text-gray-600">
-                    <span className="w-20 text-gray-400 flex-shrink-0">New ticket</span>
-                    <span className="font-bold text-gray-800 font-mono">{deptToast.newKey}</span>
-                  </div>
-                )}
-                <div className="flex items-center gap-2 text-[12px] text-gray-600">
-                  <span className="w-20 text-gray-400 flex-shrink-0">Assigned to</span>
-                  <span className="font-semibold text-gray-800">{deptToast.assignee}</span>
+                  <h3 className="text-[15px] font-semibold text-gray-900">Successfully Moved to {deptToast.dept}</h3>
                 </div>
-                {deptToast.queueUrl && (
-                  <a href={deptToast.queueUrl}
-                    className="inline-flex items-center gap-1.5 mt-1 text-[11.5px] font-medium text-blue-600 hover:text-blue-700 underline">
-                    View in {deptToast.dept} queue →
-                  </a>
-                )}
+                <div className="space-y-2 pl-12">
+                  <div className="flex items-center gap-2 text-[13px] text-gray-600">
+                    <span className="w-24 text-gray-400 flex-shrink-0">Department</span>
+                    <span className="font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">{deptToast.dept}</span>
+                  </div>
+                  {deptToast.assignee && (
+                    <div className="flex items-center gap-2 text-[13px] text-gray-600">
+                      <span className="w-24 text-gray-400 flex-shrink-0">Assigned to</span>
+                      <span className="font-semibold text-gray-800">{deptToast.assignee}</span>
+                    </div>
+                  )}
+                  {deptToast.queueUrl && (
+                    <a href={deptToast.queueUrl} className="inline-flex items-center gap-1 mt-1 text-[12px] font-medium text-blue-600 hover:text-blue-700 underline">
+                      View in {deptToast.dept} queue →
+                    </a>
+                  )}
+                </div>
+                <div className="flex justify-end mt-5">
+                  <button
+                    onClick={() => setDeptToast(null)}
+                    className="px-5 py-1.5 text-[13px] font-semibold bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    OK
+                  </button>
+                </div>
               </div>
-            </div>
-            {/* Close / progress bar */}
-            <div className="h-0.5 bg-gray-100">
-              <div className="h-full bg-green-400 animate-[shrink_5s_linear_forwards]" style={{animation: 'width 5s linear forwards', width: '100%'}} />
             </div>
           </div>
         )}
