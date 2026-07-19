@@ -1541,22 +1541,8 @@ export default function IssueDetailPage() {
             );
           })()}
 
-          {/* ── Root Cause & Fix Description — shown based on field→board config ── */}
-          {(() => {
-            const RC_FD_DEFAULTS = ['L2BOARD', 'L3BOARD'];
-            const isDevDept = (issue as any).current_department === 'Dev';
-            try {
-              const cfg = JSON.parse(localStorage.getItem('migrated_field_config') || '{}');
-              const curSpace = spaces.find(s => s.key === issue.spaceKey);
-              const rcEnabled = (cfg['Root Cause']
-                ? (curSpace ? cfg['Root Cause'].spaceIds.includes(curSpace.id) : false)
-                : RC_FD_DEFAULTS.includes(issue.spaceKey)) || isDevDept;
-              const fdEnabled = (cfg['Fix Description']
-                ? (curSpace ? cfg['Fix Description'].spaceIds.includes(curSpace.id) : false)
-                : RC_FD_DEFAULTS.includes(issue.spaceKey)) || isDevDept;
-              return rcEnabled || fdEnabled;
-            } catch { return RC_FD_DEFAULTS.includes(issue.spaceKey) || isDevDept; }
-          })() && (
+          {/* ── Root Cause & Fix Description — always shown ── */}
+          {true && (
             <div className="mt-6 space-y-4">
               {/* Root Cause — always shown */}
               {true && (
