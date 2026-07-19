@@ -1874,7 +1874,7 @@ async function _handleJiraPgApi(
           }
 
           // Build sentEnriched with paused SLA state per issue
-          const sentEnriched = await Promise.all(rows.rows.map(async (row: any) => {
+          const sentEnriched = (await Promise.all(rows.rows.map(async (row: any) => { try {
             const base = formatIssue({
               id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: row.description,
               priority: row.priority, type: row.type, labels: row.labels,
@@ -1892,10 +1892,10 @@ async function _handleJiraPgApi(
             });
             const pausedSla = await computePausedDeptSLA(row, sentDeptParam, slaPolicies);
             return { ...base, paused_sla: pausedSla };
-          }));
+          } catch { return null; } }))).filter(Boolean as any);
           return json({ issues: sentEnriched, total: sentDeptTotal, page, totalPages: Math.max(1, Math.ceil(sentDeptTotal / limit)) });
         }
-      } catch { /* fall through to normal path */ }
+      } catch { return json({ issues: [], total: 0, page, totalPages: 1 }); }
     }
 
     // Filter by dept param if provided Ã¢â‚¬â€ use raw SQL count so total is accurate
