@@ -682,19 +682,11 @@ function SpaceDetailContent() {
   }, [currentSpace?.key, user?.id]);
 
   const handleInlineUpdate = useCallback(async (issueKey: string, field: string, value: any) => {
-    if (field === 'statusId') {
-      const issue = issues.find((i: any) => i.key === issueKey);
-      if (issue && !issue.assignee) {
-        setOpenDropdown(null);
-        setAssigneeRequiredModal(true);
-        return;
-      }
-    }
     setOpenDropdown(null); setUpdating(issueKey);
     try { await api.updateIssue(issueKey, { [field]: value }); await loadIssues({ spaceKey, page: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(currentPage) : '1', limit: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(PAGE_SIZE) : '500' }); }
     catch (err) { console.error(err); }
     finally { setUpdating(null); }
-  }, [spaceKey, loadIssues, issues]);
+  }, [spaceKey, loadIssues]);
 
   const recallIssue = async (issueKey: string) => {
     try {
@@ -2448,7 +2440,15 @@ function SpaceDetailContent() {
                             <InlineDropdown onClose={() => setOpenDropdown(null)} anchorRect={openDropdown.rect}>
                               <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Move to</div>
                               {options.map(s => (
-                                <button key={s.id} onClick={() => handleInlineUpdate(issue.key, 'statusId', s.id)}
+                                <button key={s.id} onClick={() => {
+                                  const isInProgress = s.name?.toLowerCase().includes('in progress');
+                                  if (isInProgress && !issue.assignee) {
+                                    setOpenDropdown(null);
+                                    setAssigneeRequiredModal(true);
+                                    return;
+                                  }
+                                  handleInlineUpdate(issue.key, 'statusId', s.id);
+                                }}
                                   className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-50 transition-colors">
                                   {s.name}
                                 </button>
