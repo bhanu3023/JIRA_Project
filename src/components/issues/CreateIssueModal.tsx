@@ -285,6 +285,15 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const selectedAssignee = spaceMembers.find(m => m.id === form.assigneeId);
   const workTypeLabel = WORK_TYPES.find(t => t.value === form.type)?.label || 'Task';
 
+  const categoryOrder: Record<string, number> = { todo: 0, in_progress: 1, done: 3 };
+  const sortedStatuses = [...spaceStatuses].sort((a, b) => {
+    const ac = (a as any).category as string | undefined;
+    const bc = (b as any).category as string | undefined;
+    const ao = ac !== undefined ? (categoryOrder[ac] ?? 2) : 2;
+    const bo = bc !== undefined ? (categoryOrder[bc] ?? 2) : 2;
+    return ao - bo;
+  });
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl w-full max-w-[960px] max-h-[92vh] flex flex-col shadow-2xl">
@@ -486,7 +495,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   onChange={e => update('statusId', e.target.value)}
                   className="w-full px-3 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  {spaceStatuses.map(s => (
+                  {sortedStatuses.map(s => (
                     <option key={s.id} value={s.id}>{s.name}</option>
                   ))}
                 </select>
