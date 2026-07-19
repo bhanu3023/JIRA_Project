@@ -2048,7 +2048,7 @@ export default function IssueDetailPage() {
                     <ChevronDown size={10} className="text-gray-300 ml-auto flex-shrink-0" />
                   </button>
                   {showAssigneeDropdown && (
-                    <Dropdown onClose={() => { setShowAssigneeDropdown(false); setAssigneeSearch(''); }} width="w-56" align="left-0">
+                    <Dropdown onClose={() => { setShowAssigneeDropdown(false); setAssigneeSearch(''); }} width="w-72" align="left-0">
                       <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Assign to</div>
                       <div className="px-2 py-2 border-b border-gray-100">
                         <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
@@ -2311,7 +2311,7 @@ export default function IssueDetailPage() {
                   <ChevronDown size={10} className="text-gray-300 ml-auto flex-shrink-0" />
                 </button>
                 {showAssigneeDropdown && (
-                  <Dropdown onClose={() => { setShowAssigneeDropdown(false); setAssigneeSearch(''); }} width="w-56" align="left-0">
+                  <Dropdown onClose={() => { setShowAssigneeDropdown(false); setAssigneeSearch(''); }} width="w-72" align="left-0">
                     <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Assign to</div>
                     <div className="px-2 py-2 border-b border-gray-100">
                       <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
