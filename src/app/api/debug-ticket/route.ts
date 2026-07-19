@@ -10,11 +10,29 @@ export async function GET(req: NextRequest) {
   const spaceKey = req.nextUrl.searchParams.get('spaceKey') || 'TESTIN';
 
   try {
-    const spaceRow = await dbPool.query(`SELECT id FROM spaces WHERE UPPER(key) = UPPER($1)`, [spaceKey]);
-    const spaceId = spaceRow.rows[0]?.id ?? null;
+    // Replicate EXACT allSpaceIds logic from jira-pg-api.ts
+    let allSpaceIds: string[] = [];
+    let subBoardInfo: any = null;
+    try {
+      const spaceRow = await dbPool.query(
+        `SELECT id, COALESCE(sub_board_keys, '{}') AS sub_board_keys FROM spaces WHERE key = $1`,
+        [spaceKey]
+      );
+      if (spaceRow.rows[0]) {
+        allSpaceIds.push(spaceRow.rows[0].id);
+        const subKeys: string[] = spaceRow.rows[0].sub_board_keys || [];
+        subBoardInfo = { mainId: spaceRow.rows[0].id, subKeys };
+        if (subKeys.length > 0) {
+          const subRows = await dbPool.query(`SELECT id FROM spaces WHERE key = ANY($1::text[])`, [subKeys]);
+          for (const sub of subRows.rows) allSpaceIds.push(sub.id);
+        }
+      }
+    } catch {
+      const spaceRow = await dbPool.query(`SELECT id FROM spaces WHERE key = $1`, [spaceKey]);
+      if (spaceRow.rows[0]) allSpaceIds.push(spaceRow.rows[0].id);
+    }
+    const spaceId = allSpaceIds[0] ?? null;
     if (!spaceId) return Response.json({ ok: false, error: `Space ${spaceKey} not found` });
-
-    const allSpaceIds = [spaceId];
 
     const sentExistsClause = `(
       EXISTS (
@@ -86,7 +104,7 @@ export async function GET(req: NextRequest) {
       // just check it doesn't throw
     }
 
-    return Response.json({ ok: true, spaceId, allSpaceIds, dept, countResult, countError, rowsResult, rowsError });
+    return Response.json({ ok: true, spaceId, allSpaceIds, subBoardInfo, dept, countResult, countError, rowsResult, rowsError });
   } catch (e: any) {
     return Response.json({ ok: false, error: e?.message });
   }
