@@ -1851,8 +1851,9 @@ async function _handleJiraPgApi(
             );
             for (const c of cRows.rows) {
               if (!commentsMap[c.issueId]) commentsMap[c.issueId] = [];
+              const toIso = (v: any) => v ? (v instanceof Date ? v.toISOString() : new Date(v + (String(v).includes('+') || String(v).endsWith('Z') ? '' : ' UTC')).toISOString()) : null;
               commentsMap[c.issueId].push({
-                id: c.id, body: c.body, createdAt: c.createdAt, updatedAt: c.updatedAt,
+                id: c.id, body: c.body, createdAt: toIso(c.createdAt), updatedAt: toIso(c.updatedAt),
                 author: c.authorId ? { id: c.authorId, firstName: c.firstName, lastName: c.lastName, email: c.user_email, avatarUrl: c.avatarUrl } : null,
                 authorName: c.authorName, authorEmail: c.authorEmail,
               });
