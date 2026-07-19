@@ -116,6 +116,7 @@ export default function IssueDetailPage() {
   const [customFields, setCustomFields] = useState<any[]>([]);
   const [mandatoryModal, setMandatoryModal] = useState<{ missingFields: string[]; pendingStatusId: string } | null>(null);
   const [deptBlockModal, setDeptBlockModal] = useState(false);
+  const [pendingDeptChange, setPendingDeptChange] = useState<{ dept: { name: string; boardKey: string }; execute: () => void } | null>(null);
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
   const [editingCustomField, setEditingCustomField] = useState<string | null>(null);
   const [customFieldEditValue, setCustomFieldEditValue] = useState('');
@@ -2358,6 +2359,7 @@ export default function IssueDetailPage() {
               currentStatusName={issueStat?.name}
               onChanged={() => loadIssue(issueKey)}
               onDeptChangeBlocked={() => setDeptBlockModal(true)}
+              onRequestDeptChange={(dept, execute) => setPendingDeptChange({ dept, execute })}
               onSetWaitingStatus={async (deptName: string) => {
                 const waitingStatus = spaceStatuses.find((s: any) =>
                   (s.name || '').toLowerCase() === `waiting for ${deptName.toLowerCase()}`
@@ -3440,6 +3442,36 @@ export default function IssueDetailPage() {
         </div>
       )}
 
+      {pendingDeptChange && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl w-[380px] overflow-hidden">
+            <div className="h-1 bg-gradient-to-r from-amber-400 to-orange-500" />
+            <div className="px-6 py-5">
+              <h3 className="text-[15px] font-semibold text-gray-900 mb-1">Change Department?</h3>
+              <p className="text-[13px] text-gray-600 mt-2 leading-relaxed">
+                The current status in <span className="font-semibold text-gray-800">{(issue as any).current_department || 'current'}</span> will
+                first be set to <span className="font-semibold text-amber-600">Waiting for {pendingDeptChange.dept.name}</span>,
+                then the ticket will move to <span className="font-semibold text-blue-700">{pendingDeptChange.dept.name}</span>.
+              </p>
+              <div className="flex items-center justify-end gap-2 mt-5">
+                <button
+                  onClick={() => setPendingDeptChange(null)}
+                  className="px-4 py-1.5 text-[13px] text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => { const fn = pendingDeptChange.execute; setPendingDeptChange(null); fn(); }}
+                  className="px-4 py-1.5 text-[13px] font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Yes, Change Department
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {deptBlockModal && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4" style={{ background: 'rgba(9,30,66,0.54)' }}>
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden">
@@ -3544,7 +3576,7 @@ export default function IssueDetailPage() {
 }
 
 /* ===== Department Field ===== */
-function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, currentStatusName, onChanged, onDeptChangeBlocked, onSetWaitingStatus }: {
+function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, currentStatusName, onChanged, onDeptChangeBlocked, onSetWaitingStatus, onRequestDeptChange }: {
   issueKey: string;
   currentDepartment: string | null;
   spaceKey: string;
@@ -3554,6 +3586,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   onChanged: () => void;
   onDeptChangeBlocked?: () => void;
   onSetWaitingStatus?: (deptName: string) => Promise<void>;
+  onRequestDeptChange?: (dept: { name: string; boardKey: string }, execute: () => void) => void;
 }) {
   const [deptOptions, setDeptOptions] = React.useState<{ name: string; boardKey: string }[]>([]);
   const [spaceAssigned, setSpaceAssigned] = React.useState<boolean | null>(null);
@@ -3792,7 +3825,14 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
                 return (
                   <button
                     key={d.name}
-                    onClick={() => { setShowDrop(false); setPendingDept(d); }}
+                    onClick={() => {
+                    setShowDrop(false);
+                    if (onRequestDeptChange) {
+                      onRequestDeptChange(d, () => changeDept(d));
+                    } else {
+                      setPendingDept(d);
+                    }
+                  }}
                     className={`w-full text-left px-3 py-2.5 text-[12.5px] hover:bg-gray-50 flex items-center gap-2 ${isActive ? 'text-blue-600 font-medium bg-blue-50/40' : 'text-gray-700'}`}
                   >
                     {isActive
