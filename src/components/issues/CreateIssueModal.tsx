@@ -228,7 +228,10 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // Set default status
   useEffect(() => {
     if (spaceStatuses.length > 0 && !form.statusId) {
-      const def = spaceStatuses.find(s => s.name.toLowerCase() === 'to do') || spaceStatuses[0];
+      const def = spaceStatuses.find(s => s.name.toLowerCase() === 'open')
+        || spaceStatuses.find(s => s.name.toLowerCase() === 'to do')
+        || spaceStatuses.find(s => s.name.toLowerCase() === 'todo')
+        || spaceStatuses[0];
       setForm(f => ({ ...f, statusId: def.id }));
     }
   }, [spaceStatuses]);
@@ -539,6 +542,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   className={`w-full ${selectedAssignee ? 'pl-8' : 'pl-3'} pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500`}
                 >
                   <option value="">Unassigned</option>
+                  {user && <option value={user.id}>Assign to me</option>}
                   {spaceMembers.map(m => (
                     <option key={m.id} value={m.id}>{m.firstName} {m.lastName}</option>
                   ))}
