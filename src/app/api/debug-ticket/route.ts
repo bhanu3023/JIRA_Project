@@ -98,13 +98,31 @@ export async function GET(req: NextRequest) {
       rowsResult = { count: rr.rows.length, keys: rr.rows.map((r:any) => r.key) };
     } catch(e: any) { rowsError = e?.message; }
 
-    // Run comments fetch
+    // Run comments fetch — this is NOT in a try/catch in the real code
     let commentsError = null;
     if (rowsResult && (rowsResult as any).count > 0) {
-      // just check it doesn't throw
+      const fullRows = await dbPool.query(
+        `SELECT DISTINCT ON (i.id) i.id FROM issues i
+         WHERE i."spaceId" = ANY($1::text[])
+           AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
+           AND ${sentExistsClause}
+         ORDER BY i.id LIMIT 100`,
+        [allSpaceIds, dept]
+      );
+      const issueIds = fullRows.rows.map((r: any) => r.id);
+      try {
+        await dbPool.query(
+          `SELECT c.*, u."firstName", u."lastName", u.email AS user_email, u."avatarUrl"
+           FROM comments c
+           LEFT JOIN users u ON u.id = c."authorId"
+           WHERE c."issueId" = ANY($1::text[])
+           ORDER BY c."createdAt" ASC`,
+          [issueIds]
+        );
+      } catch(e: any) { commentsError = e?.message; }
     }
 
-    return Response.json({ ok: true, spaceId, allSpaceIds, subBoardInfo, dept, countResult, countError, rowsResult, rowsError });
+    return Response.json({ ok: true, spaceId, allSpaceIds, subBoardInfo, dept, countResult, countError, rowsResult, rowsError, commentsError });
   } catch (e: any) {
     return Response.json({ ok: false, error: e?.message });
   }
