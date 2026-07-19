@@ -171,6 +171,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [form, setForm] = useState({
     summary: '', description: '', type: 'task', priority: 'medium',
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: '', department: initialDept || '',
+    productType: '', projectManager: '',
   });
   const [summaryError, setSummaryError] = useState(false);
   const [error, setError]               = useState('');
@@ -253,6 +254,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         dueDate: form.dueDate || undefined,
         statusId: form.statusId || undefined,
         combination: form.combination || undefined,
+        productType: form.productType || undefined,
+        projectManager: form.projectManager || undefined,
         ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
       });
       // Save custom field values
@@ -264,7 +267,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         );
       }
       if (createAnother) {
-        setForm(f => ({ ...f, summary: '', description: '', dueDate: '', combination: '' }));
+        setForm(f => ({ ...f, summary: '', description: '', dueDate: '', combination: '', productType: '', projectManager: '' }));
         setCustomFieldValues({});
         setSummaryError(false);
       } else {
@@ -378,6 +381,46 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 value={form.combination}
                 onChange={v => update('combination', v)}
               />
+            </div>
+
+            {/* Product Type */}
+            <div className="mb-4">
+              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Product Type</label>
+              <div className="relative">
+                <select
+                  value={form.productType}
+                  onChange={e => update('productType', e.target.value)}
+                  className="w-full px-3 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-[13px] appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Select product type…</option>
+                  {['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'].map(o => (
+                    <option key={o} value={o}>{o}</option>
+                  ))}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
+                  <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                </div>
+              </div>
+            </div>
+
+            {/* Project Manager */}
+            <div className="mb-4">
+              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Project Manager</label>
+              <div className="relative">
+                <select
+                  value={form.projectManager}
+                  onChange={e => update('projectManager', e.target.value)}
+                  className="w-full px-3 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-[13px] appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Select project manager…</option>
+                  {['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan'].map(o => (
+                    <option key={o} value={o}>{o}</option>
+                  ))}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
+                  <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                </div>
+              </div>
             </div>
 
             {/* Dynamic custom fields */}
