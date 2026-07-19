@@ -254,6 +254,7 @@ function SpaceDetailContent() {
   const [visibleCols, setVisibleCols] = useState<string[]>(DEFAULT_COLS);
   const [serverFieldOptions, setServerFieldOptions] = useState<Record<string, string[]>>({});
   const [updating, setUpdating] = useState<string | null>(null);
+  const [assigneeRequiredModal, setAssigneeRequiredModal] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 50;
@@ -681,11 +682,19 @@ function SpaceDetailContent() {
   }, [currentSpace?.key, user?.id]);
 
   const handleInlineUpdate = useCallback(async (issueKey: string, field: string, value: any) => {
+    if (field === 'statusId') {
+      const issue = issues.find((i: any) => i.key === issueKey);
+      if (issue && !issue.assignee) {
+        setOpenDropdown(null);
+        setAssigneeRequiredModal(true);
+        return;
+      }
+    }
     setOpenDropdown(null); setUpdating(issueKey);
     try { await api.updateIssue(issueKey, { [field]: value }); await loadIssues({ spaceKey, page: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(currentPage) : '1', limit: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(PAGE_SIZE) : '500' }); }
     catch (err) { console.error(err); }
     finally { setUpdating(null); }
-  }, [spaceKey, loadIssues]);
+  }, [spaceKey, loadIssues, issues]);
 
   const recallIssue = async (issueKey: string) => {
     try {
@@ -2595,6 +2604,28 @@ function SpaceDetailContent() {
             title="Copy ticket key"
           >Copy</button>
           <button onClick={() => setCreatedToast(null)} className="ml-1 text-white/50 hover:text-white text-lg leading-none">×</button>
+        </div>
+      )}
+
+      {/* Assignee required popup */}
+      {assigneeRequiredModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40" onClick={() => setAssigneeRequiredModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-[380px] overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="h-1 bg-gradient-to-r from-amber-400 to-orange-500" />
+            <div className="px-6 py-5">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-9 h-9 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                </div>
+                <h3 className="text-[15px] font-semibold text-gray-900">Assignee Required</h3>
+              </div>
+              <p className="text-[13px] text-gray-600 mb-5">Please assign this ticket to someone before changing its status.</p>
+              <button onClick={() => setAssigneeRequiredModal(false)}
+                className="w-full bg-amber-500 hover:bg-amber-600 text-white text-[13px] font-medium py-2 rounded-lg transition-colors">
+                OK
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
