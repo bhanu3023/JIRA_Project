@@ -454,31 +454,6 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
               </div>
             </div>
 
-            {/* Queue */}
-            {spaceQueues.length > 0 && (
-              <div className="mb-4">
-                <label className="block text-[12px] font-semibold text-gray-500 mb-1">Queue</label>
-                <div className="relative">
-                  <select
-                    value={selectedQueueId}
-                    onChange={e => {
-                      const id = e.target.value;
-                      setSelectedQueueId(id);
-                      const q = spaceQueues.find(x => x.id === id);
-                      if (q?.dept) setForm(f => ({ ...f, department: q.dept! }));
-                      else if (!id) setForm(f => ({ ...f, department: initialDept || '' }));
-                    }}
-                    className="w-full px-3 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="">Select queue…</option>
-                    {spaceQueues.map(q => (
-                      <option key={q.id} value={q.id}>{q.label}</option>
-                    ))}
-                  </select>
-                  <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-                </div>
-              </div>
-            )}
 
             {/* Work type */}
             <div className="mb-4">
