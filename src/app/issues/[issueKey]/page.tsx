@@ -3689,7 +3689,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
       const res = await fetch(`/api/issues/${issueKey}/department`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ department: dept.name }),
+        body: JSON.stringify({ department: dept.name, fromDept: currentDepartment || (issue as any).current_department || '' }),
       });
       if (res.ok) {
         const data = await res.json();

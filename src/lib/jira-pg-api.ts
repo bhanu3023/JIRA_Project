@@ -2320,6 +2320,7 @@ async function _handleJiraPgApi(
     const body = await readJson(req);
     const newDept = String(body.department || '');
     // targetBoard may be comma-separated (multi-board mapping) Ã¢â‚¬â€ use the first board
+    const fromDeptBody = String(body.fromDept || '');
     const rawTargetBoard = String(body.targetBoard || '');
     const targetBoardKey = rawTargetBoard.split(',')[0].trim().toUpperCase();
 
@@ -2354,7 +2355,7 @@ async function _handleJiraPgApi(
       // Build per-dept assignee map: save current assignee under old dept, clear new dept
       // Fetch current_department from raw SQL Ã¢â‚¬â€ Prisma doesn't return raw ALTER TABLE columns
       const existingMap = await pool.query(`SELECT dept_assignees, current_department FROM issues WHERE key=$1`, [key]);
-      const oldDept: string = existingMap.rows[0]?.current_department || '';
+      const oldDept: string = existingMap.rows[0]?.current_department || fromDeptBody || '';
       const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
       if (oldDept && issue.assignee) {
         deptAssignees[oldDept] = {
