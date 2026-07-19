@@ -122,7 +122,19 @@ export async function GET(req: NextRequest) {
       } catch(e: any) { commentsError = e?.message; }
     }
 
-    return Response.json({ ok: true, spaceId, allSpaceIds, subBoardInfo, dept, countResult, countError, rowsResult, rowsError, commentsError });
+    // Check for DB triggers on issues table
+    const triggers = await dbPool.query(
+      `SELECT trigger_name, event_manipulation, action_statement FROM information_schema.triggers WHERE event_object_table = 'issues'`
+    );
+    // Re-read ticket state NOW (after any recent updates)
+    const ticketNow = await dbPool.query(
+      `SELECT key, current_department, original_dept, dept_statuses,
+        EXISTS(SELECT 1 FROM queue_closed_tickets WHERE issue_id=id AND LOWER(dept_name)=LOWER($1)) AS has_closed_ticket,
+        EXISTS(SELECT 1 FROM issue_dept_transitions WHERE issue_id=id AND LOWER(from_dept)=LOWER($1)) AS has_transition
+       FROM issues WHERE key='L2B-15087'`,
+      [dept]
+    );
+    return Response.json({ ok: true, spaceId, allSpaceIds, dept, countResult, countError, rowsResult, rowsError, commentsError, triggers: triggers.rows, ticketNow: ticketNow.rows[0] });
   } catch (e: any) {
     return Response.json({ ok: false, error: e?.message });
   }
