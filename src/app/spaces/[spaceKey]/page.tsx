@@ -164,6 +164,20 @@ function SpaceDetailContent() {
     return () => clearTimeout(t);
   }, [search]);
   const [closedIssues, setClosedIssues] = useState<any[]>([]);
+  const fetchClosedIssues = useCallback(async (sk: string, dept: string) => {
+    if (!sk || !dept) return;
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
+      const res = await fetch(
+        `/api/spaces/${sk}/dept-queue/closed?dept=${encodeURIComponent(dept)}&page=1`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setClosedIssues(data.issues || []);
+      }
+    } catch { /* non-fatal */ }
+  }, []);
   const [deptFilter, setDeptFilter] = useState<string>(''); // '' = all departments
   const [allCustomQueues, setAllCustomQueues] = useState<{ id: string; name: string; memberIds: string[] }[]>([]);
   // Track which spaceKey the queues were loaded for — avoids stale-spaceKey race condition
@@ -419,21 +433,9 @@ function SpaceDetailContent() {
             params.excludeDone = 'true';
             if (deptParam) params.dept = deptParam;
           }
-          // Dept sub-queue: closed tickets — fetched separately, cached per dept
+          // Dept sub-queue: closed tickets — fetched separately, auto-refreshed every 30s
           if (queueFilter === 'dept_closed') {
-            if (!cancelled && closedIssues.length === 0) {
-              try {
-                const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
-                const closedRes = await fetch(
-                  `/api/spaces/${spaceKey}/dept-queue/closed?dept=${encodeURIComponent(deptParam)}&page=1`,
-                  { headers: token ? { Authorization: `Bearer ${token}` } : {} }
-                );
-                if (closedRes.ok) {
-                  const closedData = await closedRes.json();
-                  if (!cancelled) setClosedIssues(closedData.issues || []);
-                }
-              } catch { /* non-fatal */ }
-            }
+            if (!cancelled) await fetchClosedIssues(spaceKey, deptParam);
             return; // skip normal loadIssues for closed view
           }
         }
@@ -481,7 +483,7 @@ function SpaceDetailContent() {
       }
     })();
     return () => { cancelled = true; };
-  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, user?.id]);
+  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id]);
 
   // Auto-refresh Sent/Watching every 15s so status changes made by other depts (e.g. Migration closing) appear promptly
   useEffect(() => {
@@ -520,6 +522,7 @@ function SpaceDetailContent() {
   useEffect(() => {
     const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
     if (!isDeptQueue) return;
+    if (queueFilter === 'dept_closed') return; // handled by its own interval below
     const id = setInterval(() => {
       const params: Record<string, string> = { spaceKey };
       if (queueFilter.startsWith('cq_') && activeCustomQueue?.name) {
@@ -537,12 +540,39 @@ function SpaceDetailContent() {
         if (deptParam) params.sentDept = deptParam;
       } else if (queueFilter && queueFilter !== 'queues') {
         params.queue = queueFilter;
+        if (deptParam) params.dept = deptParam;
       }
       clearIssuesCache(params);
       loadIssues(params).catch(() => {});
     }, 15000);
     return () => clearInterval(id);
   }, [spaceKey, queueFilter, deptParam, currentPage, activeCustomQueue, currentSpace?.type, allCustomQueues.length, loadIssues, clearIssuesCache]);
+
+  // Auto-refresh Worked on (dept_closed) every 30s
+  useEffect(() => {
+    if (queueFilter !== 'dept_closed' || !spaceKey || !deptParam) return;
+    const id = setInterval(() => {
+      fetchClosedIssues(spaceKey, deptParam);
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [queueFilter, spaceKey, deptParam, fetchClosedIssues]);
+
+  // Auto-refresh every 30s for regular (non-dept-queue) spaces
+  useEffect(() => {
+    const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
+    if (isDeptQueue) return; // dept_queue spaces already handled above
+    if (!spaceKey || !queueFilter || queueFilter === 'queues' || queueFilter === 'summary') return;
+    const id = setInterval(() => {
+      const params: Record<string, string> = { spaceKey, page: String(currentPage), limit: '100' };
+      if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-queue') params.excludeDone = 'true';
+      if (queueFilter === 'unassigned') params.unassigned = 'true';
+      if (queueFilter === 'assigned' && user?.id) params.assignee = user.id;
+      if (queueFilter === 'all-requests') params.limit = '50';
+      clearIssuesCache(params);
+      loadIssues(params).catch(() => {});
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [spaceKey, queueFilter, currentPage, currentSpace?.type, allCustomQueues.length, user?.id, loadIssues, clearIssuesCache]);
 
   // Load custom fields assigned to this space → dynamic columns
   useEffect(() => {
