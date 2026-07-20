@@ -17,6 +17,18 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db',
 });
 
+// 60-second in-memory cache for user role lookups so every API request
+// doesn't pay an extra DB round-trip just to check isAdmin.
+const _userCache = new Map<string, { user: any; exp: number }>();
+async function getCachedUser(userId: string) {
+  const now = Date.now();
+  const cached = _userCache.get(userId);
+  if (cached && cached.exp > now) return cached.user;
+  const user = await db.user.findUnique({ where: { id: userId } });
+  _userCache.set(userId, { user, exp: now + 60_000 });
+  return user;
+}
+
 // Ensure original_dept column exists
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).catch(() => {});
 // User invite status: 'invited' | 'active' | 'inactive'
@@ -49,6 +61,14 @@ pool.query(`CREATE TABLE IF NOT EXISTS user_worked_on_tickets (
   worked_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(user_id, issue_id, dept)
 )`).catch(() => {});
+
+// Indexes for hot query paths
+pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_space_dept ON queue_closed_tickets(space_id, LOWER(dept_name))`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_issue_id ON queue_closed_tickets(issue_id)`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_idt_issue_id ON issue_dept_transitions(issue_id)`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_idt_space_from ON issue_dept_transitions(space_id, LOWER(from_dept))`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_issues_space ON issues("spaceId")`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_issues_current_dept ON issues(LOWER(current_department))`).catch(() => {});
 
 import {
   notifyIssueCreated,
@@ -1180,8 +1200,8 @@ async function _handleJiraPgApi(
     return json({ error: 'Forbidden' }, 403);
   }
 
-  // Load current user for role checks
-  const currentUser = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+  // Load current user for role checks (cached 60s to avoid a DB round-trip on every request)
+  const currentUser = userId ? await getCachedUser(userId) : null;
   const isAdmin = currentUser?.role === 'admin';
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Stats Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -1199,11 +1219,10 @@ async function _handleJiraPgApi(
 
   if (path === 'users' && method === 'GET') {
     // All authenticated users can list users (needed for queue member search)
-    const users = await db.user.findMany({
-      orderBy: { firstName: 'asc' },
-    });
-    // Attach raw status column (ALTER TABLE column not in Prisma)
-    const statusRows = await pool.query(`SELECT id, status FROM users`).catch(() => ({ rows: [] as any[] }));
+    const [users, statusRows] = await Promise.all([
+      db.user.findMany({ orderBy: { firstName: 'asc' } }),
+      pool.query(`SELECT id, status FROM users`).catch(() => ({ rows: [] as any[] })),
+    ]);
     const statusMap: Record<string, string> = {};
     for (const r of statusRows.rows) statusMap[r.id] = r.status;
     return json(users.map(u => ({ ...formatUser(u), status: statusMap[u.id] || (u.isActive ? 'active' : 'inactive') })));
@@ -1826,41 +1845,6 @@ async function _handleJiraPgApi(
           // Sent/Watching: tickets that moved OUT of this dept.
           // Primary source: issue_dept_transitions (explicit move log).
           // Fallback source: queue_closed_tickets (ticket was in this dept's closed list)
-          //   covers tickets whose transition record may be missing (e.g. moved before logging existed).
-          // Ensure tables and columns exist before using them in queries
-          try { await pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`); } catch {}
-          try { await pool.query(`CREATE TABLE IF NOT EXISTS issue_dept_transitions (id SERIAL PRIMARY KEY, issue_id TEXT NOT NULL, space_id TEXT NOT NULL, from_dept TEXT NOT NULL, to_dept TEXT NOT NULL, moved_at TIMESTAMPTZ DEFAULT NOW())`); } catch {}
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`); } catch {}
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
-          try { await pool.query(`WITH first_dept AS (SELECT DISTINCT ON (issue_id) issue_id, from_dept FROM issue_dept_transitions WHERE from_dept != '' ORDER BY issue_id, moved_at ASC) UPDATE issues i SET original_dept = COALESCE((SELECT fd.from_dept FROM first_dept fd WHERE fd.issue_id = i.id), i.current_department) WHERE i.original_dept IS NULL`); } catch {}
-
-          // Backfill queue_closed_tickets from dept_statuses keys (case-insensitive) so OR2 is always reliable
-          try {
-            await pool.query(
-              `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id)
-               SELECT i."spaceId", k.key, i.id
-               FROM issues i, jsonb_object_keys(COALESCE(i.dept_statuses, '{}'::jsonb)) AS k(key)
-               WHERE i."spaceId" = ANY($1::text[])
-                 AND LOWER(k.key) = LOWER($2)
-                 AND LOWER(COALESCE(i.current_department,'')) != LOWER($2)
-               ON CONFLICT DO NOTHING`,
-              [allSpaceIds, sentDeptParam]
-            );
-          } catch {}
-
-          // Backfill queue_closed_tickets from issue_dept_transitions
-          try {
-            await pool.query(
-              `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id)
-               SELECT t.space_id, t.from_dept, t.issue_id
-               FROM issue_dept_transitions t
-               WHERE t.space_id = ANY($1::text[])
-                 AND LOWER(t.from_dept) = LOWER($2)
-                 AND t.from_dept != ''
-               ON CONFLICT DO NOTHING`,
-              [allSpaceIds, sentDeptParam]
-            );
-          } catch {}
 
           const sentExistsClause = `(
             EXISTS (
