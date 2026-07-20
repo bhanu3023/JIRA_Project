@@ -73,6 +73,7 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFA
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`).catch(() => {});
 pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
+pool.query(`ALTER TABLE space_members ADD COLUMN IF NOT EXISTS department VARCHAR(100)`).catch(() => {});
 
 // Indexes for hot query paths
 pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_space_dept ON queue_closed_tickets(space_id, LOWER(dept_name))`).catch(() => {});
@@ -1447,8 +1448,6 @@ async function _handleJiraPgApi(
     const uid = String(body.userId || '');
     const targetUser = await db.user.findUnique({ where: { id: uid } });
     if (!targetUser) return json({ error: 'User not found' }, 404);
-    // Ensure department column exists
-    try { await pool.query(`ALTER TABLE space_members ADD COLUMN IF NOT EXISTS department VARCHAR(100)`); } catch {}
     const memberDept = body.department ? String(body.department) : null;
     await db.spaceMember.upsert({
       where: { spaceId_userId: { spaceId: sp.id, userId: uid } },
@@ -1479,7 +1478,6 @@ async function _handleJiraPgApi(
     const isSpaceAdmin = sp.members.some(m => m.userId === userId && ['admin', 'lead', 'shift_lead'].includes(m.role));
     if (!isPrivilegedGlobalPatch && !isSpaceAdmin) return json({ error: 'Forbidden' }, 403);
     const body = await readJson(req);
-    try { await pool.query(`ALTER TABLE space_members ADD COLUMN IF NOT EXISTS department VARCHAR(100)`); } catch {}
     if (body.role !== undefined) {
       await db.spaceMember.update({ where: { spaceId_userId: { spaceId: sp.id, userId: memberUserId } }, data: { role: String(body.role) } });
     }
@@ -3534,7 +3532,7 @@ async function _handleJiraPgApi(
     });
     if (!issue) return json({ error: 'Not found' }, 404);
     const body = await readJson(req);
-    const authorUser = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+    const authorUser = userId ? await getCachedUser(userId) : null;
     // Dedup guard: reject if identical comment from same author exists within last 5 seconds
     const dupCheck = await pool.query(
       `SELECT id FROM comments WHERE "issueId" = $1 AND body = $2 AND "authorId" IS NOT DISTINCT FROM $3 AND "createdAt" > NOW() - INTERVAL '5 seconds' LIMIT 1`,
@@ -4503,11 +4501,9 @@ async function _handleJiraPgApi(
   const slaListMatch = path.match(/^sla\/([^/]+)$/);
   if (slaListMatch) {
     const spKey = slaListMatch[1].toUpperCase();
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
     try {
       const spRow = await pool.query(`SELECT id FROM spaces WHERE key = $1 LIMIT 1`, [spKey]);
-      if (!spRow.rows[0]) { await pool.end(); return json({ error: 'Space not found' }, 404); }
+      if (!spRow.rows[0]) return json({ error: 'Space not found' }, 404);
       const spaceId = spRow.rows[0].id;
 
       if (method === 'GET') {
@@ -4515,7 +4511,6 @@ async function _handleJiraPgApi(
         const rows = deptFilter
           ? await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND dept_name = $2 ORDER BY "createdAt" ASC`, [spaceId, deptFilter])
           : await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = $1 ORDER BY "createdAt" ASC`, [spaceId]);
-        await pool.end();
         return json(rows.rows);
       }
 
@@ -4536,11 +4531,9 @@ async function _handleJiraPgApi(
             body.dept_name ? String(body.dept_name) : null,
           ]
         );
-        await pool.end();
         return json(result.rows[0]);
       }
     } catch (e) {
-      await pool.end().catch(() => {});
       console.error('[SLA] Error:', e);
       return json({ error: 'SLA operation failed' }, 500);
     }
@@ -4549,8 +4542,6 @@ async function _handleJiraPgApi(
   const slaItemMatch = path.match(/^sla\/([^/]+)\/([^/]+)$/);
   if (slaItemMatch) {
     const slaId = slaItemMatch[2];
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
     try {
       if (method === 'PATCH') {
         const body = await readJson(req);
@@ -4568,17 +4559,14 @@ async function _handleJiraPgApi(
         const result = await pool.query(
           `UPDATE sla_definitions SET ${sets.join(', ')} WHERE id=$${idx} RETURNING *`, vals
         );
-        await pool.end();
         return json(result.rows[0] || { id: slaId, ok: true });
       }
 
       if (method === 'DELETE') {
         await pool.query(`DELETE FROM sla_definitions WHERE id=$1`, [slaId]);
-        await pool.end();
         return json({ ok: true });
       }
     } catch (e) {
-      await pool.end().catch(() => {});
       console.error('[SLA] Error:', e);
       return json({ error: 'SLA operation failed' }, 500);
     }
