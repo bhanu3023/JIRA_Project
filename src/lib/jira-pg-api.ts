@@ -62,6 +62,9 @@ pool.query(`CREATE TABLE IF NOT EXISTS user_worked_on_tickets (
   UNIQUE(user_id, issue_id, dept)
 )`).catch(() => {});
 
+// Custom queues table (needed by custom-queues endpoint)
+pool.query(`CREATE TABLE IF NOT EXISTS custom_queues (space_key TEXT PRIMARY KEY, queues JSONB NOT NULL DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT NOW())`).catch(() => {});
+
 // Indexes for hot query paths
 pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_space_dept ON queue_closed_tickets(space_id, LOWER(dept_name))`).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_issue_id ON queue_closed_tickets(issue_id)`).catch(() => {});
@@ -4412,9 +4415,6 @@ async function _handleJiraPgApi(
   // PUT /custom-queues/:spaceKey -- save queues to DB
   if (path.startsWith('custom-queues/')) {
     const spaceKey = path.split('/')[1];
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS custom_queues (space_key TEXT PRIMARY KEY, queues JSONB NOT NULL DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT NOW())`
-    );
     if (method === 'GET') {
       const row = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey]);
       return json(row.rows[0]?.queues || []);
