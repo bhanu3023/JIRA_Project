@@ -65,6 +65,15 @@ pool.query(`CREATE TABLE IF NOT EXISTS user_worked_on_tickets (
 // Custom queues table (needed by custom-queues endpoint)
 pool.query(`CREATE TABLE IF NOT EXISTS custom_queues (space_key TEXT PRIMARY KEY, queues JSONB NOT NULL DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT NOW())`).catch(() => {});
 
+// Ensure all issues columns exist at startup (avoids per-request ALTER TABLE locks)
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS current_department TEXT`).catch(() => {});
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIMESTAMPTZ`).catch(() => {});
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`).catch(() => {});
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`).catch(() => {});
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`).catch(() => {});
+pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`).catch(() => {});
+pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
+
 // Indexes for hot query paths
 pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_space_dept ON queue_closed_tickets(space_id, LOWER(dept_name))`).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_issue_id ON queue_closed_tickets(issue_id)`).catch(() => {});
@@ -414,7 +423,6 @@ function formatSpace(sp: any) {
 async function pauseDeptSLA(issueKey: string | null, issueId: string | null, dept: string): Promise<void> {
   if (!dept) return;
   try {
-    await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`);
     const row = await pool.query(
       `SELECT dept_sla_started_at, dept_sla_log FROM issues WHERE ${issueKey ? 'key=$1' : 'id=$1'}`,
       [issueKey || issueId]
@@ -447,7 +455,6 @@ async function pauseDeptSLA(issueKey: string | null, issueId: string | null, dep
 async function startDeptSLA(issueKey: string | null, issueId: string | null, dept: string): Promise<void> {
   if (!dept) return;
   try {
-    await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`);
     const row = await pool.query(
       `SELECT dept_sla_log FROM issues WHERE ${issueKey ? 'key=$1' : 'id=$1'}`,
       [issueKey || issueId]
@@ -523,8 +530,6 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
   try {
     const spaceId = issue.spaceId ?? issue.space?.id;
     if (!spaceId) return [];
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
     const res = await pool.query(
       `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`, [spaceId]
     );
@@ -538,8 +543,6 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
       );
       isNotified = notifRes.rows.length > 0;
     } catch { /* notifications table may not have issueKey column */ }
-
-    await pool.end();
     const allPolicies = res.rows;
     if (!allPolicies.length) return [];
 
@@ -1566,22 +1569,11 @@ async function _handleJiraPgApi(
     const spaceId = spaceRes.rows[0].id;
 
     try {
-      await pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`);
       const rows = await pool.query(
         `SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
                 i."createdAt", i."updatedAt", qct.closed_at, qct.dept_name,
-                COALESCE(
-                  (i.dept_statuses->qct.dept_name->>'name'),
-                  s.name
-                ) AS status_name,
-                COALESCE(
-                  (i.dept_statuses->qct.dept_name->>'color'),
-                  s.color
-                ) AS status_color,
-                COALESCE(
-                  (i.dept_statuses->qct.dept_name->>'category'),
-                  s.category
-                ) AS status_category,
+                s.name AS status_name, s.color AS status_color, s.category AS status_category,
+                i.dept_sla_log,
                 CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
                 a.id AS assignee_id
          FROM queue_closed_tickets qct
@@ -2396,13 +2388,6 @@ async function _handleJiraPgApi(
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Single-board mode: no targetBoard or same board as source Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (!targetBoardKey || targetBoardKey === issue.space?.key?.toUpperCase()) {
-      // Ensure columns exist
-      try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS current_department TEXT`); } catch {}
-      try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`); } catch {}
-      try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIMESTAMPTZ`); } catch {}
-      try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`); } catch {}
-      try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
-
       // Old dept status: "Waiting for <newDept>" (or create a virtual one)
       const waitingForNew = await db.status.findFirst({
         where: { spaceId: issue.spaceId, name: { equals: `Waiting for ${newDept}`, mode: 'insensitive' } },
@@ -3159,11 +3144,6 @@ async function _handleJiraPgApi(
       if (waitMatchHandoff) {
         handoffTargetDept = waitMatchHandoff[1].trim();
         try {
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIMESTAMPTZ`); } catch {}
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`); } catch {}
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`); } catch {}
-
           const existingMap = await pool.query(
             `SELECT dept_assignees, "assigneeId", current_department, dept_statuses FROM issues WHERE id=$1`, [issue.id]
           );
@@ -4530,9 +4510,6 @@ async function _handleJiraPgApi(
       if (!spRow.rows[0]) { await pool.end(); return json({ error: 'Space not found' }, 404); }
       const spaceId = spRow.rows[0].id;
 
-      // Ensure dept_name column exists
-      await pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`).catch(() => {});
-
       if (method === 'GET') {
         const deptFilter = url.searchParams.get('dept');
         const rows = deptFilter
@@ -4736,8 +4713,6 @@ async function _handleJiraPgApi(
         UNIQUE(space_key, address)
       )
     `);
-    await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`);
-
     if (method === 'GET') {
       const rows = await pool.query(
         `SELECT id, address, imap_host, smtp_host, auto_reply, department, created_at FROM email_configs WHERE space_key = $1 ORDER BY created_at`,

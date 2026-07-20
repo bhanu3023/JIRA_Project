@@ -1939,11 +1939,12 @@ function SpaceDetailContent() {
         <div className="flex-1 overflow-auto bg-gray-50 p-4">
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
             <div className="grid px-4 py-2 bg-gray-50 border-b border-gray-200 text-[10.5px] font-semibold text-gray-500 uppercase tracking-wide"
-              style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 150px 140px' }}>
+              style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 140px 110px 110px' }}>
               <div>Key</div>
               <div>Summary</div>
               <div>Status</div>
               <div>Assignee</div>
+              <div>SLA Used</div>
               <div>Closed At</div>
             </div>
             {loading && (
@@ -1957,10 +1958,20 @@ function SpaceDetailContent() {
                 <p className="text-[12px] text-gray-400 mt-1">Tickets processed through this queue will appear here</p>
               </div>
             )}
-            {closedIssues.map((issue: any) => (
+            {closedIssues.map((issue: any) => {
+              const slaLog = issue.dept_sla_log || {};
+              const deptKey = Object.keys(slaLog).find(k => k.toLowerCase() === (issue.dept_name || '').toLowerCase()) || issue.dept_name;
+              const elapsedMs: number = slaLog[deptKey]?.elapsed_ms || 0;
+              const fmtMs = (ms: number) => {
+                if (!ms || ms < 60000) return ms > 0 ? `${Math.floor(ms / 1000)}s` : '—';
+                const h = Math.floor(ms / 3600000);
+                const m = Math.floor((ms % 3600000) / 60000);
+                return h > 0 ? `${h}h ${m}m` : `${m}m`;
+              };
+              return (
               <a key={issue.id} href={`/issues/${issue.cfKey ?? issue.key}`}
                 className="grid px-4 py-3 border-b border-gray-100 hover:bg-blue-50 transition-colors cursor-pointer items-center"
-                style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 150px 140px' }}>
+                style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 140px 110px 110px' }}>
                 <span className="text-[12px] font-semibold text-blue-600 font-mono">{issue.cfKey ?? issue.key}</span>
                 <span className="text-[12.5px] text-gray-800 truncate">{issue.title || issue.summary}</span>
                 <span className="flex items-center gap-1.5">
@@ -1974,11 +1985,13 @@ function SpaceDetailContent() {
                 <span className="text-[12px] text-gray-600 truncate">
                   {issue.assignee_name?.trim() || <span className="text-gray-400 italic">Unassigned</span>}
                 </span>
+                <span className="text-[12px] font-medium text-amber-700">{fmtMs(elapsedMs)}</span>
                 <span className="text-[11.5px] text-gray-400">
                   {issue.closed_at ? new Date(issue.closed_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
                 </span>
               </a>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
