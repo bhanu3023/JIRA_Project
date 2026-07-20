@@ -624,8 +624,8 @@ function formatIssue(issue: any) {
     author: c.author
       ? { id: c.author.id, firstName: c.author.firstName, lastName: c.author.lastName, email: c.author.email }
       : { id: '', firstName: c.authorName ?? 'Unknown', lastName: '', email: c.authorEmail ?? '' },
-    createdAt: c.createdAt?.toISOString() ?? nowIso(),
-    updatedAt: c.updatedAt?.toISOString() ?? nowIso(),
+    createdAt: c.createdAt instanceof Date ? c.createdAt.toISOString() : (c.createdAt ?? nowIso()),
+    updatedAt: c.updatedAt instanceof Date ? c.updatedAt.toISOString() : (c.updatedAt ?? nowIso()),
   }));
 
   const issueNum = parseInt(String(issue.key || '').split('-').pop() || '1', 10) || 1;
@@ -1546,8 +1546,20 @@ async function _handleJiraPgApi(
     try {
       await pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`);
       const rows = await pool.query(
-        `SELECT i.id, i.key, i.title, i.priority, i.type, i."createdAt", i."updatedAt", qct.closed_at,
-                s.name AS status_name, s.color AS status_color, s.category AS status_category,
+        `SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
+                i."createdAt", i."updatedAt", qct.closed_at, qct.dept_name,
+                COALESCE(
+                  (i.dept_statuses->qct.dept_name->>'name'),
+                  s.name
+                ) AS status_name,
+                COALESCE(
+                  (i.dept_statuses->qct.dept_name->>'color'),
+                  s.color
+                ) AS status_color,
+                COALESCE(
+                  (i.dept_statuses->qct.dept_name->>'category'),
+                  s.category
+                ) AS status_category,
                 CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
                 a.id AS assignee_id
          FROM queue_closed_tickets qct
@@ -1878,30 +1890,21 @@ async function _handleJiraPgApi(
             )
           )`;
 
-          // Debug: log state of specific tickets for diagnosis
+          let sentDeptTotal = 0;
           try {
-            const dbgSent = await pool.query(
-              `SELECT i.key, i.current_department, i.original_dept,
-                EXISTS(SELECT 1 FROM queue_closed_tickets qct WHERE qct.issue_id=i.id AND LOWER(qct.dept_name)=LOWER($2) AND qct.space_id=ANY($1::text[])) AS or1,
-                EXISTS(SELECT 1 FROM issue_dept_transitions t WHERE t.issue_id=i.id AND LOWER(t.from_dept)=LOWER($2) AND LOWER(t.to_dept)!=LOWER($2)) AS or2,
-                (i.dept_statuses IS NOT NULL AND (jsonb_exists(i.dept_statuses,$2) OR jsonb_exists(i.dept_statuses,LOWER($2)))) AS or3,
-                (LOWER(COALESCE(i.original_dept,''))=LOWER($2) AND LOWER(COALESCE(i.current_department,''))!=LOWER($2)) AS or4
-               FROM issues i WHERE i."spaceId"=ANY($1::text[]) AND LOWER(COALESCE(i.current_department,''))!=LOWER($2)
-               LIMIT 5`,
+            const countRow = await pool.query(
+              `SELECT COUNT(DISTINCT i.id)::int AS cnt
+               FROM issues i
+               WHERE i."spaceId" = ANY($1::text[])
+                 AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
+                 AND ${sentExistsClause}`,
               [allSpaceIds, sentDeptParam]
             );
-            console.log('[SENT-DEBUG] spaceIds=' + JSON.stringify(allSpaceIds) + ' dept=' + sentDeptParam + ' rows=' + JSON.stringify(dbgSent.rows));
-          } catch(e: any) { console.log('[SENT-DEBUG ERROR]', e?.message); }
-
-          const countRow = await pool.query(
-            `SELECT COUNT(DISTINCT i.id)::int AS cnt
-             FROM issues i
-             WHERE i."spaceId" = ANY($1::text[])
-               AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
-               AND ${sentExistsClause}`,
-            [allSpaceIds, sentDeptParam]
-          );
-          const sentDeptTotal = countRow.rows[0]?.cnt ?? 0;
+            sentDeptTotal = countRow.rows[0]?.cnt ?? 0;
+          } catch (countErr: any) {
+            console.error('[SENT-COUNT ERROR]', countErr?.message);
+            throw countErr;
+          }
 
           const rows = await pool.query(
             `SELECT DISTINCT ON (i.id) i.*, sp.key AS space_key,
@@ -1966,6 +1969,7 @@ async function _handleJiraPgApi(
               dept_sla_log: row.dept_sla_log || {},
               dept_sla_started_at: row.dept_sla_started_at,
               dept_assignees: row.dept_assignees || {},
+              dept_statuses: row.dept_statuses || {},
               comments: commentsMap[row.id] || [],
               status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
               assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: row.assignee_avatar } : null,
@@ -2066,6 +2070,8 @@ async function _handleJiraPgApi(
           priority: row.priority, type: row.type, labels: row.labels,
           createdAt: row.createdAt, updatedAt: row.updatedAt,
           current_department: row.current_department,
+          dept_statuses: row.dept_statuses || {},
+          dept_assignees: row.dept_assignees || {},
           status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
           assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: row.assignee_avatar } : null,
           reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: row.reporter_avatar } : null,
@@ -2986,11 +2992,13 @@ async function _handleJiraPgApi(
 
     // Handle recall Ã¢â‚¬â€ return ticket to Migration dept
     if (body.recall === true) {
+      try {
       // Fetch full state BEFORE modifying anything
       const recallRow = await pool.query(
         `SELECT i.current_department, i.dept_assignees, i."reporterId", i.summary, i."assigneeId"
          FROM issues i WHERE i.key=$1 LIMIT 1`, [key]
       );
+      if (!recallRow.rows[0]) return json({ error: 'Ticket not found' }, 404);
       const recallDept: string = recallRow.rows[0]?.current_department || '';
       const savedDeptAssignees: Record<string, any> = recallRow.rows[0]?.dept_assignees || {};
       const savedMigrationAssignee = savedDeptAssignees['Migration'];
@@ -3039,6 +3047,10 @@ async function _handleJiraPgApi(
         }
       } catch { /* non-critical */ }
       return NextResponse.json({ success: true, recalled: true, key });
+      } catch (recallErr: any) {
+        console.error('[Recall ERROR]', recallErr?.message || recallErr);
+        return json({ error: recallErr?.message || 'Recall failed' }, 500);
+      }
     }
 
     const issue = await db.issue.findUnique({ where: { key }, include: { space: { include: { statuses: true } } } });
@@ -3148,6 +3160,154 @@ async function _handleJiraPgApi(
     });
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Auto-record history for every changed field Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // ── Dept handoff on "Waiting for [Dept]" status change ──────────────
+    // Extracted from history try-catch so errors are logged and not silently swallowed.
+    let deptHandoffDone = false;
+    let handoffTargetDept = '';
+    let handoffOldDept = '';
+    if (body.statusId !== undefined && issue.statusId !== data.statusId) {
+      const newStForHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === data.statusId) as any;
+      const newStatusNameForHandoff = (newStForHandoff?.name || '').trim();
+      const waitMatchHandoff = newStatusNameForHandoff.match(/^waiting\s+for\s+(.+)$/i);
+      if (waitMatchHandoff) {
+        handoffTargetDept = waitMatchHandoff[1].trim();
+        try {
+          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIMESTAMPTZ`); } catch {}
+          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`); } catch {}
+          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
+          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`); } catch {}
+
+          const existingMap = await pool.query(
+            `SELECT dept_assignees, "assigneeId", current_department, dept_statuses FROM issues WHERE id=$1`, [issue.id]
+          );
+          handoffOldDept = existingMap.rows[0]?.current_department || '';
+          const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
+          const deptStatuses: Record<string, any>  = existingMap.rows[0]?.dept_statuses  || {};
+          const curAssigneeId = existingMap.rows[0]?.assigneeId;
+
+          if (handoffOldDept && curAssigneeId) {
+            const curAssignee = await db.user.findUnique({ where: { id: curAssigneeId }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
+            if (curAssignee) {
+              deptAssignees[handoffOldDept] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: curAssignee.avatarUrl ?? null };
+            }
+          }
+          deptAssignees[handoffTargetDept] = deptAssignees[handoffTargetDept] ?? null;
+
+          deptStatuses[handoffOldDept] = { id: '', name: newStatusNameForHandoff, category: 'todo', color: '#F59E0B' };
+          const inProgressSt = await db.status.findFirst({ where: { spaceId: issue.spaceId, category: 'in_progress' }, orderBy: { order: 'asc' } })
+            || await db.status.findFirst({ where: { spaceId: issue.spaceId, name: { contains: 'progress', mode: 'insensitive' } }, orderBy: { order: 'asc' } });
+          const inProgressStatusObj = inProgressSt
+            ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
+            : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+          deptStatuses[handoffTargetDept] = inProgressStatusObj;
+          const targetStatusId = inProgressSt?.id || data.statusId;
+
+          await pauseDeptSLA(null, issue.id, handoffOldDept);
+          await pool.query(
+            `UPDATE issues SET current_department=$1, "assigneeId"=NULL, dept_sla_started_at=NOW(), dept_assignees=$2::jsonb, dept_statuses=$3::jsonb, "statusId"=$4, "updatedAt"=NOW() WHERE id=$5`,
+            [handoffTargetDept, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), targetStatusId, issue.id]
+          );
+          await startDeptSLA(null, issue.id, handoffTargetDept);
+
+          // Record dept transition so Sent/Watching and history queries work
+          if (handoffOldDept && issue.spaceId) {
+            pool.query(
+              `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept, moved_by, moved_at) VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT DO NOTHING`,
+              [issue.id, issue.spaceId, handoffOldDept, handoffTargetDept, userId]
+            ).catch(() => {});
+          }
+          // Record worked-on for the assignee in the old dept
+          if (handoffOldDept && curAssigneeId) {
+            pool.query(
+              `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+              [curAssigneeId, issue.id, handoffOldDept]
+            ).catch(() => {});
+          }
+          deptHandoffDone = true;
+          console.log(`[DeptHandoff] ${issue.key}: ${handoffOldDept} → ${handoffTargetDept}`);
+        } catch (handoffErr: any) {
+          console.error(`[DeptHandoff ERROR] ${issue.key}:`, handoffErr?.message || handoffErr);
+        }
+      }
+    }
+
+    // ── When ticket is closed (status → done), record worked-on for all depts ──
+    if (body.statusId !== undefined && issue.statusId !== data.statusId && !deptHandoffDone) {
+      const newStForClose = (issue.space?.statuses ?? []).find((s: any) => s.id === data.statusId) as any;
+      if (newStForClose?.category === 'done') {
+        try {
+          const closeData = await pool.query(
+            `SELECT dept_assignees, current_department FROM issues WHERE id=$1`, [issue.id]
+          );
+          const savedDeptAssignees: Record<string, any> = closeData.rows[0]?.dept_assignees || {};
+          const closingDept: string = closeData.rows[0]?.current_department || '';
+
+          // Pause current dept SLA so elapsed time is finalized
+          await pauseDeptSLA(null, issue.id, closingDept);
+
+          // Collect all user→dept pairs to record; use a Map to deduplicate
+          const workedOnMap = new Map<string, string>(); // userId → dept
+
+          // 1. Current assignee in closing dept
+          if (issue.assigneeId && closingDept) {
+            workedOnMap.set(`${issue.assigneeId}::${closingDept}`, `${issue.assigneeId}|${closingDept}`);
+          }
+          // Also record closing user (whoever is making this status change) if different
+          if (userId && closingDept && userId !== issue.assigneeId) {
+            workedOnMap.set(`${userId}::${closingDept}`, `${userId}|${closingDept}`);
+          }
+
+          // 2. Saved assignees from dept_assignees JSONB (assignees at handoff time)
+          for (const [dept, assigneeInfo] of Object.entries(savedDeptAssignees)) {
+            if (assigneeInfo && (assigneeInfo as any).id) {
+              workedOnMap.set(`${(assigneeInfo as any).id}::${dept}`, `${(assigneeInfo as any).id}|${dept}`);
+            }
+          }
+
+          // 3. moved_by users from issue_dept_transitions (covers unassigned handoffs)
+          try {
+            const transRows = await pool.query(
+              `SELECT from_dept, to_dept, moved_by FROM issue_dept_transitions WHERE issue_id=$1 AND moved_by IS NOT NULL`,
+              [issue.id]
+            );
+            for (const t of transRows.rows) {
+              if (t.moved_by && t.from_dept) {
+                workedOnMap.set(`${t.moved_by}::${t.from_dept}`, `${t.moved_by}|${t.from_dept}`);
+              }
+            }
+          } catch { /* non-critical */ }
+
+          // Insert all collected worked-on records (user_worked_on_tickets)
+          for (const val of workedOnMap.values()) {
+            const [uid, dept] = val.split('|');
+            if (uid && dept) {
+              pool.query(
+                `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'closed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='closed', worked_at=NOW()`,
+                [uid, issue.id, dept]
+              ).catch(() => {});
+            }
+          }
+
+          // Also insert into queue_closed_tickets for each previous dept so
+          // the sidebar "Worked on" (queue=dept_closed) shows the ticket
+          const allDepts = new Set([...workedOnMap.values()].map(v => v.split('|')[1]).filter(Boolean));
+          if (issue.spaceId) {
+            for (const dept of allDepts) {
+              pool.query(
+                `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+                [issue.spaceId, dept, issue.id]
+              ).catch(() => {});
+            }
+          }
+
+          const deptList = [...allDepts].join(', ');
+          console.log(`[TicketClosed] ${issue.key}: worked-on recorded for depts: ${deptList}`);
+        } catch (closeErr: any) {
+          console.error(`[TicketClosed ERROR] ${issue.key}:`, closeErr?.message || closeErr);
+        }
+      }
+    }
+
     try {
       const authorName = currentUser
         ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
@@ -3196,68 +3356,10 @@ async function _handleJiraPgApi(
         const oldSt = (statuses as any[]).find((s: any) => s.id === issue.statusId);
         const newSt = (statuses as any[]).find((s: any) => s.id === data.statusId);
         histRecs.push({ issueId: issue.id, field: 'status', oldValue: oldSt?.name ?? null, newValue: newSt?.name ?? null, authorName, authorEmail, createdAt: now });
-
-        // Ã¢â€â‚¬Ã¢â€â‚¬ Dept handoff on "Waiting for [Dept]" status change Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-        // When status name is "Waiting for X", auto-switch dept to X, clear assignee, start X's SLA
-        const newStatusName = (newSt?.name || '').trim();
-        const waitMatch = newStatusName.match(/^waiting\s+for\s+(.+)$/i);
-        if (waitMatch) {
-          const targetDept = waitMatch[1].trim();
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIMESTAMPTZ`); } catch {}
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`); } catch {}
-          // Save current dept's assignee before handing off
-          // Fetch current_department from raw SQL Ã¢â‚¬â€ Prisma doesn't return raw ALTER TABLE columns
-          const existingMapSt = await pool.query(`SELECT dept_assignees, "assigneeId", current_department FROM issues WHERE id=$1`, [issue.id]);
-          const oldDeptSt: string = existingMapSt.rows[0]?.current_department || '';
-          const deptAssigneesSt: Record<string, any> = existingMapSt.rows[0]?.dept_assignees || {};
-          const curAssigneeId = existingMapSt.rows[0]?.assigneeId;
-          if (oldDeptSt && curAssigneeId) {
-            const curAssignee = await db.user.findUnique({ where: { id: curAssigneeId }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
-            if (curAssignee) {
-              deptAssigneesSt[oldDeptSt] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: curAssignee.avatarUrl ?? null };
-            }
-          }
-          deptAssigneesSt[targetDept] = null;
-
-          // Per-dept statuses: current dept paused Ã¢â€ ' "Waiting for X"; target dept Ã¢â€ ' "In Progress"
-          try { await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`); } catch {}
-          const existingStatusesSt = await pool.query(`SELECT dept_statuses FROM issues WHERE id=$1`, [issue.id]);
-          const deptStatusesSt: Record<string, any> = existingStatusesSt.rows[0]?.dept_statuses || {};
-          // Current dept status Ã¢â€ ' "Waiting for [target]"
-          deptStatusesSt[oldDeptSt] = { id: '', name: newStatusName, category: 'todo', color: '#F59E0B' };
-          // Target dept status Ã¢â€ ' "In Progress"
-          const inProgressSt = await db.status.findFirst({
-            where: { spaceId: issue.spaceId, category: 'in_progress' },
-            orderBy: { order: 'asc' },
-          }) || await db.status.findFirst({ where: { spaceId: issue.spaceId, name: { contains: 'progress', mode: 'insensitive' } }, orderBy: { order: 'asc' } });
-          const inProgressStatusObj = inProgressSt
-            ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
-            : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
-          deptStatusesSt[targetDept] = inProgressStatusObj;
-          const targetStatusId = inProgressSt?.id || (await pool.query(`SELECT "statusId" FROM issues WHERE id=$1`, [issue.id])).rows[0]?.statusId;
-
-          // Pause old dept SLA (save elapsed), then reset timer for new dept
-          await pauseDeptSLA(null, issue.id, oldDeptSt);
-          await pool.query(
-            `UPDATE issues SET current_department=$1, "assigneeId"=NULL, dept_sla_started_at=NOW(), dept_assignees=$2::jsonb, dept_statuses=$3::jsonb, "statusId"=$4, "updatedAt"=NOW() WHERE id=$5`,
-            [targetDept, JSON.stringify(deptAssigneesSt), JSON.stringify(deptStatusesSt), targetStatusId, issue.id]
-          );
-          await startDeptSLA(null, issue.id, targetDept);
-          histRecs.push({
-            issueId: issue.id, field: 'department',
-            oldValue: (issue as any).current_department || null,
-            newValue: `Handed to ${targetDept} Ã¢â‚¬â€ SLA started`,
-            authorName, authorEmail, createdAt: now,
-          });
-          // Record worked-on: agent who was handling this in oldDeptSt passed it along
-          if (oldDeptSt && curAssigneeId) {
-            pool.query(
-              `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
-              [curAssigneeId, issue.id, oldDeptSt]
-            ).catch(() => {});
-          }
+        // Record dept handoff in history if it ran
+        if (deptHandoffDone && handoffOldDept) {
+          histRecs.push({ issueId: issue.id, field: 'department', oldValue: handoffOldDept, newValue: `Handed to ${handoffTargetDept} — SLA started`, authorName, authorEmail, createdAt: now });
         }
-        // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       }
 
       // Assignee (resolve display names)
@@ -3485,11 +3587,6 @@ async function _handleJiraPgApi(
     });
     // Update issue updatedAt
     await db.issue.update({ where: { key }, data: { updatedAt: new Date() } });
-    // DEBUG: log dept state after comment to detect any corruption
-    try {
-      const dbg = await pool.query('SELECT current_department, original_dept, dept_statuses FROM issues WHERE key=$1', [key]);
-      console.log('[COMMENT DEBUG] key=' + key + ' current_dept=' + dbg.rows[0]?.current_department + ' original_dept=' + dbg.rows[0]?.original_dept + ' dept_statuses=' + JSON.stringify(dbg.rows[0]?.dept_statuses));
-    } catch(e: any) { console.log('[COMMENT DEBUG ERROR]', e?.message); }
 
     // Mirror comment to all partner tickets (only explicitly linked via partnerKey)
     try {

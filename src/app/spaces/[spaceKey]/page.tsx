@@ -473,6 +473,17 @@ function SpaceDetailContent() {
     return () => { cancelled = true; };
   }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, user?.id]);
 
+  // Auto-refresh Sent/Watching every 15s so status changes made by other depts (e.g. Migration closing) appear promptly
+  useEffect(() => {
+    if (queueFilter !== 'sent-watching' || !spaceKey || !deptParam) return;
+    const interval = setInterval(() => {
+      const params: Record<string, string> = { spaceKey, page: '1', limit: '100', sentDept: deptParam };
+      clearIssuesCache(params);
+      loadIssues(params).catch(() => {});
+    }, 15_000);
+    return () => clearInterval(interval);
+  }, [queueFilter, spaceKey, deptParam, clearIssuesCache, loadIssues]);
+
   // Prefetch common queues in background so switching feels instant (< 1s)
   useEffect(() => {
     if (!spaceKey || !user?.id) return;
@@ -691,13 +702,18 @@ function SpaceDetailContent() {
   const recallIssue = async (issueKey: string) => {
     try {
       await api.updateIssue(issueKey, { recall: true } as any);
-      if (user?.id) {
-        await loadIssues({ spaceKey, page: '1', limit: '500', reporter: user.id });
-      }
     } catch (e) {
-      console.error('Failed to recall ticket', e);
+      console.error('Recall failed', e);
       alert('Failed to recall ticket');
+      return;
     }
+    // Recall succeeded — reload the Sent/Watching view so the ticket disappears
+    try {
+      const reloadParams: Record<string, string> = { spaceKey, page: '1', limit: '500' };
+      if (queueFilter === 'sent-watching' && deptParam) reloadParams.sentDept = deptParam;
+      clearIssuesCache(reloadParams);
+      await loadIssues(reloadParams);
+    } catch { /* non-critical */ }
   };
 
   const [commentingOn, setCommentingOn] = useState<string | null>(null); // issueKey
@@ -2027,7 +2043,10 @@ function SpaceDetailContent() {
                 const assigneeName = currentAssignee
                   ? `${currentAssignee.firstName || ''} ${currentAssignee.lastName || ''}`.trim()
                   : null;
-                const st = getIssueStatus(issue);
+                // Show dept_statuses[current_dept] so Migration's "Resolved" shows correctly here
+                const sentDeptStatusMap: Record<string, any> = (issue as any).dept_statuses || {};
+                const sentCurrentDept: string = (issue as any).current_department || '';
+                const st = (sentCurrentDept && sentDeptStatusMap[sentCurrentDept]) ? sentDeptStatusMap[sentCurrentDept] : getIssueStatus(issue);
                 const stColor = st?.color || '#6B7280';
                 // Last comment from issue (if comments loaded)
                 const comments: any[] = (issue as any).comments || [];
@@ -2261,9 +2280,12 @@ function SpaceDetailContent() {
             {filteredIssues.map(issue => {
               const t = typeIcons[issue.type] || typeIcons.task;
               const pm = getPriorityMeta(issue.priority ?? 'medium');
-              // Dept-aware status: show per-dept status if user has a dept set
+              // Show the status for the dept the ticket is currently in (from dept_statuses)
               const deptStatusMap: Record<string, any> = (issue as any).dept_statuses || {};
-              const deptSt = mySpaceDept && deptStatusMap[mySpaceDept] ? deptStatusMap[mySpaceDept] : null;
+              const ticketCurrentDept: string = (issue as any).current_department || '';
+              const deptSt = ticketCurrentDept && deptStatusMap[ticketCurrentDept]
+                ? deptStatusMap[ticketCurrentDept]
+                : null;
               const st = deptSt || getIssueStatus(issue);
               const isUpdating = updating === issue.key;
               const isSelected = selectedRows.has(issue.id);
