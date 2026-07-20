@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback, Suspense } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo, Suspense } from 'react';
 import { useParams, useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
@@ -191,10 +191,18 @@ function SpaceDetailContent() {
     }).catch(() => { setCustomQueuesLoadedFor(spaceKey); });
   }, [spaceKey]);
 
-  // Active custom queue object — resolved synchronously from already-loaded allCustomQueues (no extra API call)
-  const activeCustomQueue = queueFilter.startsWith('cq_')
-    ? (allCustomQueues.find(q => q.id === queueFilter) || null)
-    : null;
+  // Extract stable primitives from the matched queue so activeCustomQueue only gets a new
+  // reference when the queue's id or name actually changes — not every time allCustomQueues
+  // gets a new array reference (e.g. localStorage load → API response with same data).
+  const _rawMatch = queueFilter.startsWith('cq_') ? allCustomQueues.find(q => q.id === queueFilter) : undefined;
+  const _matchId   = _rawMatch?.id   ?? null;
+  const _matchName = _rawMatch?.name ?? null;
+  const _matchMembers = JSON.stringify(_rawMatch?.memberIds ?? null);
+  const activeCustomQueue = useMemo(() => {
+    if (!_matchId) return null;
+    return { id: _matchId, name: _matchName ?? '', memberIds: JSON.parse(_matchMembers) ?? [] };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [_matchId, _matchName, _matchMembers]);
   const [rrDepartments, setRrDepartments] = useState<string[]>([]); // from RR config
 
   // Load departments from both RR config + Department Routing custom fields
