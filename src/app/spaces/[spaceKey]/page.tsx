@@ -168,6 +168,8 @@ function SpaceDetailContent() {
   const [allCustomQueues, setAllCustomQueues] = useState<{ id: string; name: string; memberIds: string[] }[]>([]);
   // Track which spaceKey the queues were loaded for — avoids stale-spaceKey race condition
   const [customQueuesLoadedFor, setCustomQueuesLoadedFor] = useState<string>('');
+  // True while waiting for custom-queue metadata (prevents "No issues found" flash before queues load)
+  const isQueuesLoading = queueFilter.startsWith('cq_') && customQueuesLoadedFor !== spaceKey;
   useEffect(() => {
     if (!spaceKey) return;
     // Reset loaded marker immediately (synchronous — blocks issues effect until fresh queues arrive)
@@ -1849,7 +1851,7 @@ function SpaceDetailContent() {
 
         <div className="ml-auto flex items-center gap-2">
           <span className="text-[12px] text-gray-400">
-            {loading ? 'Loading…' : `${filteredIssues.length} issue${filteredIssues.length !== 1 ? 's' : ''}`}
+            {(loading || isQueuesLoading) ? 'Loading…' : `${filteredIssues.length} issue${filteredIssues.length !== 1 ? 's' : ''}`}
           </span>
           {/* Sync fields from Jira using saved credentials */}
           <button
@@ -2505,7 +2507,7 @@ function SpaceDetailContent() {
               );
             })}
 
-            {filteredIssues.length === 0 && !loading && (
+            {filteredIssues.length === 0 && !loading && !isQueuesLoading && (
               <div className="bg-white py-16 text-center">
                 <CheckCircle2 size={28} className="text-gray-200 mx-auto mb-3" />
                 <p className="text-[13px] text-gray-500 font-medium">No issues found</p>
@@ -2513,7 +2515,7 @@ function SpaceDetailContent() {
               </div>
             )}
 
-            {loading && (
+            {(loading || isQueuesLoading) && (
               <div className="bg-white py-16 flex items-center justify-center">
                 <div className="animate-spin w-6 h-6 border-2 border-blue-200 border-t-blue-600 rounded-full" />
               </div>
