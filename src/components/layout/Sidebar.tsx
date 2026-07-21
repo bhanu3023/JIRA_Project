@@ -709,7 +709,7 @@ export default function Sidebar() {
               return (
               <div key={space.id} className="group/space relative">
                 <Link
-                  href={`/spaces/${space.key}`}
+                  href={`/spaces/${space.key}?queue=all-open`}
                   onClick={(e) => {
                     if (isThisSpaceActive) {
                       e.preventDefault();
@@ -817,12 +817,6 @@ export default function Sidebar() {
               </div>
             );
             })}
-            <Link
-              href="/spaces"
-              className="mt-1 flex items-center gap-2 rounded-md px-3 py-2 text-[11.5px] text-blue-600 transition-colors hover:bg-gray-50 hover:text-blue-800"
-            >
-              <ChevronR size={11} /> View all spaces
-            </Link>
           </div>
 
         </nav>
