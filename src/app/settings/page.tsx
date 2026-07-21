@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, Suspense } from 'react';
+import { useEffect, useState, useCallback, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -192,6 +192,7 @@ function SettingsContent() {
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteForm, setInviteForm] = useState({ email: '', firstName: '', lastName: '', role: 'developer', password: 'changeme123' });
   const [inviting, setInviting] = useState(false);
+  const invitingRef = useRef(false);
   const [openUserMenu, setOpenUserMenu] = useState<string | null>(null);
   const [roleMenuPos, setRoleMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [selectedUser, setSelectedUser] = useState<any | null>(null);
@@ -1880,12 +1881,14 @@ function SettingsContent() {
 
     const handleInvite = async (e: React.FormEvent) => {
       e.preventDefault();
+      if (invitingRef.current) return;
+      invitingRef.current = true;
       setInviting(true);
       try {
         // Create user in DB
         await api.createUser(inviteForm);
 
-        // Send invite email via Microsoft 365 SMTP
+        // Send invite email via Microsoft 365 SMTP — called exactly once
         try {
           const currentUser = useStore.getState().user;
           await fetch('/api/users/invite', {
@@ -1905,8 +1908,9 @@ function SettingsContent() {
         setShowInviteModal(false);
         loadUsers();
         setMessage('User invited successfully — invite email sent to ' + inviteForm.email);
-        setTimeout(() => setMessage(''), 5000);
+        setTimeout(() => setMessage(''), 10000);
       } catch (err: any) { setMessage(err.message); }
+      invitingRef.current = false;
       setInviting(false);
     };
 
@@ -2438,7 +2442,7 @@ function SettingsContent() {
                           body: JSON.stringify({ email: u.email, firstName: u.firstName, lastName: u.lastName, role: u.role,
                             invitedBy: `${user?.firstName} ${user?.lastName}`.trim() }) });
                         setMessage(`Invite resent to ${u.email}`);
-                        setTimeout(() => setMessage(''), 4000);
+                        setTimeout(() => setMessage(''), 10000);
                       } catch { setMessage('Failed to resend invite'); }
                     }}
                     className="flex-1 py-2 rounded-lg text-sm font-medium border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors">
