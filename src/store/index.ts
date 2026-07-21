@@ -161,12 +161,11 @@ export const useStore = create<AppState>((set, get) => ({
       set({ issues: cached.issues, issueTotal: cached.total, issuePage: cached.page, loading: false });
       // If fresh enough, skip the network fetch
       if (Date.now() - cached.ts < CACHE_TTL) return;
-      // Stale: refresh in background without showing spinner
+      // Stale: revalidate in background without clearing display
     } else {
-      // Don't clear current issues or show a spinner — keep showing whatever is on screen
-      // while the new queue loads. The swap happens silently when data arrives.
-      // Only show spinner if there are truly no issues at all (very first load).
-      if (get().issues.length === 0) set({ loading: true });
+      // No cache — clear stale issues immediately so the user sees loading state
+      // instead of the previous queue's data (avoids "frozen on first click" illusion)
+      set({ issues: [], issueTotal: 0, loading: true });
     }
     try {
       const data = await api.getIssues(params);

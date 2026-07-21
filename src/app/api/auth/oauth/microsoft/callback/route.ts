@@ -88,7 +88,14 @@ export async function GET(req: NextRequest) {
         const candidates = await db.user.findMany({ where: { email: { startsWith: localPart + '@' } }, take: 1 });
         user = candidates[0] ?? null;
       }
-      // Update avatar in DB (non-blocking) — don't put it in the JWT
+      // Activate invited user on first Microsoft login + update avatar (both non-blocking)
+      if (user && !user.isActive) {
+        db.$executeRawUnsafe(
+          `UPDATE users SET "isActive"=true, status='active' WHERE id=$1`,
+          user.id
+        ).catch(() => {});
+        user = { ...user, isActive: true };
+      }
       if (user && result.avatarUrl) {
         db.$executeRawUnsafe(`UPDATE users SET "avatarUrl" = $1 WHERE id = $2`, result.avatarUrl, user.id).catch(() => {});
       }

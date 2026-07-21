@@ -496,27 +496,27 @@ function SpaceDetailContent() {
     return () => clearInterval(interval);
   }, [queueFilter, spaceKey, deptParam, clearIssuesCache, loadIssues]);
 
-  // Prefetch common queues in background so switching feels instant (< 1s)
+  // Prefetch common queues once after the space loads so switching feels instant
+  // NOTE: queueFilter intentionally NOT in deps — prefetch runs once per space/user,
+  // not on every queue switch (which caused stale setTimeout callbacks to overwrite
+  // the active queue's data after the user navigated away).
   useEffect(() => {
     if (!spaceKey || !user?.id) return;
-    // Skip prefetching when on a dept-specific view — prefetch overwrites store.issues with wrong data
-    const skipPrefetch = queueFilter === 'sent-watching' || queueFilter === 'worked-on' ||
-      queueFilter.startsWith('dept_') || queueFilter.startsWith('cq_');
-    if (skipPrefetch) return;
+    const timers: ReturnType<typeof setTimeout>[] = [];
     const QUEUES_TO_PREFETCH = ['all-open', 'assigned', 'unassigned', 'my-queue', 'all-requests'];
-    // Stagger prefetches so they don't all hit the server at once
     QUEUES_TO_PREFETCH.forEach((q, i) => {
-      setTimeout(() => {
+      timers.push(setTimeout(() => {
         const p: Record<string, string> = { spaceKey, page: '1', limit: '100' };
         if (q === 'all-open' || q === 'assigned' || q === 'unassigned' || q === 'my-queue') p.excludeDone = 'true';
         if (q === 'unassigned') p.unassigned = 'true';
         if (q === 'assigned' && user?.id) p.assignee = user.id;
         if (q === 'all-requests') { p.limit = '50'; }
         loadIssues(p).catch(() => {});
-      }, (i + 1) * 800); // stagger by 800ms each
+      }, (i + 1) * 1200));
     });
+    return () => timers.forEach(clearTimeout);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [spaceKey, user?.id, queueFilter]);
+  }, [spaceKey, user?.id]);
 
   // Auto-refresh every 15s for all dept_queue spaces so new tickets appear without manual refresh
   useEffect(() => {
