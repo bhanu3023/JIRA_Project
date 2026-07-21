@@ -193,6 +193,7 @@ function SettingsContent() {
   const [inviteForm, setInviteForm] = useState({ email: '', firstName: '', lastName: '', role: 'developer', password: 'changeme123' });
   const [inviting, setInviting] = useState(false);
   const invitingRef = useRef(false);
+  const usersLastFetchRef = useRef(0);
   const [openUserMenu, setOpenUserMenu] = useState<string | null>(null);
   const [roleMenuPos, setRoleMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [selectedUser, setSelectedUser] = useState<any | null>(null);
@@ -258,7 +259,10 @@ function SettingsContent() {
     if (sectionParam && sectionParam !== view) setView(sectionParam);
   }, [sectionParam]);
 
-  const loadUsers = () => {
+  const loadUsers = (force = false) => {
+    const now = Date.now();
+    if (!force && usersLastFetchRef.current && now - usersLastFetchRef.current < 30000) return;
+    usersLastFetchRef.current = now;
     setUsersLoading(true);
     api.getUsers().then(data => { setUsers(data); setUsersLoading(false); }).catch(() => setUsersLoading(false));
   };
@@ -272,7 +276,6 @@ function SettingsContent() {
   }, []);
 
   useEffect(() => {
-    loadUsers();
     api.getSpaces().then(setSpaces).catch(() => {});
     api.getCustomFields().then(fields => {
       setCustomFields(fields.map((f: any) => ({
@@ -299,7 +302,7 @@ function SettingsContent() {
     try {
       await api.createUser(newUser);
       setNewUser({ email: '', firstName: '', lastName: '', role: 'developer', password: 'changeme123' });
-      loadUsers();
+      loadUsers(true);
       setMessage('User created successfully');
       setTimeout(() => setMessage(''), 3000);
     } catch (err: any) { setMessage(err.message); }
@@ -307,12 +310,12 @@ function SettingsContent() {
 
   const handleToggleActive = async (userId: string, isActive: boolean) => {
     await api.updateUser(userId, { isActive: !isActive });
-    loadUsers();
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, isActive: !isActive } : u));
   };
 
   const handleRoleChange = async (userId: string, role: string) => {
     await api.updateUser(userId, { role });
-    loadUsers();
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, role } : u));
   };
 
   const handleProfileSave = async () => {
@@ -1906,7 +1909,7 @@ function SettingsContent() {
 
         setInviteForm({ email: '', firstName: '', lastName: '', role: 'developer', password: 'changeme123' });
         setShowInviteModal(false);
-        loadUsers();
+        loadUsers(true);
         setMessage('User invited successfully — invite email sent to ' + inviteForm.email);
         setTimeout(() => setMessage(''), 10000);
       } catch (err: any) { setMessage(err.message); }
@@ -2075,10 +2078,10 @@ function SettingsContent() {
                   </>
                 )}
               </div>
-              <button onClick={() => loadUsers()} disabled={usersLoading} className="p-1.5 text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-50" title="Refresh">
+              <button onClick={() => loadUsers(true)} disabled={usersLoading} className="p-1.5 text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-50" title="Refresh">
                 <RefreshCw size={13} className={usersLoading ? 'animate-spin' : ''} />
               </button>
-              <SyncMsPhotosButton onDone={() => loadUsers()} />
+              <SyncMsPhotosButton onDone={() => loadUsers(true)} />
               <SyncBoardFieldsButton />
             </div>
 
