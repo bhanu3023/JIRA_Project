@@ -258,12 +258,14 @@ export default function DashboardPage() {
           </h1>
           <p className="mt-0.5 text-[13px] text-gray-500">Have a productive day!</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Link href="/spaces?create=true"
-            className="flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-[12.5px] font-medium text-gray-800 transition-colors hover:bg-gray-50">
-            <Plus size={13} /> New Space
-          </Link>
-        </div>
+        {user?.role === 'admin' && (
+          <div className="flex items-center gap-2">
+            <Link href="/spaces?create=true"
+              className="flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-[12.5px] font-medium text-gray-800 transition-colors hover:bg-gray-50">
+              <Plus size={13} /> New Space
+            </Link>
+          </div>
+        )}
       </div>
 
       {/* Stats row */}
