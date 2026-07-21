@@ -987,10 +987,8 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     active ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
   );
 
-  // Admins, leads, and shift leads see all queues; others see only their assigned queues
-  const visibleQueues = (canManageSpace || isSpaceLead || isShiftLead(user?.id || ''))
-    ? customQueues
-    : (isDeptScoped ? userQueues : customQueues);
+  // All space members see all queues
+  const visibleQueues = customQueues;
 
   return (
     <>

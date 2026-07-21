@@ -142,8 +142,8 @@ export const useStore = create<AppState>((set, get) => ({
   loadSpace: async (key) => {
     // Skip if already loaded for this key — avoids redundant network call on every re-render
     if (get().currentSpace?.key?.toUpperCase() === key?.toUpperCase()) return;
-    // Clear stale space so the page shows a loader instead of wrong space data
-    set({ currentSpace: null });
+    // Don't clear currentSpace before fetch — keep showing whatever was there so the
+    // page never blocks on a spinner just because the user switched boards
     const space = await api.getSpace(key);
     set({ currentSpace: space });
   },
