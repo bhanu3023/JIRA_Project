@@ -2080,29 +2080,6 @@ export default function IssueDetailPage() {
                 </div>
               </PropRow>
             )}
-            {/* Per-dept assignees — shown when dept routing is in use */}
-            {(() => {
-              const deptMap: Record<string, any> = (issue as any).dept_assignees || {};
-              const entries = Object.entries(deptMap).filter(([, v]) => v !== null && v !== undefined);
-              if (!entries.length) return null;
-              return (
-                <PropRow label="Dept Owners">
-                  <div className="flex flex-col gap-1 py-0.5">
-                    {entries.map(([dept, person]: [string, any]) => (
-                      <div key={dept} className="flex items-center gap-2">
-                        <span className="text-[11px] text-gray-400 w-16 flex-shrink-0 truncate">{dept}</span>
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-5 h-5 rounded-full bg-blue-400 flex items-center justify-center text-white text-[8px] font-bold flex-shrink-0">
-                            {getInitials(person.firstName, person.lastName)}
-                          </div>
-                          <span className="text-[12px] text-gray-700">{person.firstName} {person.lastName}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </PropRow>
-              );
-            })()}
             {pinnedFields.includes('reporter') && (
               <PropRow label="Reporter" pinned onPin={() => togglePin('reporter')}>
                 {issue.reporter ? (
