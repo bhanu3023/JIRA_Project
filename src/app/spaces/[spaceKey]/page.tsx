@@ -499,16 +499,15 @@ function SpaceDetailContent() {
     return () => { cancelled = true; setIsFetching(false); };
   }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id]);
 
-  // Auto-refresh Sent/Watching every 15s so status changes made by other depts (e.g. Migration closing) appear promptly
+  // Auto-refresh Sent/Watching every 15s — silent background refresh, never clears display
   useEffect(() => {
     if (queueFilter !== 'sent-watching' || !spaceKey || !deptParam) return;
     const interval = setInterval(() => {
       const params: Record<string, string> = { spaceKey, page: '1', limit: '100', sentDept: deptParam };
-      clearIssuesCache(params);
-      loadIssues(params).catch(() => {});
+      prefetchIssues(params).catch(() => {});
     }, 15_000);
     return () => clearInterval(interval);
-  }, [queueFilter, spaceKey, deptParam, clearIssuesCache, loadIssues]);
+  }, [queueFilter, spaceKey, deptParam, prefetchIssues]);
 
   // Prefetch common queues once after the space loads so switching feels instant
   // NOTE: queueFilter intentionally NOT in deps — prefetch runs once per space/user,
@@ -532,7 +531,7 @@ function SpaceDetailContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaceKey, user?.id]);
 
-  // Auto-refresh every 15s for all dept_queue spaces so new tickets appear without manual refresh
+  // Auto-refresh every 15s for all dept_queue spaces — silent background refresh, never clears display
   useEffect(() => {
     const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
     if (!isDeptQueue) return;
@@ -556,11 +555,10 @@ function SpaceDetailContent() {
         params.queue = queueFilter;
         if (deptParam) params.dept = deptParam;
       }
-      clearIssuesCache(params);
-      loadIssues(params).catch(() => {});
+      prefetchIssues(params).catch(() => {});
     }, 15000);
     return () => clearInterval(id);
-  }, [spaceKey, queueFilter, deptParam, currentPage, activeCustomQueue, currentSpace?.type, allCustomQueues.length, loadIssues, clearIssuesCache]);
+  }, [spaceKey, queueFilter, deptParam, currentPage, activeCustomQueue, currentSpace?.type, allCustomQueues.length, prefetchIssues]);
 
   // Auto-refresh Worked on (dept_closed) every 30s
   useEffect(() => {
@@ -571,7 +569,7 @@ function SpaceDetailContent() {
     return () => clearInterval(id);
   }, [queueFilter, spaceKey, deptParam, fetchClosedIssues]);
 
-  // Auto-refresh every 30s for regular (non-dept-queue) spaces
+  // Auto-refresh every 30s for regular (non-dept-queue) spaces — silent background refresh, never clears display
   useEffect(() => {
     const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
     if (isDeptQueue) return; // dept_queue spaces already handled above
@@ -582,11 +580,10 @@ function SpaceDetailContent() {
       if (queueFilter === 'unassigned') params.unassigned = 'true';
       if (queueFilter === 'assigned' && user?.id) params.assignee = user.id;
       if (queueFilter === 'all-requests') params.limit = '50';
-      clearIssuesCache(params);
-      loadIssues(params).catch(() => {});
+      prefetchIssues(params).catch(() => {});
     }, 30_000);
     return () => clearInterval(id);
-  }, [spaceKey, queueFilter, currentPage, currentSpace?.type, allCustomQueues.length, user?.id, loadIssues, clearIssuesCache]);
+  }, [spaceKey, queueFilter, currentPage, currentSpace?.type, allCustomQueues.length, user?.id, prefetchIssues]);
 
   // Load custom fields assigned to this space → dynamic columns
   useEffect(() => {
