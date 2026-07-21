@@ -157,6 +157,8 @@ function SpaceDetailContent() {
   const [showCreate, setShowCreate] = useState(false);
   const [createdToast, setCreatedToast] = useState<{ key: string; cfKey: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // Component-local fetch state — never gets stuck because cleanup always resets it
+  const [isFetching, setIsFetching] = useState(false);
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -286,6 +288,14 @@ function SpaceDetailContent() {
   // Reset to page 1 when queue changes
   useEffect(() => { setCurrentPage(1); }, [queueFilter]);
 
+  // Immediately clear stale issues when the queue changes so old tickets never
+  // flash while the new fetch is in flight (handles early-return guard cases too)
+  useEffect(() => {
+    if (queueFilter && queueFilter !== 'queues') {
+      useStore.setState({ issues: [], issueTotal: 0 });
+    }
+  }, [queueFilter]);
+
   // Fetch distinct values from server whenever addedFilterIds changes
   useEffect(() => {
     if (!spaceKey || addedFilterIds.length === 0) return;
@@ -387,6 +397,7 @@ function SpaceDetailContent() {
     if (queueFilter.startsWith('cq_') && !activeCustomQueue) return;
     let cancelled = false;
     setLoadError(null);
+    setIsFetching(true);
     (async () => {
       try {
         if (cancelled) return;
@@ -481,9 +492,11 @@ function SpaceDetailContent() {
         await loadIssues(params);
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load space');
+      } finally {
+        if (!cancelled) setIsFetching(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; setIsFetching(false); };
   }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id]);
 
   // Auto-refresh Sent/Watching every 15s so status changes made by other depts (e.g. Migration closing) appear promptly
@@ -1890,7 +1903,7 @@ function SpaceDetailContent() {
 
         <div className="ml-auto flex items-center gap-2">
           <span className="text-[12px] text-gray-400">
-            {(loading || isQueuesLoading) ? 'Loading…' : `${filteredIssues.length} issue${filteredIssues.length !== 1 ? 's' : ''}`}
+            {(isFetching || isQueuesLoading) ? 'Loading…' : `${filteredIssues.length} issue${filteredIssues.length !== 1 ? 's' : ''}`}
           </span>
           {/* Sync fields from Jira using saved credentials */}
           <button
@@ -1957,7 +1970,7 @@ function SpaceDetailContent() {
                 setRefreshing(false);
               }
             }}
-            disabled={refreshing || loading}
+            disabled={refreshing || isFetching}
             title="Refresh"
             className="flex items-center justify-center w-7 h-7 rounded-md border border-gray-300 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors disabled:opacity-40">
             <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
@@ -2559,7 +2572,7 @@ function SpaceDetailContent() {
               );
             })}
 
-            {filteredIssues.length === 0 && !loading && !isQueuesLoading && (
+            {filteredIssues.length === 0 && !isFetching && !isQueuesLoading && (
               <div className="bg-white py-16 text-center">
                 <CheckCircle2 size={28} className="text-gray-200 mx-auto mb-3" />
                 <p className="text-[13px] text-gray-500 font-medium">No issues found</p>
@@ -2567,7 +2580,7 @@ function SpaceDetailContent() {
               </div>
             )}
 
-            {(loading || isQueuesLoading) && (
+            {(isFetching || isQueuesLoading) && (
               <div className="bg-white py-16 flex items-center justify-center">
                 <div className="animate-spin w-6 h-6 border-2 border-blue-200 border-t-blue-600 rounded-full" />
               </div>

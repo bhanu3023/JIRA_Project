@@ -175,13 +175,16 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       const data = await api.getIssues(params);
       issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
-      // Only update display if this queue is still the active one
+      // Only update display data if this queue is still the active one,
+      // but ALWAYS clear loading so the spinner never gets stuck
       if (activeQueueKey === cacheKey) {
         set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
+      } else {
+        set({ loading: false });
       }
     } catch (e) {
-      if (activeQueueKey === cacheKey) set({ loading: false });
-      throw e;
+      set({ loading: false }); // always clear loading on error
+      if (activeQueueKey === cacheKey) throw e;
     }
   },
   // Warm the cache without ever touching store.issues — safe to call in background
