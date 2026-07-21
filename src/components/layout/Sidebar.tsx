@@ -405,36 +405,23 @@ function SMSidebar({
           }
         />
         <div>
-          <button
-            onClick={() => setQueuesOpen((v) => !v)}
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
-          >
-            <ClipboardList size={15} className="text-gray-500" />
-            <span className="flex-1 text-left font-medium">Queues</span>
-            <ChevronDown
-              size={12}
-              className={cn('text-gray-400 transition-transform', queuesOpen ? '' : '-rotate-90')}
-            />
-          </button>
-          {queuesOpen && (
-            <div className="ml-4 mt-1 space-y-0.5 border-l border-gray-200 pl-3">
-              {SM_QUEUES.map((q) => (
-                <Link
-                  key={q.id}
-                  href={`/spaces/${spaceKey}?queue=${q.id}`}
-                  className={cn(
-                    'flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] transition-colors',
-                    ((searchParams?.get('queue') || 'all-open') === q.id)
-                      ? 'bg-indigo-50 font-semibold text-indigo-700'
-                      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900',
-                  )}
-                >
-                  <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-current" />
-                  {q.label}
-                </Link>
-              ))}
-            </div>
-          )}
+          <div className="ml-4 mt-1 space-y-0.5 border-l border-gray-200 pl-3">
+            {SM_QUEUES.map((q) => (
+              <Link
+                key={q.id}
+                href={`/spaces/${spaceKey}?queue=${q.id}`}
+                className={cn(
+                  'flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] transition-colors',
+                  ((searchParams?.get('queue') || 'all-open') === q.id)
+                    ? 'bg-indigo-50 font-semibold text-indigo-700'
+                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900',
+                )}
+              >
+                <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-current" />
+                {q.label}
+              </Link>
+            ))}
+          </div>
         </div>
         <SideNavItem
           href={`/spaces/${spaceKey}?queue=summary`}
@@ -1039,15 +1026,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
         </>
       ) : (
       <div>
-        <div className="flex items-center gap-1 rounded-md px-1 py-0.5 hover:bg-gray-100">
-          <button onClick={() => setQueuesOpen(v => !v)} className="flex flex-1 items-center gap-2 px-1 py-1 text-[12px] font-medium text-gray-600 hover:text-gray-900">
-            <ChevronDown size={12} className={cn('text-gray-400 transition-transform flex-shrink-0', !queuesOpen && '-rotate-90')} />
-            <ClipboardList size={13} className="text-gray-400" />
-            <span className="flex-1 text-left">Queues</span>
-          </button>
-        </div>
-
-        {queuesOpen && (
+        {true && (
           <div className="ml-2 mt-0.5 space-y-0.5 border-l border-gray-200 pl-2">
             <div className="ml-2 space-y-0.5">
                 {/* Custom queues — dept_queue only */}
