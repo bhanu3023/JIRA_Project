@@ -1777,8 +1777,7 @@ async function _handleJiraPgApi(
           assignee: true,
           reporter: true,
           space: { select: { key: true, name: true } },
-          comments: { include: { author: true }, orderBy: { createdAt: 'asc' } },
-        },
+          },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
@@ -2076,17 +2075,20 @@ async function _handleJiraPgApi(
     });
     if (!sp) return json({ error: 'Space not found' }, 404);
 
-    // Fetch all issue keys for this space to compute max number and dominant prefix.
-    // Use raw SQL so we catch ALL issues for the space regardless of spaceId mapping.
-    const allKeysRow = await pool.query<{ key: string }>(
-      `SELECT key FROM issues WHERE "spaceId" = $1 OR key LIKE $2`,
-      [sp.id, `${sk}-%`]
-    );
-    const nums = allKeysRow.rows;
-    let maxNum = nums.reduce((max, i) => {
-      const n = parseInt(i.key.split('-').pop() || '0', 10);
-      return isNaN(n) ? max : Math.max(max, n);
-    }, 0);
+    // Fetch max key number and a sample of recent keys for prefix detection.
+    const [maxRow, prefixRow] = await Promise.all([
+      pool.query<{ maxnum: string }>(
+        `SELECT COALESCE(MAX(CAST(SPLIT_PART(key, '-', ARRAY_LENGTH(STRING_TO_ARRAY(key, '-'), 1)) AS INTEGER)), 0) AS maxnum FROM issues WHERE "spaceId" = $1 OR key LIKE $2`,
+        [sp.id, `${sk}-%`]
+      ),
+      pool.query<{ key: string }>(
+        `SELECT key FROM issues WHERE ("spaceId" = $1 OR key LIKE $2) ORDER BY created_at DESC LIMIT 100`,
+        [sp.id, `${sk}-%`]
+      ),
+    ]);
+    let maxNum = parseInt(maxRow.rows[0]?.maxnum || '0', 10);
+    if (isNaN(maxNum)) maxNum = 0;
+    const nums = prefixRow.rows;
 
     // Determine key prefix: subtask = inherit from parent; otherwise use dominant prefix.
     let keyPrefix = sk;
@@ -2116,24 +2118,17 @@ async function _handleJiraPgApi(
       ? sp.statuses.find((x) => x.id === stId) || sp.statuses[0]
       : sp.statuses[0];
 
-    // Resolve reporter Ã¢â‚¬â€ use explicit reporterEmail > reporterEmail from body > logged-in user
-    let resolvedReporterId: string | null = null;
-    if (body.reporterEmail) {
-      const ru = await db.user.findFirst({ where: { email: { equals: String(body.reporterEmail), mode: 'insensitive' } } });
-      resolvedReporterId = ru?.id ?? null;
-    }
-    if (!resolvedReporterId) {
-      const reporterUser = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+    // Resolve reporter and assignee from email in parallel
+    const [reporterByEmail, assigneeByEmail] = await Promise.all([
+      body.reporterEmail ? db.user.findFirst({ where: { email: { equals: String(body.reporterEmail), mode: 'insensitive' } } }) : Promise.resolve(null),
+      (!body.assigneeId && body.assigneeEmail) ? db.user.findFirst({ where: { email: { equals: String(body.assigneeEmail), mode: 'insensitive' } } }) : Promise.resolve(null),
+    ]);
+    let resolvedReporterId: string | null = reporterByEmail?.id ?? null;
+    if (!resolvedReporterId && userId) {
+      const reporterUser = await db.user.findUnique({ where: { id: userId } });
       resolvedReporterId = reporterUser?.id ?? null;
     }
-
-    // Resolve assignee from email if provided
-    let resolvedAssigneeId: string | null = body.assigneeId ? String(body.assigneeId) : null;
-    if (!resolvedAssigneeId && body.assigneeEmail) {
-      const au = await db.user.findFirst({ where: { email: { equals: String(body.assigneeEmail), mode: 'insensitive' } } });
-      resolvedAssigneeId = au?.id ?? null;
-    }
-
+    let resolvedAssigneeId: string | null = body.assigneeId ? String(body.assigneeId) : (assigneeByEmail?.id ?? null);
     // Assignment logic:
     // 1. Manual creation (userId present, not from email) Ã¢â€ ' assign to creator
     // 2. Email ticket or queue-transfer Ã¢â€ ' round-robin for the department
@@ -2174,7 +2169,7 @@ async function _handleJiraPgApi(
             assigneeId: resolvedAssigneeId ?? existing.assigneeId,
             reporterId: resolvedReporterId ?? existing.reporterId,
           },
-          include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } }, comments: { include: { author: true } } },
+          include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } } },
         });
         return json(formatIssue(updated));
       }
@@ -2216,7 +2211,6 @@ async function _handleJiraPgApi(
         assignee: true,
         reporter: true,
         space: { select: { key: true, name: true } },
-        comments: { include: { author: true } },
       },
         });
         break; // success -- exit retry loop
@@ -3023,9 +3017,18 @@ async function _handleJiraPgApi(
       }
     }
 
-    const issue = await db.issue.findUnique({ where: { key }, include: { space: { include: { statuses: true } } } });
+    // Resolve issue + assignee email + reporter email in parallel
+    const assigneeEmailToLookup = body.assigneeEmail ? String(body.assigneeEmail) : (body.assignee as any)?.email ?? null;
+    const [issue, resolvedAssigneePatch, resolvedReporterPatch] = await Promise.all([
+      db.issue.findUnique({ where: { key }, include: { space: { include: { statuses: true } } } }),
+      assigneeEmailToLookup
+        ? db.user.findFirst({ where: { email: { equals: assigneeEmailToLookup, mode: 'insensitive' } } })
+        : Promise.resolve(null),
+      body.reporterEmail
+        ? db.user.findFirst({ where: { email: { equals: String(body.reporterEmail), mode: 'insensitive' } } })
+        : Promise.resolve(null),
+    ]);
     if (!issue) return json({ error: 'Not found' }, 404);
-
     const data: Record<string, unknown> = {};
     if (body.summary !== undefined) data.summary = String(body.summary);
     if (body.description !== undefined) data.description = body.description === null ? null : String(body.description);
@@ -3045,29 +3048,17 @@ async function _handleJiraPgApi(
     if (body.projectManager !== undefined) data.projectManager = body.projectManager === null ? null : String(body.projectManager);
 
     // Assignee Ã¢â‚¬â€ accept assigneeId, assignee object, or assigneeEmail
+    // Assignee -- accept assigneeId, assignee object, or assigneeEmail (email pre-resolved above in parallel)
     if (body.assigneeId !== undefined) {
       data.assigneeId = body.assigneeId === null ? null : String(body.assigneeId);
-    } else if (body.assigneeEmail) {
-      const au = await db.user.findFirst({ where: { email: { equals: String(body.assigneeEmail), mode: 'insensitive' } } });
-      if (au) data.assigneeId = au.id;
-    } else if (body.assignee !== undefined) {
-      if (body.assignee === null) {
-        data.assigneeId = null;
-      } else {
-        const ae = (body.assignee as any).email;
-        if (ae) {
-          const au = await db.user.findFirst({ where: { email: { equals: ae, mode: 'insensitive' } } });
-          if (au) data.assigneeId = au.id;
-        }
-      }
+    } else if (body.assignee === null) {
+      data.assigneeId = null;
+    } else if (resolvedAssigneePatch) {
+      data.assigneeId = resolvedAssigneePatch.id;
     }
 
-    // Reporter Ã¢â‚¬â€ accept reporterEmail
-    if (body.reporterEmail) {
-      const ru = await db.user.findFirst({ where: { email: { equals: String(body.reporterEmail), mode: 'insensitive' } } });
-      if (ru) data.reporterId = ru.id;
-    }
-
+    // Reporter -- pre-resolved above in parallel
+    if (resolvedReporterPatch) data.reporterId = resolvedReporterPatch.id;
     // Custom queue status (qst_...) — stored in dept_statuses, not issue.statusId
     if (body.queueStatusId) {
       try {
@@ -3082,7 +3073,7 @@ async function _handleJiraPgApi(
             category: String(body.queueStatusCategory || 'todo'),
           };
           await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(deptStatuses), key]);
-          const refreshed = await db.issue.findUnique({ where: { key }, include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } }, comments: { include: { author: true }, orderBy: { createdAt: 'asc' } } } });
+          const refreshed = await db.issue.findUnique({ where: { key }, include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } } } });
           if (refreshed) return json(formatIssue(refreshed));
         }
       } catch (e) { console.error('[queueStatus update failed]', e); }
@@ -3125,7 +3116,6 @@ async function _handleJiraPgApi(
         assignee: true,
         reporter: true,
         space: { select: { key: true, name: true } },
-        comments: { include: { author: true }, orderBy: { createdAt: 'asc' } },
       },
     });
 
