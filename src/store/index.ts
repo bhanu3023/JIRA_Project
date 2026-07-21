@@ -12,6 +12,9 @@ let loadNotificationsInflight: Promise<void> | null = null;
 const issuesCache = new Map<string, { issues: any[]; total: number; page: number; ts: number }>();
 const CACHE_TTL = 30_000; // 30 seconds stale-while-revalidate
 
+// Tracks which queue is currently active so background fetches don't overwrite the display
+let activeQueueKey = '';
+
 interface AppState {
   // Auth
   user: User | null;
@@ -36,6 +39,7 @@ interface AppState {
   issueTotal: number;
   issuePage: number;
   loadIssues: (params?: Record<string, string>) => Promise<void>;
+  prefetchIssues: (params?: Record<string, string>) => Promise<void>;
   clearIssuesCache: (params?: Record<string, string>) => void;
   loadIssue: (key: string) => Promise<void>;
   createIssue: (data: any) => Promise<any>;
@@ -155,26 +159,41 @@ export const useStore = create<AppState>((set, get) => ({
   issuePage: 1,
   loadIssues: async (params = {}) => {
     const cacheKey = JSON.stringify(params);
+    // Mark this as the active queue — any in-flight fetch for a different key must not overwrite display
+    activeQueueKey = cacheKey;
     const cached = issuesCache.get(cacheKey);
     if (cached) {
       // Show cached data instantly
       set({ issues: cached.issues, issueTotal: cached.total, issuePage: cached.page, loading: false });
       // If fresh enough, skip the network fetch
       if (Date.now() - cached.ts < CACHE_TTL) return;
-      // Stale: revalidate in background without clearing display
+      // Stale: revalidate in background — don't clear display
     } else {
-      // No cache — clear stale issues immediately so the user sees loading state
-      // instead of the previous queue's data (avoids "frozen on first click" illusion)
+      // No cache — clear stale issues immediately so user sees spinner, not the previous queue's data
       set({ issues: [], issueTotal: 0, loading: true });
     }
     try {
       const data = await api.getIssues(params);
       issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
-      set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
+      // Only update display if this queue is still the active one
+      if (activeQueueKey === cacheKey) {
+        set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
+      }
     } catch (e) {
-      set({ loading: false });
+      if (activeQueueKey === cacheKey) set({ loading: false });
       throw e;
     }
+  },
+  // Warm the cache without ever touching store.issues — safe to call in background
+  prefetchIssues: async (params = {}) => {
+    const cacheKey = JSON.stringify(params);
+    const cached = issuesCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < CACHE_TTL) return; // already fresh
+    try {
+      const data = await api.getIssues(params);
+      issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
+      // deliberately NO set() — never overwrite display
+    } catch { /* prefetch failures are silent */ }
   },
   clearIssuesCache: (params) => {
     if (params) {

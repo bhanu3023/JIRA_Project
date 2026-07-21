@@ -114,13 +114,14 @@ function SpaceDetailContent() {
       : Array.isArray(rawKey)
         ? (rawKey[0] || '').toUpperCase()
         : '';
-  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, clearIssuesCache, loading, user } = useStore(
+  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user } = useStore(
     useShallow((s) => ({
       currentSpace: s.currentSpace,
       loadSpace: s.loadSpace,
       issues: s.issues,
       issueTotal: s.issueTotal,
       loadIssues: s.loadIssues,
+      prefetchIssues: s.prefetchIssues,
       clearIssuesCache: s.clearIssuesCache,
       loading: s.loading,
       user: s.user,
@@ -511,7 +512,7 @@ function SpaceDetailContent() {
         if (q === 'unassigned') p.unassigned = 'true';
         if (q === 'assigned' && user?.id) p.assignee = user.id;
         if (q === 'all-requests') { p.limit = '50'; }
-        loadIssues(p).catch(() => {});
+        prefetchIssues(p).catch(() => {});
       }, (i + 1) * 1200));
     });
     return () => timers.forEach(clearTimeout);
