@@ -473,8 +473,8 @@ export async function POST(req: NextRequest) {
 
   if (!space) {
     console.error(`[EmailWebhook] Space not found for key "${spaceKey}" (to: ${toAddress})`);
-    (globalThis as any).__lastWebhookResult = { ok: false };
-    return NextResponse.json({ ok: false, reason: `No space found for ${toAddress} (spaceKey: ${spaceKey})` });
+    (globalThis as any).__lastWebhookResult = { ok: true };
+    return NextResponse.json({ ok: true, action: 'skipped_no_space', reason: `No space found for ${toAddress} (spaceKey: ${spaceKey})` });
   }
 
   const sk = space.key; // use canonical key from DB
