@@ -50,7 +50,7 @@ export default function IssueDetailPage() {
   const [spaceStatuses, setSpaceStatuses] = useState<any[]>([]);
   const [workflowTransitions, setWorkflowTransitions] = useState<any[]>([]);
   const [spaceMembers, setSpaceMembers] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<'comments' | 'activity' | 'history'>('comments');
+  const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
   const [detailsExpanded, setDetailsExpanded] = useState(true);
   const [slaExpanded, setSlaExpanded] = useState(true);
   const [slaNow, setSlaNow] = useState(() => Date.now());
@@ -894,7 +894,7 @@ export default function IssueDetailPage() {
 
         {/* Right: icon actions only */}
         <div className="flex items-center gap-0.5">
-          <div className="relative">
+          {user?.role === 'admin' && <div className="relative">
             <button onClick={() => setShowMoreMenu(!showMoreMenu)}
               className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-all">
               <MoreHorizontal size={15} />
@@ -907,7 +907,7 @@ export default function IssueDetailPage() {
                 </button>
               </Dropdown>
             )}
-          </div>
+          </div>}
         </div>
       </div>
 
@@ -993,15 +993,6 @@ export default function IssueDetailPage() {
           <div className="mb-6">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Description</h3>
-              {editing !== 'description' && (
-                <button
-                  onClick={() => { setEditing('description'); setEditValue(issue.description || ''); }}
-                  className="text-[11px] text-gray-400 hover:text-blue-600 px-2 py-0.5 rounded hover:bg-blue-50 transition-colors"
-                  title="Edit description"
-                >
-                  Edit
-                </button>
-              )}
             </div>
             {editing === 'description' ? (
               <div>
@@ -1041,7 +1032,7 @@ export default function IssueDetailPage() {
                 return (
                 /<[a-z][\s\S]*>/i.test(renderHtml) ? (
                 <div
-                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed select-text
+                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer
                     [&_h2]:font-bold [&_h2]:text-base [&_h2]:mt-2 [&_h2]:mb-1
                     [&_h3]:font-bold [&_h3]:text-sm  [&_h3]:mt-2 [&_h3]:mb-1
                     [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1
@@ -1070,19 +1061,15 @@ export default function IssueDetailPage() {
                       if (src) setLightboxSrc(src);
                       return;
                     }
-                  }}
-                  onDoubleClick={(e) => {
-                    const target = e.target as HTMLElement;
-                    if (target.closest('a') || target.tagName === 'IMG') return;
                     setEditing('description'); setEditValue(issue.description || '');
                   }}
                   dangerouslySetInnerHTML={{ __html: renderHtml }}
                 />
                 ) : (
                 <div
-                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed select-text"
+                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer"
                   dangerouslySetInnerHTML={{ __html: renderHtml }}
-                  onDoubleClick={() => { setEditing('description'); setEditValue(issue.description || ''); }}
+                  onClick={() => { setEditing('description'); setEditValue(issue.description || ''); }}
                 />
                 )
                 );
@@ -1622,11 +1609,7 @@ export default function IssueDetailPage() {
                 className={`px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors ${activeTab === 'comments' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
                 Comments ({(issue.comments || []).filter((c: any) => c.authorName !== 'System').length})
               </button>
-              <button onClick={() => setActiveTab('activity')}
-                className={`px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors ${activeTab === 'activity' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-                Activity ({issue.activity?.length || 0})
-              </button>
-              <button onClick={() => setActiveTab('history')}
+<button onClick={() => setActiveTab('history')}
                 className={`px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors ${activeTab === 'history' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
                 History ({(issue.activity?.length || 0) + (issue.comments || []).filter((c: any) => c.authorName === 'System').length})
               </button>
@@ -1751,29 +1734,6 @@ export default function IssueDetailPage() {
                 ))}
                 {(!issue.comments || issue.comments.length === 0) && (
                   <p className="text-[13px] text-gray-400 py-6 text-center">No comments yet</p>
-                )}
-              </div>
-            )}
-
-            {activeTab === 'activity' && (
-              <div className="pt-4 space-y-0">
-                {issue.activity?.map(a => (
-                  <div key={a.id} className="flex items-start gap-2.5 py-2.5 border-b border-gray-100 last:border-0">
-                    <div className="w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center text-[10px] text-gray-600 flex-shrink-0 font-semibold">
-                      {a.user ? getInitials(a.user.firstName, a.user.lastName) : 'S'}
-                    </div>
-                    <div className="flex-1 min-w-0 text-[13px]">
-                      <span className="font-semibold text-gray-800">{a.user ? `${a.user.firstName} ${a.user.lastName}` : 'System'}</span>
-                      <span className="text-gray-500"> {a.action}</span>
-                      {a.field && <span className="text-gray-600 font-medium"> {a.field}</span>}
-                      {a.oldValue && <span className="text-gray-400 line-through mx-1">{a.oldValue}</span>}
-                      {a.newValue && <span className="text-gray-700"> → {a.newValue}</span>}
-                      <span className="text-gray-400 text-[11px] ml-2">{timeAgo(a.createdAt)}</span>
-                    </div>
-                  </div>
-                ))}
-                {(!issue.activity || issue.activity.length === 0) && (
-                  <p className="text-[13px] text-gray-400 py-6 text-center">No activity yet</p>
                 )}
               </div>
             )}
