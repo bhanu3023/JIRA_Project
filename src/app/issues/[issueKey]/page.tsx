@@ -3079,7 +3079,8 @@ export default function IssueDetailPage() {
                         const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
                         const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');
 
-                        const isNotified = s.isNotified === true;
+                        const warnMs = 30 * 60 * 1000;
+                        const isNotified = s.isNotified === true && (remainingMs <= warnMs);
 
                         return (
                           <div key={s.id} className={`rounded-xl border p-3 ${isBreached ? 'border-red-300 bg-red-50' : isPaused ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-white'}`}>
