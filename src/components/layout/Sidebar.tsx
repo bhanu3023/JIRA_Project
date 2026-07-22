@@ -679,7 +679,6 @@ export default function Sidebar() {
               label="Home"
               active={pathname === '/dashboard'}
             />
-            <RecentFlyout />
             <GlobalNavItem href="/filters" icon={<List size={15} />} label="Filters" active={pathname === '/filters'} />
             {isPrivileged && (
               <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
