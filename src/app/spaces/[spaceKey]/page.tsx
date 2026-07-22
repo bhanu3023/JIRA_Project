@@ -133,7 +133,6 @@ function SpaceDetailContent() {
     { id: 'assignee',       label: 'Assignee',            width: '150px' },
     { id: 'priority',       label: 'Priority',            width: '120px' },
     { id: 'status',         label: 'Status',              width: '165px' },
-    { id: 'sprint',         label: 'Sprint',              width: '110px' },
     { id: 'created',        label: 'Created',             width: '150px' },
     { id: 'updated',        label: 'Updated',             width: '150px' },
     { id: 'dueDate',        label: 'Due Date',            width: '120px' },

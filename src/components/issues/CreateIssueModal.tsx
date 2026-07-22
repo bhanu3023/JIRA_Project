@@ -21,6 +21,60 @@ interface Props {
   onCreated: (issue?: any) => void;
 }
 
+function SearchableSelect({ value, onChange, options, placeholder }: { value: string; onChange: (v: string) => void; options: string[]; placeholder: string }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+  const filtered = options.filter(o => o.toLowerCase().includes(search.toLowerCase()));
+  return (
+    <div ref={ref} className="relative">
+      <button type="button" onClick={() => { setOpen(!open); setSearch(''); }}
+        className="w-full flex items-center justify-between px-3 py-2 bg-white border border-gray-300 rounded-lg text-[13px] hover:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors">
+        <span className={value ? 'text-gray-900' : 'text-gray-400'}>{value || placeholder}</span>
+        <ChevronDown size={14} className={`text-gray-400 flex-shrink-0 ml-1 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full mt-1 w-full z-[9999] bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden">
+          <div className="px-2 py-1.5 border-b border-gray-100">
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-gray-50 rounded border border-gray-200">
+              <Search size={12} className="text-gray-400 flex-shrink-0" />
+              <input autoFocus type="text" value={search} onChange={e => setSearch(e.target.value)}
+                placeholder="Search..." className="flex-1 text-[12px] bg-transparent outline-none text-gray-700 placeholder-gray-400" />
+              {search && <button type="button" onClick={() => setSearch('')} className="text-gray-400 hover:text-gray-600"><X size={11} /></button>}
+            </div>
+          </div>
+          <div className="max-h-48 overflow-y-auto py-1">
+            {value && (
+              <button type="button" onClick={() => { onChange(''); setOpen(false); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] text-gray-400 hover:bg-red-50 hover:text-red-500 transition-colors">
+                <X size={12} /> Clear selection
+              </button>
+            )}
+            {filtered.length === 0 ? (
+              <p className="px-3 py-2 text-[12px] text-gray-400 text-center">No options found</p>
+            ) : filtered.map(opt => (
+              <button key={opt} type="button" onClick={() => { onChange(opt); setOpen(false); }}
+                className={`w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-blue-50 transition-colors ${
+                  value === opt ? 'text-blue-600 bg-blue-50 font-medium' : 'text-gray-700'
+                }`}>
+                <div className={`w-4 h-4 rounded-full border flex items-center justify-center flex-shrink-0 ${value === opt ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                  {value === opt && <Check size={10} className="text-white" />}
+                </div>
+                {opt}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const WORK_TYPES = [
   { value: 'task',            label: 'Task' },
   { value: 'bug',             label: 'Bug' },
@@ -401,41 +455,23 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             {/* Product Type */}
             <div className="mb-4">
               <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Product Type</label>
-              <div className="relative">
-                <select
-                  value={form.productType}
-                  onChange={e => update('productType', e.target.value)}
-                  className="w-full px-3 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-[13px] appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Select product type…</option>
-                  {['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'].map(o => (
-                    <option key={o} value={o}>{o}</option>
-                  ))}
-                </select>
-                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
-                  <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                </div>
-              </div>
+              <SearchableSelect
+                value={form.productType}
+                onChange={v => update('productType', v)}
+                options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
+                placeholder="Select product type..."
+              />
             </div>
 
             {/* Project Manager */}
             <div className="mb-4">
               <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Project Manager</label>
-              <div className="relative">
-                <select
-                  value={form.projectManager}
-                  onChange={e => update('projectManager', e.target.value)}
-                  className="w-full px-3 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-[13px] appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Select project manager…</option>
-                  {['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan'].map(o => (
-                    <option key={o} value={o}>{o}</option>
-                  ))}
-                </select>
-                <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
-                  <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                </div>
-              </div>
+              <SearchableSelect
+                value={form.projectManager}
+                onChange={v => update('projectManager', v)}
+                options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan']}
+                placeholder="Select project manager..."
+              />
             </div>
 
             {/* Dynamic custom fields */}
