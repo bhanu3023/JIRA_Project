@@ -2078,7 +2078,11 @@ async function _handleJiraPgApi(
     // Fetch max key number and a sample of recent keys for prefix detection.
     const [maxRow, prefixRow] = await Promise.all([
       pool.query<{ maxnum: string }>(
-        `SELECT COALESCE(MAX(CAST(SPLIT_PART(key, '-', ARRAY_LENGTH(STRING_TO_ARRAY(key, '-'), 1)) AS INTEGER)), 0) AS maxnum FROM issues WHERE "spaceId" = $1 OR key LIKE $2`,
+        `SELECT COALESCE(MAX(
+          CASE WHEN SPLIT_PART(key, '-', ARRAY_LENGTH(STRING_TO_ARRAY(key, '-'), 1)) ~ '^[0-9]+$'
+               THEN CAST(SPLIT_PART(key, '-', ARRAY_LENGTH(STRING_TO_ARRAY(key, '-'), 1)) AS INTEGER)
+               ELSE 0 END
+        ), 0) AS maxnum FROM issues WHERE "spaceId" = $1 OR key LIKE $2`,
         [sp.id, `${sk}-%`]
       ),
       pool.query<{ key: string }>(
