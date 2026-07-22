@@ -86,16 +86,26 @@ export default function Header() {
   }, []);
 
   // Live search with debounce
+  const extractIssueKey = (input: string): string | null => {
+    const urlMatch = input.match(/\/issues\/([A-Za-z0-9_-]+(?:-[A-Za-z0-9]+)*)(?:\?|#|$)/);
+    if (urlMatch) return urlMatch[1];
+    const keyMatch = input.trim().match(/^(CF-\d+|[A-Z][A-Z0-9]+-\d+)$/i);
+    if (keyMatch) return keyMatch[1].toUpperCase();
+    return null;
+  };
+
   const handleSearchChange = useCallback((q: string) => {
     setSearchQuery(q);
     setActiveIdx(-1);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (!q.trim()) { setSearchResults([]); setSearchOpen(false); return; }
+    const issueKey = extractIssueKey(q.trim());
+    const searchTerm = issueKey || q.trim();
+    if (!searchTerm) { setSearchResults([]); setSearchOpen(false); return; }
     setSearchLoading(true);
     setSearchOpen(true);
     debounceRef.current = setTimeout(async () => {
       try {
-        const res = await api.search(q.trim());
+        const res = await api.search(searchTerm);
         setSearchResults((res.issues || []).slice(0, 8));
       } catch { setSearchResults([]); }
       setSearchLoading(false);
@@ -111,9 +121,15 @@ export default function Header() {
       if (activeIdx >= 0 && searchResults[activeIdx]) {
         router.push(`/issues/${(searchResults[activeIdx] as any).cfKey ?? searchResults[activeIdx].key}`);
         closeSearch();
-      } else if (searchQuery.trim()) {
-        router.push(`/search?q=${encodeURIComponent(searchQuery)}`);
-        closeSearch();
+      } else {
+        const issueKey = extractIssueKey(searchQuery.trim());
+        if (issueKey) {
+          router.push(`/issues/${issueKey}`);
+          closeSearch();
+        } else if (searchQuery.trim()) {
+          router.push(`/search?q=${encodeURIComponent(searchQuery)}`);
+          closeSearch();
+        }
       }
     }
     if (e.key === 'Escape') closeSearch();
