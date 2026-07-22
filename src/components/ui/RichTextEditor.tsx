@@ -350,9 +350,59 @@ export default function RichTextEditor({
         <Divider />
         <TBtn title="Inline code" onClick={() => {
           const sel = window.getSelection();
-          const txt = sel?.toString();
-          exec('insertHTML', `<code style="background:#f1f5f9;border-radius:3px;padding:1px 5px;font-family:monospace;font-size:12px;">${txt || 'code'}</code>`);
+          if (!sel || sel.rangeCount === 0) return;
+          const range = sel.getRangeAt(0);
+          const parentCode = range.startContainer.parentElement?.closest('code');
+          if (parentCode && !parentCode.closest('pre')) {
+            const text = parentCode.textContent || '';
+            const textNode = document.createTextNode(text);
+            parentCode.replaceWith(textNode);
+            emit();
+            return;
+          }
+          const txt = sel.toString();
+          if (txt) {
+            const code = document.createElement('code');
+            code.textContent = txt;
+            range.deleteContents();
+            range.insertNode(code);
+            range.setStartAfter(code);
+            range.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          } else {
+            const code = document.createElement('code');
+            code.innerHTML = '&ZeroWidthSpace;';
+            range.insertNode(code);
+            range.setStart(code, 0);
+            range.setEnd(code, 1);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+          emit();
         }}><Code size={13} /></TBtn>
+        <TBtn title="Code block" onClick={() => {
+          const sel = window.getSelection();
+          const txt = sel?.toString() || '';
+          editorRef.current?.focus();
+          const pre = document.createElement('pre');
+          pre.style.cssText = 'background:#1e293b;color:#e2e8f0;border-radius:6px;padding:12px 16px;font-family:monospace;font-size:13px;overflow-x:auto;margin:8px 0;white-space:pre-wrap;word-break:break-word;';
+          const code = document.createElement('code');
+          code.textContent = txt || 'code here';
+          pre.appendChild(code);
+          if (sel && sel.rangeCount > 0) {
+            const range = sel.getRangeAt(0);
+            range.deleteContents();
+            range.insertNode(pre);
+            const br = document.createElement('br');
+            pre.after(br);
+            range.setStartAfter(br);
+            range.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+          emit();
+        }}><span className="text-[10px] font-bold font-mono">{'{}'}</span></TBtn>
         {!compact && (
           <TBtn title="Blockquote" onClick={() => formatBlock('blockquote')}><Quote size={13} /></TBtn>
         )}
@@ -384,6 +434,8 @@ export default function RichTextEditor({
             [&_blockquote]:pl-3 [&_blockquote]:text-gray-500 [&_blockquote]:italic [&_blockquote]:my-1
           [&_hr]:border-gray-200 [&_hr]:my-2
           [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs
+          [&_pre]:bg-slate-800 [&_pre]:text-slate-200 [&_pre]:rounded-md [&_pre]:p-3 [&_pre]:my-2 [&_pre]:font-mono [&_pre]:text-[13px] [&_pre]:overflow-x-auto
+          [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0
           [&_a]:text-blue-600 [&_a]:underline
           [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1
           empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400

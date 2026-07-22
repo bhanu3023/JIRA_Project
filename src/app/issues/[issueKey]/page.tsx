@@ -943,25 +943,6 @@ export default function IssueDetailPage() {
               Create subtask
             </button>
 
-            {/* Link work item with dropdown arrow */}
-            <div className="inline-flex items-center border border-gray-300 rounded overflow-hidden">
-              <button
-                onClick={() => setShowLinkForm(v => !v)}
-                className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-gray-600 bg-white hover:bg-gray-50 transition-all">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-500">
-                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-                </svg>
-                Link work item
-              </button>
-              <div className="w-px h-5 bg-gray-300" />
-              <button
-                onClick={() => setShowLinkForm(v => !v)}
-                className="inline-flex items-center h-8 px-2 text-gray-500 bg-white hover:bg-gray-50 transition-all">
-                <ChevronDown size={12} />
-              </button>
-            </div>
-
             {/* Attach */}
             <button onClick={() => fileInputRef.current?.click()}
               className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-gray-600 bg-white border border-gray-300 rounded hover:bg-gray-50 hover:border-gray-400 transition-all">
@@ -969,11 +950,6 @@ export default function IssueDetailPage() {
               Attach
             </button>
             <input ref={fileInputRef} type="file" className="hidden" onChange={handleUpload} />
-
-            {/* More ··· */}
-            <button className="inline-flex items-center h-8 w-8 justify-center text-gray-500 bg-white border border-gray-300 rounded hover:bg-gray-50 hover:border-gray-400 transition-all">
-              <MoreHorizontal size={15} />
-            </button>
           </div>
 
           {/* Reporter Line */}
