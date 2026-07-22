@@ -894,7 +894,7 @@ export default function IssueDetailPage() {
 
         {/* Right: icon actions only */}
         <div className="flex items-center gap-0.5">
-          <div className="relative">
+          {user?.role === 'admin' && <div className="relative">
             <button onClick={() => setShowMoreMenu(!showMoreMenu)}
               className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-all">
               <MoreHorizontal size={15} />
@@ -907,7 +907,7 @@ export default function IssueDetailPage() {
                 </button>
               </Dropdown>
             )}
-          </div>
+          </div>}
         </div>
       </div>
 
