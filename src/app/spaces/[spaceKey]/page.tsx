@@ -1142,11 +1142,6 @@ function SpaceDetailContent() {
             ) : isQueueView ? (
               <div>
                 <h1 className="text-[17px] font-semibold text-gray-900">{queueLabel}</h1>
-                <p className="text-[11.5px] text-gray-400 mt-0.5">
-                  {(queueFilter === 'all-requests' || queueFilter.startsWith('cq_'))
-                    ? `${(issueTotal ?? issues.length).toLocaleString()} issues`
-                    : `${filteredIssues.length} issues`}
-                </p>
               </div>
             ) : (
               <>
