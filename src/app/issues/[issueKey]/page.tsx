@@ -405,8 +405,10 @@ export default function IssueDetailPage() {
           'Work Type': 'workType', 'Product Type': 'productType',
           'Combination': 'combination', 'Project Manager': 'projectManager',
         };
+        const HIDDEN_FIELDS = new Set(['Sprint', 'Story Points', 'Labels']);
         const applicable = fields.filter((f: any) => {
           if (f.isDeleted) return false;
+          if (HIDDEN_FIELDS.has(f.name)) return false;
           // Never show built-in system fields here — they have their own dedicated rows
           if (f.source === 'system') return false;
           const ids: string[] = Array.isArray(f.spaceIds) ? f.spaceIds : [];
