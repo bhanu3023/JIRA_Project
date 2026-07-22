@@ -987,8 +987,8 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     active ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
   );
 
-  // All space members see all queues
-  const visibleQueues = customQueues;
+  // Admins/managers see all queues; other users see only queues they belong to
+  const visibleQueues = canManageSpace ? customQueues : userQueues;
 
   return (
     <>

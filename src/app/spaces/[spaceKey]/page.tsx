@@ -1217,7 +1217,9 @@ function SpaceDetailContent() {
           { id: 'sent-watching', label: 'Sent / Watching', desc: 'Tickets sent to or watched by you'       },
         ];
         const defaultQueues = isDeptQueue ? deptQueueDefaults : serviceDeskQueues;
-        const customQueues = isDeptQueue ? allCustomQueues : [];
+        const customQueues = isDeptQueue
+          ? (isAdmin ? allCustomQueues : allCustomQueues.filter(q => q.memberIds.includes(user?.id || '')))
+          : [];
         return (
           <div className="flex-1 overflow-y-auto px-6 py-6">
             <h2 className="text-[15px] font-semibold text-gray-800 mb-1">{isDeptQueue ? 'Department Queues' : 'Queues'}</h2>
