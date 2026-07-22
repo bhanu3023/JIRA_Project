@@ -1165,10 +1165,6 @@ function SpaceDetailContent() {
           </div>
 
           <div className="flex items-center gap-2">
-            <Link href={`/spaces/${spaceKey}/board`}
-              className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 rounded-md text-[12.5px] font-medium text-gray-600 hover:bg-gray-50 transition-colors">
-              <LayoutGrid size={13} /> Board
-            </Link>
             {currentSpace.type === 'scrum' && (
               <Link href={`/spaces/${spaceKey}/backlog`}
                 className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 rounded-md text-[12.5px] font-medium text-gray-600 hover:bg-gray-50 transition-colors">
@@ -1181,10 +1177,6 @@ function SpaceDetailContent() {
                 <Settings size={14} />
               </Link>
             )}
-            <button onClick={() => setShowCreate(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-[12.5px] font-medium rounded-md hover:bg-blue-700 transition-colors">
-              <Plus size={13} /> New Issue
-            </button>
           </div>
         </div>
 
@@ -1902,62 +1894,6 @@ function SpaceDetailContent() {
           <span className="text-[12px] text-gray-400">
             {(isFetching || isQueuesLoading) ? 'Loading…' : `${filteredIssues.length} issue${filteredIssues.length !== 1 ? 's' : ''}`}
           </span>
-          {/* Sync fields from Jira using saved credentials */}
-          <button
-            onClick={async () => {
-              try {
-                const savedUrl   = localStorage.getItem('jira_cred_url') || '';
-                const savedEmail = localStorage.getItem('jira_cred_email') || '';
-                const savedToken = localStorage.getItem('jira_cred_token') || '';
-                if (!savedUrl || !savedEmail || !savedToken) {
-                  alert('Jira credentials not found. Please go to the Import page and connect to Jira first.');
-                  return;
-                }
-                // Map local spaceKey → Jira project key
-                const jiraProjectMap: Record<string, string> = {
-                  L1BOAR: 'CFITS', L2BOARD: 'L2B', L3BOARD: 'L3B',
-                  QABOAR: 'QAB', PSMBOARD: 'PSM', CFMBOARD: 'CFM',
-                  INFRABOARD: 'IB', TESTBOARD: 'TEST', CBBOARD: 'CB',
-                  EBBOARD: 'EB', MBBOARD: 'MB', SOPSBOARD: 'SOPS',
-                };
-                const jiraProject = jiraProjectMap[spaceKey];
-                if (!jiraProject) {
-                  alert(`No Jira project mapping found for ${spaceKey}`);
-                  return;
-                }
-                setRefreshing(true);
-                const res = await fetch('/api/admin/jira-field-sync', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    secret: 'cf-admin-sync-2024',
-                    jiraUrl: savedUrl,
-                    email: savedEmail,
-                    apiToken: savedToken,
-                    jiraProject,
-                    spaceKey,
-                    onlyMissing: false,
-                  }),
-                });
-                const data = await res.json();
-                if (data.ok) {
-                  await loadIssues({ spaceKey, page: String(currentPage), limit: '500' });
-                  alert(`✅ Synced! Updated ${data.updated} tickets from Jira.`);
-                } else {
-                  alert(`❌ Sync failed: ${data.error}`);
-                }
-              } catch (e: any) {
-                alert(`❌ Error: ${e.message}`);
-              } finally {
-                setRefreshing(false);
-              }
-            }}
-            disabled={refreshing}
-            title="Sync Customer Name & Project Manager from Jira"
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-green-300 bg-green-50 text-green-700 text-[11.5px] font-medium hover:bg-green-100 transition-colors disabled:opacity-40">
-            <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} />
-            Sync Fields
-          </button>
           <button
             onClick={async () => {
               setRefreshing(true);
@@ -2038,8 +1974,8 @@ function SpaceDetailContent() {
       )}
 
       {queueFilter !== 'summary' && queueFilter !== 'queues' && queueFilter !== 'dept_closed' && <>
-      {/* ── Bulk action bar ── */}
-      {selectedRows.size > 0 && (() => { const activeCount = issues.filter(i => selectedRows.has(i.id)).length; return activeCount > 0 ? (
+      {/* ── Bulk action bar (admin only) ── */}
+      {isAdmin && selectedRows.size > 0 && (() => { const activeCount = issues.filter(i => selectedRows.has(i.id)).length; return activeCount > 0 ? (
         <div className="flex items-center gap-3 px-4 py-2 bg-blue-50 border-b border-blue-200">
           <span className="text-sm font-medium text-blue-700">{activeCount} selected</span>
           <button
@@ -2062,8 +1998,8 @@ function SpaceDetailContent() {
           {/* Table header */}
           <div className="grid items-center px-4 py-2 bg-white border-b border-gray-200 sticky top-0 z-10"
             style={{ gridTemplateColumns: gridCols }}>
-            <div className="flex items-center justify-center" onClick={toggleAll}>
-              {(() => {
+            <div className="flex items-center justify-center" onClick={isAdmin ? toggleAll : undefined}>
+              {isAdmin && (() => {
                 const allChecked = selectedRows.size === issues.length && issues.length > 0;
                 return (
                   <div className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors
@@ -2370,12 +2306,14 @@ function SpaceDetailContent() {
                     }
                   }}>
 
-                  {/* Checkbox */}
-                  <div className="flex items-center justify-center" onClick={e => toggleRow(e, issue.id)}>
-                    <div className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors flex-shrink-0
-                      ${isSelected ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-400 group-hover:border-blue-400'}`}>
-                      {isSelected && <svg width="9" height="9" viewBox="0 0 10 10" fill="none"><path d="M1.5 5l2.5 2.5 5-5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-                    </div>
+                  {/* Checkbox (admin only) */}
+                  <div className="flex items-center justify-center" onClick={isAdmin ? (e => toggleRow(e, issue.id)) : undefined}>
+                    {isAdmin && (
+                      <div className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors flex-shrink-0
+                        ${isSelected ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-400 group-hover:border-blue-400'}`}>
+                        {isSelected && <svg width="9" height="9" viewBox="0 0 10 10" fill="none"><path d="M1.5 5l2.5 2.5 5-5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                      </div>
+                    )}
                   </div>
                   {/* Type */}
                   <div className="px-1 flex items-center"><IssueTypeIcon type={issue.type || 'task'} size={14} /></div>
