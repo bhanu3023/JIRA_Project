@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
@@ -405,8 +405,10 @@ export default function IssueDetailPage() {
           'Work Type': 'workType', 'Product Type': 'productType',
           'Combination': 'combination', 'Project Manager': 'projectManager',
         };
+        const HIDDEN_FIELDS = new Set(['Sprint', 'Story Points', 'Labels']);
         const applicable = fields.filter((f: any) => {
           if (f.isDeleted) return false;
+          if (HIDDEN_FIELDS.has(f.name)) return false;
           // Never show built-in system fields here — they have their own dedicated rows
           if (f.source === 'system') return false;
           const ids: string[] = Array.isArray(f.spaceIds) ? f.spaceIds : [];
@@ -2080,29 +2082,6 @@ export default function IssueDetailPage() {
                 </div>
               </PropRow>
             )}
-            {/* Per-dept assignees — shown when dept routing is in use */}
-            {(() => {
-              const deptMap: Record<string, any> = (issue as any).dept_assignees || {};
-              const entries = Object.entries(deptMap).filter(([, v]) => v !== null && v !== undefined);
-              if (!entries.length) return null;
-              return (
-                <PropRow label="Dept Owners">
-                  <div className="flex flex-col gap-1 py-0.5">
-                    {entries.map(([dept, person]: [string, any]) => (
-                      <div key={dept} className="flex items-center gap-2">
-                        <span className="text-[11px] text-gray-400 w-16 flex-shrink-0 truncate">{dept}</span>
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-5 h-5 rounded-full bg-blue-400 flex items-center justify-center text-white text-[8px] font-bold flex-shrink-0">
-                            {getInitials(person.firstName, person.lastName)}
-                          </div>
-                          <span className="text-[12px] text-gray-700">{person.firstName} {person.lastName}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </PropRow>
-              );
-            })()}
             {pinnedFields.includes('reporter') && (
               <PropRow label="Reporter" pinned onPin={() => togglePin('reporter')}>
                 {issue.reporter ? (
@@ -2122,29 +2101,6 @@ export default function IssueDetailPage() {
                 </div>
               </PropRow>
             )}
-            {pinnedFields.includes('sprint') && (
-              <PropRow label="Sprint" pinned onPin={() => togglePin('sprint')}>
-                <span className="text-[13px] text-gray-700 px-1.5 py-1">{issue.sprintName || <span className="text-gray-400">None</span>}</span>
-              </PropRow>
-            )}
-            {pinnedFields.includes('storyPoints') && (
-              <PropRow label="Story Points" pinned onPin={() => togglePin('storyPoints')}>
-                {editing === 'storyPoints' ? (
-                  <div className="flex items-center gap-1.5 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                    <input type="number" value={editValue} onChange={e => setEditValue(e.target.value)}
-                      className="w-14 border border-blue-400 rounded px-2 py-0.5 text-sm focus:outline-none" autoFocus min="0" max="100"
-                      onKeyDown={e => { if (e.key === 'Enter') handleUpdate('storyPoints', editValue ? parseInt(editValue) : null); if (e.key === 'Escape') setEditing(null); }} />
-                    <button onClick={() => handleUpdate('storyPoints', editValue ? parseInt(editValue) : null)} className="text-blue-600"><Check size={13} /></button>
-                    <button onClick={() => setEditing(null)} className="text-gray-400"><X size={13} /></button>
-                  </div>
-                ) : (
-                  <button onClick={() => { setEditing('storyPoints'); setEditValue(issue.storyPoints?.toString() || ''); }}
-                    className="text-[13px] text-gray-700 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                    {issue.storyPoints ?? <span className="text-gray-400">None</span>}
-                  </button>
-                )}
-              </PropRow>
-            )}
             {pinnedFields.includes('dueDate') && (
               <PropRow label="Due Date" pinned onPin={() => togglePin('dueDate')}>
                 {editing === 'dueDate' ? (
@@ -2161,16 +2117,6 @@ export default function IssueDetailPage() {
                     {issue.dueDate ? formatDate(issue.dueDate) : <span className="text-gray-400">None</span>}
                   </button>
                 )}
-              </PropRow>
-            )}
-            {pinnedFields.includes('labels') && (
-              <PropRow label="Labels" pinned onPin={() => togglePin('labels')}>
-                <div className="flex flex-wrap gap-1 px-1.5 py-1">
-                  {issue.labels?.length ? issue.labels.map(l => (
-                    <span key={l.id} className="text-[11px] font-medium px-2 py-0.5 rounded-full border"
-                      style={{ backgroundColor: l.color + '15', color: l.color, borderColor: l.color + '40' }}>{l.name}</span>
-                  )) : <span className="text-[13px] text-gray-400">None</span>}
-                </div>
               </PropRow>
             )}
             {customFields.filter(cf => pinnedFields.includes(`cf_${cf.id}`) && cf.fieldType !== 'department-routing' && cf.type !== 'department-routing').map(cf => {
@@ -2383,28 +2329,7 @@ export default function IssueDetailPage() {
               </div>
             </PropRow>}
 
-            {/* Sprint */}
-            {!pinnedFields.includes('sprint') && <PropRow label="Sprint" onPin={() => togglePin('sprint')}>
-              <span className="text-[13px] text-gray-700 px-1.5 py-1">{issue.sprintName || <span className="text-gray-400">None</span>}</span>
-            </PropRow>}
 
-            {/* Story Points */}
-            {!pinnedFields.includes('storyPoints') && <PropRow label="Story Points" onPin={() => togglePin('storyPoints')}>
-              {editing === 'storyPoints' ? (
-                <div className="flex items-center gap-1.5 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                  <input type="number" value={editValue} onChange={e => setEditValue(e.target.value)}
-                    className="w-14 border border-blue-400 rounded px-2 py-0.5 text-sm focus:outline-none" autoFocus min="0" max="100"
-                    onKeyDown={e => { if (e.key === 'Enter') handleUpdate('storyPoints', editValue ? parseInt(editValue) : null); if (e.key === 'Escape') setEditing(null); }} />
-                  <button onClick={() => handleUpdate('storyPoints', editValue ? parseInt(editValue) : null)} className="text-blue-600"><Check size={13} /></button>
-                  <button onClick={() => setEditing(null)} className="text-gray-400"><X size={13} /></button>
-                </div>
-              ) : (
-                <button onClick={() => { setEditing('storyPoints'); setEditValue(issue.storyPoints?.toString() || ''); }}
-                  className="text-[13px] text-gray-700 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                  {issue.storyPoints ?? <span className="text-gray-400">None</span>}
-                </button>
-              )}
-            </PropRow>}
 
             {/* Due Date */}
             {!pinnedFields.includes('dueDate') && <PropRow label="Due Date" onPin={() => togglePin('dueDate')}>
@@ -2424,15 +2349,6 @@ export default function IssueDetailPage() {
               )}
             </PropRow>}
 
-            {/* Labels */}
-            {!pinnedFields.includes('labels') && <PropRow label="Labels" onPin={() => togglePin('labels')}>
-              <div className="flex flex-wrap gap-1 px-1.5 py-1">
-                {issue.labels?.length ? issue.labels.map(l => (
-                  <span key={l.id} className="text-[11px] font-medium px-2 py-0.5 rounded-full border"
-                    style={{ backgroundColor: l.color + '15', color: l.color, borderColor: l.color + '40' }}>{l.name}</span>
-                )) : <span className="text-[13px] text-gray-400">None</span>}
-              </div>
-            </PropRow>}
 
             {/* Parent */}
             {issue.parent && (
