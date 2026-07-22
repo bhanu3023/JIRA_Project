@@ -4453,7 +4453,12 @@ async function _handleJiraPgApi(
             });
             if (already) continue;
             const leadIds = await getSpaceLeadUserIds(row.spaceId);
-            const recipients = [row.assigneeId, row.reporterId, ...leadIds].filter(Boolean);
+            const managerMembers = await db.spaceMember.findMany({
+              where: { spaceId: row.spaceId, role: 'manager' },
+              select: { userId: true },
+            }).catch(() => []);
+            const managerIds = managerMembers.map((m: any) => m.userId).filter(Boolean);
+            const recipients = [row.assigneeId, row.reporterId, ...leadIds, ...managerIds].filter(Boolean);
             const minsLeft = Math.ceil(timeToBreachMs / 60_000);
             await notifyUsers(recipients, null, {
               type: 'SLA_BREACH',
@@ -4461,9 +4466,11 @@ async function _handleJiraPgApi(
               message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes. Issue: ${row.summary || row.key}`,
               issueKey: row.key,
             });
-            // Also send email notification to assignee + reporter
+            // Also send email notification to assignee, shift leads, and managers
+            const allEmailUserIds = [row.assigneeId, ...leadIds, ...managerIds].filter(Boolean);
+            const uniqueEmailUserIds = [...new Set(allEmailUserIds)];
             const emailRecipients = await db.user.findMany({
-              where: { id: { in: [row.assigneeId, row.reporterId].filter(Boolean) } },
+              where: { id: { in: uniqueEmailUserIds } },
               select: { email: true },
             });
             const assigneeEmails = emailRecipients.map((u: any) => u.email).filter(Boolean);
