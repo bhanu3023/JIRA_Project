@@ -14,7 +14,12 @@ export async function GET(req: NextRequest) {
 
   const clientId = process.env.MICROSOFT_CLIENT_ID;
   if (!clientId) {
-    // Redirect back with error
+    const mode = searchParams.get('mode') || 'email';
+    if (mode === 'login') {
+      return NextResponse.redirect(
+        new URL('/auth/login?oauth_error=MICROSOFT_CLIENT_ID+is+not+configured', req.url)
+      );
+    }
     const base = returnUrl.includes('?') ? returnUrl : `${returnUrl}?tab=email`;
     return NextResponse.redirect(
       new URL(`${base}&oauth_error=MICROSOFT_CLIENT_ID+is+not+configured+in+.env.local`, req.url)

@@ -87,7 +87,7 @@ export default function NavigationLoader() {
   if (!loading) return null;
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-white/70 backdrop-blur-[2px]">
+    <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-white/70 backdrop-blur-[2px]">
       <DotLoader />
     </div>
   );

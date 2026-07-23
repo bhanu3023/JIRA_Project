@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, priorityColors, getInitials, getIssueStatus } from '@/lib/utils';
+import { typeIcons, priorityColors, getInitials, getIssueStatus, resolveStatusColor } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { Issue, WorkflowStatus } from '@/types';
 
@@ -80,7 +80,7 @@ export default function BoardPage() {
             >
               {/* Column Header */}
               <div className="px-3 py-2.5 flex items-center gap-2">
-                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: status.color }} />
+                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: resolveStatusColor(status) }} />
                 <span className="text-sm font-semibold text-gray-700 uppercase">{status.name}</span>
                 <span className="text-xs text-gray-400 ml-auto bg-gray-200 px-1.5 py-0.5 rounded-full">{columnIssues.length}</span>
               </div>

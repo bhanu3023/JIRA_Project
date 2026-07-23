@@ -67,6 +67,40 @@ export type IssueStatusShape = {
   category?: string;
 };
 
+const STATUS_CATEGORY_COLORS: Record<string, string> = {
+  done: '#10B981',
+  in_progress: '#3B82F6',
+  todo: '#64748B',
+};
+
+const STATUS_NAME_COLORS: Record<string, string> = {
+  'resolved': '#10B981',
+  'done': '#10B981',
+  'closed': '#10B981',
+  'completed': '#10B981',
+  'fixed': '#10B981',
+  'in progress': '#3B82F6',
+  'in review': '#60A5FA',
+  'active': '#3B82F6',
+  'in development': '#3B82F6',
+  'open': '#64748B',
+  'to do': '#64748B',
+  'new': '#64748B',
+  'backlog': '#64748B',
+  'on hold': '#F59E0B',
+  'waiting': '#F59E0B',
+  'blocked': '#EF4444',
+  'cancelled': '#EF4444',
+  'rejected': '#EF4444',
+};
+
+export function resolveStatusColor(status: { name?: string; color?: string; category?: string }): string {
+  const name = (status.name || '').toLowerCase().trim();
+  if (STATUS_NAME_COLORS[name]) return STATUS_NAME_COLORS[name];
+  if (status.category && STATUS_CATEGORY_COLORS[status.category]) return STATUS_CATEGORY_COLORS[status.category];
+  return status.color || '#64748B';
+}
+
 const FALLBACK_ISSUE_STATUS: IssueStatusShape = {
   id: '_unknown',
   name: '—',
@@ -78,7 +112,7 @@ const FALLBACK_ISSUE_STATUS: IssueStatusShape = {
 export function getIssueStatus(issue: { status?: IssueStatusShape | null }): IssueStatusShape {
   const s = issue.status;
   if (s && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.color === 'string') {
-    return s;
+    return { ...s, color: resolveStatusColor(s) };
   }
   return FALLBACK_ISSUE_STATUS;
 }

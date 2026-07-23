@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getIssueStatus } from '@/lib/utils';
+import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getIssueStatus, resolveStatusColor } from '@/lib/utils';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
 import RichTextEditor from '@/components/ui/RichTextEditor';
@@ -1095,7 +1095,7 @@ export default function IssueDetailPage() {
                         {getInitials(child.assignee.firstName, child.assignee.lastName)}
                       </div>
                     )}
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded shrink-0" style={{ backgroundColor: child.status.color + '25', color: child.status.color }}>{child.status.name}</span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded shrink-0" style={{ backgroundColor: resolveStatusColor(child.status) + '25', color: resolveStatusColor(child.status) }}>{child.status.name}</span>
                   </Link>
                 ))}
               </div>
@@ -1240,7 +1240,7 @@ export default function IssueDetailPage() {
                                 <span className="font-mono text-[11px] font-bold text-blue-600 flex-shrink-0">{r.key}</span>
                                 <span className="text-[12.5px] text-gray-700 truncate">{r.summary}</span>
                                 <span className="ml-auto text-[10px] text-white px-1.5 py-0.5 rounded flex-shrink-0"
-                                  style={{ backgroundColor: r.status?.color || '#6B7280' }}>{r.status?.name}</span>
+                                  style={{ backgroundColor: r.status ? resolveStatusColor(r.status) : '#6B7280' }}>{r.status?.name}</span>
                               </button>
                             ))}
                           </div>
@@ -1292,7 +1292,7 @@ export default function IssueDetailPage() {
                               {/* Status badge */}
                               {li.status && (
                                 <span className="text-[10px] font-bold px-2.5 py-1 rounded text-white flex-shrink-0 shadow-sm"
-                                  style={{ backgroundColor: li.status.color || '#6B7280' }}>
+                                  style={{ backgroundColor: resolveStatusColor(li.status) }}>
                                   {li.status.name?.toUpperCase()}
                                 </span>
                               )}

@@ -31,7 +31,7 @@ function useCountUp(target: number, duration = 1200) {
   return display;
 }
 import Link from 'next/link';
-import { typeIcons, timeAgo, cn } from '@/lib/utils';
+import { typeIcons, timeAgo, cn, resolveStatusColor } from '@/lib/utils';
 import { PriorityIcon } from '@/components/ui/PriorityIcon';
 import SpaceIcon from '@/components/ui/SpaceIcon';
 import DotLoader from '@/components/ui/DotLoader';
@@ -381,7 +381,7 @@ export default function DashboardPage() {
                         </td>
                         <td className="px-2 py-2.5">
                           <span className="text-[11px] font-medium text-white px-2 py-0.5 rounded whitespace-nowrap"
-                            style={{ backgroundColor: issue.status?.color || '#6B7280' }}>
+                            style={{ backgroundColor: issue.status ? resolveStatusColor(issue.status) : '#6B7280' }}>
                             {issue.status?.name || 'Open'}
                           </span>
                         </td>
