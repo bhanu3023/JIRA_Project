@@ -4128,6 +4128,214 @@ async function _handleJiraPgApi(
     return json({ issues });
   }
 
+  // GET /my-dashboard — personal analytics for the logged-in user's own tickets.
+  // SLA "running/near-breach/breaching-soon/breached" buckets and the low/medium/high
+  // risk buckets are not defined anywhere else in the codebase (only a 30-minute
+  // pre-breach warning threshold exists, reused here for "breaching soon"/"high risk");
+  // these thresholds are this endpoint's own reasonable defaults, not existing business rules.
+  if (path === 'my-dashboard' && method === 'GET') {
+    if (!userId) return json({ error: 'Forbidden' }, 403);
+
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const fromParam = url.searchParams.get('from');
+    const toParam = url.searchParams.get('to');
+    const rangeFrom = fromParam ? new Date(fromParam) : new Date(now.getTime() - 7 * 86_400_000);
+    const rangeTo = toParam ? new Date(toParam) : now;
+
+    const myIssuesRes = await pool.query(
+      `SELECT i.*, s.name AS status_name, s.category AS status_category, s.color AS status_color
+       FROM issues i
+       LEFT JOIN statuses s ON s.id = i."statusId"
+       WHERE i."assigneeId" = $1`,
+      [userId]
+    );
+    const myIssues = myIssuesRes.rows;
+
+    const isDone = (r: any) => r.status_category === 'done';
+    const isWaiting = (r: any) => /wait|hold/i.test(r.status_name || '');
+    const isInProgress = (r: any) => r.status_category === 'in_progress' && !isWaiting(r);
+    const isTodo = (r: any) => r.status_category === 'todo' && !isWaiting(r);
+
+    const openIssues = myIssues.filter((r: any) => !isDone(r));
+    const inProgressIssues = openIssues.filter(isInProgress);
+    const waitingIssues = openIssues.filter(isWaiting);
+    const todoIssues = openIssues.filter(isTodo);
+    const doneIssues = myIssues.filter(isDone);
+
+    // My tickets by status (all-time, mine) — drives the "by status" donut
+    const byStatusMap: Record<string, { count: number; color: string }> = {};
+    for (const r of myIssues) {
+      const name = r.status_name || 'Unknown';
+      if (!byStatusMap[name]) byStatusMap[name] = { count: 0, color: r.status_color || '#94A3B8' };
+      byStatusMap[name].count++;
+    }
+    const byStatus = Object.entries(byStatusMap).map(([name, v]) => ({ name, count: v.count, color: v.color }));
+
+    // My tickets by priority (all-time, mine) — normalize case since priority values
+    // are inconsistently cased across migrated data ("Medium" vs "medium").
+    const byPriorityMap: Record<string, number> = {};
+    for (const r of myIssues) {
+      const p = (r.priority || 'medium').toLowerCase();
+      byPriorityMap[p] = (byPriorityMap[p] || 0) + 1;
+    }
+    const byPriority = Object.entries(byPriorityMap).map(([name, count]) => ({ name, count }));
+
+    // Ageing buckets — open tickets only
+    const ageing = { '0-2': 0, '3-5': 0, '5-10': 0, '10+': 0 };
+    for (const r of openIssues) {
+      const ageDays = (now.getTime() - new Date(r.createdAt).getTime()) / 86_400_000;
+      if (ageDays <= 2) ageing['0-2']++;
+      else if (ageDays <= 5) ageing['3-5']++;
+      else if (ageDays <= 10) ageing['5-10']++;
+      else ageing['10+']++;
+    }
+
+    // My current open tickets by source (original) department
+    const bySourceDeptMap: Record<string, number> = {};
+    for (const r of openIssues) {
+      const dept = r.original_dept || r.current_department || 'Unassigned';
+      bySourceDeptMap[dept] = (bySourceDeptMap[dept] || 0) + 1;
+    }
+    const bySourceDept = Object.entries(bySourceDeptMap).map(([dept, count]) => ({ dept, count }));
+
+    // Ticket journey — open tickets grouped by current department + rough stage
+    const journeyMap: Record<string, { total: number; created: number; inProgress: number; waiting: number; completed: number }> = {};
+    for (const r of openIssues) {
+      const dept = r.current_department || 'Unassigned';
+      if (!journeyMap[dept]) journeyMap[dept] = { total: 0, created: 0, inProgress: 0, waiting: 0, completed: 0 };
+      const j = journeyMap[dept];
+      j.total++;
+      if (isWaiting(r)) j.waiting++;
+      else if (r.status_category === 'in_progress') j.inProgress++;
+      else if (r.status_category === 'done') j.completed++;
+      else j.created++;
+    }
+    const journey = Object.entries(journeyMap).map(([dept, v]) => ({ dept, ...v }));
+
+    // SLA: reuse computePausedDeptSLA per open issue with an applicable department + policy
+    const spaceIds = Array.from(new Set(openIssues.map((r: any) => r.spaceId).filter(Boolean)));
+    const policiesBySpace: Record<string, any[]> = {};
+    for (const sid of spaceIds) {
+      const res = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`, [sid]);
+      policiesBySpace[sid] = res.rows;
+    }
+    const THIRTY_MIN_MS = 30 * 60 * 1000;
+    let slaRunning = 0;
+    let slaBreachingSoon = 0;
+    let slaTrackedCount = 0;
+    let slaBreachedCount = 0;
+    const slaStatus = { withinSla: 0, nearBreach: 0, breachingSoon: 0, breached: 0 };
+    const riskBuckets = { low: 0, medium: 0, high: 0 };
+    for (const r of openIssues) {
+      const dept = r.current_department;
+      if (!dept) continue;
+      const policies = policiesBySpace[r.spaceId] || [];
+      const sla = await computePausedDeptSLA(r, dept, policies);
+      if (!sla) continue;
+      slaTrackedCount++;
+      if (sla.isBreached) {
+        slaBreachedCount++;
+        slaStatus.breached++;
+        riskBuckets.high++;
+        continue;
+      }
+      slaRunning++;
+      if (sla.remainingMs <= THIRTY_MIN_MS) {
+        slaBreachingSoon++;
+        slaStatus.breachingSoon++;
+        riskBuckets.high++;
+      } else if (sla.elapsed_ms / sla.goalDurationMs >= 0.75) {
+        slaStatus.nearBreach++;
+        riskBuckets.medium++;
+      } else if (sla.elapsed_ms / sla.goalDurationMs >= 0.5) {
+        slaStatus.withinSla++;
+        riskBuckets.medium++;
+      } else {
+        slaStatus.withinSla++;
+        riskBuckets.low++;
+      }
+    }
+    const slaCompliancePct = slaTrackedCount > 0
+      ? Math.round(((slaTrackedCount - slaBreachedCount) / slaTrackedCount) * 100)
+      : 100;
+
+    // Moved to other departments by me (date-ranged) — 'passed' rows, destination
+    // recovered from the matching issue_dept_transitions row (closest in time).
+    const movedRes = await pool.query(
+      `SELECT dt.to_dept AS dept, COUNT(*)::int AS cnt
+       FROM user_worked_on_tickets w
+       JOIN LATERAL (
+         SELECT to_dept FROM issue_dept_transitions dt
+         WHERE dt.issue_id = w.issue_id AND dt.from_dept = w.dept
+         ORDER BY ABS(EXTRACT(EPOCH FROM (dt.moved_at - w.worked_at))) ASC
+         LIMIT 1
+       ) dt ON true
+       WHERE w.user_id = $1 AND w.reason = 'passed' AND w.worked_at BETWEEN $2 AND $3
+       GROUP BY dt.to_dept
+       ORDER BY cnt DESC`,
+      [userId, rangeFrom, rangeTo]
+    );
+
+    // Received from other departments (date-ranged) — 'returned' rows, source dept.
+    // Note: only covers handoffs into a department that already had a saved assignee;
+    // a fresh round-robin assignment isn't recorded as a "received" event anywhere.
+    const receivedRes = await pool.query(
+      `SELECT dt.from_dept AS dept, COUNT(*)::int AS cnt
+       FROM user_worked_on_tickets w
+       JOIN LATERAL (
+         SELECT from_dept FROM issue_dept_transitions dt
+         WHERE dt.issue_id = w.issue_id AND dt.to_dept = w.dept
+         ORDER BY ABS(EXTRACT(EPOCH FROM (dt.moved_at - w.worked_at))) ASC
+         LIMIT 1
+       ) dt ON true
+       WHERE w.user_id = $1 AND w.reason = 'returned' AND w.worked_at BETWEEN $2 AND $3
+       GROUP BY dt.from_dept
+       ORDER BY cnt DESC`,
+      [userId, rangeFrom, rangeTo]
+    );
+
+    const [reportedByMeTotal, createdToday, resolvedToday, commentsToday, movedTodayRes, receivedTodayRes] = await Promise.all([
+      db.issue.count({ where: { reporterId: userId } }),
+      db.issue.count({ where: { reporterId: userId, createdAt: { gte: startOfToday } } }),
+      db.issue.count({ where: { assigneeId: userId, status: { category: 'done' }, updatedAt: { gte: startOfToday } } }),
+      (db as any).comment.count({ where: { authorId: userId, createdAt: { gte: startOfToday } } }),
+      pool.query(`SELECT COUNT(*)::int AS cnt FROM user_worked_on_tickets WHERE user_id=$1 AND reason='passed' AND worked_at >= $2`, [userId, startOfToday]),
+      pool.query(`SELECT COUNT(*)::int AS cnt FROM user_worked_on_tickets WHERE user_id=$1 AND reason='returned' AND worked_at >= $2`, [userId, startOfToday]),
+    ]);
+
+    return json({
+      range: { from: rangeFrom.toISOString(), to: rangeTo.toISOString() },
+      cards: {
+        myOpenTickets: todoIssues.length,
+        inProgress: inProgressIssues.length,
+        waitingOrOnHold: waitingIssues.length,
+        resolvedByMe: doneIssues.length,
+        reportedByMe: reportedByMeTotal,
+        slaRunning,
+        slaBreachingSoon,
+      },
+      byStatus,
+      byPriority,
+      ageing,
+      bySourceDept,
+      journey,
+      slaStatus,
+      slaCompliancePct,
+      slaTrackedCount,
+      riskBuckets,
+      movedByMe: movedRes.rows,
+      receivedByMe: receivedRes.rows,
+      quickStats: {
+        createdToday,
+        resolvedToday,
+        commentsToday,
+        movedToday: movedTodayRes.rows[0]?.cnt || 0,
+        receivedToday: receivedTodayRes.rows[0]?.cnt || 0,
+      },
+    });
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ Notifications (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   // GET /notifications Ã¢â‚¬â€ list for current user

@@ -81,6 +81,11 @@ class ApiClient {
     return this.request<any>('/auth/me');
   }
 
+  getMyDashboard(params?: { from?: string; to?: string }) {
+    const qs = params ? new URLSearchParams(params as Record<string, string>).toString() : '';
+    return this.request<any>(`/my-dashboard${qs ? `?${qs}` : ''}`);
+  }
+
   // Users
   getUsers() { return this.request<any[]>('/users'); }
   createUser(data: any) { return this.request<any>('/users', { method: 'POST', body: JSON.stringify(data) }); }
