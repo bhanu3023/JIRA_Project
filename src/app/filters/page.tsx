@@ -613,9 +613,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'reporter',       label: 'Reporter',        group: 'People' },
   { id: 'projectManager', label: 'Project Manager', group: 'People' },
   { id: 'priority',       label: 'Priority',        group: 'Issue' },
-  { id: 'label',          label: 'Label',           group: 'Issue' },
   { id: 'department',     label: 'Department',      group: 'Issue' },
-  { id: 'sprint',         label: 'Sprint',          group: 'Issue' },
   { id: 'productType',    label: 'Product Type',    group: 'Issue' },
   { id: 'combination',    label: 'Combination',     group: 'Issue' },
   { id: 'customerName',   label: 'Customer Name',   group: 'Issue' },
@@ -779,12 +777,10 @@ export default function FiltersPage() {
   const [selTypes, setSelTypes]           = useState<string[]>([]);
   const [selStatuses, setSelStatuses]     = useState<string[]>([]);
   const [selPriorities, setSelPriorities] = useState<string[]>([]);
-  const [selLabels, setSelLabels]         = useState<string[]>([]);
   const [selCreated, setSelCreated]       = useState('');
   const [selUpdated, setSelUpdated]       = useState('');
   const [selDueDate, setSelDueDate]       = useState('');
   const [selDepartment, setSelDepartment] = useState('');
-  const [selSprint, setSelSprint]         = useState('');
   const [selProductType, setSelProductType] = useState('');
   const [selCombination, setSelCombination] = useState('');
   const [selCustomerName, setSelCustomerName] = useState('');
@@ -816,9 +812,7 @@ export default function FiltersPage() {
         if (key === 'dueDate')        setSelDueDate('');
         if (key === 'reporter')       setSelReporters([]);
         if (key === 'priority')       setSelPriorities([]);
-        if (key === 'label')          setSelLabels([]);
         if (key === 'department')     setSelDepartment('');
-        if (key === 'sprint')         setSelSprint('');
         if (key === 'productType')    setSelProductType('');
         if (key === 'combination')    setSelCombination('');
         if (key === 'customerName')   setSelCustomerName('');
@@ -854,8 +848,8 @@ export default function FiltersPage() {
 
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
-    selTypes.length || selStatuses.length || selPriorities.length || selLabels.length ||
-    selCreated || selUpdated || selDueDate || selDepartment || selSprint ||
+    selTypes.length || selStatuses.length || selPriorities.length ||
+    selCreated || selUpdated || selDueDate || selDepartment ||
     selProductType || selCombination || selCustomerName || selClientName || selProjectManager,
   );
 
@@ -912,9 +906,6 @@ export default function FiltersPage() {
         // Priority(ies)
         if (selPriorities.length) params.priority = selPriorities.join(',');
 
-        // Labels
-        if (selLabels.length) params.labels = selLabels.join(',');
-
         // Date ranges
         if (selCreated) params.createdRange = selCreated;
         if (selUpdated) params.updatedRange = selUpdated;
@@ -922,7 +913,6 @@ export default function FiltersPage() {
 
         // Extra text/field filters
         if (selDepartment)     params.department     = selDepartment;
-        if (selSprint)         params.sprint         = selSprint;
         if (selProductType)    params.productType    = selProductType;
         if (selCombination)    params.combination    = selCombination;
         if (selCustomerName)   params.customerName   = selCustomerName;
@@ -938,7 +928,7 @@ export default function FiltersPage() {
       } catch { setIssues([]); setTotal(0); }
       setLoadingIssues(false);
     }, 400);
-  }, [text, selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selLabels, selCreated, selUpdated, selDueDate, selDepartment, selSprint, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, spaces]);
+  }, [text, selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, spaces]);
 
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
 
@@ -959,9 +949,9 @@ export default function FiltersPage() {
 
   const clearAll = () => {
     setText(''); setSelSpaces([]); setSelQueue(''); setSelAssignees([]); setSelReporters([]);
-    setSelTypes([]); setSelStatuses([]); setSelPriorities([]); setSelLabels([]);
+    setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
-    setSelDepartment(''); setSelSprint(''); setSelProductType('');
+    setSelDepartment(''); setSelProductType('');
     setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager('');
     setActiveExtras([]);
     setActiveFilterId(null);
@@ -1325,29 +1315,10 @@ export default function FiltersPage() {
                 </button>
               </div>
             )}
-            {activeExtras.includes('label') && (
-              <div className="flex items-center gap-1">
-                <DropBtn
-                  label="Label"
-                  options={Array.from(new Set(spaces.flatMap((sp: any) => sp.labels || []).map((l: any) => l.name || l))).map((l) => ({ value: l as string, label: l as string }))}
-                  selected={selLabels}
-                  onChange={setSelLabels}
-                />
-                <button onClick={() => toggleExtra('label')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors">
-                  <X size={11} />
-                </button>
-              </div>
-            )}
             {activeExtras.includes('department') && (
               <div className="flex items-center gap-1">
                 <TextFilterBtn label="Department" value={selDepartment} onChange={setSelDepartment} />
                 <button onClick={() => toggleExtra('department')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
-              </div>
-            )}
-            {activeExtras.includes('sprint') && (
-              <div className="flex items-center gap-1">
-                <TextFilterBtn label="Sprint" value={selSprint} onChange={setSelSprint} />
-                <button onClick={() => toggleExtra('sprint')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('productType') && (
