@@ -1092,7 +1092,7 @@ export default function FiltersPage() {
             {text && <button onClick={() => setText('')}><X size={12} className="text-gray-400 hover:text-gray-600" /></button>}
           </div>
 
-          <DropBtn label="Space" options={spaces.map((sp: any) => ({ value: sp.key, label: sp.name }))} selected={selSpaces} onChange={setSelSpaces} />
+          <DropBtn label="Queue" options={spaces.map((sp: any) => ({ value: sp.key, label: sp.name }))} selected={selSpaces} onChange={setSelSpaces} />
           <DropBtn
             label="Assignee"
             options={allMembers.map((m: any) => ({ value: m.id, label: `${m.firstName || ''} ${m.lastName || ''}`.trim() || m.email || m.id }))}
