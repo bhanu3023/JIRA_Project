@@ -32,10 +32,9 @@ interface SavedFilter {
   createdAt: string; updatedAt: string;
 }
 
-const ISSUE_TYPES = ['bug', 'task', 'story', 'epic', 'subtask', 'improvement', 'feature', 'test', 'incident', 'change_request'];
+const ISSUE_TYPES = ['bug', 'task', 'subtask'];
 const TYPE_LABELS: Record<string, string> = {
-  bug: 'Bug', task: 'Task', story: 'Story', epic: 'Epic', subtask: 'Subtask',
-  improvement: 'Improvement', feature: 'Feature', test: 'Test', incident: 'Incident', change_request: 'Change Request',
+  bug: 'Bug', task: 'Task', subtask: 'Subtask',
 };
 const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
 const PRIORITY_LABELS: Record<string, string> = {
@@ -668,10 +667,12 @@ export default function FiltersPage() {
   const filteredSpacesForStatus = selSpaces.length > 0
     ? spaces.filter((sp: any) => selSpaces.includes(sp.key))
     : spaces;
+  const ALLOWED_STATUSES = new Set(['open', 'in progress', 'waiting for dev', 'waiting for migration', 'waiting for qa', 'waiting for infra', 'resolved']);
   const availableStatuses: { value: string; label: string }[] = Array.from(
     new Map(
       filteredSpacesForStatus
         .flatMap((sp: any) => (sp.statuses || []))
+        .filter((s: any) => ALLOWED_STATUSES.has((s.name || '').toLowerCase()))
         .map((s: any) => [s.name, s])
     ).values()
   )

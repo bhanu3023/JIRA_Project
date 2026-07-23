@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime } from '@/lib/utils';
+import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
@@ -1948,12 +1948,15 @@ function SpaceDetailContent() {
                 <span className="text-[12px] font-semibold text-blue-600 font-mono">{issue.cfKey ?? issue.key}</span>
                 <span className="text-[12.5px] text-gray-800 truncate">{issue.title || issue.summary}</span>
                 <span className="flex items-center gap-1.5">
-                  {issue.status_name && (
-                    <span className="text-[11px] font-medium px-2 py-0.5 rounded-full border"
-                      style={{ borderColor: issue.status_color || '#E5E7EB', color: issue.status_color || '#6B7280', backgroundColor: `${issue.status_color}18` || '#F9FAFB' }}>
-                      {issue.status_name}
-                    </span>
-                  )}
+                  {issue.status_name && (() => {
+                    const sc = resolveStatusColor({ name: issue.status_name, color: issue.status_color, category: issue.status_category });
+                    return (
+                      <span className="text-[11px] font-medium px-2 py-0.5 rounded-full border"
+                        style={{ borderColor: sc, color: sc, backgroundColor: sc + '18' }}>
+                        {issue.status_name}
+                      </span>
+                    );
+                  })()}
                 </span>
                 <span className="text-[12px] text-gray-600 truncate">
                   {issue.assignee_name?.trim() || <span className="text-gray-400 italic">Unassigned</span>}
@@ -2043,7 +2046,7 @@ function SpaceDetailContent() {
                 const sentDeptStatusMap: Record<string, any> = (issue as any).dept_statuses || {};
                 const sentCurrentDept: string = (issue as any).current_department || '';
                 const st = (sentCurrentDept && sentDeptStatusMap[sentCurrentDept]) ? sentDeptStatusMap[sentCurrentDept] : getIssueStatus(issue);
-                const stColor = st?.color || '#6B7280';
+                const stColor = st ? resolveStatusColor(st) : '#6B7280';
                 // Last comment from issue (if comments loaded)
                 const comments: any[] = (issue as any).comments || [];
                 const lastComment = comments.length > 0 ? comments[comments.length - 1] : null;

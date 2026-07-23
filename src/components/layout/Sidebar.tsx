@@ -683,7 +683,6 @@ export default function Sidebar() {
             {isPrivileged && (
               <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
             )}
-            <GlobalNavItem href="/breached" icon={<AlertTriangle size={15} />} label="Breached" active={pathname === '/breached'} />
           </div>
 
           <div className="mx-4 my-4 h-px bg-gray-200" />
