@@ -1259,9 +1259,7 @@ export default function FiltersPage() {
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Key</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Work</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Assignee</th>
-                {activeExtras.includes('reporter') && (
-                  <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Reporter</th>
-                )}
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Reported By</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20 hidden md:table-cell">Priority</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
@@ -1303,22 +1301,20 @@ export default function FiltersPage() {
                       <span className="text-[11.5px] text-gray-300">Unassigned</span>
                     )}
                   </td>
-                  {activeExtras.includes('reporter') && (
-                    <td className="px-2 py-2.5">
-                      {issue.reporter ? (
-                        <div className="flex items-center gap-1.5">
-                          <div className="h-6 w-6 flex-shrink-0 rounded-full bg-purple-500 flex items-center justify-center text-[9px] font-bold text-white">
-                            {`${issue.reporter.firstName?.[0] || ''}${issue.reporter.lastName?.[0] || ''}`.toUpperCase()}
-                          </div>
-                          <span className="text-[12px] text-gray-600 truncate">
-                            {`${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim()}
-                          </span>
+                  <td className="px-2 py-2.5">
+                    {issue.reporter ? (
+                      <div className="flex items-center gap-1.5">
+                        <div className="h-6 w-6 flex-shrink-0 rounded-full bg-purple-500 flex items-center justify-center text-[9px] font-bold text-white">
+                          {`${issue.reporter.firstName?.[0] || ''}${issue.reporter.lastName?.[0] || ''}`.toUpperCase()}
                         </div>
-                      ) : (
-                        <span className="text-[11.5px] text-gray-300">—</span>
-                      )}
-                    </td>
-                  )}
+                        <span className="text-[12px] text-gray-600 truncate">
+                          {`${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim()}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-[11.5px] text-gray-300">—</span>
+                    )}
+                  </td>
                   <td className="px-2 py-2.5">
                     <span
                       className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
