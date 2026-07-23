@@ -153,7 +153,9 @@ function SpaceQueueDropBtn({
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
-  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  // Multiple boards can be expanded at once — a Set, not a single key, so selecting
+  // one board doesn't collapse another board's already-open queue list.
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [queuesByKey, setQueuesByKey] = useState<Record<string, { id: string; name: string }[]>>({});
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
@@ -169,24 +171,37 @@ function SpaceQueueDropBtn({
 
   const filtered = spaces.filter((sp: any) => (sp.name || '').toLowerCase().includes(q.toLowerCase()));
 
-  const toggleSpace = (key: string) => {
-    if (selQueue) onQueueChange('');
-    onSpacesChange(selSpaces.includes(key) ? selSpaces.filter((v) => v !== key) : [...selSpaces, key]);
+  const loadQueues = async (key: string) => {
+    if (queuesByKey[key]) return;
+    setLoadingKey(key);
+    try {
+      const rows = await api.request<any[]>(`custom-queues/${key}`);
+      setQueuesByKey((prev) => ({ ...prev, [key]: Array.isArray(rows) ? rows : [] }));
+    } catch {
+      setQueuesByKey((prev) => ({ ...prev, [key]: [] }));
+    }
+    setLoadingKey(null);
   };
 
-  const expandSpace = async (key: string) => {
-    if (expandedKey === key) { setExpandedKey(null); return; }
-    setExpandedKey(key);
-    if (!queuesByKey[key]) {
-      setLoadingKey(key);
-      try {
-        const rows = await api.request<any[]>(`custom-queues/${key}`);
-        setQueuesByKey((prev) => ({ ...prev, [key]: Array.isArray(rows) ? rows : [] }));
-      } catch {
-        setQueuesByKey((prev) => ({ ...prev, [key]: [] }));
-      }
-      setLoadingKey(null);
+  const toggleSpace = (key: string) => {
+    if (selQueue) onQueueChange('');
+    const isSelecting = !selSpaces.includes(key);
+    onSpacesChange(isSelecting ? [...selSpaces, key] : selSpaces.filter((v) => v !== key));
+    // Checking a space auto-expands its queues so there's no extra click to see them —
+    // other already-expanded boards stay open.
+    if (isSelecting) {
+      setExpandedKeys((prev) => new Set(prev).add(key));
+      loadQueues(key);
     }
+  };
+
+  const expandSpace = (key: string) => {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+    if (!expandedKeys.has(key)) loadQueues(key);
   };
 
   // Picking a specific queue narrows the space selection to just its parent space,
@@ -234,7 +249,7 @@ function SpaceQueueDropBtn({
             ) : (
               filtered.map((sp: any) => {
                 const key = sp.key;
-                const isExpanded = expandedKey === key;
+                const isExpanded = expandedKeys.has(key);
                 const subQueues = queuesByKey[key] || [];
                 return (
                   <div key={key}>
