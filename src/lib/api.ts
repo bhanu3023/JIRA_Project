@@ -81,7 +81,7 @@ class ApiClient {
     return this.request<any>('/auth/me');
   }
 
-  getMyDashboard(params?: { from?: string; to?: string }) {
+  getMyDashboard(params?: { from?: string; to?: string; userId?: string }) {
     const qs = params ? new URLSearchParams(params as Record<string, string>).toString() : '';
     return this.request<any>(`/my-dashboard${qs ? `?${qs}` : ''}`);
   }

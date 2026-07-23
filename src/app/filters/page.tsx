@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { useSearchParams } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -838,6 +839,33 @@ export default function FiltersPage() {
       return [...prev, key];
     });
   };
+
+  // Hydrate filters from the URL once on mount — lets other pages (e.g. the
+  // personal dashboard) deep-link straight into a scoped ticket list here.
+  const urlParams = useSearchParams();
+  useEffect(() => {
+    const qpAssignee = urlParams?.get('assignee');
+    const qpReporter = urlParams?.get('reporter');
+    const qpStatus = urlParams?.get('status');
+    const qpPriority = urlParams?.get('priority');
+    const qpSpace = urlParams?.get('space');
+    const qpQueue = urlParams?.get('queue');
+    if (!qpAssignee && !qpReporter && !qpStatus && !qpPriority && !qpSpace) return;
+
+    if (qpAssignee) setSelAssignees(qpAssignee.split(','));
+    if (qpReporter) {
+      setSelReporters(qpReporter.split(','));
+      setActiveExtras((prev) => (prev.includes('reporter') ? prev : [...prev, 'reporter']));
+    }
+    if (qpStatus) setSelStatuses(qpStatus.split(','));
+    if (qpPriority) {
+      setSelPriorities(qpPriority.split(','));
+      setActiveExtras((prev) => (prev.includes('priority') ? prev : [...prev, 'priority']));
+    }
+    if (qpSpace) setSelSpaces([qpSpace]);
+    if (qpQueue) setSelQueue(qpQueue);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* derived */
   // When specific spaces are selected, only show statuses that belong to those spaces.
