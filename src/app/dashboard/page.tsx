@@ -71,18 +71,19 @@ function StatCard({ label, value, icon, iconClass, id, selected, onToggle }: {
   );
 }
 
-function StatCards({ totalSpaces, openIssues, resolvedToday, teamMembers, highlightedBox, toggleHighlight }: {
-  totalSpaces: number; openIssues: number; resolvedToday: number; teamMembers: number;
+function StatCards({ totalSpaces, openIssues, resolvedToday, teamMembers, isAdmin, highlightedBox, toggleHighlight }: {
+  totalSpaces: number; openIssues: number; resolvedToday: number; teamMembers: number; isAdmin: boolean;
   highlightedBox: DashboardHighlight | null; toggleHighlight: (id: DashboardHighlight) => void;
 }) {
   const stats = [
     { label: 'Total Spaces',   value: totalSpaces,   icon: <Zap size={16} />,         iconClass: 'text-blue-500 bg-blue-50' },
     { label: 'Open Issues',    value: openIssues,    icon: <AlertCircle size={16} />,  iconClass: 'text-orange-500 bg-orange-50' },
     { label: 'Resolved',       value: resolvedToday, icon: <CheckCircle2 size={16} />, iconClass: 'text-green-500 bg-green-50' },
-    { label: 'Team Members',   value: teamMembers,   icon: <Users size={16} />,        iconClass: 'text-purple-500 bg-purple-50' },
+    // Org-wide member count is admin-only info
+    ...(isAdmin ? [{ label: 'Team Members', value: teamMembers, icon: <Users size={16} />, iconClass: 'text-purple-500 bg-purple-50' }] : []),
   ];
   return (
-    <div className="grid grid-cols-4 gap-4">
+    <div className={cn('grid gap-4', isAdmin ? 'grid-cols-4' : 'grid-cols-3')}>
       {stats.map((stat, i) => {
         const id = `stat-${i}` as DashboardHighlight;
         return (
@@ -275,6 +276,7 @@ export default function DashboardPage() {
         openIssues={openIssuesCount}
         resolvedToday={resolvedTodayCount}
         teamMembers={spaces.reduce((a, s) => a + (s.memberCount || 0), 0)}
+        isAdmin={user?.role === 'admin'}
         highlightedBox={highlightedBox}
         toggleHighlight={toggleHighlight}
       />
