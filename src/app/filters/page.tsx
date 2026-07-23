@@ -169,24 +169,33 @@ function SpaceQueueDropBtn({
 
   const filtered = spaces.filter((sp: any) => (sp.name || '').toLowerCase().includes(q.toLowerCase()));
 
-  const toggleSpace = (key: string) => {
-    if (selQueue) onQueueChange('');
-    onSpacesChange(selSpaces.includes(key) ? selSpaces.filter((v) => v !== key) : [...selSpaces, key]);
+  const loadQueues = async (key: string) => {
+    if (queuesByKey[key]) return;
+    setLoadingKey(key);
+    try {
+      const rows = await api.request<any[]>(`custom-queues/${key}`);
+      setQueuesByKey((prev) => ({ ...prev, [key]: Array.isArray(rows) ? rows : [] }));
+    } catch {
+      setQueuesByKey((prev) => ({ ...prev, [key]: [] }));
+    }
+    setLoadingKey(null);
   };
 
-  const expandSpace = async (key: string) => {
+  const toggleSpace = (key: string) => {
+    if (selQueue) onQueueChange('');
+    const isSelecting = !selSpaces.includes(key);
+    onSpacesChange(isSelecting ? [...selSpaces, key] : selSpaces.filter((v) => v !== key));
+    // Checking a space auto-expands its queues so there's no extra click to see them
+    if (isSelecting) {
+      setExpandedKey(key);
+      loadQueues(key);
+    }
+  };
+
+  const expandSpace = (key: string) => {
     if (expandedKey === key) { setExpandedKey(null); return; }
     setExpandedKey(key);
-    if (!queuesByKey[key]) {
-      setLoadingKey(key);
-      try {
-        const rows = await api.request<any[]>(`custom-queues/${key}`);
-        setQueuesByKey((prev) => ({ ...prev, [key]: Array.isArray(rows) ? rows : [] }));
-      } catch {
-        setQueuesByKey((prev) => ({ ...prev, [key]: [] }));
-      }
-      setLoadingKey(null);
-    }
+    loadQueues(key);
   };
 
   // Picking a specific queue narrows the space selection to just its parent space,
