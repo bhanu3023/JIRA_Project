@@ -129,8 +129,8 @@ function SpaceDetailContent() {
   );
   // Static column definitions (always available)
   const STATIC_COLUMNS = [
-    { id: 'reporter',       label: 'Reporter',            width: '150px' },
     { id: 'assignee',       label: 'Assignee',            width: '150px' },
+    { id: 'reporter',       label: 'Reporter',            width: '150px' },
     { id: 'priority',       label: 'Priority',            width: '120px' },
     { id: 'status',         label: 'Status',              width: '165px' },
     { id: 'created',        label: 'Created',             width: '150px' },
@@ -151,7 +151,7 @@ function SpaceDetailContent() {
     { id: 'resolvedAt',     label: 'Resolved At',         width: '150px' },
     { id: 'department',     label: 'Department',          width: '130px' },
   ];
-  const DEFAULT_COLS = ['reporter','assignee','priority','status','created'];
+  const DEFAULT_COLS = ['assignee','reporter','priority','status','created'];
 
   const [showCreate, setShowCreate] = useState(false);
   const [createdToast, setCreatedToast] = useState<{ key: string; cfKey: string } | null>(null);
@@ -318,7 +318,15 @@ function SpaceDetailContent() {
     if (!spaceKey) return;
     try {
       const savedCols = localStorage.getItem(`visibleCols_${spaceKey}`);
-      if (savedCols) setVisibleCols(JSON.parse(savedCols));
+      if (savedCols) {
+        const parsed = JSON.parse(savedCols) as string[];
+        // One-time migration: previously Reporter was saved before Assignee — swap
+        // only if that old order is still present, so this doesn't re-flip on reload.
+        const ai = parsed.indexOf('assignee');
+        const ri = parsed.indexOf('reporter');
+        if (ai !== -1 && ri !== -1 && ri < ai) [parsed[ai], parsed[ri]] = [parsed[ri], parsed[ai]];
+        setVisibleCols(parsed);
+      }
     } catch {}
     try {
       const savedFields = localStorage.getItem(`addedFields_${spaceKey}`);
