@@ -19,6 +19,7 @@ import {
 /* ─── types ─── */
 interface FilterCriteria {
   spaces?: string[];
+  queue?: string;
   assignees?: string[];
   types?: string[];
   statuses?: string[];
@@ -130,6 +131,173 @@ function DropBtn({
           {selected.length > 0 && (
             <div className="border-t border-gray-100 px-3 py-2">
               <button onClick={() => onChange([])} className="text-[11.5px] text-blue-600 font-medium hover:text-blue-800">
+                Clear
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Queue filter — pick one or more spaces, or drill into a single space to filter by one of its custom queues */
+function SpaceQueueDropBtn({
+  spaces, selSpaces, onSpacesChange, selQueue, onQueueChange,
+}: {
+  spaces: any[];
+  selSpaces: string[];
+  onSpacesChange: (v: string[]) => void;
+  selQueue: string;
+  onQueueChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [queuesByKey, setQueuesByKey] = useState<Record<string, { id: string; name: string }[]>>({});
+  const [loadingKey, setLoadingKey] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQ(''); }
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const filtered = spaces.filter((sp: any) => (sp.name || '').toLowerCase().includes(q.toLowerCase()));
+
+  const toggleSpace = (key: string) => {
+    if (selQueue) onQueueChange('');
+    onSpacesChange(selSpaces.includes(key) ? selSpaces.filter((v) => v !== key) : [...selSpaces, key]);
+  };
+
+  const expandSpace = async (key: string) => {
+    if (expandedKey === key) { setExpandedKey(null); return; }
+    setExpandedKey(key);
+    if (!queuesByKey[key]) {
+      setLoadingKey(key);
+      try {
+        const rows = await api.request<any[]>(`custom-queues/${key}`);
+        setQueuesByKey((prev) => ({ ...prev, [key]: Array.isArray(rows) ? rows : [] }));
+      } catch {
+        setQueuesByKey((prev) => ({ ...prev, [key]: [] }));
+      }
+      setLoadingKey(null);
+    }
+  };
+
+  // Picking a specific queue narrows the space selection to just its parent space,
+  // since department filtering only makes sense scoped to a single space.
+  const selectQueue = (spaceKey: string, queueName: string) => {
+    onSpacesChange([spaceKey]);
+    onQueueChange(selQueue === queueName ? '' : queueName);
+  };
+
+  const active = selSpaces.length > 0;
+  const label = selQueue ? `Queue: ${selQueue}` : active ? `Queue (${selSpaces.length})` : 'Queue';
+
+  return (
+    <div ref={ref} className="relative flex-shrink-0">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
+          active
+            ? 'border-blue-500 bg-blue-50 text-blue-700'
+            : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50',
+        )}
+      >
+        {label}
+        <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
+      </button>
+
+      {open && (
+        <div className="absolute top-full mt-1 z-[200] w-64 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden">
+          <div className="border-b border-gray-100 px-3 py-2">
+            <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
+              <Search size={12} className="text-gray-400 flex-shrink-0" />
+              <input
+                autoFocus
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search queue…"
+                className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
+              />
+            </div>
+          </div>
+          <div className="max-h-72 overflow-y-auto py-1">
+            {filtered.length === 0 ? (
+              <p className="px-4 py-3 text-[12px] text-gray-400 text-center">No results</p>
+            ) : (
+              filtered.map((sp: any) => {
+                const key = sp.key;
+                const isExpanded = expandedKey === key;
+                const subQueues = queuesByKey[key] || [];
+                return (
+                  <div key={key}>
+                    <div className="flex w-full items-center gap-1.5 px-3 py-2 hover:bg-gray-50 transition-colors">
+                      <button
+                        onClick={() => toggleSpace(key)}
+                        className="flex flex-1 items-center gap-2.5 text-[12.5px] text-gray-700 text-left"
+                      >
+                        <div className={cn(
+                          'h-4 w-4 flex-shrink-0 rounded border flex items-center justify-center',
+                          selSpaces.includes(key) ? 'border-blue-600 bg-blue-600' : 'border-gray-300',
+                        )}>
+                          {selSpaces.includes(key) && <Check size={10} className="text-white" strokeWidth={3} />}
+                        </div>
+                        <span className="flex-1 truncate">{sp.name}</span>
+                      </button>
+                      <button
+                        onClick={() => expandSpace(key)}
+                        className="flex-shrink-0 rounded p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                        title="Show queues in this space"
+                      >
+                        <ChevronDown size={13} className={cn('transition-transform', isExpanded && 'rotate-180')} />
+                      </button>
+                    </div>
+                    {isExpanded && (
+                      <div className="ml-6 mb-1 border-l border-gray-100 pl-2">
+                        {loadingKey === key ? (
+                          <p className="px-2 py-1.5 text-[11.5px] text-gray-400">Loading queues…</p>
+                        ) : subQueues.length === 0 ? (
+                          <p className="px-2 py-1.5 text-[11.5px] text-gray-400">No queues in this space</p>
+                        ) : (
+                          subQueues.map((qu) => {
+                            const isSel = selQueue === qu.name && selSpaces.includes(key);
+                            return (
+                              <button
+                                key={qu.id}
+                                onClick={() => selectQueue(key, qu.name)}
+                                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-[12px] text-gray-600 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                              >
+                                <div className={cn(
+                                  'h-3.5 w-3.5 flex-shrink-0 rounded-full border-2 flex items-center justify-center',
+                                  isSel ? 'border-blue-600' : 'border-gray-300',
+                                )}>
+                                  {isSel && <div className="h-1.5 w-1.5 rounded-full bg-blue-600" />}
+                                </div>
+                                <span className="flex-1 truncate text-left">{qu.name}</span>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+          {(selSpaces.length > 0 || selQueue) && (
+            <div className="border-t border-gray-100 px-3 py-2">
+              <button
+                onClick={() => { onSpacesChange([]); onQueueChange(''); }}
+                className="text-[11.5px] text-blue-600 font-medium hover:text-blue-800"
+              >
                 Clear
               </button>
             </div>
@@ -605,6 +773,7 @@ export default function FiltersPage() {
   /* filter bar state */
   const [text, setText]                   = useState('');
   const [selSpaces, setSelSpaces]         = useState<string[]>([]);
+  const [selQueue, setSelQueue]           = useState('');  // custom queue name within a single selected space
   const [selAssignees, setSelAssignees]   = useState<string[]>([]);  // stores member IDs
   const [selReporters, setSelReporters]   = useState<string[]>([]);  // stores member IDs
   const [selTypes, setSelTypes]           = useState<string[]>([]);
@@ -684,7 +853,7 @@ export default function FiltersPage() {
   );
 
   const hasCriteria = Boolean(
-    text.trim() || selSpaces.length || selAssignees.length || selReporters.length ||
+    text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length || selLabels.length ||
     selCreated || selUpdated || selDueDate || selDepartment || selSprint ||
     selProductType || selCombination || selCustomerName || selClientName || selProjectManager,
@@ -709,6 +878,9 @@ export default function FiltersPage() {
           // No specific filter: restrict to accessible spaces only (not all 25k+ issues)
           params.spaceKeys = accessibleSpaceKeys.join(',');
         }
+
+        // Queue (department) — only meaningful when scoped to exactly one space
+        if (selQueue && params.spaceKey) params.dept = selQueue;
 
         // Expand a member into all possible identifiers the mock can match against
         const expandMember = (id: string) => {
@@ -766,7 +938,7 @@ export default function FiltersPage() {
       } catch { setIssues([]); setTotal(0); }
       setLoadingIssues(false);
     }, 400);
-  }, [text, selSpaces, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selLabels, selCreated, selUpdated, selDueDate, selDepartment, selSprint, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, spaces]);
+  }, [text, selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selLabels, selCreated, selUpdated, selDueDate, selDepartment, selSprint, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, spaces]);
 
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
 
@@ -786,7 +958,7 @@ export default function FiltersPage() {
   useEffect(() => { loadSavedFilters(); }, []);
 
   const clearAll = () => {
-    setText(''); setSelSpaces([]); setSelAssignees([]); setSelReporters([]);
+    setText(''); setSelSpaces([]); setSelQueue(''); setSelAssignees([]); setSelReporters([]);
     setSelTypes([]); setSelStatuses([]); setSelPriorities([]); setSelLabels([]);
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
     setSelDepartment(''); setSelSprint(''); setSelProductType('');
@@ -799,6 +971,7 @@ export default function FiltersPage() {
     const c = f.criteria || {};
     setText(c.text || '');
     setSelSpaces(c.spaces || []);
+    setSelQueue((c as any).queue || '');
     setSelAssignees(c.assignees || []);
     setSelReporters((c as any).reporters || []);
     setSelTypes(c.types || []);
@@ -835,6 +1008,7 @@ export default function FiltersPage() {
   const currentCriteria: FilterCriteria & { reporters?: string[]; createdRange?: string; updatedRange?: string } = {
     ...(text.trim() ? { text: text.trim() } : {}),
     ...(selSpaces.length ? { spaces: selSpaces } : {}),
+    ...(selQueue ? { queue: selQueue } : {}),
     ...(selAssignees.length ? { assignees: selAssignees } : {}),
     ...(selReporters.length ? { reporters: selReporters } : {}),
     ...(selTypes.length ? { types: selTypes } : {}),
@@ -937,6 +1111,7 @@ export default function FiltersPage() {
                       const isActive  = activeFilterId === f.id;
                       const chips     = [
                         ...(f.criteria?.spaces || []).map((v: string) => spaces.find((s: any) => s.key === v)?.name || v),
+                        ...((f.criteria as any)?.queue ? [(f.criteria as any).queue] : []),
                         ...(f.criteria?.assignees || []).map((v: string) => memberName(v)),
                         ...((f.criteria as any)?.reporters || []).map((v: string) => memberName(v)),
                         ...(f.criteria?.types || []).map((v: string) => TYPE_LABELS[v] || v),
@@ -1092,7 +1267,7 @@ export default function FiltersPage() {
             {text && <button onClick={() => setText('')}><X size={12} className="text-gray-400 hover:text-gray-600" /></button>}
           </div>
 
-          <DropBtn label="Queue" options={spaces.map((sp: any) => ({ value: sp.key, label: sp.name }))} selected={selSpaces} onChange={setSelSpaces} />
+          <SpaceQueueDropBtn spaces={spaces} selSpaces={selSpaces} onSpacesChange={setSelSpaces} selQueue={selQueue} onQueueChange={setSelQueue} />
           <DropBtn
             label="Assignee"
             options={allMembers.map((m: any) => ({ value: m.id, label: `${m.firstName || ''} ${m.lastName || ''}`.trim() || m.email || m.id }))}
