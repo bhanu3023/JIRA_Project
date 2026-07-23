@@ -40,7 +40,7 @@ function withDisambiguatedLabels<T extends { dept: string; spaceKey?: string | n
   return items.map((i) => ({ ...i, label: counts[i.dept] > 1 && i.spaceKey ? `${i.dept} (${i.spaceKey})` : i.dept }));
 }
 
-/* ─── stat card (clickable) ─── */
+/* ─── stat card (always clickable, even at 0 — it's a real, if empty, ticket list) ─── */
 function StatTile({ label, value, icon, iconClass, href }: { label: string; value: number; icon: React.ReactNode; iconClass: string; href: string }) {
   return (
     <Link href={href} className="flex items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm transition-colors hover:border-blue-300 hover:shadow-md">
@@ -53,31 +53,47 @@ function StatTile({ label, value, icon, iconClass, href }: { label: string; valu
   );
 }
 
-/* ─── donut chart with centered total — each legend row is clickable ─── */
+/* ─── donut chart with centered total — every row (and the empty state) is clickable ─── */
 function Donut({
-  data, centerLabel, centerSub,
+  data, centerLabel, centerSub, fallbackHref, height = 140,
 }: {
   data: { name: string; value: number; color: string; href?: string }[];
   centerLabel?: string;
   centerSub?: string;
+  fallbackHref: string;
+  height?: number;
 }) {
   const router = useRouter();
   const total = data.reduce((a, d) => a + d.value, 0);
-  const shown = total > 0 ? data.filter((d) => d.value > 0) : [{ name: 'None', value: 1, color: '#E5E7EB' }];
+
+  if (total === 0) {
+    return (
+      <Link
+        href={fallbackHref}
+        className="flex flex-col items-center justify-center gap-1 rounded-lg text-center transition-colors hover:bg-gray-50"
+        style={{ height }}
+      >
+        <span className="text-2xl font-bold text-gray-300">0</span>
+        <span className="text-[11.5px] text-gray-400">No tickets yet — click to view</span>
+      </Link>
+    );
+  }
+
+  const shown = data.filter((d) => d.value > 0);
   return (
     <div className="flex items-center gap-4">
       <div className="relative h-[120px] w-[120px] flex-shrink-0">
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie
-              data={shown} dataKey="value" innerRadius={38} outerRadius={58} paddingAngle={total > 0 ? 2 : 0}
+              data={shown} dataKey="value" innerRadius={38} outerRadius={58} paddingAngle={2}
               startAngle={90} endAngle={-270} stroke="none"
               onClick={(d: any) => { if (d?.href) router.push(d.href); }}
-              cursor={total > 0 ? 'pointer' : 'default'}
+              cursor="pointer"
             >
               {shown.map((d, i) => <Cell key={i} fill={d.color} />)}
             </Pie>
-            {total > 0 && <Tooltip formatter={(v: any, n: any) => [v, n]} />}
+            <Tooltip formatter={(v: any, n: any) => [v, n]} />
           </PieChart>
         </ResponsiveContainer>
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
@@ -97,7 +113,7 @@ function Donut({
             <div key={d.name} className="flex items-center justify-between gap-2 text-[11.5px]">
               {d.href && d.value > 0 ? <Link href={d.href} className="min-w-0 hover:text-blue-600 hover:underline">{row}</Link> : row}
               <span className="flex-shrink-0 font-medium text-gray-700">
-                {d.value} {total > 0 && <span className="text-gray-400">({Math.round((d.value / total) * 100)}%)</span>}
+                {d.value} <span className="text-gray-400">({Math.round((d.value / total) * 100)}%)</span>
               </span>
             </div>
           );
@@ -110,18 +126,22 @@ function Donut({
 /* ─── card shell ─── */
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+    <div className="flex flex-col rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
       <h3 className="mb-3 text-[13px] font-semibold text-gray-800">{title}</h3>
-      {children}
+      <div className="flex flex-1 items-center">{children}</div>
     </div>
   );
 }
 
-/* ─── bar chart — bars are clickable ─── */
-function DeptBarChart({ data, color }: { data: { dept: string; label: string; count: number; href: string }[]; color: string }) {
+/* ─── bar chart — bars, and the empty state, are clickable ─── */
+function DeptBarChart({ data, color, fallbackHref }: { data: { dept: string; label: string; count: number; href: string }[]; color: string; fallbackHref: string }) {
   const router = useRouter();
   if (!data.length) {
-    return <div className="flex h-[180px] items-center justify-center text-[12px] text-gray-400">No data yet</div>;
+    return (
+      <Link href={fallbackHref} className="flex h-[180px] w-full flex-col items-center justify-center gap-1 rounded-lg text-center transition-colors hover:bg-gray-50">
+        <span className="text-[12px] text-gray-400">No data yet — click to view my tickets</span>
+      </Link>
+    );
   }
   return (
     <ResponsiveContainer width="100%" height={180}>
@@ -139,18 +159,62 @@ function DeptBarChart({ data, color }: { data: { dept: string; label: string; co
   );
 }
 
+/* ─── admin queue-scoped "view as" dropdown ─── */
+function QueueSelect({ label, options, value, onChange }: { label: string; options: any[]; value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="relative flex-shrink-0">
+      <select
+        value={options.some((u) => u.id === value) ? value : ''}
+        onChange={(e) => { if (e.target.value) onChange(e.target.value); }}
+        className="appearance-none rounded-lg border border-gray-300 bg-white py-2 pl-3 pr-8 text-[13px] font-medium text-gray-700 outline-none focus:border-blue-500 disabled:opacity-50"
+        disabled={options.length === 0}
+      >
+        <option value="">{options.length ? label : `${label} (none found)`}</option>
+        {options.map((u) => (
+          <option key={u.id} value={u.id}>{`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email}</option>
+        ))}
+      </select>
+      <ChevronDown size={13} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+    </div>
+  );
+}
+
 export default function MyDashboardPage() {
   const { user } = useStore(useShallow((s) => ({ user: s.user })));
   const isAdmin = user?.role === 'admin';
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [users, setUsers] = useState<any[]>([]);
+  const [allUsers, setAllUsers] = useState<any[]>([]);
+  const [queueUsers, setQueueUsers] = useState<{ migration: any[]; dev: any[] }>({ migration: [], dev: [] });
   const [viewedUserId, setViewedUserId] = useState<string>('');
 
-  // Admin-only: load the user list to populate the "view as" dropdown
+  // Admin-only: group users by their custom-queue membership (Migration / Dev) across
+  // every space, instead of one unmanageable flat list of the entire organization.
   useEffect(() => {
     if (!isAdmin) return;
-    api.getUsers().then((rows: any) => setUsers(Array.isArray(rows) ? rows : [])).catch(() => {});
+    (async () => {
+      try {
+        const [usersRes, spacesRes] = await Promise.all([api.getUsers(), api.getSpaces()]);
+        const usersList: any[] = Array.isArray(usersRes) ? usersRes : [];
+        setAllUsers(usersList);
+        const usersById = new Map(usersList.map((u: any) => [u.id, u]));
+        const migrationIds = new Set<string>();
+        const devIds = new Set<string>();
+        await Promise.all((Array.isArray(spacesRes) ? spacesRes : []).map(async (sp: any) => {
+          try {
+            const queues = await api.request<any[]>(`custom-queues/${sp.key}`);
+            for (const q of Array.isArray(queues) ? queues : []) {
+              const name = (q.name || '').toLowerCase();
+              const memberIds: string[] = q.memberIds || [];
+              if (name.includes('migration')) memberIds.forEach((id) => migrationIds.add(id));
+              if (name.includes('dev')) memberIds.forEach((id) => devIds.add(id));
+            }
+          } catch { /* space may have no custom queues */ }
+        }));
+        const resolve = (ids: Set<string>) => Array.from(ids).map((id) => usersById.get(id)).filter(Boolean);
+        setQueueUsers({ migration: resolve(migrationIds), dev: resolve(devIds) });
+      } catch { /* non-fatal — dropdowns just stay empty */ }
+    })();
   }, [isAdmin]);
 
   useEffect(() => {
@@ -170,6 +234,7 @@ export default function MyDashboardPage() {
   const cards = data.cards || {};
   const cardStatuses = data.cardStatuses || {};
   const targetUserId: string = data.viewedUserId || user?.id || '';
+  const myAssignedFallback = filtersHref({ assignee: targetUserId });
   const byStatus = (data.byStatus || []) as { name: string; count: number; color: string }[];
   const byPriority = (data.byPriority || []) as { name: string; count: number }[];
   const slaStatus = data.slaStatus || { withinSla: 0, nearBreach: 0, breachingSoon: 0, breached: 0 };
@@ -180,7 +245,7 @@ export default function MyDashboardPage() {
 
   const statusDonutData = byStatus.map((s) => ({
     name: s.name, value: s.count, color: s.color,
-    href: s.name === 'Unknown' ? filtersHref({ assignee: targetUserId }) : filtersHref({ assignee: targetUserId, status: s.name }),
+    href: s.name === 'Unknown' ? myAssignedFallback : filtersHref({ assignee: targetUserId, status: s.name }),
   }));
   const priorityDonutData = byPriority.map((p) => ({
     name: p.name.charAt(0).toUpperCase() + p.name.slice(1),
@@ -189,47 +254,44 @@ export default function MyDashboardPage() {
     href: filtersHref({ assignee: targetUserId, priority: p.name }),
   }));
   const slaStatusDonutData = Object.entries(slaStatus).map(([k, v]) => ({
-    name: SLA_STATUS_LABELS[k], value: v as number, color: SLA_STATUS_COLORS[k],
-    href: filtersHref({ assignee: targetUserId }),
+    name: SLA_STATUS_LABELS[k], value: v as number, color: SLA_STATUS_COLORS[k], href: myAssignedFallback,
   }));
   const slaComplianceDonutData = [
-    { name: 'Within SLA', value: (data.slaTrackedCount || 0) - (slaStatus.breached || 0), color: '#22C55E', href: filtersHref({ assignee: targetUserId }) },
-    { name: 'Breached', value: slaStatus.breached || 0, color: '#EF4444', href: filtersHref({ assignee: targetUserId }) },
+    { name: 'Within SLA', value: (data.slaTrackedCount || 0) - (slaStatus.breached || 0), color: '#22C55E', href: myAssignedFallback },
+    { name: 'Breached', value: slaStatus.breached || 0, color: '#EF4444', href: myAssignedFallback },
   ];
 
   const barDataFor = (rows: { dept: string; label: string; spaceKey: string | null; count: number }[]) =>
     rows.map((r) => ({ ...r, href: filtersHref({ assignee: targetUserId, space: r.spaceKey || undefined, queue: r.spaceKey ? r.dept : undefined }) }));
 
+  const viewedName = viewedUserId && viewedUserId !== user?.id
+    ? (allUsers.find((u) => u.id === viewedUserId)?.firstName || 'another user')
+    : user?.firstName;
+
   return (
     <div className="mx-auto max-w-[1400px] space-y-4">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2 text-[22px] font-semibold text-gray-900">
             User Level Dashboard <span>👋</span>
           </h1>
           <p className="mt-0.5 text-[13px] text-gray-500">
-            {viewedUserId && viewedUserId !== user?.id ? 'Viewing' : 'Welcome back,'}{' '}
-            {viewedUserId && viewedUserId !== user?.id
-              ? users.find((u) => u.id === viewedUserId)?.firstName || 'another user'
-              : user?.firstName}
+            {viewedUserId && viewedUserId !== user?.id ? 'Viewing' : 'Welcome back,'} {viewedName}
           </p>
         </div>
 
         {isAdmin && (
-          <div className="relative flex-shrink-0">
-            <select
-              value={viewedUserId}
-              onChange={(e) => setViewedUserId(e.target.value)}
-              className="appearance-none rounded-lg border border-gray-300 bg-white py-2 pl-3 pr-8 text-[13px] font-medium text-gray-700 outline-none focus:border-blue-500"
-            >
-              <option value="">My Dashboard</option>
-              {users.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={13} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
+            {viewedUserId && (
+              <button
+                onClick={() => setViewedUserId('')}
+                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-[13px] font-medium text-gray-600 hover:bg-gray-50"
+              >
+                My Dashboard
+              </button>
+            )}
+            <QueueSelect label="Migration Queue" options={queueUsers.migration} value={viewedUserId} onChange={setViewedUserId} />
+            <QueueSelect label="Dev Queue" options={queueUsers.dev} value={viewedUserId} onChange={setViewedUserId} />
           </div>
         )}
       </div>
@@ -264,44 +326,46 @@ export default function MyDashboardPage() {
         <StatTile
           label="SLA Running (With Me)" value={cards.slaRunning || 0}
           icon={<Hourglass size={17} className="text-indigo-600" />} iconClass="bg-indigo-50"
-          href={filtersHref({ assignee: targetUserId })}
+          href={myAssignedFallback}
         />
         <StatTile
           label="SLA Breaching Soon" value={cards.slaBreachingSoon || 0}
           icon={<AlertTriangle size={17} className="text-red-600" />} iconClass="bg-red-50"
-          href={filtersHref({ assignee: targetUserId })}
+          href={myAssignedFallback}
         />
       </div>
 
       {/* Donut row */}
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
-        <Card title="My Tickets by Status"><Donut data={statusDonutData} /></Card>
-        <Card title="My Tickets by Priority"><Donut data={priorityDonutData} /></Card>
-        <Card title="SLA Status (My Tickets)"><Donut data={slaStatusDonutData} /></Card>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4 lg:items-stretch">
+        <Card title="My Tickets by Status"><Donut data={statusDonutData} fallbackHref={myAssignedFallback} /></Card>
+        <Card title="My Tickets by Priority"><Donut data={priorityDonutData} fallbackHref={myAssignedFallback} /></Card>
+        <Card title="SLA Status (My Tickets)"><Donut data={slaStatusDonutData} fallbackHref={myAssignedFallback} /></Card>
         <Card title="SLA Compliance (My Tickets)">
-          <Donut data={slaComplianceDonutData} centerLabel={`${data.slaCompliancePct ?? 100}%`} centerSub="Compliance" />
+          <Donut data={slaComplianceDonutData} centerLabel={`${data.slaCompliancePct ?? 100}%`} centerSub="Compliance" fallbackHref={myAssignedFallback} />
         </Card>
       </div>
 
       {/* Bar charts row */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
         <Card title="Tickets Moved to Other Departments (By Me)">
-          <DeptBarChart data={barDataFor(movedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#3B82F6" />
+          <DeptBarChart data={barDataFor(movedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#3B82F6" fallbackHref={myAssignedFallback} />
         </Card>
         <Card title="Tickets Received from Other Departments">
-          <DeptBarChart data={barDataFor(receivedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#8B5CF6" />
+          <DeptBarChart data={barDataFor(receivedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#8B5CF6" fallbackHref={myAssignedFallback} />
         </Card>
         <Card title="My Current Tickets by Source Department (From)">
-          <DeptBarChart data={barDataFor(bySourceDept)} color="#14B8A6" />
+          <DeptBarChart data={barDataFor(bySourceDept)} color="#14B8A6" fallbackHref={myAssignedFallback} />
         </Card>
       </div>
 
       {/* Ticket journey */}
       <Card title="My Ticket Journey (Current Tickets)">
         {journey.length === 0 ? (
-          <p className="py-8 text-center text-[12px] text-gray-400">No open tickets right now</p>
+          <Link href={myAssignedFallback} className="flex w-full flex-col items-center gap-1 rounded-lg py-8 text-center transition-colors hover:bg-gray-50">
+            <span className="text-[12px] text-gray-400">No open tickets right now — click to view my tickets</span>
+          </Link>
         ) : (
-          <div className="space-y-4">
+          <div className="w-full space-y-4">
             {journey.map((j, i) => {
               const stageIdx = j.completed >= j.total * 0.5 ? 3 : j.waiting >= j.total * 0.5 ? 2 : j.inProgress >= j.total * 0.5 ? 1 : 0;
               const href = filtersHref({ assignee: targetUserId, space: j.spaceKey || undefined, queue: j.spaceKey ? j.dept : undefined });
