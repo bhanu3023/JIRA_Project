@@ -32,10 +32,9 @@ interface SavedFilter {
   createdAt: string; updatedAt: string;
 }
 
-const ISSUE_TYPES = ['bug', 'task', 'story', 'epic', 'subtask', 'improvement', 'feature', 'test', 'incident', 'change_request'];
+const ISSUE_TYPES = ['bug', 'task', 'subtask'];
 const TYPE_LABELS: Record<string, string> = {
-  bug: 'Bug', task: 'Task', story: 'Story', epic: 'Epic', subtask: 'Subtask',
-  improvement: 'Improvement', feature: 'Feature', test: 'Test', incident: 'Incident', change_request: 'Change Request',
+  bug: 'Bug', task: 'Task', subtask: 'Subtask',
 };
 const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
 const PRIORITY_LABELS: Record<string, string> = {
