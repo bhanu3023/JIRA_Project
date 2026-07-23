@@ -4259,13 +4259,14 @@ async function _handleJiraPgApi(
     }
     const journey = Object.values(journeyMap);
 
-    // SLA: reuse computePausedDeptSLA per open issue with an applicable department + policy
-    const spaceIds = Array.from(new Set(openIssues.map((r: any) => r.spaceId).filter(Boolean)));
-    const policiesBySpace: Record<string, any[]> = {};
-    for (const sid of spaceIds) {
-      const res = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`, [sid]);
-      policiesBySpace[sid] = res.rows;
-    }
+    // SLA: reuse computeIssueSLAsFromDb — the SAME function the issue detail page uses
+    // to show its "SLA Breached" state. An earlier version of this endpoint used
+    // computePausedDeptSLA instead, which reads dept_sla_log[dept].elapsed_ms as a
+    // frozen snapshot from whenever a department was last entered/left — for a ticket
+    // that's been sitting in one department for a while, that snapshot never advances,
+    // so breaches were silently undercounted here even though the ticket page itself
+    // correctly showed them as breached. computeIssueSLAsFromDb instead compares
+    // dept_sla_started_at directly against "now" on every call, so it can't go stale.
     const THIRTY_MIN_MS = 30 * 60 * 1000;
     let slaRunning = 0;
     let slaBreachingSoon = 0;
@@ -4273,22 +4274,27 @@ async function _handleJiraPgApi(
     let slaBreachedCount = 0;
     const slaStatus = { withinSla: 0, nearBreach: 0, breachingSoon: 0, breached: 0 };
     for (const r of openIssues) {
-      const dept = r.current_department;
-      if (!dept) continue;
-      const policies = policiesBySpace[r.spaceId] || [];
-      const sla = await computePausedDeptSLA(r, dept, policies);
-      if (!sla) continue;
+      const instances = await computeIssueSLAsFromDb({ ...r, status: { name: r.status_name, category: r.status_category } });
+      if (!instances.length) continue;
+      // Most urgent applicable policy: an already-breached one first, else the soonest due.
+      const primary = instances.slice().sort((a: any, b: any) => {
+        if (a.isBreached !== b.isBreached) return a.isBreached ? -1 : 1;
+        return new Date(a.dueTime).getTime() - new Date(b.dueTime).getTime();
+      })[0];
+      if (primary.isPaused) continue;
       slaTrackedCount++;
-      if (sla.isBreached) {
+      if (primary.isBreached) {
         slaBreachedCount++;
         slaStatus.breached++;
         continue;
       }
       slaRunning++;
-      if (sla.remainingMs <= THIRTY_MIN_MS) {
+      const remainingMs = new Date(primary.dueTime).getTime() - now.getTime();
+      const elapsedMs = now.getTime() - new Date(primary.startedAt).getTime();
+      if (remainingMs <= THIRTY_MIN_MS) {
         slaBreachingSoon++;
         slaStatus.breachingSoon++;
-      } else if (sla.elapsed_ms / sla.goalDurationMs >= 0.75) {
+      } else if (elapsedMs / primary.goalDurationMs >= 0.75) {
         slaStatus.nearBreach++;
       } else {
         slaStatus.withinSla++;
