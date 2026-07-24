@@ -66,7 +66,9 @@ function Donut({
   const router = useRouter();
   const total = data.reduce((a, d) => a + d.value, 0);
 
-  if (total === 0) {
+  // No categories to show at all (e.g. by-status/by-priority for a user with zero
+  // tickets ever) — nothing meaningful to preview, so keep this compact.
+  if (data.length === 0) {
     return (
       <Link
         href={fallbackHref}
@@ -79,7 +81,9 @@ function Donut({
     );
   }
 
-  const shown = data.filter((d) => d.value > 0);
+  // Fixed category sets (SLA Status, SLA Compliance) always have their real colors —
+  // show the full colored legend at 0 rather than collapsing to a bare "no data" line.
+  const shown = total > 0 ? data.filter((d) => d.value > 0) : [{ name: 'None', value: 1, color: '#E5E7EB', href: fallbackHref }];
   return (
     <div className="flex items-center gap-4">
       <div className="relative h-[120px] w-[120px] flex-shrink-0">
@@ -109,11 +113,12 @@ function Donut({
               <span className="truncate">{d.name}</span>
             </span>
           );
+          const linkHref = d.value > 0 ? d.href : fallbackHref;
           return (
             <div key={d.name} className="flex items-center justify-between gap-2 text-[11.5px]">
-              {d.href && d.value > 0 ? <Link href={d.href} className="min-w-0 hover:text-blue-600 hover:underline">{row}</Link> : row}
+              {linkHref ? <Link href={linkHref} className="min-w-0 hover:text-blue-600 hover:underline">{row}</Link> : row}
               <span className="flex-shrink-0 font-medium text-gray-700">
-                {d.value} <span className="text-gray-400">({Math.round((d.value / total) * 100)}%)</span>
+                {d.value}{total > 0 && <span className="text-gray-400"> ({Math.round((d.value / total) * 100)}%)</span>}
               </span>
             </div>
           );
