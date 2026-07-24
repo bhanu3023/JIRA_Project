@@ -242,6 +242,7 @@ export default function MyDashboardPage() {
   const journey = withDisambiguatedLabels((data.journey || []) as { dept: string; spaceKey: string | null; total: number; created: number; inProgress: number; waiting: number; completed: number }[]);
   const movedByMe = withDisambiguatedLabels((data.movedByMe || []) as { dept: string; spaceKey: string | null; cnt: number }[]);
   const receivedByMe = withDisambiguatedLabels((data.receivedByMe || []) as { dept: string; spaceKey: string | null; cnt: number }[]);
+  const totalAssignedEver = byStatus.reduce((a, s) => a + s.count, 0);
 
   const statusDonutData = byStatus.map((s) => ({
     name: s.name, value: s.count, color: s.color,
@@ -335,6 +336,27 @@ export default function MyDashboardPage() {
         />
       </div>
 
+      {/* When nothing has ever been assigned to this user, the 4 donuts + 3 bars + journey
+          card would otherwise all render their own "no data" state stacked on top of each
+          other — 8 near-identical empty boxes. Collapse that into one clear message instead. */}
+      {totalAssignedEver === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-300 bg-white px-6 py-14 text-center">
+          <Layers size={28} className="mx-auto mb-3 text-gray-300" />
+          <p className="text-[14px] font-medium text-gray-600">No tickets have been assigned to {viewedName} yet</p>
+          <p className="mx-auto mt-1 max-w-md text-[12.5px] text-gray-400">
+            Status, priority, SLA, and department breakdowns will show up here as soon as tickets are assigned.
+          </p>
+          {(cards.reportedByMe || 0) > 0 && (
+            <Link
+              href={filtersHref({ reporter: targetUserId })}
+              className="mt-4 inline-block rounded-md border border-blue-300 bg-blue-50 px-4 py-2 text-[12.5px] font-medium text-blue-700 hover:bg-blue-100"
+            >
+              View {cards.reportedByMe} ticket{cards.reportedByMe === 1 ? '' : 's'} reported by {viewedName} instead
+            </Link>
+          )}
+        </div>
+      ) : (
+      <>
       {/* Donut row */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-4 lg:items-stretch">
         <Card title="My Tickets by Status"><Donut data={statusDonutData} fallbackHref={myAssignedFallback} /></Card>
@@ -400,6 +422,8 @@ export default function MyDashboardPage() {
           </div>
         )}
       </Card>
+      </>
+      )}
     </div>
   );
 }
