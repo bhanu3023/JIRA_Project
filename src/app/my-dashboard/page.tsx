@@ -345,8 +345,12 @@ export default function MyDashboardPage() {
         </Card>
       </div>
 
-      {/* Bar charts row */}
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+      {/* Bar charts row — when the journey has nothing to show, its compact empty
+          state joins this row as a 4th tile instead of sitting alone as a giant
+          full-width strip with a one-line message and huge blank space either side.
+          Once there's real journey data (which needs the extra width to lay out
+          department rows), it gets its own full-width section below instead. */}
+      <div className={cn('grid grid-cols-1 gap-3', journey.length === 0 ? 'lg:grid-cols-4' : 'lg:grid-cols-3')}>
         <Card title="Tickets Moved to Other Departments (By Me)">
           <DeptBarChart data={barDataFor(movedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#3B82F6" fallbackHref={myAssignedFallback} />
         </Card>
@@ -356,15 +360,16 @@ export default function MyDashboardPage() {
         <Card title="My Current Tickets by Source Department (From)">
           <DeptBarChart data={barDataFor(bySourceDept)} color="#14B8A6" fallbackHref={myAssignedFallback} />
         </Card>
+        {journey.length === 0 && (
+          <Card title="My Ticket Journey (Current Tickets)">
+            <DeptBarChart data={[]} color="#F59E0B" fallbackHref={myAssignedFallback} />
+          </Card>
+        )}
       </div>
 
-      {/* Ticket journey */}
-      <Card title="My Ticket Journey (Current Tickets)">
-        {journey.length === 0 ? (
-          <Link href={myAssignedFallback} className="flex w-full flex-col items-center gap-1 rounded-lg py-8 text-center transition-colors hover:bg-gray-50">
-            <span className="text-[12px] text-gray-400">No open tickets right now — click to view my tickets</span>
-          </Link>
-        ) : (
+      {/* Ticket journey — full width, only rendered once there's real data */}
+      {journey.length > 0 && (
+        <Card title="My Ticket Journey (Current Tickets)">
           <div className="w-full space-y-4">
             {journey.map((j, i) => {
               const stageIdx = j.completed >= j.total * 0.5 ? 3 : j.waiting >= j.total * 0.5 ? 2 : j.inProgress >= j.total * 0.5 ? 1 : 0;
@@ -398,8 +403,8 @@ export default function MyDashboardPage() {
               <span>Created</span><span>In Progress</span><span>Waiting</span><span>Completed</span>
             </div>
           </div>
-        )}
-      </Card>
+        </Card>
+      )}
     </div>
   );
 }
