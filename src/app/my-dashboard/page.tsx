@@ -13,8 +13,15 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
 import {
-  Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown,
+  Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown, Calendar,
 } from 'lucide-react';
+
+const DATE_RANGE_OPTIONS = [
+  { key: 'today', label: 'Today', days: 0 },
+  { key: '7d', label: 'Last 7 Days', days: 7 },
+  { key: '30d', label: 'Last 30 Days', days: 30 },
+] as const;
+type DateRangeKey = (typeof DATE_RANGE_OPTIONS)[number]['key'];
 
 /* ─── palette ─── */
 const DEPT_PALETTE = ['#3B82F6', '#8B5CF6', '#F59E0B', '#14B8A6', '#EC4899', '#64748B', '#22C55E', '#EF4444'];
@@ -129,10 +136,13 @@ function Donut({
 }
 
 /* ─── card shell ─── */
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Card({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-      <h3 title={title} className="mb-3 line-clamp-2 break-normal text-[13px] font-semibold leading-snug text-gray-800">{title}</h3>
+      <div className="mb-3">
+        <h3 title={title} className="line-clamp-2 break-normal text-[13px] font-semibold leading-snug text-gray-800">{title}</h3>
+        {subtitle && <p className="mt-0.5 text-[10.5px] text-gray-400">{subtitle}</p>}
+      </div>
       <div className="flex flex-1 items-center">{children}</div>
     </div>
   );
@@ -184,6 +194,24 @@ function QueueSelect({ label, options, value, onChange }: { label: string; optio
   );
 }
 
+/** Applies to the "moved/received" department-activity charts below — the rest of the
+ * dashboard is always a live snapshot of current ticket state, not a historical range. */
+function DateRangeSelect({ value, onChange }: { value: DateRangeKey; onChange: (v: DateRangeKey) => void }) {
+  return (
+    <div className="relative flex-shrink-0">
+      <Calendar size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as DateRangeKey)}
+        className="appearance-none rounded-lg border border-gray-300 bg-white py-2 pl-8 pr-8 text-[13px] font-medium text-gray-700 outline-none focus:border-blue-500"
+      >
+        {DATE_RANGE_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+      </select>
+      <ChevronDown size={13} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+    </div>
+  );
+}
+
 export default function MyDashboardPage() {
   const { user } = useStore(useShallow((s) => ({ user: s.user })));
   const isAdmin = user?.role === 'admin';
@@ -192,6 +220,7 @@ export default function MyDashboardPage() {
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [queueUsers, setQueueUsers] = useState<{ migration: any[]; dev: any[] }>({ migration: [], dev: [] });
   const [viewedUserId, setViewedUserId] = useState<string>('');
+  const [dateRangeKey, setDateRangeKey] = useState<DateRangeKey>('7d');
 
   // Admin-only: group users by their custom-queue membership (Migration / Dev) across
   // every space, instead of one unmanageable flat list of the entire organization.
@@ -225,12 +254,20 @@ export default function MyDashboardPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    api.getMyDashboard(viewedUserId ? { userId: viewedUserId } : undefined)
+    const to = new Date();
+    const from = dateRangeKey === 'today'
+      ? new Date(to.getFullYear(), to.getMonth(), to.getDate())
+      : new Date(to.getTime() - (dateRangeKey === '30d' ? 30 : 7) * 86_400_000);
+    api.getMyDashboard({
+      ...(viewedUserId ? { userId: viewedUserId } : {}),
+      from: from.toISOString(),
+      to: to.toISOString(),
+    })
       .then((d: any) => { if (!cancelled) setData(d); })
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [viewedUserId]);
+  }, [viewedUserId, dateRangeKey]);
 
   if (loading || !data) {
     return <DotLoader className="py-24" />;
@@ -272,6 +309,7 @@ export default function MyDashboardPage() {
   const viewedName = viewedUserId && viewedUserId !== user?.id
     ? (allUsers.find((u) => u.id === viewedUserId)?.firstName || 'another user')
     : user?.firstName;
+  const dateRangeLabel = DATE_RANGE_OPTIONS.find((o) => o.key === dateRangeKey)?.label;
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-4">
@@ -285,20 +323,23 @@ export default function MyDashboardPage() {
           </p>
         </div>
 
-        {isAdmin && (
-          <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
-            {viewedUserId && (
-              <button
-                onClick={() => setViewedUserId('')}
-                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-[13px] font-medium text-gray-600 hover:bg-gray-50"
-              >
-                My Dashboard
-              </button>
-            )}
-            <QueueSelect label="Migration Queue" options={queueUsers.migration} value={viewedUserId} onChange={setViewedUserId} />
-            <QueueSelect label="Dev Queue" options={queueUsers.dev} value={viewedUserId} onChange={setViewedUserId} />
-          </div>
-        )}
+        <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
+          <DateRangeSelect value={dateRangeKey} onChange={setDateRangeKey} />
+          {isAdmin && (
+            <>
+              {viewedUserId && (
+                <button
+                  onClick={() => setViewedUserId('')}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-[13px] font-medium text-gray-600 hover:bg-gray-50"
+                >
+                  My Dashboard
+                </button>
+              )}
+              <QueueSelect label="Migration Queue" options={queueUsers.migration} value={viewedUserId} onChange={setViewedUserId} />
+              <QueueSelect label="Dev Queue" options={queueUsers.dev} value={viewedUserId} onChange={setViewedUserId} />
+            </>
+          )}
+        </div>
       </div>
 
       {/* Top stat row */}
@@ -356,10 +397,10 @@ export default function MyDashboardPage() {
           Once there's real journey data (which needs the extra width to lay out
           department rows), it gets its own full-width section below instead. */}
       <div className={cn('grid grid-cols-1 gap-3', journey.length === 0 ? 'lg:grid-cols-4' : 'lg:grid-cols-3')}>
-        <Card title="Tickets Moved to Other Departments (By Me)">
+        <Card title="Tickets Moved to Other Departments (By Me)" subtitle={dateRangeLabel}>
           <DeptBarChart data={barDataFor(movedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#3B82F6" fallbackHref={myAssignedFallback} />
         </Card>
-        <Card title="Tickets Received from Other Departments">
+        <Card title="Tickets Received from Other Departments" subtitle={dateRangeLabel}>
           <DeptBarChart data={barDataFor(receivedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#8B5CF6" fallbackHref={myAssignedFallback} />
         </Card>
         <Card title="My Current Tickets by Source Department (From)">
