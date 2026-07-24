@@ -47,7 +47,7 @@ function StatTile({ label, value, icon, iconClass, href }: { label: string; valu
       <div className={cn('flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg', iconClass)}>{icon}</div>
       <div className="min-w-0">
         <p className="text-2xl font-bold leading-none text-gray-900 tabular-nums">{value.toLocaleString()}</p>
-        <p className="mt-1 truncate text-[11.5px] text-gray-500">{label}</p>
+        <p className="mt-1 line-clamp-2 text-[11.5px] leading-tight text-gray-500">{label}</p>
       </div>
     </Link>
   );
@@ -127,7 +127,7 @@ function Donut({
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-      <h3 className="mb-3 text-[13px] font-semibold text-gray-800">{title}</h3>
+      <h3 title={title} className="mb-3 line-clamp-2 break-normal text-[13px] font-semibold leading-snug text-gray-800">{title}</h3>
       <div className="flex flex-1 items-center">{children}</div>
     </div>
   );
@@ -297,7 +297,7 @@ export default function MyDashboardPage() {
       </div>
 
       {/* Top stat row */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
         <StatTile
           label="My Open Tickets" value={cards.myOpenTickets || 0}
           icon={<Layers size={17} className="text-blue-600" />} iconClass="bg-blue-50"
