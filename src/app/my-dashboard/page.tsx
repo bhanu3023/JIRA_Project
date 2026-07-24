@@ -55,7 +55,7 @@ function StatTile({ label, value, icon, iconClass, href }: { label: string; valu
 
 /* ─── donut chart with centered total — every row (and the empty state) is clickable ─── */
 function Donut({
-  data, centerLabel, centerSub, fallbackHref, height = 140,
+  data, centerLabel, centerSub, fallbackHref, height = 100,
 }: {
   data: { name: string; value: number; color: string; href?: string }[];
   centerLabel?: string;
@@ -138,7 +138,7 @@ function DeptBarChart({ data, color, fallbackHref }: { data: { dept: string; lab
   const router = useRouter();
   if (!data.length) {
     return (
-      <Link href={fallbackHref} className="flex h-[180px] w-full flex-col items-center justify-center gap-1 rounded-lg text-center transition-colors hover:bg-gray-50">
+      <Link href={fallbackHref} className="flex h-[110px] w-full flex-col items-center justify-center gap-1 rounded-lg text-center transition-colors hover:bg-gray-50">
         <span className="text-[12px] text-gray-400">No data yet — click to view my tickets</span>
       </Link>
     );
