@@ -270,7 +270,7 @@ export default function MyDashboardPage() {
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-4">
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2 text-[22px] font-semibold text-gray-900">
             User Level Dashboard <span>👋</span>
