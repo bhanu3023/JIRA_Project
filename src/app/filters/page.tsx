@@ -485,8 +485,16 @@ function DateDropBtn({
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
 
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
+
   // when opening, decode current value into draft
   const handleOpen = () => {
+    if (ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      setDropPos(align === 'right'
+        ? { top: r.bottom + 4, left: r.right - 288 }
+        : { top: r.bottom + 4, left: r.left });
+    }
     if (selected) {
       if (selected.startsWith('withinLast:')) {
         const [, n, u] = selected.split(':'); setMode('withinLast'); setWlN(n); setWlUnit(u);
@@ -557,11 +565,12 @@ function DateDropBtn({
         )}
       </button>
 
-      {open && (
-        <div className={cn(
-          'absolute top-full mt-1 z-[200] w-72 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden',
-          align === 'right' ? 'right-0' : 'left-0',
-        )}>
+      {open && dropPos && createPortal(
+        <div
+          onMouseDown={e => e.stopPropagation()}
+          className="fixed z-[9999] w-72 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}
+        >
           <div className="divide-y divide-gray-100 py-1">
 
             {/* Within the last */}
@@ -641,7 +650,8 @@ function DateDropBtn({
               Update
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -665,6 +675,7 @@ const EXTRA_FILTER_OPTIONS = [
 /* ─── Simple text filter button ─── */
 function TextFilterBtn({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   const [open, setOpen] = useState(false);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
   const [draft, setDraft] = useState(value);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => { setDraft(value); }, [value]);
@@ -675,9 +686,16 @@ function TextFilterBtn({ label, value, onChange }: { label: string; value: strin
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
   const active = Boolean(value);
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      setDropPos({ top: r.bottom + 4, left: r.left });
+    }
+    setOpen(v => !v);
+  };
   return (
     <div ref={ref} className="relative flex-shrink-0">
-      <button onClick={() => setOpen(v => !v)}
+      <button onClick={handleToggle}
         className={cn('flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
           active ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50')}>
         {active ? `${label}: ${value}` : label}
@@ -685,8 +703,12 @@ function TextFilterBtn({ label, value, onChange }: { label: string; value: strin
           ? <span onClick={(e) => { e.stopPropagation(); onChange(''); }} className="ml-0.5 text-blue-400 hover:text-blue-700 cursor-pointer"><X size={11} /></span>
           : <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />}
       </button>
-      {open && (
-        <div className="absolute top-full mt-1 z-[200] w-56 rounded-lg border border-gray-200 bg-white shadow-2xl p-3">
+      {open && dropPos && createPortal(
+        <div
+          onMouseDown={e => e.stopPropagation()}
+          className="fixed z-[9999] w-56 rounded-lg border border-gray-200 bg-white shadow-2xl p-3"
+          style={{ top: dropPos.top, left: dropPos.left }}
+        >
           <input autoFocus value={draft} onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') { onChange(draft); setOpen(false); } if (e.key === 'Escape') setOpen(false); }}
             placeholder={`Filter by ${label.toLowerCase()}…`}
@@ -697,7 +719,8 @@ function TextFilterBtn({ label, value, onChange }: { label: string; value: strin
             {value && <button onClick={() => { onChange(''); setDraft(''); setOpen(false); }}
               className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] text-gray-600 hover:bg-gray-50">Clear</button>}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
