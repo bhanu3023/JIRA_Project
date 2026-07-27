@@ -1412,7 +1412,7 @@ export default function FiltersPage() {
       )}
 
       {/* ── Filter bar (only on All Work tab) ── */}
-      {!showSavedPanel && <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-visible">
+      {!showSavedPanel && <div className="sticky top-0 z-[100] rounded-xl border border-gray-200 bg-white shadow-sm overflow-visible">
 
         {/* Row 1: fixed filters */}
         <div className="flex items-center gap-2 px-4 py-3 flex-wrap border-b border-gray-100">
