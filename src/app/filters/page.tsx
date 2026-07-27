@@ -103,6 +103,7 @@ function DropBtn({
       {open && dropPos && typeof document !== 'undefined' && createPortal(
         <div
           className="fixed z-[9999] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          onMouseDown={e => e.stopPropagation()}
           style={{ top: dropPos.top, left: dropPos.left }}
         >
           <div className="border-b border-gray-100 px-3 py-2">
@@ -251,7 +252,8 @@ function SpaceQueueDropBtn({
 
       {open && dropPos && typeof document !== 'undefined' && createPortal(
         <div className="fixed z-[9999] w-64 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
-          style={{ top: dropPos.top, left: dropPos.left }}>
+          style={{ top: dropPos.top, left: dropPos.left }}
+          onMouseDown={e => e.stopPropagation()}>
           <div className="border-b border-gray-100 px-3 py-2">
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
@@ -709,6 +711,7 @@ function MoreFiltersBtn({
   onToggleExtra: (key: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
   const [q, setQ] = useState('');
   const ref = useRef<HTMLDivElement>(null);
 
@@ -720,6 +723,14 @@ function MoreFiltersBtn({
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
+
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      setDropPos({ top: r.bottom + 4, left: r.right - 240 });
+    }
+    setOpen(v => !v);
+  };
 
   const qLow = q.trim().toLowerCase();
   const filtered = EXTRA_FILTER_OPTIONS.filter((o) =>
@@ -733,7 +744,7 @@ function MoreFiltersBtn({
   return (
     <div ref={ref} className="relative flex-shrink-0">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={handleToggle}
         className={cn(
           'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
           activeExtras.length > 0
@@ -748,8 +759,12 @@ function MoreFiltersBtn({
         <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
       </button>
 
-      {open && (
-        <div className="absolute right-0 top-full mt-1 z-[200] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden">
+      {open && dropPos && createPortal(
+        <div
+          onMouseDown={e => e.stopPropagation()}
+          className="fixed z-[9999] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}
+        >
           {/* search */}
           <div className="border-b border-gray-100 px-3 py-2">
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
@@ -795,7 +810,8 @@ function MoreFiltersBtn({
               ))
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -843,7 +859,8 @@ function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChang
       </button>
       {open && dropPos && typeof document !== 'undefined' && createPortal(
         <div className="fixed z-[9999] w-44 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
-          style={{ top: dropPos.top, left: dropPos.left }}>
+          style={{ top: dropPos.top, left: dropPos.left }}
+          onMouseDown={e => e.stopPropagation()}>
           <div className="py-1">
             {([['yes', 'Yes — Breached', 'text-red-600', 'bg-red-50'], ['no', 'No — Not Breached', 'text-gray-700', 'bg-gray-50']] as const).map(([v, lbl, textCls, bgCls]) => (
               <button key={v} onClick={() => { onChange(value === v ? '' : v); setOpen(false); }}
