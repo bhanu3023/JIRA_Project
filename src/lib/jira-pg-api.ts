@@ -725,6 +725,7 @@ function formatIssue(issue: any) {
     dept_statuses: (issue as any).dept_statuses ?? {},
     createdAt: issue.createdAt?.toISOString() ?? nowIso(),
     updatedAt: issue.updatedAt?.toISOString() ?? nowIso(),
+    sla_breached: issue.sla_breached ?? false,
   };
 }
 
@@ -2098,6 +2099,21 @@ async function _handleJiraPgApi(
         }));
       } catch { /* keep Prisma results as fallback */ }
     }
+
+    // Batch-mark SLA breached: single query instead of N per-issue lookups
+    try {
+      const allKeys = enrichedIssues.flatMap((i: any) => [i.key, i.cfKey].filter(Boolean));
+      if (allKeys.length > 0) {
+        const breachRows = await pool.query<{ issueKey: string }>(
+          `SELECT DISTINCT "issueKey" FROM notifications WHERE "issueKey" = ANY($1) AND type = 'SLA_BREACH'`,
+          [allKeys]
+        );
+        const breachedKeys = new Set(breachRows.rows.map((r: any) => r.issueKey));
+        enrichedIssues = enrichedIssues.map((i: any) =>
+          breachedKeys.has(i.key) || breachedKeys.has(i.cfKey) ? { ...i, sla_breached: true } : i
+        );
+      }
+    } catch { /* sla breach batch is best-effort */ }
 
     return json({
       issues: enrichedIssues,
