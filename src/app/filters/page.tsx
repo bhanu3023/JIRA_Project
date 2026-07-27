@@ -103,6 +103,7 @@ function DropBtn({
       {open && dropPos && typeof document !== 'undefined' && createPortal(
         <div
           className="fixed z-[9999] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          onMouseDown={e => e.stopPropagation()}
           style={{ top: dropPos.top, left: dropPos.left }}
         >
           <div className="border-b border-gray-100 px-3 py-2">
@@ -251,7 +252,8 @@ function SpaceQueueDropBtn({
 
       {open && dropPos && typeof document !== 'undefined' && createPortal(
         <div className="fixed z-[9999] w-64 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
-          style={{ top: dropPos.top, left: dropPos.left }}>
+          style={{ top: dropPos.top, left: dropPos.left }}
+          onMouseDown={e => e.stopPropagation()}>
           <div className="border-b border-gray-100 px-3 py-2">
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
@@ -843,7 +845,8 @@ function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChang
       </button>
       {open && dropPos && typeof document !== 'undefined' && createPortal(
         <div className="fixed z-[9999] w-44 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
-          style={{ top: dropPos.top, left: dropPos.left }}>
+          style={{ top: dropPos.top, left: dropPos.left }}
+          onMouseDown={e => e.stopPropagation()}>
           <div className="py-1">
             {([['yes', 'Yes — Breached', 'text-red-600', 'bg-red-50'], ['no', 'No — Not Breached', 'text-gray-700', 'bg-gray-50']] as const).map(([v, lbl, textCls, bgCls]) => (
               <button key={v} onClick={() => { onChange(value === v ? '' : v); setOpen(false); }}
