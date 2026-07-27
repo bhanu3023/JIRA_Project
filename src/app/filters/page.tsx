@@ -57,6 +57,7 @@ function DropBtn({
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const ref = useRef<HTMLDivElement>(null);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -73,10 +74,18 @@ function DropBtn({
 
   const active = selected.length > 0;
 
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setDropPos({ top: rect.bottom + 4, left: align === 'right' ? rect.right - 240 : rect.left });
+    }
+    setOpen((v) => !v);
+  };
+
   return (
-    <div ref={ref} className="relative flex-shrink-0">
+    <div ref={ref} className="flex-shrink-0">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={handleToggle}
         className={cn(
           'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
           active
@@ -91,11 +100,11 @@ function DropBtn({
         <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
       </button>
 
-      {open && (
-        <div className={cn(
-          'absolute top-full mt-1 z-[200] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden',
-          align === 'right' ? 'right-0' : 'left-0',
-        )}>
+      {open && dropPos && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed z-[9999] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}
+        >
           <div className="border-b border-gray-100 px-3 py-2">
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
@@ -136,7 +145,8 @@ function DropBtn({
               </button>
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -154,6 +164,7 @@ function SpaceQueueDropBtn({
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
   // Multiple boards can be expanded at once — a Set, not a single key, so selecting
   // one board doesn't collapse another board's already-open queue list.
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
@@ -215,10 +226,18 @@ function SpaceQueueDropBtn({
   const active = selSpaces.length > 0;
   const label = selQueue ? `Queue: ${selQueue}` : active ? `Queue (${selSpaces.length})` : 'Queue';
 
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setDropPos({ top: rect.bottom + 4, left: rect.left });
+    }
+    setOpen((v) => !v);
+  };
+
   return (
-    <div ref={ref} className="relative flex-shrink-0">
+    <div ref={ref} className="flex-shrink-0">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={handleToggle}
         className={cn(
           'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
           active
@@ -230,8 +249,9 @@ function SpaceQueueDropBtn({
         <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
       </button>
 
-      {open && (
-        <div className="absolute top-full mt-1 z-[200] w-64 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden">
+      {open && dropPos && typeof document !== 'undefined' && createPortal(
+        <div className="fixed z-[9999] w-64 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}>
           <div className="border-b border-gray-100 px-3 py-2">
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
@@ -318,7 +338,8 @@ function SpaceQueueDropBtn({
               </button>
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -780,6 +801,72 @@ function MoreFiltersBtn({
   );
 }
 
+/* ─── SLA Breached single-select button ─── */
+function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChange: (v: 'yes' | 'no' | '') => void }) {
+  const [open, setOpen] = useState(false);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setDropPos({ top: rect.bottom + 4, left: rect.left });
+    }
+    setOpen((v) => !v);
+  };
+
+  const active = Boolean(value);
+  const label = value === 'yes' ? 'SLA Breached: Yes' : value === 'no' ? 'SLA Breached: No' : 'SLA Breached';
+
+  return (
+    <div ref={ref} className="flex-shrink-0">
+      <button
+        onClick={handleToggle}
+        className={cn(
+          'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
+          active ? 'border-red-400 bg-red-50 text-red-600' : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50',
+        )}
+      >
+        {label}
+        {active
+          ? <span onClick={(e) => { e.stopPropagation(); onChange(''); setOpen(false); }} className="ml-0.5 text-red-400 hover:text-red-600 cursor-pointer"><X size={11} /></span>
+          : <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />}
+      </button>
+      {open && dropPos && typeof document !== 'undefined' && createPortal(
+        <div className="fixed z-[9999] w-44 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}>
+          <div className="py-1">
+            {([['yes', 'Yes — Breached', 'text-red-600', 'bg-red-50'], ['no', 'No — Not Breached', 'text-gray-700', 'bg-gray-50']] as const).map(([v, lbl, textCls, bgCls]) => (
+              <button key={v} onClick={() => { onChange(value === v ? '' : v); setOpen(false); }}
+                className={cn('flex w-full items-center gap-2.5 px-3 py-2.5 text-[12.5px] transition-colors hover:bg-gray-50', value === v && bgCls)}>
+                <div className={cn('h-4 w-4 flex-shrink-0 rounded border flex items-center justify-center', value === v ? 'border-blue-600 bg-blue-600' : 'border-gray-300')}>
+                  {value === v && <Check size={10} className="text-white" strokeWidth={3} />}
+                </div>
+                <span className={cn('font-medium', value === v ? textCls : 'text-gray-700')}>{lbl}</span>
+              </button>
+            ))}
+          </div>
+          {value && (
+            <div className="border-t border-gray-100 px-3 py-2">
+              <button onClick={() => { onChange(''); setOpen(false); }} className="text-[11.5px] text-blue-600 font-medium hover:text-blue-800">Clear</button>
+            </div>
+          )}
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
 /* ─── main page ─── */
 export default function FiltersPage() {
   const { user, spaces } = useStore(useShallow((s) => ({ user: s.user, spaces: s.spaces })));
@@ -802,6 +889,7 @@ export default function FiltersPage() {
   const [selCustomerName, setSelCustomerName] = useState('');
   const [selClientName, setSelClientName] = useState('');
   const [selProjectManager, setSelProjectManager] = useState('');
+  const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
 
   /* issues */
   const [issues, setIssues]   = useState<any[]>([]);
@@ -893,7 +981,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selDueDate || selDepartment ||
-    selProductType || selCombination || selCustomerName || selClientName || selProjectManager,
+    selProductType || selCombination || selCustomerName || selClientName || selProjectManager || selBreached,
   );
 
   /* fetch issues — all filtering done server-side for accuracy */
@@ -961,17 +1049,22 @@ export default function FiltersPage() {
         if (selCustomerName)   params.customerName   = selCustomerName;
         if (selClientName)     params.clientName     = selClientName;
         if (selProjectManager) params.projectManager = selProjectManager;
+        if (selBreached) params.slaBreached = selBreached;
 
         // Text search
         if (text.trim()) params.q = text.trim();
 
         const { issues: list, total: tot } = await api.getIssues(params);
-        setIssues(list as any[]);
-        setTotal(tot);
+        // client-side breached filter (if backend doesn't support it yet)
+        let filtered = list as any[];
+        if (selBreached === 'yes') filtered = filtered.filter((i: any) => i.sla_breached);
+        if (selBreached === 'no')  filtered = filtered.filter((i: any) => !i.sla_breached);
+        setIssues(filtered);
+        setTotal(selBreached ? filtered.length : tot);
       } catch { setIssues([]); setTotal(0); }
       setLoadingIssues(false);
     }, 400);
-  }, [text, selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, spaces]);
+  }, [text, selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, spaces]);
 
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
 
@@ -996,6 +1089,7 @@ export default function FiltersPage() {
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
     setSelDepartment(''); setSelProductType('');
     setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager('');
+    setSelBreached('');
     setActiveExtras([]);
     setActiveFilterId(null);
   };
@@ -1309,6 +1403,9 @@ export default function FiltersPage() {
           />
           <DropBtn label="Type" options={ISSUE_TYPES.map((t) => ({ value: t, label: TYPE_LABELS[t] || t }))} selected={selTypes} onChange={setSelTypes} />
           <DropBtn label="Status" options={availableStatuses} selected={selStatuses} onChange={setSelStatuses} />
+
+          {/* SLA Breached filter */}
+          <SlaBreachedBtn value={selBreached} onChange={setSelBreached} />
 
           <div className="flex items-center gap-2 ml-auto flex-shrink-0">
             {/* More filters — adds extras to row 2 */}
