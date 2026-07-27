@@ -1055,12 +1055,8 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         const { issues: list, total: tot } = await api.getIssues(params);
-        // client-side breached filter (if backend doesn't support it yet)
-        let filtered = list as any[];
-        if (selBreached === 'yes') filtered = filtered.filter((i: any) => i.sla_breached);
-        if (selBreached === 'no')  filtered = filtered.filter((i: any) => !i.sla_breached);
-        setIssues(filtered);
-        setTotal(selBreached ? filtered.length : tot);
+        setIssues(list as any[]);
+        setTotal(tot);
       } catch { setIssues([]); setTotal(0); }
       setLoadingIssues(false);
     }, 400);

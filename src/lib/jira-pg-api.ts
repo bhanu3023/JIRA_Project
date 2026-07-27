@@ -2100,20 +2100,45 @@ async function _handleJiraPgApi(
       } catch { /* keep Prisma results as fallback */ }
     }
 
-    // Batch-mark SLA breached: single query instead of N per-issue lookups
+    // SLA breach filter — resolve breached set once, then apply to the full result
+    const slaBreachedParam = url.searchParams.get('slaBreached'); // 'yes' | 'no' | null
     try {
-      const allKeys = enrichedIssues.flatMap((i: any) => [i.key, i.cfKey].filter(Boolean));
-      if (allKeys.length > 0) {
-        const breachRows = await pool.query<{ issueKey: string }>(
-          `SELECT DISTINCT "issueKey" FROM notifications WHERE "issueKey" = ANY($1) AND type = 'SLA_BREACH'`,
-          [allKeys]
+      if (slaBreachedParam === 'yes' || slaBreachedParam === 'no') {
+        // Fetch ALL breached keys for the spaces in scope (not just current page)
+        // so the filter is accurate across the full dataset
+        const spaceConstraint = spaceKey
+          ? `AND i."spaceId" = (SELECT id FROM spaces WHERE key = $1 LIMIT 1)`
+          : '';
+        const breachResult = await pool.query<{ issueKey: string }>(
+          `SELECT DISTINCT n."issueKey"
+           FROM notifications n
+           JOIN issues i ON (i.key = n."issueKey" OR i.cf_key = n."issueKey")
+           WHERE n.type = 'SLA_BREACH' ${spaceConstraint}`,
+          spaceKey ? [spaceKey] : []
         );
-        const breachedKeys = new Set(breachRows.rows.map((r: any) => r.issueKey));
-        enrichedIssues = enrichedIssues.map((i: any) =>
-          breachedKeys.has(i.key) || breachedKeys.has(i.cfKey) ? { ...i, sla_breached: true } : i
-        );
+        const breachedSet = new Set(breachResult.rows.map((r: any) => r.issueKey));
+        enrichedIssues = enrichedIssues
+          .map((i: any) => {
+            const breached = breachedSet.has(i.key) || breachedSet.has(i.cfKey);
+            return { ...i, sla_breached: breached };
+          })
+          .filter((i: any) => slaBreachedParam === 'yes' ? i.sla_breached : !i.sla_breached);
+        deptTotal = enrichedIssues.length;
+      } else {
+        // No breach filter — still mark so the column shows correctly
+        const allKeys = enrichedIssues.flatMap((i: any) => [i.key, i.cfKey].filter(Boolean));
+        if (allKeys.length > 0) {
+          const breachRows = await pool.query<{ issueKey: string }>(
+            `SELECT DISTINCT "issueKey" FROM notifications WHERE "issueKey" = ANY($1) AND type = 'SLA_BREACH'`,
+            [allKeys]
+          );
+          const breachedKeys = new Set(breachRows.rows.map((r: any) => r.issueKey));
+          enrichedIssues = enrichedIssues.map((i: any) =>
+            breachedKeys.has(i.key) || breachedKeys.has(i.cfKey) ? { ...i, sla_breached: true } : i
+          );
+        }
       }
-    } catch { /* sla breach batch is best-effort */ }
+    } catch { /* sla breach is best-effort */ }
 
     return json({
       issues: enrichedIssues,
