@@ -129,8 +129,8 @@ function SpaceDetailContent() {
   );
   // Static column definitions (always available)
   const STATIC_COLUMNS = [
-    { id: 'assignee',       label: 'Assignee',            width: '150px' },
     { id: 'reporter',       label: 'Reporter',            width: '150px' },
+    { id: 'assignee',       label: 'Assignee',            width: '150px' },
     { id: 'priority',       label: 'Priority',            width: '120px' },
     { id: 'status',         label: 'Status',              width: '165px' },
     { id: 'created',        label: 'Created',             width: '150px' },
@@ -151,7 +151,7 @@ function SpaceDetailContent() {
     { id: 'resolvedAt',     label: 'Resolved At',         width: '150px' },
     { id: 'department',     label: 'Department',          width: '130px' },
   ];
-  const DEFAULT_COLS = ['assignee','reporter','priority','status','created'];
+  const DEFAULT_COLS = ['reporter','assignee','priority','status','created'];
 
   const [showCreate, setShowCreate] = useState(false);
   const [createdToast, setCreatedToast] = useState<{ key: string; cfKey: string } | null>(null);

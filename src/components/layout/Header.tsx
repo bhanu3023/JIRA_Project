@@ -48,6 +48,7 @@ export default function Header() {
   const searchRef   = useRef<HTMLDivElement>(null);
   const inputRef    = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSeqRef = useRef(0);
 
   const [showNotifications, setShowNotifications] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -97,18 +98,23 @@ export default function Header() {
   const handleSearchChange = useCallback((q: string) => {
     setSearchQuery(q);
     setActiveIdx(-1);
+    setSearchResults([]);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const issueKey = extractIssueKey(q.trim());
     const searchTerm = issueKey || q.trim();
-    if (!searchTerm) { setSearchResults([]); setSearchOpen(false); return; }
+    if (!searchTerm) { setSearchLoading(false); setSearchOpen(false); return; }
     setSearchLoading(true);
     setSearchOpen(true);
+    const seq = ++searchSeqRef.current;
     debounceRef.current = setTimeout(async () => {
       try {
         const res = await api.search(searchTerm);
+        if (seq !== searchSeqRef.current) return; // stale response — newer query in flight
         setSearchResults((res.issues || []).slice(0, 8));
-      } catch { setSearchResults([]); }
-      setSearchLoading(false);
+      } catch {
+        if (seq === searchSeqRef.current) setSearchResults([]);
+      }
+      if (seq === searchSeqRef.current) setSearchLoading(false);
     }, 200);
   }, [spaces]);
 
