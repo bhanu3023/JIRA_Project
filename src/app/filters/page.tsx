@@ -110,8 +110,7 @@ function DropBtn({
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
               <input
-                autoFocus
-                value={q}
+                                value={q}
                 onChange={(e) => setQ(e.target.value)}
                 placeholder={`Search ${label.toLowerCase()}…`}
                 className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
@@ -258,8 +257,7 @@ function SpaceQueueDropBtn({
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
               <input
-                autoFocus
-                value={q}
+                                value={q}
                 onChange={(e) => setQ(e.target.value)}
                 placeholder="Search queue…"
                 className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
@@ -709,7 +707,7 @@ function TextFilterBtn({ label, value, onChange }: { label: string; value: strin
           className="fixed z-[9999] w-56 rounded-lg border border-gray-200 bg-white shadow-2xl p-3"
           style={{ top: dropPos.top, left: dropPos.left }}
         >
-          <input autoFocus value={draft} onChange={e => setDraft(e.target.value)}
+          <input value={draft} onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') { onChange(draft); setOpen(false); } if (e.key === 'Escape') setOpen(false); }}
             placeholder={`Filter by ${label.toLowerCase()}…`}
             className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-[12.5px] outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
@@ -793,7 +791,7 @@ function MoreFiltersBtn({
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
               <input
-                autoFocus value={q} onChange={(e) => setQ(e.target.value)}
+                value={q} onChange={(e) => setQ(e.target.value)}
                 placeholder="Search filters…"
                 className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
               />
@@ -1712,3 +1710,4 @@ export default function FiltersPage() {
     </div>
   );
 }
+
