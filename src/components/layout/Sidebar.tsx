@@ -709,7 +709,7 @@ export default function Sidebar() {
               return (
               <div key={space.id} className="group/space relative">
                 <Link
-                  href={`/spaces/${space.key}?queue=all-open`}
+                  href={`/spaces/${space.key}`}
                   onClick={(e) => {
                     if (isThisSpaceActive) {
                       e.preventDefault();
