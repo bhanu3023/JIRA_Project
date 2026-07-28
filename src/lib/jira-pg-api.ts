@@ -2168,7 +2168,7 @@ async function _handleJiraPgApi(
         [sp.id, `${sk}-%`]
       ),
       pool.query<{ key: string }>(
-        `SELECT key FROM issues WHERE ("spaceId" = $1 OR key LIKE $2) ORDER BY created_at DESC LIMIT 100`,
+        `SELECT key FROM issues WHERE ("spaceId" = $1 OR key LIKE $2) ORDER BY "createdAt" DESC LIMIT 100`,
         [sp.id, `${sk}-%`]
       ),
     ]);
