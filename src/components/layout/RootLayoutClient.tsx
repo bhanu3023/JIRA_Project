@@ -63,11 +63,13 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
     <div className="flex h-screen overflow-hidden bg-white">
       {isAuthenticated && <Sidebar />}
       <div
-        className={`relative flex flex-1 flex-col overflow-hidden ${isAuthenticated && sidebarOpen ? 'ml-72' : isAuthenticated ? 'ml-[60px]' : ''}`}
+        className={`flex flex-1 flex-col overflow-hidden ${isAuthenticated && sidebarOpen ? 'ml-72' : isAuthenticated ? 'ml-[60px]' : ''}`}
       >
-        <NavigationLoader />
         {isAuthenticated && <Header />}
-        <main className="flex-1 overflow-auto bg-white">{children}</main>
+        <div className="relative flex-1 overflow-hidden">
+          <NavigationLoader />
+          <main className="h-full overflow-auto bg-white">{children}</main>
+        </div>
       </div>
     </div>
   );
