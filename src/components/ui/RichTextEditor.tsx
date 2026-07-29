@@ -49,17 +49,13 @@ export default function RichTextEditor({
   const fileRef    = useRef<HTMLInputElement>(null);
   const skipSync   = useRef(false);
 
-  // Keep inline attachments under the reverse proxy's body-size limit (must be
-  // raised server-side — see nginx client_max_body_size — since this app
-  // code alone cannot lift a proxy-enforced ceiling) as the whole description
-  // — every embedded image/file — rides along as base64 inside the
-  // issue-create/update JSON payload. Base64 adds ~33% overhead on top of
-  // raw file size, so these caps leave headroom under a 50MB proxy limit.
-  // Per-item caps alone aren't enough: several files each under the cap can
-  // still add up past the proxy limit, so also track a running total.
-  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-  const MAX_FILE_BYTES  = 20 * 1024 * 1024;
-  const MAX_TOTAL_BYTES = 35 * 1024 * 1024;
+  // Images/files are uploaded to the server and referenced by URL rather than
+  // embedded as base64 inline — that used to make the description payload
+  // scale with attachment size, which both tripped the reverse proxy's
+  // body-size limit and made ticket creation slow (uploading tens of MB of
+  // base64 text as part of the create-issue request). A plain URL keeps the
+  // create-issue payload tiny no matter how big the attachment is.
+  const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
   const [warning, setWarning] = useState<string | null>(null);
   const warnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warn = (msg: string) => {
@@ -67,8 +63,25 @@ export default function RichTextEditor({
     if (warnTimer.current) clearTimeout(warnTimer.current);
     warnTimer.current = setTimeout(() => setWarning(null), 5000);
   };
-  const currentSizeBytes = () => editorRef.current?.innerHTML.length ?? 0;
-  const roomLeft = (extraBytes: number) => currentSizeBytes() + extraBytes <= MAX_TOTAL_BYTES;
+
+  const uploadFile = async (file: File): Promise<{ url: string } | null> => {
+    try {
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
+      const res = await fetch('/api/uploads', {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        body: fd,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Upload failed');
+      return data;
+    } catch (e: any) {
+      warn(`Failed to upload "${file.name}": ${e?.message || 'unknown error'}`);
+      return null;
+    }
+  };
 
   // ── @ Mention state ──────────────────────────────────────────────────
   const [mentionOpen,   setMentionOpen]   = useState(false);
@@ -231,14 +244,21 @@ export default function RichTextEditor({
     return () => window.removeEventListener('scroll', updatePos, true);
   }, [mentionOpen]);
 
-  /* ── Insert image inline (compressed via canvas) ────────────────── */
+  /* ── Insert image: compress client-side, upload, embed the URL ───── */
   const insertImage = (file: File) => {
+    const placeholderId = `up-${Math.random().toString(36).slice(2)}`;
+    editorRef.current?.focus();
+    document.execCommand('insertHTML', false,
+      `<span id="${placeholderId}" contenteditable="false" style="display:inline-block;padding:4px 8px;background:#f1f5f9;border-radius:6px;color:#64748b;font-size:12px;">Uploading "${file.name}"…</span>&nbsp;`
+    );
+    emit();
+
     const reader = new FileReader();
     reader.onload = (ev) => {
       const originalSrc = ev.target?.result as string;
       const img = new Image();
       img.onload = () => {
-        const MAX = 1200;
+        const MAX = 1600;
         const scale = img.width > MAX ? MAX / img.width : 1;
         const w = Math.round(img.width * scale);
         const h = Math.round(img.height * scale);
@@ -246,31 +266,36 @@ export default function RichTextEditor({
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
         // JPEG at 0.75 quality — ~10x smaller than raw PNG for photos
-        let compressed = canvas.toDataURL('image/jpeg', 0.75);
-        if (compressed.length > MAX_IMAGE_BYTES) {
-          // One more pass at lower quality before giving up
-          compressed = canvas.toDataURL('image/jpeg', 0.5);
-        }
-        if (compressed.length > MAX_IMAGE_BYTES) {
-          warn(`"${file.name}" is too large even after compression. Please use a smaller image (under ~10MB).`);
-          return;
-        }
-        if (!roomLeft(compressed.length)) {
-          warn(`Adding "${file.name}" would make this description too large combined with existing attachments. Remove something first or use a smaller image.`);
-          return;
-        }
-        editorRef.current?.focus();
-        document.execCommand('insertHTML', false,
-          `<img src="${compressed}" alt="${file.name}" style="max-width:100%;border-radius:6px;margin:6px 0;display:block;" title="${file.name}" />`
-        );
-        emit();
+        canvas.toBlob(async (blob) => {
+          const placeholder = document.getElementById(placeholderId);
+          if (!blob) {
+            placeholder?.remove();
+            warn(`Could not process "${file.name}".`);
+            emit();
+            return;
+          }
+          if (blob.size > MAX_UPLOAD_BYTES) {
+            placeholder?.remove();
+            warn(`"${file.name}" is too large (${(blob.size / 1024 / 1024).toFixed(1)}MB, max 25MB).`);
+            emit();
+            return;
+          }
+          const uploadName = file.name.replace(/\.\w+$/, '.jpg');
+          const result = await uploadFile(new File([blob], uploadName, { type: 'image/jpeg' }));
+          const el = document.getElementById(placeholderId);
+          if (!result) { el?.remove(); emit(); return; }
+          const imgEl = document.createElement('img');
+          imgEl.src = result.url;
+          imgEl.alt = file.name;
+          imgEl.title = file.name;
+          imgEl.style.cssText = 'max-width:100%;border-radius:6px;margin:6px 0;display:block;';
+          el?.replaceWith(imgEl);
+          emit();
+        }, 'image/jpeg', 0.75);
       };
       img.onerror = () => {
-        // Fallback: insert original if canvas fails
-        editorRef.current?.focus();
-        document.execCommand('insertHTML', false,
-          `<img src="${originalSrc}" alt="${file.name}" style="max-width:100%;border-radius:6px;margin:6px 0;display:block;" title="${file.name}" />`
-        );
+        document.getElementById(placeholderId)?.remove();
+        warn(`Could not read "${file.name}".`);
         emit();
       };
       img.src = originalSrc;
@@ -278,36 +303,35 @@ export default function RichTextEditor({
     reader.readAsDataURL(file);
   };
 
-  /* ── Insert non-image file as download chip ──────────────────────── */
+  /* ── Insert non-image file: upload, embed as a download chip ──────── */
   const insertFile = (file: File) => {
-    if (file.size > MAX_FILE_BYTES) {
-      warn(`"${file.name}" is too large to attach here (${(file.size / 1024 / 1024).toFixed(1)}MB, max 20MB).`);
+    if (file.size > MAX_UPLOAD_BYTES) {
+      warn(`"${file.name}" is too large to attach (${(file.size / 1024 / 1024).toFixed(1)}MB, max 25MB).`);
       return;
     }
-    // Base64 runs ~33% larger than the raw file
-    if (!roomLeft(file.size * 1.4)) {
-      warn(`Adding "${file.name}" would make this description too large combined with existing attachments. Remove something first or attach a smaller file.`);
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const dataUrl = ev.target?.result as string;
-      const ext = file.name.split('.').pop()?.toUpperCase() || 'FILE';
-      const sizeKb = (file.size / 1024).toFixed(0);
-      editorRef.current?.focus();
-      document.execCommand('insertHTML', false,
-        `<a href="${dataUrl}" download="${file.name}" data-filename="${file.name}" data-filesize="${sizeKb} KB"
-          style="display:inline-flex;align-items:center;gap:6px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;padding:6px 10px;margin:4px 2px;text-decoration:none;color:#1e40af;font-size:12px;font-weight:500;cursor:pointer;"
-          contenteditable="false">
-          <span style="background:#3b82f6;color:white;border-radius:4px;padding:2px 5px;font-size:10px;font-weight:700;">${ext}</span>
-          <span style="color:#374151;">${file.name}</span>
-          <span style="color:#9ca3af;font-size:11px;">${sizeKb} KB</span>
-          <span style="color:#6b7280;font-size:11px;">⬇</span>
-        </a>&nbsp;`
-      );
+    const placeholderId = `up-${Math.random().toString(36).slice(2)}`;
+    const ext = file.name.split('.').pop()?.toUpperCase() || 'FILE';
+    const sizeKb = (file.size / 1024).toFixed(0);
+    editorRef.current?.focus();
+    document.execCommand('insertHTML', false,
+      `<span id="${placeholderId}" contenteditable="false" style="display:inline-block;padding:4px 8px;background:#f1f5f9;border-radius:6px;color:#64748b;font-size:12px;">Uploading "${file.name}"…</span>&nbsp;`
+    );
+    emit();
+
+    uploadFile(file).then((result) => {
+      const el = document.getElementById(placeholderId);
+      if (!result) { el?.remove(); emit(); return; }
+      const a = document.createElement('a');
+      a.href = result.url;
+      a.download = file.name;
+      a.setAttribute('data-filename', file.name);
+      a.setAttribute('data-filesize', `${sizeKb} KB`);
+      a.setAttribute('contenteditable', 'false');
+      a.style.cssText = 'display:inline-flex;align-items:center;gap:6px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;padding:6px 10px;margin:4px 2px;text-decoration:none;color:#1e40af;font-size:12px;font-weight:500;cursor:pointer;';
+      a.innerHTML = `<span style="background:#3b82f6;color:white;border-radius:4px;padding:2px 5px;font-size:10px;font-weight:700;">${ext}</span><span style="color:#374151;">${file.name}</span><span style="color:#9ca3af;font-size:11px;">${sizeKb} KB</span><span style="color:#6b7280;font-size:11px;">⬇</span>`;
+      el?.replaceWith(a);
       emit();
-    };
-    reader.readAsDataURL(file);
+    });
   };
 
   /* ── Paste: intercept images; keep HTML formatting ─────────────── */

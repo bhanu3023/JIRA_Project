@@ -13,8 +13,13 @@ import { Pool } from 'pg';
 import { getNextAgent, getDefaultDepartment, getRrConfig, saveRrConfig } from '@/lib/rr-service';
 import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs } from '@/lib/connector-service';
 
+// max: 20 — default pg pool max (10) queues requests behind a shared handful
+// of connections once concurrent users stack up. This pool backs almost every
+// raw SQL call in the app (issue creation, lists, comments, etc.), so it's
+// worth sizing deliberately rather than leaving it at the client default.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db',
+  max: 20,
 });
 
 // 60-second in-memory cache for user role lookups so every API request
@@ -1105,6 +1110,33 @@ async function _handleJiraPgApi(
       token: encodeToken(user.id, clientIp, clientUA),
       user: { ...formatUser(user), status: 'active' },
     });
+  }
+
+  // Generic small-file upload for description images/attachments — returns a
+  // static URL so the description payload stays tiny instead of carrying the
+  // whole file as base64 (that was blowing past the reverse-proxy body-size
+  // limit and making ticket creation slow to upload on the client).
+  if (path === 'uploads' && method === 'POST') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    try {
+      const formData = await req.formData();
+      const file = formData.get('file');
+      if (!(file instanceof Blob)) return json({ error: 'No file provided' }, 400);
+      const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+      if (file.size > MAX_UPLOAD_BYTES) return json({ error: 'File too large (max 25MB)' }, 413);
+      const { writeFile, mkdir } = await import('fs/promises');
+      const nodePath = await import('path');
+      const id = rid();
+      const originalName = (file as any).name || 'file';
+      const safeName = String(originalName).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'file';
+      const dir = nodePath.join(process.cwd(), 'public', 'uploads', 'tmp', id);
+      await mkdir(dir, { recursive: true });
+      const buf = Buffer.from(await file.arrayBuffer());
+      await writeFile(nodePath.join(dir, safeName), buf);
+      return json({ url: `/uploads/tmp/${id}/${safeName}`, filename: safeName, size: file.size });
+    } catch (e: any) {
+      return json({ error: e?.message || 'Upload failed' }, 500);
+    }
   }
 
   if (path === 'auth/register' && method === 'POST') {
