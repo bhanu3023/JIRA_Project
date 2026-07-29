@@ -49,11 +49,13 @@ export default function RichTextEditor({
   const fileRef    = useRef<HTMLInputElement>(null);
   const skipSync   = useRef(false);
 
-  // Keep inline attachments well under typical reverse-proxy body-size limits
-  // (e.g. nginx's 1MB default) since the whole description — images and all —
-  // rides along as base64 inside the issue-create/update JSON payload.
-  const MAX_IMAGE_BYTES = 1.5 * 1024 * 1024;
-  const MAX_FILE_BYTES  = 2 * 1024 * 1024;
+  // Keep inline attachments under the reverse proxy's body-size limit (raised
+  // to 25MB server-side — see nginx client_max_body_size) since the whole
+  // description — images and all — rides along as base64 inside the
+  // issue-create/update JSON payload. Base64 adds ~33% overhead, so these
+  // caps leave headroom under that 25MB ceiling.
+  const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+  const MAX_FILE_BYTES  = 15 * 1024 * 1024;
   const [warning, setWarning] = useState<string | null>(null);
   const warnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warn = (msg: string) => {
@@ -244,7 +246,7 @@ export default function RichTextEditor({
           compressed = canvas.toDataURL('image/jpeg', 0.5);
         }
         if (compressed.length > MAX_IMAGE_BYTES) {
-          warn(`"${file.name}" is too large even after compression. Please use a smaller image (under ~1.5MB).`);
+          warn(`"${file.name}" is too large even after compression. Please use a smaller image (under ~8MB).`);
           return;
         }
         editorRef.current?.focus();
@@ -269,7 +271,7 @@ export default function RichTextEditor({
   /* ── Insert non-image file as download chip ──────────────────────── */
   const insertFile = (file: File) => {
     if (file.size > MAX_FILE_BYTES) {
-      warn(`"${file.name}" is too large to attach here (${(file.size / 1024 / 1024).toFixed(1)}MB, max 2MB).`);
+      warn(`"${file.name}" is too large to attach here (${(file.size / 1024 / 1024).toFixed(1)}MB, max 15MB).`);
       return;
     }
     const reader = new FileReader();
