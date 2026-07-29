@@ -41,6 +41,13 @@ interface AppState {
   loadIssues: (params?: Record<string, string>) => Promise<void>;
   prefetchIssues: (params?: Record<string, string>) => Promise<void>;
   clearIssuesCache: (params?: Record<string, string>) => void;
+  // Bumped whenever an issue is created/mutated somewhere that doesn't know the
+  // exact params of whatever list view is currently on screen (e.g. the global
+  // header's Create button). List views depend on this in their fetch effect
+  // and re-fetch with THEIR OWN correct params — far safer than a caller
+  // guessing params and overwriting the display with a mismatched query.
+  issuesVersion: number;
+  bumpIssuesVersion: () => void;
   loadIssue: (key: string) => Promise<void>;
   createIssue: (data: any) => Promise<any>;
   updateIssue: (key: string, data: any) => Promise<void>;
@@ -157,6 +164,8 @@ export const useStore = create<AppState>((set, get) => ({
   currentIssue: null,
   issueTotal: 0,
   issuePage: 1,
+  issuesVersion: 0,
+  bumpIssuesVersion: () => set(s => ({ issuesVersion: s.issuesVersion + 1 })),
   loadIssues: async (params = {}) => {
     const cacheKey = JSON.stringify(params);
     // Mark this as the active queue — any in-flight fetch for a different key must not overwrite display

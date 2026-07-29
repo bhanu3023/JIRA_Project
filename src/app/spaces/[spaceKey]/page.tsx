@@ -114,7 +114,7 @@ function SpaceDetailContent() {
       : Array.isArray(rawKey)
         ? (rawKey[0] || '').toUpperCase()
         : '';
-  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user } = useStore(
+  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion } = useStore(
     useShallow((s) => ({
       currentSpace: s.currentSpace,
       loadSpace: s.loadSpace,
@@ -125,6 +125,7 @@ function SpaceDetailContent() {
       clearIssuesCache: s.clearIssuesCache,
       loading: s.loading,
       user: s.user,
+      issuesVersion: s.issuesVersion,
     })),
   );
   // Static column definitions (always available)
@@ -504,7 +505,7 @@ function SpaceDetailContent() {
       }
     })();
     return () => { cancelled = true; setIsFetching(false); };
-  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id]);
+  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id, issuesVersion]);
 
   // Auto-refresh Sent/Watching every 15s — silent background refresh, never clears display
   useEffect(() => {
