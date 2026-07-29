@@ -243,6 +243,9 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     productType: '', projectManager: '',
   });
   const [summaryError, setSummaryError] = useState(false);
+  const [combinationError, setCombinationError]     = useState(false);
+  const [productTypeError, setProductTypeError]     = useState(false);
+  const [projectManagerError, setProjectManagerError] = useState(false);
   const [error, setError]               = useState('');
   const [loading, setLoading]           = useState(false);
   const [uploading, setUploading]       = useState(false);
@@ -309,9 +312,28 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!form.summary.trim()) { setSummaryError(true); return; }
+
+    const missingSummary        = !form.summary.trim();
+    const missingCombination    = form.combination.length === 0;
+    const missingProductType    = !form.productType;
+    const missingProjectManager = !form.projectManager;
+
+    setSummaryError(missingSummary);
+    setCombinationError(missingCombination);
+    setProductTypeError(missingProductType);
+    setProjectManagerError(missingProjectManager);
+
+    if (missingSummary || missingCombination || missingProductType || missingProjectManager) {
+      const missingLabels = [
+        missingSummary && 'Summary',
+        missingCombination && 'Combination',
+        missingProductType && 'Product Type',
+        missingProjectManager && 'Project Manager',
+      ].filter(Boolean);
+      setError(`Please fill in the required field${missingLabels.length > 1 ? 's' : ''}: ${missingLabels.join(', ')}`);
+      return;
+    }
     if (uploading) { setError('Please wait for attachments to finish uploading before creating.'); return; }
-    setSummaryError(false);
     setError('');
     setLoading(true);
     try {
@@ -341,6 +363,9 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         setForm(f => ({ ...f, summary: '', description: '', dueDate: '', combination: [], productType: '', projectManager: '' }));
         setCustomFieldValues({});
         setSummaryError(false);
+        setCombinationError(false);
+        setProductTypeError(false);
+        setProjectManagerError(false);
       } else {
         onCreated(newIssue);
       }
@@ -351,9 +376,12 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     }
   };
 
-  const update = (field: string, value: string) => {
+  const update = (field: string, value: any) => {
     setForm(f => ({ ...f, [field]: value }));
     if (field === 'summary' && value.trim()) setSummaryError(false);
+    if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
+    if (field === 'productType' && value) setProductTypeError(false);
+    if (field === 'projectManager' && value) setProjectManagerError(false);
   };
 
   const selectedAssignee = spaceMembers.find(m => m.id === form.assigneeId);
@@ -451,33 +479,63 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
             {/* Combination */}
             <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Combination</label>
-              <CombinationDropdown
-                value={form.combination}
-                onChange={v => update('combination', v)}
-              />
+              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                Combination <span className="text-red-500">*</span>
+              </label>
+              <div className={combinationError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                <CombinationDropdown
+                  value={form.combination}
+                  onChange={v => update('combination', v)}
+                />
+              </div>
+              {combinationError && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                  <p className="text-[12px] text-red-600 font-medium">Combination is required</p>
+                </div>
+              )}
             </div>
 
             {/* Product Type */}
             <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Product Type</label>
-              <SearchableSelect
-                value={form.productType}
-                onChange={v => update('productType', v)}
-                options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
-                placeholder="Select product type..."
-              />
+              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                Product Type <span className="text-red-500">*</span>
+              </label>
+              <div className={productTypeError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                <SearchableSelect
+                  value={form.productType}
+                  onChange={v => update('productType', v)}
+                  options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
+                  placeholder="Select product type..."
+                />
+              </div>
+              {productTypeError && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                  <p className="text-[12px] text-red-600 font-medium">Product Type is required</p>
+                </div>
+              )}
             </div>
 
             {/* Project Manager */}
             <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Project Manager</label>
-              <SearchableSelect
-                value={form.projectManager}
-                onChange={v => update('projectManager', v)}
-                options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan']}
-                placeholder="Select project manager..."
-              />
+              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                Project Manager <span className="text-red-500">*</span>
+              </label>
+              <div className={projectManagerError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                <SearchableSelect
+                  value={form.projectManager}
+                  onChange={v => update('projectManager', v)}
+                  options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan']}
+                  placeholder="Select project manager..."
+                />
+              </div>
+              {projectManagerError && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                  <p className="text-[12px] text-red-600 font-medium">Project Manager is required</p>
+                </div>
+              )}
             </div>
 
             {/* Dynamic custom fields */}
