@@ -55,7 +55,7 @@ export default function RichTextEditor({
   // body-size limit and made ticket creation slow (uploading tens of MB of
   // base64 text as part of the create-issue request). A plain URL keeps the
   // create-issue payload tiny no matter how big the attachment is.
-  const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+  const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
   const [warning, setWarning] = useState<string | null>(null);
   const warnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warn = (msg: string) => {
@@ -276,7 +276,7 @@ export default function RichTextEditor({
           }
           if (blob.size > MAX_UPLOAD_BYTES) {
             placeholder?.remove();
-            warn(`"${file.name}" is too large (${(blob.size / 1024 / 1024).toFixed(1)}MB, max 25MB).`);
+            warn(`"${file.name}" is too large (${(blob.size / 1024 / 1024).toFixed(1)}MB, max 500MB).`);
             emit();
             return;
           }
@@ -306,7 +306,7 @@ export default function RichTextEditor({
   /* ── Insert non-image file: upload, embed as a download chip ──────── */
   const insertFile = (file: File) => {
     if (file.size > MAX_UPLOAD_BYTES) {
-      warn(`"${file.name}" is too large to attach (${(file.size / 1024 / 1024).toFixed(1)}MB, max 25MB).`);
+      warn(`"${file.name}" is too large to attach (${(file.size / 1024 / 1024).toFixed(1)}MB, max 500MB).`);
       return;
     }
     const placeholderId = `up-${Math.random().toString(36).slice(2)}`;

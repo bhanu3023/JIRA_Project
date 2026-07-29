@@ -1116,26 +1116,63 @@ async function _handleJiraPgApi(
   // static URL so the description payload stays tiny instead of carrying the
   // whole file as base64 (that was blowing past the reverse-proxy body-size
   // limit and making ticket creation slow to upload on the client).
+  //
+  // Stored under <cwd>/uploads (NOT public/) and served via the GET branch
+  // below rather than Next's static /public handler: `next start` builds a
+  // route manifest for /public at build time, so files written there after
+  // the server has started 404 even though they exist on disk. Reading the
+  // file from disk on every request sidesteps that entirely.
   if (path === 'uploads' && method === 'POST') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     try {
       const formData = await req.formData();
       const file = formData.get('file');
       if (!(file instanceof Blob)) return json({ error: 'No file provided' }, 400);
-      const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-      if (file.size > MAX_UPLOAD_BYTES) return json({ error: 'File too large (max 25MB)' }, 413);
+      const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+      if (file.size > MAX_UPLOAD_BYTES) return json({ error: 'File too large (max 500MB)' }, 413);
       const { writeFile, mkdir } = await import('fs/promises');
       const nodePath = await import('path');
       const id = rid();
       const originalName = (file as any).name || 'file';
       const safeName = String(originalName).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'file';
-      const dir = nodePath.join(process.cwd(), 'public', 'uploads', 'tmp', id);
+      const dir = nodePath.join(process.cwd(), 'uploads', 'tmp', id);
       await mkdir(dir, { recursive: true });
       const buf = Buffer.from(await file.arrayBuffer());
       await writeFile(nodePath.join(dir, safeName), buf);
-      return json({ url: `/uploads/tmp/${id}/${safeName}`, filename: safeName, size: file.size });
+      return json({ url: `/api/uploads/tmp/${id}/${safeName}`, filename: safeName, size: file.size });
     } catch (e: any) {
       return json({ error: e?.message || 'Upload failed' }, 500);
+    }
+  }
+
+  // Serve previously uploaded files by reading straight from disk (see note above).
+  if (segments[0] === 'uploads' && method === 'GET') {
+    try {
+      const nodePath = await import('path');
+      const { readFile, stat } = await import('fs/promises');
+      const uploadsRoot = nodePath.join(process.cwd(), 'uploads');
+      const safeSegments = segments.slice(1).map((s) => s.replace(/[^a-zA-Z0-9._-]/g, '_'));
+      const filePath = nodePath.resolve(uploadsRoot, ...safeSegments);
+      if (!filePath.startsWith(uploadsRoot)) return new NextResponse(null, { status: 400 });
+      const fileStat = await stat(filePath).catch(() => null);
+      if (!fileStat || !fileStat.isFile()) return new NextResponse(null, { status: 404 });
+      const buf = await readFile(filePath);
+      const ext = (safeSegments[safeSegments.length - 1]?.split('.').pop() || '').toLowerCase();
+      const mimeMap: Record<string, string> = {
+        jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+        pdf: 'application/pdf', csv: 'text/csv', txt: 'text/plain', zip: 'application/zip',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      };
+      return new NextResponse(buf, {
+        headers: {
+          'Content-Type': mimeMap[ext] || 'application/octet-stream',
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        },
+      });
+    } catch {
+      return new NextResponse(null, { status: 500 });
     }
   }
 
