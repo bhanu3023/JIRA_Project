@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -54,10 +54,30 @@ export default function Header() {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
-  // Pick the first available space for the global Create modal
-  const defaultSpace = spaces[0];
+  // If the user is currently viewing a space/queue, the global Create button
+  // should default to that space + department instead of always the first
+  // space in the list — otherwise a ticket created while looking at e.g. the
+  // "Migration" queue silently lands with no department and never shows up
+  // there (it isn't visible from any department-filtered queue).
+  const spaceMatch = pathname?.match(/^\/spaces\/([^/]+)/);
+  const pathSpaceKey = spaceMatch ? decodeURIComponent(spaceMatch[1]).toUpperCase() : '';
+  const pathSpace = pathSpaceKey ? spaces.find((s: any) => s.key === pathSpaceKey) : undefined;
+  const defaultSpace = pathSpace || spaces[0];
   const defaultSpaceKey = defaultSpace?.key || '';
+
+  const queueParam = searchParams?.get('queue') || '';
+  const deptParam = searchParams?.get('dept') || '';
+  let headerInitialDept: string | undefined = deptParam || undefined;
+  if (!headerInitialDept && pathSpaceKey && queueParam.startsWith('cq_')) {
+    try {
+      const stored = localStorage.getItem(`custom_queues_${pathSpaceKey}`);
+      const queues = stored ? JSON.parse(stored) : [];
+      headerInitialDept = queues.find((q: any) => q.id === queueParam)?.name || undefined;
+    } catch { /* localStorage may be unavailable or stale — fall back to no default */ }
+  }
 
   useEffect(() => {
     loadNotifications();
@@ -403,6 +423,7 @@ export default function Header() {
           spaceKey={defaultSpaceKey}
           statuses={(defaultSpace as any)?.statuses || []}
           members={(defaultSpace as any)?.members || []}
+          initialDept={headerInitialDept}
           onClose={() => setShowCreateModal(false)}
           onCreated={() => {
             setShowCreateModal(false);
