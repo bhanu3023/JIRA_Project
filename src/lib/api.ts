@@ -60,6 +60,10 @@ class ApiClient {
       throw new Error(errMsg);
     }
 
+    if (res.status === 413) {
+      throw new Error('That request is too large — the description or an attached image/file is too big. Try a smaller image or remove an attachment and try again.');
+    }
+
     if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
     return data as T;
   }

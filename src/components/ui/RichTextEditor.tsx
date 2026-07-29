@@ -49,6 +49,19 @@ export default function RichTextEditor({
   const fileRef    = useRef<HTMLInputElement>(null);
   const skipSync   = useRef(false);
 
+  // Keep inline attachments well under typical reverse-proxy body-size limits
+  // (e.g. nginx's 1MB default) since the whole description — images and all —
+  // rides along as base64 inside the issue-create/update JSON payload.
+  const MAX_IMAGE_BYTES = 1.5 * 1024 * 1024;
+  const MAX_FILE_BYTES  = 2 * 1024 * 1024;
+  const [warning, setWarning] = useState<string | null>(null);
+  const warnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const warn = (msg: string) => {
+    setWarning(msg);
+    if (warnTimer.current) clearTimeout(warnTimer.current);
+    warnTimer.current = setTimeout(() => setWarning(null), 5000);
+  };
+
   // ── @ Mention state ──────────────────────────────────────────────────
   const [mentionOpen,   setMentionOpen]   = useState(false);
   const [mentionQuery,  setMentionQuery]  = useState('');
@@ -225,7 +238,15 @@ export default function RichTextEditor({
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
         // JPEG at 0.75 quality — ~10x smaller than raw PNG for photos
-        const compressed = canvas.toDataURL('image/jpeg', 0.75);
+        let compressed = canvas.toDataURL('image/jpeg', 0.75);
+        if (compressed.length > MAX_IMAGE_BYTES) {
+          // One more pass at lower quality before giving up
+          compressed = canvas.toDataURL('image/jpeg', 0.5);
+        }
+        if (compressed.length > MAX_IMAGE_BYTES) {
+          warn(`"${file.name}" is too large even after compression. Please use a smaller image (under ~1.5MB).`);
+          return;
+        }
         editorRef.current?.focus();
         document.execCommand('insertHTML', false,
           `<img src="${compressed}" alt="${file.name}" style="max-width:100%;border-radius:6px;margin:6px 0;display:block;" title="${file.name}" />`
@@ -247,6 +268,10 @@ export default function RichTextEditor({
 
   /* ── Insert non-image file as download chip ──────────────────────── */
   const insertFile = (file: File) => {
+    if (file.size > MAX_FILE_BYTES) {
+      warn(`"${file.name}" is too large to attach here (${(file.size / 1024 / 1024).toFixed(1)}MB, max 2MB).`);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = (ev) => {
       const dataUrl = ev.target?.result as string;
@@ -412,6 +437,12 @@ export default function RichTextEditor({
         <TBtn title="Insert image" onClick={() => imgRef.current?.click()}><ImageIcon size={13} /></TBtn>
         <TBtn title="Attach file"  onClick={() => fileRef.current?.click()}><Paperclip size={13} /></TBtn>
       </div>
+
+      {warning && (
+        <div className="px-3 py-1.5 text-xs text-amber-800 bg-amber-50 border-b border-amber-200">
+          {warning}
+        </div>
+      )}
 
       {/* ── Editable area ── */}
       <div
