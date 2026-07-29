@@ -26,7 +26,7 @@ import {
 const PRIVILEGED_ROLES = ['admin'];
 
 export default function Header() {
-  const { user, logout, notifications, unreadCount, loadNotifications, markAllNotificationsRead, spaces, loadIssues } = useStore(
+  const { user, logout, notifications, unreadCount, loadNotifications, markAllNotificationsRead, spaces, bumpIssuesVersion } = useStore(
     useShallow((s) => ({
       user: s.user,
       logout: s.logout,
@@ -35,7 +35,7 @@ export default function Header() {
       loadNotifications: s.loadNotifications,
       markAllNotificationsRead: s.markAllNotificationsRead,
       spaces: s.spaces,
-      loadIssues: s.loadIssues,
+      bumpIssuesVersion: s.bumpIssuesVersion,
     })),
   );
   const isPrivileged = PRIVILEGED_ROLES.includes(user?.role || '');
@@ -427,11 +427,12 @@ export default function Header() {
           onClose={() => setShowCreateModal(false)}
           onCreated={() => {
             setShowCreateModal(false);
-            // Refresh issues if currently on a space page
-            if (typeof window !== 'undefined') {
-              const match = window.location.pathname.match(/\/spaces\/([^/]+)/);
-              if (match) loadIssues({ spaceKey: match[1] });
-            }
+            // Don't call loadIssues here — this component doesn't know the exact
+            // params (dept/queue/filters/page) of whatever list view is on screen,
+            // and a mismatched query wipes the display to empty before overwriting
+            // it with unfiltered data. Bump the shared version instead so the
+            // mounted list view refetches with its own correct params.
+            bumpIssuesVersion();
           }}
         />
       )}
