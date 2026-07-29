@@ -358,6 +358,9 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   const selectedAssignee = spaceMembers.find(m => m.id === form.assigneeId);
   const workTypeLabel = WORK_TYPES.find(t => t.value === form.type)?.label || 'Task';
+  // Real department destinations only — the built-in entries (Unassigned/Assigned/My
+  // Queue/All Requests) are list-filter views, not places a new ticket can be routed to.
+  const queueOptions = Array.from(new Set(spaceQueues.map(q => q.dept).filter((d): d is string => !!d)));
 
   const categoryOrder: Record<string, number> = { todo: 0, in_progress: 1, done: 3 };
   const sortedStatuses = [...spaceStatuses].sort((a, b) => {
@@ -599,6 +602,26 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
               </div>
             </div>
+
+            {/* Queue — which department/queue this ticket lands in */}
+            {queueOptions.length > 0 && (
+              <div className="mb-4">
+                <label className="block text-[12px] font-semibold text-gray-500 mb-1">Queue</label>
+                <div className="relative">
+                  <select
+                    value={form.department}
+                    onChange={e => update('department', e.target.value)}
+                    className="w-full px-3 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">No queue</option>
+                    {queueOptions.map(name => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                  </select>
+                  <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+            )}
 
             {/* Priority */}
             <div className="mb-4">
