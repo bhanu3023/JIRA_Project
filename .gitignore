@@ -38,6 +38,7 @@ Thumbs.db
 neutara_db_dump.sql
 neutara_db_dump.sql.gz
 public/uploads/attachments/
+public/uploads/tmp/
 db-backup/*.sql
 db-backup/*.dump
 neutara_db_dump.sql.gz
