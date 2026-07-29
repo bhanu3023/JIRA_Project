@@ -1384,6 +1384,19 @@ async function _handleJiraPgApi(
     return json(spaces.map(formatSpace));
   }
 
+  // Every space's key only — deliberately NOT membership-filtered like GET /spaces above.
+  // Used by the issue detail page to find which space owns a department's workflow
+  // (statuses/transitions) when resolving the status-change dropdown: a department's
+  // workflow can live in a space the viewing user isn't a member of, and without this
+  // the dropdown silently came up empty (no transitions) for anyone but an admin, since
+  // admins are the only ones who see every space via GET /spaces. Just keys/names, no
+  // membership or issue data, so exposing it to any authenticated user is fine.
+  if (path === 'all-space-keys' && method === 'GET') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const rows = await db.space.findMany({ select: { key: true } });
+    return json(rows.map((r) => r.key));
+  }
+
   if (path === 'spaces' && method === 'POST') {
     const body = await readJson(req);
     const key = String(body.key || '').toUpperCase().replace(/[^A-Z0-9]/g, '');

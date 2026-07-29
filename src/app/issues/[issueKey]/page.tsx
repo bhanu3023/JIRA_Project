@@ -310,18 +310,32 @@ export default function IssueDetailPage() {
       };
 
       if (dept) {
-        // Search all spaces for a queue matching current_department.
-        // Check issue's own space first (most likely), then remaining spaces.
-        // No type filter — CloudFuze Board may not have type='dept_queue'.
-        const allSpaceKeys = [
-          currentIssue.spaceKey,
-          ...(spaces as any[]).map((s: any) => s.key).filter((k: string) => k !== currentIssue.spaceKey),
-        ];
-        let found = false;
-        for (const spKey of allSpaceKeys) {
+        // Search all spaces for a queue matching current_department. Must search
+        // EVERY space, not just ones the viewing user is a member of — a department's
+        // workflow can live in a space a regular agent was never added to, and the
+        // status dropdown should still work for them. GET /spaces is membership-
+        // filtered for non-admins, which is why this used to only work for admins
+        // (they're the only ones who see every space there); all-space-keys isn't.
+        (async () => {
+          let allSpaceKeys: string[] = [currentIssue.spaceKey];
           try {
-            const stored = localStorage.getItem(`custom_queues_${spKey}`);
-            if (stored) {
+            const keys = await api.request<string[]>('all-space-keys');
+            if (Array.isArray(keys)) {
+              allSpaceKeys = [currentIssue.spaceKey, ...keys.filter((k: string) => k !== currentIssue.spaceKey)];
+            }
+          } catch {
+            // Fall back to whatever spaces this user can already see
+            allSpaceKeys = [
+              currentIssue.spaceKey,
+              ...(spaces as any[]).map((s: any) => s.key).filter((k: string) => k !== currentIssue.spaceKey),
+            ];
+          }
+
+          // Cheap first pass: localStorage cache from spaces this browser has visited
+          for (const spKey of allSpaceKeys) {
+            try {
+              const stored = localStorage.getItem(`custom_queues_${spKey}`);
+              if (!stored) continue;
               const queues: any[] = JSON.parse(stored);
               const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
               if (matchedQueue) {
@@ -333,47 +347,42 @@ export default function IssueDetailPage() {
                     fromStatusId: t.fromStatusId ?? t.from,
                     toStatusId: t.toStatusId ?? t.to,
                   })));
-                  found = true;
-                  break;
+                  return;
                 }
                 const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
                 loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
-                found = true;
-                break;
+                return;
               }
-            }
-          } catch {}
-        }
-        if (!found) {
-          // Fallback: try API — check own space first, then all spaces
-          (async () => {
-            for (const spKey of allSpaceKeys) {
-              try {
-                const queues = await api.request<any[]>(`custom-queues/${spKey}`);
-                if (Array.isArray(queues)) {
-                  const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
-                  if (matchedQueue) {
-                    const qSt = matchedQueue.queueStatuses;
-                    const qTr = matchedQueue.queueTransitions;
-                    if (qSt?.length) {
-                      setSpaceStatuses(qSt);
-                      setWorkflowTransitions((qTr || []).map((t: any) => ({
-                    fromStatusId: t.fromStatusId ?? t.from,
-                    toStatusId: t.toStatusId ?? t.to,
-                  })));
-                      return;
-                    }
-                    const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
-                    loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
+            } catch {}
+          }
+
+          // Fallback: query custom-queues per space via API
+          for (const spKey of allSpaceKeys) {
+            try {
+              const queues = await api.request<any[]>(`custom-queues/${spKey}`);
+              if (Array.isArray(queues)) {
+                const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
+                if (matchedQueue) {
+                  const qSt = matchedQueue.queueStatuses;
+                  const qTr = matchedQueue.queueTransitions;
+                  if (qSt?.length) {
+                    setSpaceStatuses(qSt);
+                    setWorkflowTransitions((qTr || []).map((t: any) => ({
+                      fromStatusId: t.fromStatusId ?? t.from,
+                      toStatusId: t.toStatusId ?? t.to,
+                    })));
                     return;
                   }
+                  const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
+                  loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
+                  return;
                 }
-              } catch {}
-            }
-            // Nothing found — fall back to the original space
-            loadStatusesForSpace(currentIssue.spaceKey);
-          })();
-        }
+              }
+            } catch {}
+          }
+          // Nothing found — fall back to the original space
+          loadStatusesForSpace(currentIssue.spaceKey);
+        })();
       } else {
         loadStatusesForSpace(currentIssue.spaceKey);
       }
