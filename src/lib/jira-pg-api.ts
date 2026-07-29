@@ -1122,8 +1122,8 @@ async function _handleJiraPgApi(
       const formData = await req.formData();
       const file = formData.get('file');
       if (!(file instanceof Blob)) return json({ error: 'No file provided' }, 400);
-      const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-      if (file.size > MAX_UPLOAD_BYTES) return json({ error: 'File too large (max 25MB)' }, 413);
+      const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+      if (file.size > MAX_UPLOAD_BYTES) return json({ error: 'File too large (max 500MB)' }, 413);
       const { writeFile, mkdir } = await import('fs/promises');
       const nodePath = await import('path');
       const id = rid();
