@@ -24,6 +24,7 @@ interface Props {
   minHeight?: string;
   compact?: boolean;
   members?: Member[];   // ← space members for @ mention
+  onUploadingChange?: (uploading: boolean) => void;  // ← true while any attachment upload is in flight
 }
 
 function getInitials(m: Member) {
@@ -43,10 +44,20 @@ export default function RichTextEditor({
   minHeight = '160px',
   compact = false,
   members = [],
+  onUploadingChange,
 }: Props) {
   const editorRef  = useRef<HTMLDivElement>(null);
   const imgRef     = useRef<HTMLInputElement>(null);
   const fileRef    = useRef<HTMLInputElement>(null);
+  const pendingUploads = useRef(0);
+  const beginUpload = () => {
+    pendingUploads.current += 1;
+    if (pendingUploads.current === 1) onUploadingChange?.(true);
+  };
+  const endUpload = () => {
+    pendingUploads.current = Math.max(0, pendingUploads.current - 1);
+    if (pendingUploads.current === 0) onUploadingChange?.(false);
+  };
   const skipSync   = useRef(false);
 
   // Images/files are uploaded to the server and referenced by URL rather than
@@ -252,6 +263,7 @@ export default function RichTextEditor({
       `<span id="${placeholderId}" contenteditable="false" style="display:inline-block;padding:4px 8px;background:#f1f5f9;border-radius:6px;color:#64748b;font-size:12px;">Uploading "${file.name}"…</span>&nbsp;`
     );
     emit();
+    beginUpload();
 
     const reader = new FileReader();
     reader.onload = (ev) => {
@@ -272,18 +284,20 @@ export default function RichTextEditor({
             placeholder?.remove();
             warn(`Could not process "${file.name}".`);
             emit();
+            endUpload();
             return;
           }
           if (blob.size > MAX_UPLOAD_BYTES) {
             placeholder?.remove();
             warn(`"${file.name}" is too large (${(blob.size / 1024 / 1024).toFixed(1)}MB, max 500MB).`);
             emit();
+            endUpload();
             return;
           }
           const uploadName = file.name.replace(/\.\w+$/, '.jpg');
           const result = await uploadFile(new File([blob], uploadName, { type: 'image/jpeg' }));
           const el = document.getElementById(placeholderId);
-          if (!result) { el?.remove(); emit(); return; }
+          if (!result) { el?.remove(); emit(); endUpload(); return; }
           const imgEl = document.createElement('img');
           imgEl.src = result.url;
           imgEl.alt = file.name;
@@ -291,12 +305,14 @@ export default function RichTextEditor({
           imgEl.style.cssText = 'max-width:100%;border-radius:6px;margin:6px 0;display:block;';
           el?.replaceWith(imgEl);
           emit();
+          endUpload();
         }, 'image/jpeg', 0.75);
       };
       img.onerror = () => {
         document.getElementById(placeholderId)?.remove();
         warn(`Could not read "${file.name}".`);
         emit();
+        endUpload();
       };
       img.src = originalSrc;
     };
@@ -317,10 +333,11 @@ export default function RichTextEditor({
       `<span id="${placeholderId}" contenteditable="false" style="display:inline-block;padding:4px 8px;background:#f1f5f9;border-radius:6px;color:#64748b;font-size:12px;">Uploading "${file.name}"…</span>&nbsp;`
     );
     emit();
+    beginUpload();
 
     uploadFile(file).then((result) => {
       const el = document.getElementById(placeholderId);
-      if (!result) { el?.remove(); emit(); return; }
+      if (!result) { el?.remove(); emit(); endUpload(); return; }
       const a = document.createElement('a');
       a.href = result.url;
       a.download = file.name;
@@ -331,6 +348,7 @@ export default function RichTextEditor({
       a.innerHTML = `<span style="background:#3b82f6;color:white;border-radius:4px;padding:2px 5px;font-size:10px;font-weight:700;">${ext}</span><span style="color:#374151;">${file.name}</span><span style="color:#9ca3af;font-size:11px;">${sizeKb} KB</span><span style="color:#6b7280;font-size:11px;">⬇</span>`;
       el?.replaceWith(a);
       emit();
+      endUpload();
     });
   };
 

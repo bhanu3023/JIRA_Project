@@ -245,6 +245,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [summaryError, setSummaryError] = useState(false);
   const [error, setError]               = useState('');
   const [loading, setLoading]           = useState(false);
+  const [uploading, setUploading]       = useState(false);
   const [createAnother, setCreateAnother] = useState(false);
   const [infoBannerVisible, setInfoBannerVisible] = useState(true);
   const [requestTypeOpen, setRequestTypeOpen]     = useState(false);
@@ -309,6 +310,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!form.summary.trim()) { setSummaryError(true); return; }
+    if (uploading) { setError('Please wait for attachments to finish uploading before creating.'); return; }
     setSummaryError(false);
     setError('');
     setLoading(true);
@@ -440,6 +442,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 onChange={v => update('description', v)}
                 placeholder="Add a description… paste or drag images, use the toolbar to format"
                 minHeight="280px"
+                onUploadingChange={setUploading}
               />
             </div>
 
@@ -675,10 +678,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             </button>
             <button
               onClick={handleSubmit}
-              disabled={loading}
+              disabled={loading || uploading}
+              title={uploading ? 'Waiting for attachments to finish uploading…' : undefined}
               className="px-6 py-1.5 text-[13px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {loading ? 'Creating…' : 'Create'}
+              {loading ? 'Creating…' : uploading ? 'Uploading…' : 'Create'}
             </button>
           </div>
         </div>
