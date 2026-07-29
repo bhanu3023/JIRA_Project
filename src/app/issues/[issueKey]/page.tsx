@@ -761,13 +761,32 @@ export default function IssueDetailPage() {
     }
   };
 
+  // router.back() assumes there's always an in-app page behind this one in
+  // browser history — but opening an issue directly (email link, notification,
+  // shared URL, refresh) leaves no such history, so "Back" would land
+  // somewhere unrelated or force a full reload instead of returning to the
+  // ticket's queue. Navigate to a known destination instead: the queue this
+  // ticket's department belongs to, list caching there means it renders from
+  // cache instantly rather than re-fetching.
+  const handleBack = () => {
+    const spaceKey = currentIssue?.spaceKey || issueKey.split('-').slice(0, -1).join('-');
+    const dept = (currentIssue as any)?.current_department;
+    if (spaceKey && dept) {
+      router.push(`/spaces/${spaceKey}?queue=dept_all&dept=${encodeURIComponent(dept)}`);
+    } else if (spaceKey) {
+      router.push(`/spaces/${spaceKey}`);
+    } else {
+      router.push('/dashboard');
+    }
+  };
+
   if (issueLoadDone && !currentIssue) return (
     <div className="flex items-center justify-center h-64">
       <div className="flex flex-col items-center gap-3 text-center">
         <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-400 text-2xl">?</div>
         <p className="text-base font-semibold text-gray-700">Issue not found</p>
         <p className="text-sm text-gray-400">The issue <span className="font-mono font-medium text-gray-600">{issueKey}</span> does not exist or was deleted.</p>
-        <button onClick={() => router.back()} className="mt-2 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">Go back</button>
+        <button onClick={handleBack} className="mt-2 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">Go back</button>
       </div>
     </div>
   );
@@ -848,7 +867,7 @@ export default function IssueDetailPage() {
       <div className="flex items-center justify-between px-6 py-2.5 border-b border-gray-200 bg-white flex-shrink-0">
         {/* Left: Back + type icon + issue key */}
         <div className="flex items-center gap-2 text-sm">
-          <button onClick={() => router.back()} className="flex items-center gap-1.5 text-gray-500 hover:text-indigo-600 font-medium transition-colors">
+          <button onClick={handleBack} className="flex items-center gap-1.5 text-gray-500 hover:text-indigo-600 font-medium transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
             Back
           </button>

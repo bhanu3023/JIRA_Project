@@ -2884,11 +2884,16 @@ async function _handleJiraPgApi(
       return json({ error: 'Issue not found' }, 404);
     }
 
-    // Auto-refresh custom fields from Jira if all 5 are null (never synced)
+    // Auto-refresh custom fields from Jira if all 5 are null (never synced).
+    // Fire-and-forget: this hits a real external Jira Cloud API with no timeout
+    // on the fetch calls, so awaiting it here could hang the whole issue page
+    // indefinitely if Jira is slow, unreachable, or rate-limiting. Running it
+    // in the background means this load won't show the freshly-synced fields,
+    // but the next load will, and the page never hangs waiting on Jira.
     if (
       issue.customerName === null && issue.clientName === null &&
       issue.projectManager === null && issue.productType === null && issue.combination === null
-    ) {
+    ) (async () => {
       try {
         const prefix = key.split('-')[0];
         const meta = PREFIX_TO_META[prefix];
@@ -2954,7 +2959,7 @@ async function _handleJiraPgApi(
           }
         }
       } catch { /* non-fatal */ }
-    }
+    })().catch(() => {});
 
     // Load attachments, history, links (both directions)
     const dbAttachments = await (db as any).attachment.findMany({
