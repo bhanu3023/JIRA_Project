@@ -49,13 +49,17 @@ export default function RichTextEditor({
   const fileRef    = useRef<HTMLInputElement>(null);
   const skipSync   = useRef(false);
 
-  // Keep inline attachments under the reverse proxy's body-size limit (raised
-  // to 25MB server-side — see nginx client_max_body_size) since the whole
-  // description — images and all — rides along as base64 inside the
-  // issue-create/update JSON payload. Base64 adds ~33% overhead, so these
-  // caps leave headroom under that 25MB ceiling.
-  const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-  const MAX_FILE_BYTES  = 15 * 1024 * 1024;
+  // Keep inline attachments under the reverse proxy's body-size limit (must be
+  // raised server-side — see nginx client_max_body_size — since this app
+  // code alone cannot lift a proxy-enforced ceiling) as the whole description
+  // — every embedded image/file — rides along as base64 inside the
+  // issue-create/update JSON payload. Base64 adds ~33% overhead on top of
+  // raw file size, so these caps leave headroom under a 50MB proxy limit.
+  // Per-item caps alone aren't enough: several files each under the cap can
+  // still add up past the proxy limit, so also track a running total.
+  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+  const MAX_FILE_BYTES  = 20 * 1024 * 1024;
+  const MAX_TOTAL_BYTES = 35 * 1024 * 1024;
   const [warning, setWarning] = useState<string | null>(null);
   const warnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warn = (msg: string) => {
@@ -63,6 +67,8 @@ export default function RichTextEditor({
     if (warnTimer.current) clearTimeout(warnTimer.current);
     warnTimer.current = setTimeout(() => setWarning(null), 5000);
   };
+  const currentSizeBytes = () => editorRef.current?.innerHTML.length ?? 0;
+  const roomLeft = (extraBytes: number) => currentSizeBytes() + extraBytes <= MAX_TOTAL_BYTES;
 
   // ── @ Mention state ──────────────────────────────────────────────────
   const [mentionOpen,   setMentionOpen]   = useState(false);
@@ -246,7 +252,11 @@ export default function RichTextEditor({
           compressed = canvas.toDataURL('image/jpeg', 0.5);
         }
         if (compressed.length > MAX_IMAGE_BYTES) {
-          warn(`"${file.name}" is too large even after compression. Please use a smaller image (under ~8MB).`);
+          warn(`"${file.name}" is too large even after compression. Please use a smaller image (under ~10MB).`);
+          return;
+        }
+        if (!roomLeft(compressed.length)) {
+          warn(`Adding "${file.name}" would make this description too large combined with existing attachments. Remove something first or use a smaller image.`);
           return;
         }
         editorRef.current?.focus();
@@ -271,7 +281,12 @@ export default function RichTextEditor({
   /* ── Insert non-image file as download chip ──────────────────────── */
   const insertFile = (file: File) => {
     if (file.size > MAX_FILE_BYTES) {
-      warn(`"${file.name}" is too large to attach here (${(file.size / 1024 / 1024).toFixed(1)}MB, max 15MB).`);
+      warn(`"${file.name}" is too large to attach here (${(file.size / 1024 / 1024).toFixed(1)}MB, max 20MB).`);
+      return;
+    }
+    // Base64 runs ~33% larger than the raw file
+    if (!roomLeft(file.size * 1.4)) {
+      warn(`Adding "${file.name}" would make this description too large combined with existing attachments. Remove something first or attach a smaller file.`);
       return;
     }
     const reader = new FileReader();
