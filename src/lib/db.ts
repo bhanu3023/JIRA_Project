@@ -9,7 +9,13 @@ declare global {
 }
 
 function createPrismaClient() {
-  const adapter = new PrismaPg({ connectionString: DB_URL });
+  // Default pg pool max is 10 — far too low once concurrent users start
+  // stacking up (each request holds a connection for the duration of its
+  // queries), causing requests to queue behind the pool instead of failing
+  // fast or running in parallel. 20 gives real headroom while staying well
+  // under Postgres's default max_connections (100), leaving room for the
+  // other pools in this app (jira-pg-api.ts's raw pool, email pollers, etc).
+  const adapter = new PrismaPg({ connectionString: DB_URL, max: 20 });
   return new PrismaClient({ adapter });
 }
 

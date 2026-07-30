@@ -188,6 +188,21 @@ async function getSpaceLeadUserIds(spaceId: string, dept?: string | null): Promi
   } catch { return []; }
 }
 
+// Queue "Suspend" was a display-only badge — it toggled custom_queues.suspendedIds
+// in the DB but nothing ever read that array to actually block access, so a
+// suspended user could still view/create/comment on tickets in that queue.
+// This is the actual enforcement: given a space + department/queue name, check
+// whether the requesting user is in that queue's suspendedIds.
+async function isUserSuspendedFromQueue(spaceKey: string, department: string | null | undefined, userId: string | null | undefined): Promise<boolean> {
+  if (!department || !userId) return false;
+  try {
+    const row = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey.toUpperCase()]);
+    const queues: any[] = row.rows[0]?.queues || [];
+    const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === department.toLowerCase());
+    return Array.isArray(q?.suspendedIds) && q.suspendedIds.includes(userId);
+  } catch { return false; }
+}
+
 // Find previously RESOLVED issues with a similar summary (to detect recurring issues)
 async function findPreviouslyResolvedSimilar(spaceId: string, excludeId: string, summary: string): Promise<Array<{ key: string; cf_key: string; summary: string }>> {
   try {
@@ -2045,6 +2060,9 @@ async function _handleJiraPgApi(
 
     // Filter by dept param if provided Ã¢â‚¬â€ use raw SQL count so total is accurate
     const deptParam = url.searchParams.get('dept');
+    if (deptParam && spaceKey && !isAdmin && await isUserSuspendedFromQueue(spaceKey, deptParam, userId)) {
+      return json({ error: 'Your access to this queue has been suspended.' }, 403);
+    }
     let enrichedIssues = issues.map((i: any) => formatIssue({ ...i, ...(deptMap[i.key] || {}) }));
     let deptTotal = total;
     if (deptParam) {
@@ -2238,6 +2256,9 @@ async function _handleJiraPgApi(
       include: { statuses: { orderBy: { order: 'asc' } } },
     });
     if (!sp) return json({ error: 'Space not found' }, 404);
+    if (body.department && !isAdmin && await isUserSuspendedFromQueue(sk, String(body.department), userId)) {
+      return json({ error: 'Your access to this queue has been suspended.' }, 403);
+    }
 
     // Fetch max key number and a sample of recent keys for prefix detection.
     const [maxRow, prefixRow] = await Promise.all([
@@ -2895,6 +2916,16 @@ async function _handleJiraPgApi(
       const imported = await importIssueFromJira(key);
       if (imported) return json(imported);
       return json({ error: 'Issue not found' }, 404);
+    }
+
+    if (!isAdmin && issue.space?.key) {
+      try {
+        const deptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
+        const issueDept = deptRow.rows[0]?.current_department;
+        if (issueDept && await isUserSuspendedFromQueue(issue.space.key, issueDept, userId)) {
+          return json({ error: 'Your access to this queue has been suspended.' }, 403);
+        }
+      } catch { /* non-critical — don't block ticket viewing on this lookup failing */ }
     }
 
     // Auto-refresh custom fields from Jira if all 5 are null (never synced).
@@ -3696,6 +3727,15 @@ async function _handleJiraPgApi(
       },
     });
     if (!issue) return json({ error: 'Not found' }, 404);
+    if (!isAdmin && issue.space?.key) {
+      try {
+        const deptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
+        const issueDept = deptRow.rows[0]?.current_department;
+        if (issueDept && await isUserSuspendedFromQueue(issue.space.key, issueDept, userId)) {
+          return json({ error: 'Your access to this queue has been suspended.' }, 403);
+        }
+      } catch { /* non-critical */ }
+    }
     const body = await readJson(req);
     const authorUser = userId ? await getCachedUser(userId) : null;
     // Dedup guard: reject if identical comment from same author exists within last 5 seconds
