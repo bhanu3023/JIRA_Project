@@ -21,60 +21,6 @@ interface Props {
   onCreated: (issue?: any) => void;
 }
 
-function SearchableSelect({ value, onChange, options, placeholder }: { value: string; onChange: (v: string) => void; options: string[]; placeholder: string }) {
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-  const filtered = options.filter(o => o.toLowerCase().includes(search.toLowerCase()));
-  return (
-    <div ref={ref} className="relative">
-      <button type="button" onClick={() => { setOpen(!open); setSearch(''); }}
-        className="w-full flex items-center justify-between px-3 py-2 bg-white border border-gray-300 rounded-lg text-[13px] hover:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors">
-        <span className={value ? 'text-gray-900' : 'text-gray-400'}>{value || placeholder}</span>
-        <ChevronDown size={14} className={`text-gray-400 flex-shrink-0 ml-1 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
-      {open && (
-        <div className="absolute left-0 top-full mt-1 w-full z-[9999] bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden">
-          <div className="px-2 py-1.5 border-b border-gray-100">
-            <div className="flex items-center gap-1.5 px-2 py-1 bg-gray-50 rounded border border-gray-200">
-              <Search size={12} className="text-gray-400 flex-shrink-0" />
-              <input autoFocus type="text" value={search} onChange={e => setSearch(e.target.value)}
-                placeholder="Search..." className="flex-1 text-[12px] bg-transparent outline-none text-gray-700 placeholder-gray-400" />
-              {search && <button type="button" onClick={() => setSearch('')} className="text-gray-400 hover:text-gray-600"><X size={11} /></button>}
-            </div>
-          </div>
-          <div className="max-h-48 overflow-y-auto py-1">
-            {value && (
-              <button type="button" onClick={() => { onChange(''); setOpen(false); }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] text-gray-400 hover:bg-red-50 hover:text-red-500 transition-colors">
-                <X size={12} /> Clear selection
-              </button>
-            )}
-            {filtered.length === 0 ? (
-              <p className="px-3 py-2 text-[12px] text-gray-400 text-center">No options found</p>
-            ) : filtered.map(opt => (
-              <button key={opt} type="button" onClick={() => { onChange(opt); setOpen(false); }}
-                className={`w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-blue-50 transition-colors ${
-                  value === opt ? 'text-blue-600 bg-blue-50 font-medium' : 'text-gray-700'
-                }`}>
-                <div className={`w-4 h-4 rounded-full border flex items-center justify-center flex-shrink-0 ${value === opt ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
-                  {value === opt && <Check size={10} className="text-white" />}
-                </div>
-                {opt}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 const WORK_TYPES = [
   { value: 'task',            label: 'Task' },
   { value: 'bug',             label: 'Bug' },
@@ -113,7 +59,7 @@ const COMBINATION_OPTIONS = [
 ];
 
 // Searchable multi-select dropdown
-function CombinationDropdown({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+function MultiSelectDropdown({ value, onChange, options, placeholder }: { value: string[]; onChange: (v: string[]) => void; options: string[]; placeholder: string }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const ref = useRef<HTMLDivElement>(null);
@@ -126,7 +72,7 @@ function CombinationDropdown({ value, onChange }: { value: string[]; onChange: (
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const filtered = COMBINATION_OPTIONS.filter(o =>
+  const filtered = options.filter(o =>
     o.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -144,7 +90,7 @@ function CombinationDropdown({ value, onChange }: { value: string[]; onChange: (
       >
         <span className="flex flex-wrap gap-1 flex-1 text-left">
           {value.length === 0
-            ? <span className="text-gray-400">Select combinations...</span>
+            ? <span className="text-gray-400">{placeholder}</span>
             : value.map(v => (
                 <span key={v} className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 text-[11px] font-medium px-2 py-0.5 rounded-full border border-blue-200">
                   {v}
@@ -232,15 +178,21 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   const [selectedSpaceKey, setSelectedSpaceKey] = useState(spaceKey);
   const [spaceMembers, setSpaceMembers]         = useState<SpaceMember[]>(members);
+  // baseStatuses = the space's own full status list (fallback when the
+  // selected queue has no restricted list of its own). spaceStatuses = what
+  // the Status dropdown actually shows — narrowed to the selected queue's
+  // queueStatuses when it has one, same concept the issue detail page's
+  // status dropdown already uses for department workflows.
+  const [baseStatuses, setBaseStatuses]         = useState<WorkflowStatus[]>(statuses);
   const [spaceStatuses, setSpaceStatuses]       = useState<WorkflowStatus[]>(statuses);
   const [createIssueFields, setCreateIssueFields] = useState<any[]>([]);
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
-  const [spaceQueues, setSpaceQueues] = useState<{ id: string; label: string; dept?: string }[]>([]);
+  const [spaceQueues, setSpaceQueues] = useState<{ id: string; label: string; dept?: string; queueStatuses?: WorkflowStatus[]; memberIds?: string[] }[]>([]);
   const [selectedQueueId, setSelectedQueueId] = useState('');
   const [form, setForm] = useState({
     summary: '', description: '', type: 'task', priority: 'medium',
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
-    productType: '', projectManager: '',
+    productType: [] as string[], projectManager: [] as string[],
   });
   const [summaryError, setSummaryError] = useState(false);
   const [queueError, setQueueError]                 = useState(false);
@@ -260,15 +212,18 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     if (selectedSpaceKey !== spaceKey) {
       api.getSpace(selectedSpaceKey).then((space: any) => {
         setSpaceMembers(space.members || []);
-        setSpaceStatuses(space.statuses || []);
+        setBaseStatuses(space.statuses || []);
       }).catch(() => {});
     } else {
       setSpaceMembers(members);
-      setSpaceStatuses(statuses);
+      setBaseStatuses(statuses);
     }
   }, [selectedSpaceKey]);
 
-  // Load queues for the selected space
+  // Load queues for the selected space — keep each queue's own queueStatuses
+  // so the Status dropdown can be narrowed to whatever that specific queue's
+  // workflow allows (e.g. Dev queue vs Migration queue each having a
+  // different, smaller set of valid statuses).
   useEffect(() => {
     const builtIn = [
       { id: 'all-open',      label: 'All Open' },
@@ -278,12 +233,53 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
       { id: 'all-requests',  label: 'All Requests' },
     ];
     api.request<any[]>(`custom-queues/${selectedSpaceKey}`).then((q) => {
-      const custom = (q || []).map((cq: any) => ({ id: cq.id, label: cq.name, dept: cq.name }));
+      const custom = (q || []).map((cq: any) => ({
+        id: cq.id, label: cq.name, dept: cq.name,
+        queueStatuses: cq.queueStatuses,
+        memberIds: cq.memberIds, suspendedIds: cq.suspendedIds,
+      }));
       setSpaceQueues([...builtIn, ...custom]);
     }).catch(() => {
       setSpaceQueues(builtIn);
     });
   }, [selectedSpaceKey]);
+
+  const selectedQueue = form.department
+    ? spaceQueues.find(q => q.dept?.toLowerCase() === form.department.toLowerCase())
+    : undefined;
+
+  // Narrow the Status dropdown to the selected queue's own status list, same
+  // as the issue detail page's department status dropdown already does —
+  // falls back to the space's full list when the queue has no restricted one.
+  useEffect(() => {
+    const nextStatuses = selectedQueue?.queueStatuses?.length ? selectedQueue.queueStatuses : baseStatuses;
+    setSpaceStatuses(nextStatuses);
+    // If the currently-selected status isn't valid for this queue, clear it
+    // so the "Set default status" effect below picks a valid one.
+    if (form.statusId && !nextStatuses.some(s => s.id === form.statusId)) {
+      setForm(f => ({ ...f, statusId: '' }));
+    }
+  }, [selectedQueue, baseStatuses]);
+
+  // Assignee options — only members with access to the selected queue (its
+  // memberIds, minus anyone suspended from it), not every member of the whole
+  // space. Falls back to full space membership when the queue has no
+  // configured member list (or no queue is selected).
+  const assigneeOptions = (() => {
+    const memberIds = selectedQueue?.memberIds;
+    if (!memberIds?.length) return spaceMembers;
+    const suspended = new Set((selectedQueue as any)?.suspendedIds || []);
+    const allowed = new Set(memberIds.filter((id: string) => !suspended.has(id)));
+    return spaceMembers.filter(m => allowed.has(m.id));
+  })();
+
+  // If the currently-selected assignee has no access to the newly-selected
+  // queue, clear it rather than silently keeping an invalid assignment.
+  useEffect(() => {
+    if (form.assigneeId && !assigneeOptions.some(m => m.id === form.assigneeId)) {
+      setForm(f => ({ ...f, assigneeId: '' }));
+    }
+  }, [selectedQueue]);
 
   // Load custom fields enabled for Create Issue for the selected space
   useEffect(() => {
@@ -317,8 +313,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     // Only require a queue when this space actually has queues to pick from
     const missingQueue          = queueOptions.length > 0 && !form.department;
     const missingCombination    = form.combination.length === 0;
-    const missingProductType    = !form.productType;
-    const missingProjectManager = !form.projectManager;
+    const missingProductType    = form.productType.length === 0;
+    const missingProjectManager = form.projectManager.length === 0;
 
     setSummaryError(missingSummary);
     setQueueError(missingQueue);
@@ -351,8 +347,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         dueDate: form.dueDate || undefined,
         statusId: form.statusId || undefined,
         combination: form.combination.length > 0 ? form.combination.join(', ') : undefined,
-        productType: form.productType || undefined,
-        projectManager: form.projectManager || undefined,
+        productType: form.productType.length > 0 ? form.productType.join(', ') : undefined,
+        projectManager: form.projectManager.length > 0 ? form.projectManager.join(', ') : undefined,
         ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
       });
       // Save custom field values
@@ -376,8 +372,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     if (field === 'summary' && value.trim()) setSummaryError(false);
     if (field === 'department' && value) setQueueError(false);
     if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
-    if (field === 'productType' && value) setProductTypeError(false);
-    if (field === 'projectManager' && value) setProjectManagerError(false);
+    if (field === 'productType' && Array.isArray(value) && value.length > 0) setProductTypeError(false);
+    if (field === 'projectManager' && Array.isArray(value) && value.length > 0) setProjectManagerError(false);
   };
 
   const selectedAssignee = spaceMembers.find(m => m.id === form.assigneeId);
@@ -476,9 +472,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 Combination <span className="text-red-500">*</span>
               </label>
               <div className={combinationError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <CombinationDropdown
+                <MultiSelectDropdown
                   value={form.combination}
                   onChange={v => update('combination', v)}
+                  options={COMBINATION_OPTIONS}
+                  placeholder="Select combinations..."
                 />
               </div>
               {combinationError && (
@@ -495,7 +493,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 Product Type <span className="text-red-500">*</span>
               </label>
               <div className={productTypeError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <SearchableSelect
+                <MultiSelectDropdown
                   value={form.productType}
                   onChange={v => update('productType', v)}
                   options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
@@ -516,7 +514,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 Project Manager <span className="text-red-500">*</span>
               </label>
               <div className={projectManagerError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <SearchableSelect
+                <MultiSelectDropdown
                   value={form.projectManager}
                   onChange={v => update('projectManager', v)}
                   options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan']}
@@ -705,8 +703,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   className={`w-full ${selectedAssignee ? 'pl-8' : 'pl-3'} pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500`}
                 >
                   <option value="">Unassigned</option>
-                  {user && <option value={user.id}>Assign to me</option>}
-                  {spaceMembers.map(m => (
+                  {user && assigneeOptions.some(m => m.id === user.id) && <option value={user.id}>Assign to me</option>}
+                  {assigneeOptions.map(m => (
                     <option key={m.id} value={m.id}>{m.firstName} {m.lastName}</option>
                   ))}
                 </select>
