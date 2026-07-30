@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { WorkflowStatus, SpaceMember } from '@/types';
-import { X, Minus, Maximize2, MoreHorizontal, ChevronDown, Info, AlertCircle, Search, Check } from 'lucide-react';
+import { X, ChevronDown, Info, AlertCircle, Search, Check } from 'lucide-react';
 import { getInitials } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import SpaceIcon from '@/components/ui/SpaceIcon';
@@ -243,13 +243,13 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     productType: '', projectManager: '',
   });
   const [summaryError, setSummaryError] = useState(false);
+  const [queueError, setQueueError]                 = useState(false);
   const [combinationError, setCombinationError]     = useState(false);
   const [productTypeError, setProductTypeError]     = useState(false);
   const [projectManagerError, setProjectManagerError] = useState(false);
   const [error, setError]               = useState('');
   const [loading, setLoading]           = useState(false);
   const [uploading, setUploading]       = useState(false);
-  const [createAnother, setCreateAnother] = useState(false);
   const [infoBannerVisible, setInfoBannerVisible] = useState(true);
   const [requestTypeOpen, setRequestTypeOpen]     = useState(false);
 
@@ -314,18 +314,22 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     e?.preventDefault();
 
     const missingSummary        = !form.summary.trim();
+    // Only require a queue when this space actually has queues to pick from
+    const missingQueue          = queueOptions.length > 0 && !form.department;
     const missingCombination    = form.combination.length === 0;
     const missingProductType    = !form.productType;
     const missingProjectManager = !form.projectManager;
 
     setSummaryError(missingSummary);
+    setQueueError(missingQueue);
     setCombinationError(missingCombination);
     setProductTypeError(missingProductType);
     setProjectManagerError(missingProjectManager);
 
-    if (missingSummary || missingCombination || missingProductType || missingProjectManager) {
+    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager) {
       const missingLabels = [
         missingSummary && 'Summary',
+        missingQueue && 'Queue',
         missingCombination && 'Combination',
         missingProductType && 'Product Type',
         missingProjectManager && 'Project Manager',
@@ -359,16 +363,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             .map(([fieldId, value]) => api.setCustomFieldValue(newIssue.id, fieldId, value).catch(() => {}))
         );
       }
-      if (createAnother) {
-        setForm(f => ({ ...f, summary: '', description: '', dueDate: '', combination: [], productType: '', projectManager: '' }));
-        setCustomFieldValues({});
-        setSummaryError(false);
-        setCombinationError(false);
-        setProductTypeError(false);
-        setProjectManagerError(false);
-      } else {
-        onCreated(newIssue);
-      }
+      onCreated(newIssue);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -379,6 +374,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const update = (field: string, value: any) => {
     setForm(f => ({ ...f, [field]: value }));
     if (field === 'summary' && value.trim()) setSummaryError(false);
+    if (field === 'department' && value) setQueueError(false);
     if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
     if (field === 'productType' && value) setProductTypeError(false);
     if (field === 'projectManager' && value) setProjectManagerError(false);
@@ -420,9 +416,6 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             )}
           </div>
           <div className="flex items-center gap-0.5">
-            <button className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><Minus size={15} /></button>
-            <button className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><Maximize2 size={15} /></button>
-            <button className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><MoreHorizontal size={15} /></button>
             <button onClick={onClose} className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><X size={15} /></button>
           </div>
         </div>
@@ -664,20 +657,28 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             {/* Queue — which department/queue this ticket lands in */}
             {queueOptions.length > 0 && (
               <div className="mb-4">
-                <label className="block text-[12px] font-semibold text-gray-500 mb-1">Queue</label>
-                <div className="relative">
+                <label className="block text-[12px] font-semibold text-gray-500 mb-1">
+                  Queue <span className="text-red-500">*</span>
+                </label>
+                <div className={`relative ${queueError ? 'ring-2 ring-red-300 rounded-lg' : ''}`}>
                   <select
                     value={form.department}
                     onChange={e => update('department', e.target.value)}
                     className="w-full px-3 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
-                    <option value="">No queue</option>
+                    <option value="">Select queue...</option>
                     {queueOptions.map(name => (
                       <option key={name} value={name}>{name}</option>
                     ))}
                   </select>
                   <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                 </div>
+                {queueError && (
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                    <p className="text-[12px] text-red-600 font-medium">Queue is required</p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -739,16 +740,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         </div>
 
         {/* ── Footer ── */}
-        <div className="flex items-center justify-between px-6 py-3.5 border-t border-gray-200 bg-white rounded-b-xl">
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={createAnother}
-              onChange={e => setCreateAnother(e.target.checked)}
-              className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"
-            />
-            <span className="text-[13px] text-gray-700">Create another</span>
-          </label>
+        <div className="flex items-center justify-end px-6 py-3.5 border-t border-gray-200 bg-white rounded-b-xl">
           <div className="flex items-center gap-2">
             <button
               type="button"
