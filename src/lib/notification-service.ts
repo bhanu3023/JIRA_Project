@@ -256,11 +256,23 @@ async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: 
 }
 
 // ── Send helper ────────────────────────────────────────────────────────────────
+// Priority: (1) the ticket's own linked mailbox via Graph — lands in a
+// monitored inbox and threads correctly — (2) the single global SMTP
+// account, (3) any other connected OAuth account. Previously the global SMTP
+// branch always ran first (ignoring the ticket's own mailbox entirely) and
+// unconditionally `return`ed even when the send failed, so a broken/blocked
+// SMTP account (Microsoft 365 rejects legacy basic-auth SMTP for many
+// tenants) silently dropped the notification instead of falling back —
+// assignees and reporters got nothing, with no visible error.
 async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string) {
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
   if (!uniqueTo.length) return;
 
-  // Try SMTP first (if configured)
+  if (fromEmail) {
+    const sentViaTicketInbox = await sendViaGraph({ from: fromEmail, to: uniqueTo, subject, html, text, inReplyTo });
+    if (sentViaTicketInbox) return;
+  }
+
   const transporter = getTransporter();
   if (transporter) {
     try {
@@ -276,20 +288,20 @@ async function sendNotification(to: string[], subject: string, html: string, tex
         mailOpts.references = inReplyTo;
       }
       await transporter.sendMail(mailOpts);
-      console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')}`);
+      console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')} via SMTP (${FROM_EMAIL})`);
+      return;
     } catch (err: any) {
-      console.error(`[Notification] Failed to send "${subject}":`, err.message);
+      console.error(`[Notification] SMTP send failed for "${subject}", trying OAuth fallback:`, err.message);
+      // fall through instead of giving up — the notification still matters
     }
-    return;
   }
 
-  // SMTP not configured — fall back to OAuth (Microsoft Graph API)
-  // Use the specified inbox email (so replies come back to the right address), or fall back to first connected account
-  const senderEmail = fromEmail || await getBestSenderEmail();
+  const senderEmail = await getBestSenderEmail();
   if (senderEmail) {
-    await sendViaGraph({ from: senderEmail, to: uniqueTo, subject, html, text, inReplyTo });
+    const sent = await sendViaGraph({ from: senderEmail, to: uniqueTo, subject, html, text, inReplyTo });
+    if (!sent) console.error(`[Notification] All send methods failed for "${subject}" to ${uniqueTo.join(', ')}`);
   } else {
-    console.warn(`[Notification] Skipping "${subject}" — no SMTP credentials and no OAuth account connected`);
+    console.warn(`[Notification] Skipping "${subject}" — no working SMTP and no OAuth account connected`);
   }
 }
 
