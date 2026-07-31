@@ -44,6 +44,13 @@ docker exec -i jira_postgres psql -U jirauser -d jiradb -c "
   CREATE INDEX IF NOT EXISTS user_sessions_token_hash_idx ON user_sessions(token_hash);
   CREATE INDEX IF NOT EXISTS user_sessions_user_idx ON user_sessions(user_id);
   CREATE INDEX IF NOT EXISTS issues_space_created_idx ON issues (\"spaceId\", \"createdAt\" DESC);
+  -- Queue views filter with LOWER(current_department), which the plain
+  -- (spaceId, current_department) index can't serve, so Postgres fell back
+  -- to a full sequential scan on every queue switch (~48ms at 29k rows,
+  -- worse as the table grows). This matches the exact expression used in
+  -- jira-pg-api.ts's dept-filtered queries so it can use an index scan
+  -- instead (confirmed via EXPLAIN ANALYZE: ~48ms scan -> ~0.5ms).
+  CREATE INDEX IF NOT EXISTS idx_issues_space_dept_lower ON issues (\"spaceId\", LOWER(current_department));
 " 2>&1 | grep -v NOTICE || true
 
 DATABASE_URL="postgresql://jirauser:Neutara%402024@localhost:5434/jiradb" node /root/Jira-v2.0/seed-queues.mjs 2>/dev/null || true

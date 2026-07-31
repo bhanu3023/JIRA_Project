@@ -605,7 +605,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   className="w-full pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   {spaces.map(s => (
-                    <option key={s.key} value={s.key}>{s.name} ({s.key})</option>
+                    <option key={s.key} value={s.key}>{s.name}</option>
                   ))}
                 </select>
                 <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />

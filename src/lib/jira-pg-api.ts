@@ -1143,8 +1143,8 @@ async function _handleJiraPgApi(
       const formData = await req.formData();
       const file = formData.get('file');
       if (!(file instanceof Blob)) return json({ error: 'No file provided' }, 400);
-      const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
-      if (file.size > MAX_UPLOAD_BYTES) return json({ error: 'File too large (max 500MB)' }, 413);
+      const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
+      if (file.size > MAX_UPLOAD_BYTES) return json({ error: 'File too large (max 10GB)' }, 413);
       const { writeFile, mkdir } = await import('fs/promises');
       const nodePath = await import('path');
       const id = rid();
@@ -2757,6 +2757,20 @@ async function _handleJiraPgApi(
         if (r.rows[0]) extraCols = r.rows[0];
       } catch {}
       const newStatusName = newDeptStatusObj?.name || 'Open';
+      // Email the reporter and the (possibly new) assignee about the department
+      // transfer — the in-app notifications above don't reach anyone's inbox,
+      // and a department move is exactly the kind of change both of them need
+      // to know about (e.g. reporter's Migration ticket moving to Dev).
+      if (updatedIssue) {
+        notifyIssueUpdated({
+          key: updatedIssue.key, summary: updatedIssue.summary, priority: updatedIssue.priority,
+          spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
+          status: { name: updatedIssue.status?.name ?? newStatusName, category: updatedIssue.status?.category ?? 'todo' },
+          assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
+          updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
+          changes: [{ field: 'Department', from: oldDept || 'None', to: newDept }],
+        }).catch(() => {});
+      }
       fireConnectorEvent({
         event: 'issue.department_changed', timestamp: new Date().toISOString(),
         issue: {
@@ -4733,6 +4747,31 @@ async function _handleJiraPgApi(
               message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes for: ${row.summary || row.key}`,
               issueKey: row.cf_key || row.key,
             });
+            // Email the assignee too — this is the endpoint that actually runs
+            // every 5 min (Header.tsx's monitor-agent poll); the sibling
+            // /sla-breach-check endpoint had this email call but nothing ever
+            // invokes it, so assignees were only getting the in-app bell, never
+            // an email, no matter how close the SLA was to breaching.
+            try {
+              const uniqueEmailUserIds = Array.from(new Set([row.assigneeId].filter(Boolean)));
+              const emailRecipients = await db.user.findMany({
+                where: { id: { in: uniqueEmailUserIds } },
+                select: { email: true },
+              });
+              const assigneeEmails = emailRecipients.map((u: any) => u.email).filter(Boolean);
+              const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
+              if (assigneeEmails.length && spaceRow) {
+                notifySLABreach({
+                  issueKey: row.cf_key || row.key,
+                  issueSummary: row.summary || row.key,
+                  spaceKey: spaceRow.key,
+                  spaceName: spaceRow.name,
+                  slaName: policy.name || 'SLA',
+                  minsLeft,
+                  assigneeEmails,
+                }).catch(() => {});
+              }
+            } catch { /* non-critical */ }
             results.slaNotified++;
           }
         }
