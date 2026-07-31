@@ -494,9 +494,11 @@ function SpaceDetailContent() {
         if (filters.projectManager)   params.projectManager   = filters.projectManager;
         if (filters.manageClientName) params.manageClientName = filters.manageClientName;
         if (filters.customerPlan)     params.customerPlan     = filters.customerPlan;
-        // Clear stale cache for THIS exact param set so we never show another queue's issues
-        // while the new fetch is in-flight (e.g. showing 29k migration issues in dept queue).
-        clearIssuesCache(params);
+        // NOTE: previously cleared this exact param set's cache here before every load,
+        // which defeated prefetching entirely — every queue switch (esp. custom queues)
+        // was forced into a full network round-trip even when the data was already warm.
+        // The store's activeQueueKey guard already prevents a slow in-flight fetch from
+        // overwriting the display once the user has switched away, so no clear is needed.
         await loadIssues(params);
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load space');
@@ -538,6 +540,20 @@ function SpaceDetailContent() {
     return () => timers.forEach(clearTimeout);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaceKey, user?.id]);
+
+  // Prefetch every custom queue (Dev/Migration/Bug/etc.) for this space once the queue
+  // list is known, so switching between them hits a warm cache instead of a cold fetch.
+  // Safe to re-run whenever allCustomQueues changes — prefetchIssues never touches display.
+  useEffect(() => {
+    if (!spaceKey || allCustomQueues.length === 0) return;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    allCustomQueues.forEach((q, i) => {
+      timers.push(setTimeout(() => {
+        prefetchIssues({ spaceKey, page: '1', limit: String(PAGE_SIZE), dept: q.name }).catch(() => {});
+      }, (i + 1) * 400));
+    });
+    return () => timers.forEach(clearTimeout);
+  }, [spaceKey, allCustomQueues, prefetchIssues]);
 
   // Auto-refresh every 15s for all dept_queue spaces — silent background refresh, never clears display
   useEffect(() => {
