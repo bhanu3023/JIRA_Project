@@ -504,7 +504,7 @@ async function computePausedDeptSLA(
   issueRow: any,
   dept: string,
   slaPolicies: any[]
-): Promise<{ elapsed_ms: number; goalDurationMs: number; isBreached: boolean; remainingMs: number; policyName: string } | null> {
+): Promise<{ elapsed_ms: number; goalDurationMs: number; isBreached: boolean; remainingMs: number; policyName: string; paused_at: string | null } | null> {
   try {
     const log: Record<string, any> = issueRow.dept_sla_log || {};
     const deptLog = log[dept];
@@ -541,7 +541,7 @@ async function computePausedDeptSLA(
     }
     const isBreached = elapsed_ms > goalDurationMs;
     const remainingMs = Math.max(0, goalDurationMs - elapsed_ms);
-    return { elapsed_ms, goalDurationMs, isBreached, remainingMs, policyName: policy.name || 'SLA' };
+    return { elapsed_ms, goalDurationMs, isBreached, remainingMs, policyName: policy.name || 'SLA', paused_at: deptLog?.paused_at || null };
   } catch { return null; }
 }
 
