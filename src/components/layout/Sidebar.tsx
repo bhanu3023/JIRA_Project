@@ -852,9 +852,6 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
   const [addMemberSearch, setAddMemberSearch] = useState('');
   const [slaTimeValue, setSlaTimeValue] = useState('');
   const [slaTimeUnit, setSlaTimeUnit] = useState<'minutes' | 'hours' | 'days'>('hours');
-  const _deptQueueParam = useSearchParams()?.get('queue') || '';
-  const _deptParam = useSearchParams()?.get('dept') || '';
-  const [expandedQueueSub, setExpandedQueueSub] = useState<string | null>(null);
   const [rrConfig, setRrConfig] = useState<any>(null);
   const { user, currentIssue } = useStore(useShallow((s) => ({ user: s.user, currentIssue: s.currentIssue })));
   const searchParams = useSearchParams();
@@ -1024,8 +1021,9 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                 {/* Custom queues — dept_queue only */}
                 {isDeptQueue && visibleQueues.map(q => {
                   const isMenuOpen = queueMenuOpen === q.id;
-                  const isDeptSubActive = ['dept_all','dept_unassigned','dept_assigned','dept_closed','sent-watching'].includes(_deptQueueParam) && _deptParam === q.name;
-                  const isSubExpanded = expandedQueueSub === q.id || (isDeptSubActive && expandedQueueSub === null);
+                  // Sub-items (All Open, Unassigned, Assigned to me, Closed, Sent/Watching) are
+                  // always shown now — no arrow toggle, so they stay reachable from the sidebar.
+                  const isSubExpanded = true;
                   const queueParam = searchParams?.get('queue');
                   const deptParam = searchParams?.get('dept');
                   const subActive = (subQueue: string) =>
@@ -1068,12 +1066,6 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                             </div>
                           )}
                         </div>
-                        {/* Chevron — always visible, expands sub-items */}
-                        <button
-                          onClick={e => { e.stopPropagation(); setExpandedQueueSub(isSubExpanded ? null : q.id); }}
-                          className="flex w-5 h-5 flex-shrink-0 items-center justify-center rounded text-gray-400 hover:text-gray-700 mr-1">
-                          <ChevronDown size={11} className={cn('transition-transform', isSubExpanded ? '' : '-rotate-90')} />
-                        </button>
                       </div>
 
                       {/* Sub-items */}
