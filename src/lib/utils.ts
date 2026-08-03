@@ -117,6 +117,20 @@ export function getIssueStatus(issue: { status?: IssueStatusShape | null }): Iss
   return FALLBACK_ISSUE_STATUS;
 }
 
+// Distinct, readable palette for department/queue badges — picked so no two adjacent
+// hues clash and everything stays legible on a light chip background.
+const DEPT_COLOR_PALETTE = [
+  '#6366F1', '#F59E0B', '#10B981', '#EF4444', '#8B5CF6',
+  '#06B6D4', '#EC4899', '#14B8A6', '#F97316', '#0EA5E9',
+];
+
+/** Deterministic color for a department/queue name — same name always gets the same color. */
+export function getDeptColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  return DEPT_COLOR_PALETTE[Math.abs(hash) % DEPT_COLOR_PALETTE.length];
+}
+
 export function timeAgo(date: string | undefined | null): string {
   if (!date) return '—';
   const seconds = Math.floor((Date.now() - new Date(date).getTime()) / 1000);

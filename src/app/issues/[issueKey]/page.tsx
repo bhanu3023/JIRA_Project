@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getIssueStatus, resolveStatusColor } from '@/lib/utils';
+import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getIssueStatus, resolveStatusColor, getDeptColor } from '@/lib/utils';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
 import RichTextEditor from '@/components/ui/RichTextEditor';
@@ -3621,7 +3621,11 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
           className="flex items-center gap-1.5 hover:bg-gray-50 rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left"
         >
           {displayDept ? (
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+            <span
+              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border"
+              style={{ backgroundColor: getDeptColor(displayDept) + '15', color: getDeptColor(displayDept), borderColor: getDeptColor(displayDept) + '40' }}
+            >
+              <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: getDeptColor(displayDept) }} />
               {displayDept}
             </span>
           ) : (
@@ -3739,6 +3743,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
                     {isActive
                       ? <Check size={11} className="text-blue-600 flex-shrink-0" />
                       : <span className="w-[11px] flex-shrink-0" />}
+                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: getDeptColor(d.name) }} />
                     <span className="flex-1">{d.name}</span>
                   </button>
                 );

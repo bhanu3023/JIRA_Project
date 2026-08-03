@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor } from '@/lib/utils';
+import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor, getDeptColor } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
@@ -1234,8 +1234,8 @@ function SpaceDetailContent() {
               {customQueues.map(q => (
                 <Link key={q.id} href={`/spaces/${spaceKey}?queue=${q.id}`}
                   className="flex items-center gap-4 px-4 py-3 rounded-lg border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all group">
-                  <div className="w-8 h-8 rounded-md bg-purple-100 flex items-center justify-center flex-shrink-0">
-                    <Layers size={15} className="text-purple-600" />
+                  <div className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0" style={{ backgroundColor: getDeptColor(q.name) + '20' }}>
+                    <Layers size={15} style={{ color: getDeptColor(q.name) }} />
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-[13px] font-medium text-gray-800 group-hover:text-blue-700">{q.name}</p>
