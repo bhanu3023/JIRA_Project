@@ -2630,8 +2630,11 @@ async function _handleJiraPgApi(
           || newDeptQueueStatuses[0];
         newDeptStatusObj = inProgressSt || { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
       } else {
+        // First arrival in this dept — default to an Open/To-do status, never the
+        // "Waiting for <newDept>" marker (that belongs to the OLD dept's record,
+        // shown while the ticket is in transit, not once it has actually landed).
         const firstTodoSt = newDeptQueueStatuses.find((s: any) => s.category === 'todo') || newDeptQueueStatuses[0];
-        newDeptStatusObj = firstTodoSt || oldDeptStatusObj;
+        newDeptStatusObj = firstTodoSt || { id: '', name: 'Open', category: 'todo', color: '#6366F1' };
       }
 
       if (oldDept) deptStatuses[oldDept] = oldDeptStatusObj;
