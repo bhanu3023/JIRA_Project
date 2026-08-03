@@ -225,12 +225,13 @@ function SpaceDetailContent() {
   // Load departments from both RR config + Department Routing custom fields
   useEffect(() => {
     if (!spaceKey) return;
-    const headers = { Authorization: `Bearer ${localStorage.getItem('jira_token')}` };
     const combined: string[] = [];
 
+    // Routed through api.request so identical concurrent calls (e.g. the sidebar
+    // fetching the same space's rr-config) are coalesced into one network call.
     Promise.allSettled([
-      fetch(`/api/spaces/${spaceKey}/rr-config`, { headers }).then(r => r.ok ? r.json() : null),
-      fetch(`/api/custom-fields`, { headers }).then(r => r.ok ? r.json() : null),
+      api.request<any>(`spaces/${spaceKey}/rr-config`).catch(() => null),
+      api.request<any>(`custom-fields`).catch(() => null),
     ]).then(([rrRes, cfRes]) => {
       // 1. Department Routing custom fields (options: "DeptName|boardKey|employees")
       if (cfRes.status === 'fulfilled' && cfRes.value) {

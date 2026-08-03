@@ -7,7 +7,31 @@ class ApiClient {
     return localStorage.getItem('jira_token');
   }
 
+  // Coalesce identical concurrent GET requests into one network call. The sidebar
+  // and the page it's rendered alongside each independently fetch the same
+  // custom-queues/rr-config data for the same space on every load — this cuts
+  // that duplication (and any other accidental double-fetch) without needing to
+  // restructure which component owns the data.
+  private inFlightGets = new Map<string, Promise<any>>();
+
   async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const method = (options.method || 'GET').toUpperCase();
+    if (method === 'GET') {
+      // Normalize so callers using "spaces/x" vs "/spaces/x" still coalesce —
+      // they resolve to the same URL below but would otherwise miss each other.
+      const dedupKey = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
+      const existing = this.inFlightGets.get(dedupKey);
+      if (existing) return existing as Promise<T>;
+      const promise = this.requestUncoalesced<T>(endpoint, options).finally(() => {
+        this.inFlightGets.delete(dedupKey);
+      });
+      this.inFlightGets.set(dedupKey, promise);
+      return promise;
+    }
+    return this.requestUncoalesced<T>(endpoint, options);
+  }
+
+  private async requestUncoalesced<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const method = (options.method || 'GET').toUpperCase();
     const skipAuthHeader =
       method === 'POST' && (endpoint === '/auth/login' || endpoint === '/auth/register');

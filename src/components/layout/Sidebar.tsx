@@ -859,18 +859,16 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
   const canManageSpace = isManager(user?.role);
   const [spaceMemberRole, setSpaceMemberRole] = useState<string>('');
 
-  // Fetch RR config to determine shift lead status + space member role
+  // Fetch RR config to determine shift lead status + space member role.
+  // Routed through api.request so this coalesces with the page's own identical
+  // rr-config/space fetches for the same spaceKey instead of duplicating them.
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    fetch(`/api/spaces/${spaceKey}/rr-config`, { headers })
-      .then(r => r.ok ? r.json() : null)
+    api.request<any>(`spaces/${spaceKey}/rr-config`)
       .then((cfg: any) => { if (cfg?.config) setRrConfig(cfg.config); })
       .catch(() => {});
     // Load current user's SpaceMember role for this space
     if (user?.id) {
-      fetch(`/api/spaces/${spaceKey}`, { headers })
-        .then(r => r.ok ? r.json() : null)
+      api.request<any>(`spaces/${spaceKey}`)
         .then((sp: any) => {
           const me = (sp?.members || []).find((m: any) => (m.userId || m.user?.id) === user.id);
           if (me?.role) setSpaceMemberRole(me.role);
