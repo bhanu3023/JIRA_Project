@@ -188,7 +188,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [spaceStatuses, setSpaceStatuses]       = useState<WorkflowStatus[]>(statuses);
   const [createIssueFields, setCreateIssueFields] = useState<any[]>([]);
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
-  const [spaceQueues, setSpaceQueues] = useState<{ id: string; label: string; dept?: string; queueStatuses?: WorkflowStatus[]; memberIds?: string[] }[]>([]);
+  const [spaceQueues, setSpaceQueues] = useState<{ id: string; label: string; dept?: string; queueStatuses?: WorkflowStatus[]; memberIds?: string[]; suspendedIds?: string[] }[]>([]);
   const [selectedQueueId, setSelectedQueueId] = useState('');
   const [form, setForm] = useState({
     summary: '', description: '', type: 'task', priority: 'medium',
@@ -381,7 +381,17 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const workTypeLabel = WORK_TYPES.find(t => t.value === form.type)?.label || 'Task';
   // Real department destinations only — the built-in entries (Unassigned/Assigned/My
   // Queue/All Requests) are list-filter views, not places a new ticket can be routed to.
-  const queueOptions = Array.from(new Set(spaceQueues.map(q => q.dept).filter((d): d is string => !!d)));
+  // Non-admins only see queues they're a member of (and not suspended from) — same
+  // access rule as the Queues overview page, so this list matches what they can open.
+  const isAdmin = user?.role === 'admin';
+  const queueOptions = Array.from(new Set(
+    spaceQueues
+      .filter(q => !!q.dept)
+      .filter(q => isAdmin || (
+        (q.memberIds || []).includes(user?.id || '') && !(q.suspendedIds || []).includes(user?.id || '')
+      ))
+      .map(q => q.dept as string)
+  ));
 
   const categoryOrder: Record<string, number> = { todo: 0, in_progress: 1, done: 3 };
   const sortedStatuses = [...spaceStatuses].sort((a, b) => {
