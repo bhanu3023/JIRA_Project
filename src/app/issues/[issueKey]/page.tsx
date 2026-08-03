@@ -331,7 +331,14 @@ export default function IssueDetailPage() {
             ];
           }
 
-          // Cheap first pass: localStorage cache from spaces this browser has visited
+          // Cheap first pass: localStorage cache from spaces this browser has visited —
+          // shows something instantly, but must NOT be trusted as final: it goes stale
+          // the moment a queue's status list changes on the server (e.g. an admin
+          // configures Infra's statuses after this browser already cached Infra with
+          // none). This used to `return` immediately on any match, permanently freezing
+          // the dropdown on whatever was cached the first time this browser saw the
+          // queue — always re-verifying against the live API below fixes that.
+          let resolvedFromCache = false;
           for (const spKey of allSpaceKeys) {
             try {
               const stored = localStorage.getItem(`custom_queues_${spKey}`);
@@ -347,22 +354,25 @@ export default function IssueDetailPage() {
                     fromStatusId: t.fromStatusId ?? t.from,
                     toStatusId: t.toStatusId ?? t.to,
                   })));
-                  return;
+                } else {
+                  const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
+                  loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
                 }
-                const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
-                loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
-                return;
+                resolvedFromCache = true;
+                break;
               }
             } catch {}
           }
 
-          // Fallback: query custom-queues per space via API
+          // Always verify against the live API and correct the display if the cached
+          // snapshot was stale — also refreshes the cache for next time.
           for (const spKey of allSpaceKeys) {
             try {
               const queues = await api.request<any[]>(`custom-queues/${spKey}`);
               if (Array.isArray(queues)) {
                 const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
                 if (matchedQueue) {
+                  try { localStorage.setItem(`custom_queues_${spKey}`, JSON.stringify(queues)); } catch {}
                   const qSt = matchedQueue.queueStatuses;
                   const qTr = matchedQueue.queueTransitions;
                   if (qSt?.length) {
@@ -380,8 +390,8 @@ export default function IssueDetailPage() {
               }
             } catch {}
           }
-          // Nothing found — fall back to the original space
-          loadStatusesForSpace(currentIssue.spaceKey);
+          // Nothing found anywhere — fall back to the original space
+          if (!resolvedFromCache) loadStatusesForSpace(currentIssue.spaceKey);
         })();
       } else {
         loadStatusesForSpace(currentIssue.spaceKey);
