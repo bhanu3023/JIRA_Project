@@ -4703,7 +4703,7 @@ async function _handleJiraPgApi(
   // Ã¢â€â‚¬Ã¢â€â‚¬ SLA Breach Warning Check Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   // POST /monitor-agent Ã¢â‚¬â€ combined: SLA breach warnings + duplicate scan on recent tickets
   if (path === 'monitor-agent' && method === 'POST') {
-    const results = { slaNotified: 0, duplicatesFound: 0 };
+    const results = { slaNotified: 0, dueDateNotified: 0, duplicatesFound: 0 };
     const warnMs = 30 * 60 * 1000;
 
     try {
@@ -4745,8 +4745,11 @@ async function _handleJiraPgApi(
           const dueAt = new Date(row.dept_sla_started_at).getTime() + durationMs;
           const timeToBreachMs = dueAt - Date.now();
           if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
+            // Dedup must match the key the notification is actually stored under below
+            // (cf_key, not the internal key) — otherwise this never finds the prior
+            // notification and re-sends every 5-min poll for the whole 30-min window.
             const already = await (db as any).notification.findFirst({
-              where: { issueKey: row.key, type: 'SLA_BREACH', createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
+              where: { issueKey: row.cf_key || row.key, type: 'SLA_BREACH', createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
             });
             if (already) continue;
             const leadIds = await getSpaceLeadUserIds(row.spaceId);
@@ -4789,7 +4792,39 @@ async function _handleJiraPgApi(
     } catch (e: any) { console.error('[MonitorAgent:SLA]', e?.message); }
 
     try {
-      // Ã¢â€â‚¬Ã¢â€â‚¬ 2. Duplicate scan Ã¢â‚¬â€ check tickets created in the last 24h Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+      // 1b. Due date approaching (30 min before) — separate from SLA breach;
+      // dueDate is a field set directly on the ticket, unrelated to the SLA
+      // policy's own duration clock.
+      const dueSoon = await pool.query(
+        `SELECT i.*, s.category AS status_category
+         FROM issues i
+         LEFT JOIN statuses s ON i."statusId" = s.id
+         WHERE i."dueDate" IS NOT NULL
+           AND i."assigneeId" IS NOT NULL
+           AND (s.category IS NULL OR s.category != 'done')
+         LIMIT 2000`
+      );
+      for (const row of dueSoon.rows) {
+        const timeToDueMs = new Date(row.dueDate).getTime() - Date.now();
+        if (timeToDueMs > 0 && timeToDueMs <= warnMs) {
+          const already = await (db as any).notification.findFirst({
+            where: { issueKey: row.cf_key || row.key, type: 'DUE_DATE', createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
+          });
+          if (already) continue;
+          const minsLeft = Math.ceil(timeToDueMs / 60_000);
+          await notifyUsers([row.assigneeId], null, {
+            type: 'DUE_DATE',
+            title: `Due in ${minsLeft} min: ${row.cf_key || row.key}`,
+            message: `"${row.summary || row.key}" is due in ${minsLeft} minutes.`,
+            issueKey: row.cf_key || row.key,
+          });
+          results.dueDateNotified++;
+        }
+      }
+    } catch (e: any) { console.error('[MonitorAgent:DueDate]', e?.message); }
+
+    try {
+      //Ã¢â€â‚¬Ã¢â€â‚¬ 2. Duplicate scan Ã¢â‚¬â€ check tickets created in the last 24h Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       const recentIssues = await pool.query(
         `SELECT i.id, i.key, i.cf_key, i.summary, i."spaceId", i."reporterId", i."assigneeId"
          FROM issues i

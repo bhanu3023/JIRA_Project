@@ -793,19 +793,24 @@ function SpaceDetailContent() {
   }, [spaceKey, loadIssues, clearIssuesCache, queueFilter, currentPage]);
 
   const recallIssue = async (issueKey: string) => {
+    const prevIssues = useStore.getState().issues;
+    // Remove from the list immediately — recalling should make the ticket
+    // disappear from Sent/Watching right away, not after two round-trips.
+    useStore.setState(s => ({ issues: s.issues.filter((i: any) => i.key !== issueKey) }));
     try {
       await api.updateIssue(issueKey, { recall: true } as any);
     } catch (e) {
       console.error('Recall failed', e);
       alert('Failed to recall ticket');
+      useStore.setState({ issues: prevIssues });
       return;
     }
-    // Recall succeeded — reload the Sent/Watching view so the ticket disappears
+    // Background reconcile — no need to block the UI on this
     try {
       const reloadParams: Record<string, string> = { spaceKey, page: '1', limit: '500' };
       if (queueFilter === 'sent-watching' && deptParam) reloadParams.sentDept = deptParam;
       clearIssuesCache(reloadParams);
-      await loadIssues(reloadParams);
+      loadIssues(reloadParams);
     } catch { /* non-critical */ }
   };
 
