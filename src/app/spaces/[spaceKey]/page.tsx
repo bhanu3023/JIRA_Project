@@ -2036,10 +2036,10 @@ function SpaceDetailContent() {
                 const assigneeName = currentAssignee
                   ? `${currentAssignee.firstName || ''} ${currentAssignee.lastName || ''}`.trim()
                   : null;
-                // Show dept_statuses[current_dept] so Migration's "Resolved" shows correctly here
+                // Show the status this dept (deptParam, the one we're watching FROM) had it at
+                // right before the ticket transferred out — not the new dept's status.
                 const sentDeptStatusMap: Record<string, any> = (issue as any).dept_statuses || {};
-                const sentCurrentDept: string = (issue as any).current_department || '';
-                const st = (sentCurrentDept && sentDeptStatusMap[sentCurrentDept]) ? sentDeptStatusMap[sentCurrentDept] : getIssueStatus(issue);
+                const st = (deptParam && sentDeptStatusMap[deptParam]) ? sentDeptStatusMap[deptParam] : getIssueStatus(issue);
                 const stColor = st ? resolveStatusColor(st) : '#6B7280';
                 // Last comment from issue (if comments loaded)
                 const comments: any[] = (issue as any).comments || [];
@@ -2057,8 +2057,6 @@ function SpaceDetailContent() {
                 };
                 const slaIsPaused = !!pausedSla;
                 const pausedElapsedMs: number = pausedSla?.elapsed_ms || 0;
-                const hasUpdate = issue.updatedAt && issue.createdAt &&
-                  new Date(issue.updatedAt).getTime() - new Date(issue.createdAt).getTime() > 5000;
                 return (
                   <div key={issue.id}
                     className="bg-white rounded-xl border border-gray-150 shadow-sm hover:shadow-md hover:border-blue-200 transition-all cursor-pointer group"
@@ -2141,6 +2139,11 @@ function SpaceDetailContent() {
                           </div>
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
+                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Actual SLA</span>
+                            <span className="text-[13px] font-bold text-gray-600">{fmtDuration(pausedSla.goalDurationMs)}</span>
+                          </div>
+                          <div className="h-6 w-px bg-gray-200" />
+                          <div className="flex flex-col">
                             <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Paused At</span>
                             <span className="text-[13px] font-bold text-gray-600">{pausedSla.paused_at ? timeAgo(pausedSla.paused_at) : '—'}</span>
                           </div>
@@ -2187,12 +2190,6 @@ function SpaceDetailContent() {
                         })}
                       </div>
                     )}
-                    {comments.length === 0 && hasUpdate && (
-                      <div className="mx-4 mb-3 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100 text-[12px] text-gray-500">
-                        Status changed to <strong>{st?.name}</strong> · {timeAgo(issue.updatedAt!)}
-                      </div>
-                    )}
-
                     {/* Inline comment area */}
                     <div className="mx-4 mb-3" onClick={e => e.stopPropagation()}>
                       {commentingOn === issue.key ? (
