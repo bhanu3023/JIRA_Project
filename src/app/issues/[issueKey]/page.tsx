@@ -612,12 +612,29 @@ export default function IssueDetailPage() {
     finally { setSubmittingComment(false); }
   };
 
-  const handleUpdate = async (field: string, value: any) => {
+  // displayPatch covers relational fields (assignee, status) whose visible name/avatar
+  // lives on a different key than the raw id being saved (issue.assignee vs assigneeId).
+  const handleUpdate = async (field: string, value: any, displayPatch?: Record<string, any>) => {
+    const prevValue = (issue as any)?.[field];
+    const patchKeys = displayPatch ? Object.keys(displayPatch) : [];
+    const prevDisplay: Record<string, any> = {};
+    for (const k of patchKeys) prevDisplay[k] = (issue as any)?.[k];
+    // Reflect the change immediately instead of waiting on a PATCH + full reissue
+    // fetch before anything on screen moves — sync with the server in the
+    // background and revert only if the request actually fails.
+    useStore.setState(s => ({
+      currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: value, ...(displayPatch || {}) } as any : s.currentIssue,
+    }));
+    setEditing(null);
     try {
       await api.updateIssue(issueKey, { [field]: value });
       loadIssue(issueKey);
-      setEditing(null);
-    } catch (err) { console.error(err); }
+    } catch (err) {
+      console.error(err);
+      useStore.setState(s => ({
+        currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: prevValue, ...prevDisplay } as any : s.currentIssue,
+      }));
+    }
   };
 
   // Combination / Product Type / Project Manager must be filled before resolving a ticket
@@ -669,22 +686,43 @@ export default function IssueDetailPage() {
     if (statusId.startsWith('qst_') && targetStatus) {
       const dept = (issue as any).current_department;
       if (dept) {
-        await api.updateIssue(issueKey, {
-          queueStatusId: statusId,
-          queueStatusName: (targetStatus as any).name,
-          queueStatusColor: (targetStatus as any).color || '#64748B',
-          queueStatusCategory: (targetStatus as any).category || 'todo',
-        } as any);
-        loadIssue(issueKey);
+        const prevDeptStatuses = (issue as any).dept_statuses;
+        const queueSt = {
+          id: statusId, name: (targetStatus as any).name,
+          color: (targetStatus as any).color || '#64748B', category: (targetStatus as any).category || 'todo',
+        };
+        useStore.setState(s => ({
+          currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: { ...(s.currentIssue as any).dept_statuses, [dept]: queueSt } } as any : s.currentIssue,
+        }));
+        setShowStatusDropdown(false);
+        try {
+          await api.updateIssue(issueKey, {
+            queueStatusId: statusId,
+            queueStatusName: queueSt.name,
+            queueStatusColor: queueSt.color,
+            queueStatusCategory: queueSt.category,
+          } as any);
+          loadIssue(issueKey);
+        } catch (err) {
+          console.error(err);
+          useStore.setState(s => ({
+            currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: prevDeptStatuses } as any : s.currentIssue,
+          }));
+        }
         return;
       }
     }
-    await handleUpdate('statusId', statusId);
+    await handleUpdate('statusId', statusId, targetStatus
+      ? { status: { id: targetStatus.id, name: targetStatus.name, category: (targetStatus as any).category, color: (targetStatus as any).color } }
+      : undefined);
   };
 
   const handleAssigneeChange = async (assigneeId: string | null) => {
     setShowAssigneeDropdown(false);
-    await handleUpdate('assigneeId', assigneeId);
+    const member = assigneeId ? spaceMembers.find(m => m.id === assigneeId) : null;
+    await handleUpdate('assigneeId', assigneeId, {
+      assignee: member ? { id: member.id, firstName: member.firstName, lastName: member.lastName, email: (member as any).email, avatarUrl: (member as any).avatarUrl ?? null } : null,
+    });
   };
 
   const handlePriorityChange = async (priority: string) => {
