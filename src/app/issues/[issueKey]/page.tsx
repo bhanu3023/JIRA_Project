@@ -114,7 +114,7 @@ export default function IssueDetailPage() {
   const linkSearchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [copiedLink, setCopiedLink]     = useState(false);
   const [customFields, setCustomFields] = useState<any[]>([]);
-  const [mandatoryModal, setMandatoryModal] = useState<{ missingFields: string[]; pendingStatusId: string } | null>(null);
+  const [mandatoryModal, setMandatoryModal] = useState<{ missingFields: string[]; pendingStatusId?: string; context: 'resolve' | 'department' } | null>(null);
   const [deptBlockModal, setDeptBlockModal] = useState(false);
   const [pendingDeptChange, setPendingDeptChange] = useState<{ dept: { name: string; boardKey: string }; execute: () => void } | null>(null);
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
@@ -620,24 +620,29 @@ export default function IssueDetailPage() {
     } catch (err) { console.error(err); }
   };
 
+  // Combination / Product Type / Project Manager must be filled before resolving a ticket
+  // OR moving it to another department — shared by handleStatusChange and department change.
+  const getMissingCoreFields = (): string[] => {
+    const missing: string[] = [];
+    const alwaysRequired: { name: string; key: string }[] = [
+      { name: 'Project Manager', key: 'projectManager' },
+      { name: 'Product Type',    key: 'productType'    },
+      { name: 'Combination',     key: 'combination'    },
+    ];
+    for (const f of alwaysRequired) {
+      const cfEntry = customFields.find(cf => cf.name?.toLowerCase() === f.name.toLowerCase());
+      const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
+      if (!val || val.toString().trim() === '') missing.push(f.name);
+    }
+    return missing;
+  };
+
   const handleStatusChange = async (statusId: string) => {
     setShowStatusDropdown(false);
     // Check if moving to a "done" category status — validate required fields
     const targetStatus = spaceStatuses.find(s => s.id === statusId);
     if (targetStatus?.category === 'done') {
-      const missing: string[] = [];
-
-      // Always-required fields before resolving a ticket
-      const alwaysRequired: { name: string; key: string }[] = [
-        { name: 'Project Manager', key: 'projectManager' },
-        { name: 'Product Type',    key: 'productType'    },
-        { name: 'Combination',     key: 'combination'    },
-      ];
-      for (const f of alwaysRequired) {
-        const cfEntry = customFields.find(cf => cf.name?.toLowerCase() === f.name.toLowerCase());
-        const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
-        if (!val || val.toString().trim() === '') missing.push(f.name);
-      }
+      const missing: string[] = getMissingCoreFields();
 
       // Any other custom fields explicitly marked required
       const nativeKey: Record<string, string> = {
@@ -646,7 +651,7 @@ export default function IssueDetailPage() {
         'Combination': 'combination', 'Project Manager': 'projectManager',
       };
       for (const cf of customFields.filter(c => c.required)) {
-        if (alwaysRequired.some(a => a.name.toLowerCase() === cf.name?.toLowerCase())) continue; // already checked
+        if (missing.includes(cf.name) || ['Project Manager', 'Product Type', 'Combination'].includes(cf.name)) continue; // already checked
         const val = customFieldValues[cf.id] || (nativeKey[cf.name] ? (issue as any)?.[nativeKey[cf.name]] : null);
         if (!val || val.toString().trim() === '') missing.push(cf.name);
       }
@@ -655,7 +660,7 @@ export default function IssueDetailPage() {
       if (!issue?.assignee) missing.push('Assignee');
 
       if (missing.length > 0) {
-        setMandatoryModal({ missingFields: missing, pendingStatusId: statusId });
+        setMandatoryModal({ missingFields: missing, pendingStatusId: statusId, context: 'resolve' });
         return;
       }
     }
@@ -2275,7 +2280,14 @@ export default function IssueDetailPage() {
               currentStatusName={issueStat?.name}
               onChanged={() => loadIssue(issueKey)}
               onDeptChangeBlocked={() => setDeptBlockModal(true)}
-              onRequestDeptChange={(dept, execute) => setPendingDeptChange({ dept, execute })}
+              onRequestDeptChange={(dept, execute) => {
+                const missing = getMissingCoreFields();
+                if (missing.length > 0) {
+                  setMandatoryModal({ missingFields: missing, context: 'department' });
+                  return;
+                }
+                setPendingDeptChange({ dept, execute });
+              }}
               onSetWaitingStatus={async (deptName: string) => {
                 const waitingStatus = spaceStatuses.find((s: any) =>
                   (s.name || '').toLowerCase() === `waiting for ${deptName.toLowerCase()}`
@@ -3309,11 +3321,17 @@ export default function IssueDetailPage() {
               </div>
               <div>
                 <h3 className="text-[15px] font-bold text-gray-900">Required fields missing</h3>
-                <p className="text-[12.5px] text-gray-500 mt-0.5">Complete all required fields before closing this ticket.</p>
+                <p className="text-[12.5px] text-gray-500 mt-0.5">
+                  {mandatoryModal.context === 'department'
+                    ? 'Complete all required fields before changing the department.'
+                    : 'Complete all required fields before closing this ticket.'}
+                </p>
               </div>
             </div>
             <div className="px-6 py-4">
-              <p className="text-[13px] text-gray-700 mb-3">The following fields are mandatory and must be filled before resolving this ticket:</p>
+              <p className="text-[13px] text-gray-700 mb-3">
+                The following fields are mandatory and must be filled before {mandatoryModal.context === 'department' ? 'changing the department' : 'resolving this ticket'}:
+              </p>
               <ul className="space-y-2">
                 {mandatoryModal.missingFields.map(field => (
                   <li key={field} className="flex items-center gap-2.5 px-3 py-2 bg-red-50 border border-red-100 rounded-lg">
@@ -3609,7 +3627,10 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   if (spaceAssigned !== true) return null;
 
   return (
-    <div className="flex items-start gap-2 py-1.5 border-b border-gray-100 last:border-0 group relative">
+    <div
+      className="flex items-start gap-2 py-1.5 px-1.5 -mx-1.5 border-b border-gray-100 last:border-0 group relative rounded-md"
+      style={displayDept ? { backgroundColor: getDeptColor(displayDept) + '0c', borderLeft: `2px solid ${getDeptColor(displayDept)}` } : undefined}
+    >
       <div className="w-[90px] flex-shrink-0 pt-1.5">
         <span className="text-[11.5px] text-gray-400 leading-none">Department</span>
       </div>
