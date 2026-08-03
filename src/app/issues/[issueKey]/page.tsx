@@ -365,30 +365,34 @@ export default function IssueDetailPage() {
           }
 
           // Always verify against the live API and correct the display if the cached
-          // snapshot was stale — also refreshes the cache for next time.
-          for (const spKey of allSpaceKeys) {
-            try {
-              const queues = await api.request<any[]>(`custom-queues/${spKey}`);
-              if (Array.isArray(queues)) {
-                const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
-                if (matchedQueue) {
-                  try { localStorage.setItem(`custom_queues_${spKey}`, JSON.stringify(queues)); } catch {}
-                  const qSt = matchedQueue.queueStatuses;
-                  const qTr = matchedQueue.queueTransitions;
-                  if (qSt?.length) {
-                    setSpaceStatuses(qSt);
-                    setWorkflowTransitions((qTr || []).map((t: any) => ({
-                      fromStatusId: t.fromStatusId ?? t.from,
-                      toStatusId: t.toStatusId ?? t.to,
-                    })));
-                    return;
-                  }
-                  const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
-                  loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
-                  return;
-                }
+          // snapshot was stale — also refreshes the cache for next time. Fetch every
+          // space concurrently instead of one at a time: this runs on every single
+          // ticket open now (not just as a rare cache-miss fallback like before), so
+          // awaiting spaces one-by-one would scale the load time with the number of
+          // spaces in the system.
+          const liveResults = await Promise.allSettled(
+            allSpaceKeys.map(spKey => api.request<any[]>(`custom-queues/${spKey}`).then(queues => ({ spKey, queues })))
+          );
+          for (const r of liveResults) {
+            if (r.status !== 'fulfilled' || !Array.isArray(r.value.queues)) continue;
+            const { spKey, queues } = r.value;
+            const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
+            if (matchedQueue) {
+              try { localStorage.setItem(`custom_queues_${spKey}`, JSON.stringify(queues)); } catch {}
+              const qSt = matchedQueue.queueStatuses;
+              const qTr = matchedQueue.queueTransitions;
+              if (qSt?.length) {
+                setSpaceStatuses(qSt);
+                setWorkflowTransitions((qTr || []).map((t: any) => ({
+                  fromStatusId: t.fromStatusId ?? t.from,
+                  toStatusId: t.toStatusId ?? t.to,
+                })));
+                return;
               }
-            } catch {}
+              const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
+              loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
+              return;
+            }
           }
           // Nothing found anywhere — fall back to the original space
           if (!resolvedFromCache) loadStatusesForSpace(currentIssue.spaceKey);
