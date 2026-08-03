@@ -10,6 +10,7 @@ import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import SpaceIcon from '@/components/ui/SpaceIcon';
 import { api } from '@/lib/api';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
+import DeptDropdown from '@/components/ui/DeptDropdown';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 
 interface Props {
@@ -658,19 +659,12 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 <label className="block text-[12px] font-semibold text-gray-500 mb-1">
                   Queue <span className="text-red-500">*</span>
                 </label>
-                <div className={`relative ${queueError ? 'ring-2 ring-red-300 rounded-lg' : ''}`}>
-                  <select
-                    value={form.department}
-                    onChange={e => update('department', e.target.value)}
-                    className="w-full px-3 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="">Select queue...</option>
-                    {queueOptions.map(name => (
-                      <option key={name} value={name}>{name}</option>
-                    ))}
-                  </select>
-                  <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-                </div>
+                <DeptDropdown
+                  value={form.department}
+                  onChange={v => update('department', v)}
+                  options={queueOptions}
+                  error={queueError}
+                />
                 {queueError && (
                   <div className="flex items-center gap-1.5 mt-1.5">
                     <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
