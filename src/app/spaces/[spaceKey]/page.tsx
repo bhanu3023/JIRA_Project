@@ -2057,8 +2057,6 @@ function SpaceDetailContent() {
                 };
                 const slaIsPaused = !!pausedSla;
                 const pausedElapsedMs: number = pausedSla?.elapsed_ms || 0;
-                // Priority
-                const pm = getPriorityMeta(issue.priority ?? 'medium');
                 const hasUpdate = issue.updatedAt && issue.createdAt &&
                   new Date(issue.updatedAt).getTime() - new Date(issue.createdAt).getTime() > 5000;
                 return (
@@ -2067,42 +2065,26 @@ function SpaceDetailContent() {
                     onClick={() => { window.location.href = `/issues/${issue.cfKey ?? issue.key}`; }}>
                     {/* Card top row */}
                     <div className="flex items-start gap-3 px-4 pt-4 pb-3">
-                      {/* Unread dot */}
-                      <div className="flex-shrink-0 mt-1">
-                        {hasUpdate
-                          ? <div className="w-2 h-2 rounded-full bg-orange-400" title="New update" />
-                          : <div className="w-2 h-2 rounded-full bg-gray-200" />}
-                      </div>
-                      {/* Type icon */}
-                      <div className="flex-shrink-0 mt-0.5"><IssueTypeIcon type={issue.type || 'task'} size={15} /></div>
                       {/* Main content */}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1 flex-wrap">
                           <span className="text-[12px] text-blue-600 font-semibold font-mono">{issue.cfKey ?? issue.key}</span>
-                          {/* Dept badge */}
-                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${deptBadge}`}>{currentDept || '—'}</span>
+                          {/* Transferred-to queue */}
+                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${deptBadge}`} title="Transferred to this queue">→ {currentDept || '—'}</span>
                           {/* Status */}
                           <span className="text-[11px] font-medium px-2 py-0.5 rounded-full border"
                             style={{ background: stColor + '18', color: stColor, borderColor: stColor + '40' }}>
                             {st?.name || 'Open'}
                           </span>
-                          {/* Priority */}
-                          <span className="flex items-center gap-1 text-[11px] text-gray-400">
-                            <PriorityIcon priority={issue.priority ?? 'medium'} size={11} />
-                            <span className="capitalize">{issue.priority || 'Medium'}</span>
-                          </span>
                         </div>
                         <p className="text-[13.5px] font-medium text-gray-800 group-hover:text-blue-700 line-clamp-1">{issue.summary}</p>
                       </div>
-                      {/* Last updated + Recall */}
-                      <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                        <span className="text-[11px] text-gray-400">{issue.updatedAt ? timeAgo(issue.updatedAt) : '—'}</span>
-                        <div onClick={e => e.stopPropagation()}>
-                          <button onClick={() => recallIssue(issue.key)}
-                            className="px-2.5 py-1 text-[11px] font-semibold bg-orange-50 text-orange-600 border border-orange-200 rounded-lg hover:bg-orange-100 transition-colors">
-                            ↩ Recall
-                          </button>
-                        </div>
+                      {/* Recall */}
+                      <div className="flex-shrink-0" onClick={e => e.stopPropagation()}>
+                        <button onClick={() => recallIssue(issue.key)}
+                          className="px-2.5 py-1 text-[11px] font-semibold bg-orange-50 text-orange-600 border border-orange-200 rounded-lg hover:bg-orange-100 transition-colors">
+                          ↩ Recall
+                        </button>
                       </div>
                     </div>
 
@@ -2136,16 +2118,9 @@ function SpaceDetailContent() {
                           <span className="text-[12px] text-gray-400 italic">Unassigned — waiting for {currentDept}</span>
                         )}
                       </div>
-                      {/* Divider */}
-                      <div className="h-3 w-px bg-gray-200" />
-                      {/* Created */}
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10.5px] text-gray-400 font-medium uppercase tracking-wide">Raised</span>
-                        <span className="text-[12px] text-gray-600">{issue.createdAt ? timeAgo(issue.createdAt) : '—'}</span>
-                      </div>
                     </div>
 
-                    {/* Paused SLA panel */}
+                    {/* Paused SLA panel — how much was worked, when it paused, how much remains */}
                     {slaIsPaused && pausedSla && (
                       <div className={`mx-4 mb-2 rounded-lg border px-3 py-2 ${pausedSla.isBreached ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
                         <div className="flex items-center justify-between mb-1.5">
@@ -2161,13 +2136,13 @@ function SpaceDetailContent() {
                         </div>
                         <div className="flex items-center gap-4">
                           <div className="flex flex-col">
-                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">{deptParam} Time Used</span>
+                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Time Worked</span>
                             <span className={`text-[13px] font-bold ${pausedSla.isBreached ? 'text-red-600' : 'text-amber-600'}`}>{fmtDuration(pausedSla.elapsed_ms)}</span>
                           </div>
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
-                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Target</span>
-                            <span className="text-[13px] font-bold text-gray-600">{fmtDuration(pausedSla.goalDurationMs)}</span>
+                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Paused At</span>
+                            <span className="text-[13px] font-bold text-gray-600">{pausedSla.paused_at ? timeAgo(pausedSla.paused_at) : '—'}</span>
                           </div>
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
@@ -2175,11 +2150,6 @@ function SpaceDetailContent() {
                             <span className={`text-[13px] font-bold ${pausedSla.isBreached ? 'text-red-600' : 'text-green-600'}`}>
                               {pausedSla.isBreached ? fmtDuration(pausedSla.elapsed_ms - pausedSla.goalDurationMs) : fmtDuration(pausedSla.remainingMs)}
                             </span>
-                          </div>
-                          <div className="h-6 w-px bg-gray-200" />
-                          <div className="flex flex-col">
-                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Waiting For</span>
-                            <span className="text-[13px] font-bold text-blue-600">{currentDept}</span>
                           </div>
                         </div>
                         {/* Progress bar */}
