@@ -4745,8 +4745,11 @@ async function _handleJiraPgApi(
           const dueAt = new Date(row.dept_sla_started_at).getTime() + durationMs;
           const timeToBreachMs = dueAt - Date.now();
           if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
+            // Dedup must match the key the notification is actually stored under below
+            // (cf_key, not the internal key) — otherwise this never finds the prior
+            // notification and re-sends every 5-min poll for the whole 30-min window.
             const already = await (db as any).notification.findFirst({
-              where: { issueKey: row.key, type: 'SLA_BREACH', createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
+              where: { issueKey: row.cf_key || row.key, type: 'SLA_BREACH', createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
             });
             if (already) continue;
             const leadIds = await getSpaceLeadUserIds(row.spaceId);
