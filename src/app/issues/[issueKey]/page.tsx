@@ -580,24 +580,33 @@ export default function IssueDetailPage() {
     if (!commentText.trim() || submittingComment) return;
     setSubmittingComment(true);
     const textToSubmit = commentText;
+    const tempId = `opt-${Date.now()}`;
     setCommentText(''); // clear immediately to prevent double-submit
+    // Append the comment right away — the previous version built this same
+    // "optimistic" object but only appended it after awaiting the server response,
+    // so it never actually showed until the round-trip finished.
+    const optimisticComment = {
+      id: tempId,
+      body: textToSubmit,
+      isInternal,
+      authorName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || 'You',
+      author: user,
+      createdAt: new Date().toISOString(),
+    };
+    useStore.setState((s) => ({
+      currentIssue: s.currentIssue
+        ? { ...s.currentIssue, comments: [...(s.currentIssue.comments || []), optimisticComment] }
+        : s.currentIssue,
+    }));
     try {
       const saved = await api.addComment(issueKey, { body: textToSubmit, isInternal });
       setIsInternal(false);
       // Mark this comment as known so the poll doesn't fire a sound for our own comment
       if (saved?.id) knownCommentIds.current.add(saved.id);
-      // Optimistically append the new comment so the UI updates instantly
-      const optimisticComment = saved || {
-        id: `opt-${Date.now()}`,
-        body: textToSubmit,
-        isInternal,
-        authorName: user?.name || user?.email || 'You',
-        author: user,
-        createdAt: new Date().toISOString(),
-      };
+      // Swap the placeholder for the real saved comment (real id/timestamps)
       useStore.setState((s) => ({
         currentIssue: s.currentIssue
-          ? { ...s.currentIssue, comments: [...(s.currentIssue.comments || []), optimisticComment] }
+          ? { ...s.currentIssue, comments: (s.currentIssue.comments || []).map((c: any) => c.id === tempId ? (saved || c) : c) }
           : s.currentIssue,
       }));
       // Background refresh to sync server state (don't await — no spinner)
@@ -607,17 +616,39 @@ export default function IssueDetailPage() {
       if (!err?.message?.includes('Duplicate comment')) {
         console.error(err);
         setCommentText(textToSubmit); // restore text on non-duplicate failures
+        useStore.setState((s) => ({
+          currentIssue: s.currentIssue
+            ? { ...s.currentIssue, comments: (s.currentIssue.comments || []).filter((c: any) => c.id !== tempId) }
+            : s.currentIssue,
+        }));
       }
     }
     finally { setSubmittingComment(false); }
   };
 
-  const handleUpdate = async (field: string, value: any) => {
+  // displayPatch covers relational fields (assignee, status) whose visible name/avatar
+  // lives on a different key than the raw id being saved (issue.assignee vs assigneeId).
+  const handleUpdate = async (field: string, value: any, displayPatch?: Record<string, any>) => {
+    const prevValue = (issue as any)?.[field];
+    const patchKeys = displayPatch ? Object.keys(displayPatch) : [];
+    const prevDisplay: Record<string, any> = {};
+    for (const k of patchKeys) prevDisplay[k] = (issue as any)?.[k];
+    // Reflect the change immediately instead of waiting on a PATCH + full reissue
+    // fetch before anything on screen moves — sync with the server in the
+    // background and revert only if the request actually fails.
+    useStore.setState(s => ({
+      currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: value, ...(displayPatch || {}) } as any : s.currentIssue,
+    }));
+    setEditing(null);
     try {
       await api.updateIssue(issueKey, { [field]: value });
       loadIssue(issueKey);
-      setEditing(null);
-    } catch (err) { console.error(err); }
+    } catch (err) {
+      console.error(err);
+      useStore.setState(s => ({
+        currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: prevValue, ...prevDisplay } as any : s.currentIssue,
+      }));
+    }
   };
 
   // Combination / Product Type / Project Manager must be filled before resolving a ticket
@@ -669,22 +700,43 @@ export default function IssueDetailPage() {
     if (statusId.startsWith('qst_') && targetStatus) {
       const dept = (issue as any).current_department;
       if (dept) {
-        await api.updateIssue(issueKey, {
-          queueStatusId: statusId,
-          queueStatusName: (targetStatus as any).name,
-          queueStatusColor: (targetStatus as any).color || '#64748B',
-          queueStatusCategory: (targetStatus as any).category || 'todo',
-        } as any);
-        loadIssue(issueKey);
+        const prevDeptStatuses = (issue as any).dept_statuses;
+        const queueSt = {
+          id: statusId, name: (targetStatus as any).name,
+          color: (targetStatus as any).color || '#64748B', category: (targetStatus as any).category || 'todo',
+        };
+        useStore.setState(s => ({
+          currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: { ...(s.currentIssue as any).dept_statuses, [dept]: queueSt } } as any : s.currentIssue,
+        }));
+        setShowStatusDropdown(false);
+        try {
+          await api.updateIssue(issueKey, {
+            queueStatusId: statusId,
+            queueStatusName: queueSt.name,
+            queueStatusColor: queueSt.color,
+            queueStatusCategory: queueSt.category,
+          } as any);
+          loadIssue(issueKey);
+        } catch (err) {
+          console.error(err);
+          useStore.setState(s => ({
+            currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: prevDeptStatuses } as any : s.currentIssue,
+          }));
+        }
         return;
       }
     }
-    await handleUpdate('statusId', statusId);
+    await handleUpdate('statusId', statusId, targetStatus
+      ? { status: { id: targetStatus.id, name: targetStatus.name, category: (targetStatus as any).category, color: (targetStatus as any).color } }
+      : undefined);
   };
 
   const handleAssigneeChange = async (assigneeId: string | null) => {
     setShowAssigneeDropdown(false);
-    await handleUpdate('assigneeId', assigneeId);
+    const member = assigneeId ? spaceMembers.find(m => m.id === assigneeId) : null;
+    await handleUpdate('assigneeId', assigneeId, {
+      assignee: member ? { id: member.id, firstName: member.firstName, lastName: member.lastName, email: (member as any).email, avatarUrl: (member as any).avatarUrl ?? null } : null,
+    });
   };
 
   const handlePriorityChange = async (priority: string) => {
@@ -3588,9 +3640,12 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
     setOptimisticDept(dept.name);
     // Only set waiting status if not already in it (avoids redundant reload)
     const alreadyWaiting = (currentStatusName || '').toLowerCase() === `waiting for ${dept.name.toLowerCase()}`;
-    if (!alreadyWaiting) {
-      try { await onSetWaitingStatus?.(dept.name); } catch {}
-    }
+    // Fire the "waiting status" update alongside the actual transfer instead of
+    // waiting for it first — the transfer endpoint doesn't depend on the status
+    // already being set, so sequencing them just doubled the wait for no reason.
+    const waitingStatusPromise = alreadyWaiting
+      ? Promise.resolve()
+      : Promise.resolve(onSetWaitingStatus?.(dept.name)).catch(() => {});
     try {
       const res = await fetch(`/api/issues/${issueKey}/department`, {
         method: 'PATCH',
@@ -3620,6 +3675,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
     } catch {
       setOptimisticDept(prevDept);
     }
+    await waitingStatusPromise;
     setSaving(false);
   };
 

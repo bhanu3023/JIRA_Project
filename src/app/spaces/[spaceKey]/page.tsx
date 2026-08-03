@@ -767,12 +767,30 @@ function SpaceDetailContent() {
     }
   }, [currentSpace?.key, user?.id]);
 
-  const handleInlineUpdate = useCallback(async (issueKey: string, field: string, value: any) => {
+  // displayPatch covers relational fields (assignee, status) whose visible name lives
+  // on a different key than the raw id being saved (issue.assignee vs assigneeId).
+  const handleInlineUpdate = useCallback(async (issueKey: string, field: string, value: any, displayPatch?: Record<string, any>) => {
     setOpenDropdown(null); setUpdating(issueKey);
-    try { await api.updateIssue(issueKey, { [field]: value }); await loadIssues({ spaceKey, page: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(currentPage) : '1', limit: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(PAGE_SIZE) : '500' }); }
-    catch (err) { console.error(err); }
+    const prevIssues = useStore.getState().issues;
+    // Reflect the change in the row immediately — don't wait on a PATCH plus a full
+    // list reload (up to 500 rows) before the row shows the new value.
+    useStore.setState(s => ({
+      issues: s.issues.map((i: any) => i.key === issueKey ? { ...i, [field]: value, ...(displayPatch || {}) } : i),
+    }));
+    try {
+      await api.updateIssue(issueKey, { [field]: value });
+      const params = { spaceKey, page: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(currentPage) : '1', limit: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(PAGE_SIZE) : '500' };
+      // Force a fresh fetch (not a cache hit) so the background reconcile reflects
+      // this edit and any server-side side effects, instead of re-showing stale data.
+      clearIssuesCache(params);
+      loadIssues(params);
+    }
+    catch (err) {
+      console.error(err);
+      useStore.setState({ issues: prevIssues });
+    }
     finally { setUpdating(null); }
-  }, [spaceKey, loadIssues]);
+  }, [spaceKey, loadIssues, clearIssuesCache, queueFilter, currentPage]);
 
   const recallIssue = async (issueKey: string) => {
     try {
@@ -2345,7 +2363,7 @@ function SpaceDetailContent() {
                             </div>
                             <div className="max-h-52 overflow-y-auto py-1">
                               {!inlineAssigneeSearch && (
-                                <button onClick={() => { handleInlineUpdate(issue.key, 'assigneeId', null); setInlineAssigneeSearch(''); }}
+                                <button onClick={() => { handleInlineUpdate(issue.key, 'assigneeId', null, { assignee: null }); setInlineAssigneeSearch(''); }}
                                   className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 ${!issue.assignee ? 'text-blue-600 font-medium' : 'text-gray-500'}`}>
                                   <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center"><User size={10} className="text-gray-400" /></div>
                                   Unassigned {!issue.assignee && <Check size={11} className="ml-auto text-blue-600" />}
@@ -2362,7 +2380,7 @@ function SpaceDetailContent() {
                                   const member = m.user || m;
                                   const isSel = issue.assignee?.email === member.email || issue.assignee?.id === member.id;
                                   return (
-                                    <button key={member.id} onClick={() => { handleInlineUpdate(issue.key, 'assigneeId', member.id); setInlineAssigneeSearch(''); }}
+                                    <button key={member.id} onClick={() => { handleInlineUpdate(issue.key, 'assigneeId', member.id, { assignee: { id: member.id, firstName: member.firstName, lastName: member.lastName, email: member.email, avatarUrl: member.avatarUrl ?? null } }); setInlineAssigneeSearch(''); }}
                                       className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 ${isSel ? 'text-blue-600 font-medium' : 'text-gray-700'}`}>
                                       <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold text-white ${avatarColor(member.firstName)}`}>{getInitials(member.firstName, member.lastName)}</div>
                                       <span className="flex-1 text-left truncate">{member.firstName} {member.lastName}</span>
@@ -2430,7 +2448,7 @@ function SpaceDetailContent() {
                                     setAssigneeRequiredModal(true);
                                     return;
                                   }
-                                  handleInlineUpdate(issue.key, 'statusId', s.id);
+                                  handleInlineUpdate(issue.key, 'statusId', s.id, { status: { id: s.id, name: s.name, category: (s as any).category, color: (s as any).color } });
                                 }}
                                   className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-50 transition-colors">
                                   {s.name}
