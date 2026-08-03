@@ -543,7 +543,10 @@ function SpaceDetailContent() {
 
   // Prefetch every custom queue (Dev/Migration/Bug/etc.) for this space once the queue
   // list is known, so switching between them hits a warm cache instead of a cold fetch.
-  // Safe to re-run whenever allCustomQueues changes — prefetchIssues never touches display.
+  // Also prefetch each queue's Sent/Watching view — previously missing from any
+  // prefetch list, so it was always a cold load no matter how recently a sibling
+  // queue had been visited. Safe to re-run whenever allCustomQueues changes —
+  // prefetchIssues never touches display.
   useEffect(() => {
     if (!spaceKey || allCustomQueues.length === 0) return;
     const timers: ReturnType<typeof setTimeout>[] = [];
@@ -551,6 +554,9 @@ function SpaceDetailContent() {
       timers.push(setTimeout(() => {
         prefetchIssues({ spaceKey, page: '1', limit: String(PAGE_SIZE), dept: q.name }).catch(() => {});
       }, (i + 1) * 400));
+      timers.push(setTimeout(() => {
+        prefetchIssues({ spaceKey, page: '1', limit: '100', sentDept: q.name }).catch(() => {});
+      }, (i + 1) * 400 + 200));
     });
     return () => timers.forEach(clearTimeout);
   }, [spaceKey, allCustomQueues, prefetchIssues]);
@@ -821,13 +827,34 @@ function SpaceDetailContent() {
   const submitComment = async (issueKey: string) => {
     const body = richCommentHtml.replace(/<[^>]+>/g, '').trim() ? richCommentHtml : commentText.trim();
     if (!body) return;
+    const tempId = `opt-${Date.now()}`;
+    const optimisticComment = {
+      id: tempId,
+      body,
+      isInternal: false,
+      authorName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || 'You',
+      author: user,
+      createdAt: new Date().toISOString(),
+    };
+    const prevIssues = useStore.getState().issues;
+    // Show the comment immediately — don't wait on a PATCH plus a full list
+    // reload (up to 100-500 rows) before the card reflects anything.
+    useStore.setState(s => ({
+      issues: s.issues.map((i: any) => i.key === issueKey ? { ...i, comments: [...((i as any).comments || []), optimisticComment] } : i),
+    }));
+    setCommentText('');
+    setRichCommentHtml('');
+    setCommentingOn(null);
     setSubmittingComment(true);
     try {
-      await api.addComment(issueKey, { body });
-      setCommentText('');
-      setRichCommentHtml('');
-      setCommentingOn(null);
-      // Reload with current queue params (not a hardcoded reporter filter)
+      const saved = await api.addComment(issueKey, { body });
+      // Swap the placeholder for the real saved comment
+      useStore.setState(s => ({
+        issues: s.issues.map((i: any) => i.key === issueKey
+          ? { ...i, comments: ((i as any).comments || []).map((c: any) => c.id === tempId ? (saved || c) : c) }
+          : i),
+      }));
+      // Reload with current queue params in the background (not a hardcoded reporter filter)
       const params: Record<string, string> = { spaceKey, page: '1', limit: '100' };
       if (queueFilter === 'sent-watching') {
         if (deptParam) params.sentDept = deptParam;
@@ -844,8 +871,11 @@ function SpaceDetailContent() {
         params.reporter = user?.id || '';
       }
       clearIssuesCache(params);
-      await loadIssues(params);
-    } catch (e) { console.error(e); }
+      loadIssues(params);
+    } catch (e) {
+      console.error(e);
+      useStore.setState({ issues: prevIssues });
+    }
     finally { setSubmittingComment(false); }
   };
 
