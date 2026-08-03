@@ -2637,7 +2637,14 @@ async function _handleJiraPgApi(
         newDeptStatusObj = firstTodoSt || { id: '', name: 'Open', category: 'todo', color: '#6366F1' };
       }
 
-      if (oldDept) deptStatuses[oldDept] = oldDeptStatusObj;
+      // Record the OLD dept's status exactly as it was right before the transfer —
+      // not the "Waiting for <newDept>" transit marker, which discarded that info
+      // (Sent/Watching needs to show what it was actually at before leaving).
+      if (oldDept) {
+        deptStatuses[oldDept] = issue.status
+          ? { id: issue.status.id, name: issue.status.name, category: issue.status.category, color: issue.status.color }
+          : oldDeptStatusObj;
+      }
       deptStatuses[newDept] = newDeptStatusObj;
 
       // Restore previously saved assignee for this dept, or round-robin to a new one

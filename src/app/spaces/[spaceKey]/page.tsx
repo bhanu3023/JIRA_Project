@@ -2036,10 +2036,10 @@ function SpaceDetailContent() {
                 const assigneeName = currentAssignee
                   ? `${currentAssignee.firstName || ''} ${currentAssignee.lastName || ''}`.trim()
                   : null;
-                // Show dept_statuses[current_dept] so Migration's "Resolved" shows correctly here
+                // Show the status this dept (deptParam, the one we're watching FROM) had it at
+                // right before the ticket transferred out — not the new dept's status.
                 const sentDeptStatusMap: Record<string, any> = (issue as any).dept_statuses || {};
-                const sentCurrentDept: string = (issue as any).current_department || '';
-                const st = (sentCurrentDept && sentDeptStatusMap[sentCurrentDept]) ? sentDeptStatusMap[sentCurrentDept] : getIssueStatus(issue);
+                const st = (deptParam && sentDeptStatusMap[deptParam]) ? sentDeptStatusMap[deptParam] : getIssueStatus(issue);
                 const stColor = st ? resolveStatusColor(st) : '#6B7280';
                 // Last comment from issue (if comments loaded)
                 const comments: any[] = (issue as any).comments || [];
@@ -2136,6 +2136,11 @@ function SpaceDetailContent() {
                           <div className="flex flex-col">
                             <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Time Worked</span>
                             <span className={`text-[13px] font-bold ${pausedSla.isBreached ? 'text-red-600' : 'text-amber-600'}`}>{fmtDuration(pausedSla.elapsed_ms)}</span>
+                          </div>
+                          <div className="h-6 w-px bg-gray-200" />
+                          <div className="flex flex-col">
+                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Actual SLA</span>
+                            <span className="text-[13px] font-bold text-gray-600">{fmtDuration(pausedSla.goalDurationMs)}</span>
                           </div>
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
