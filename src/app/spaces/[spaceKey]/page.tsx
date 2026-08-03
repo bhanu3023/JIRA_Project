@@ -2057,8 +2057,6 @@ function SpaceDetailContent() {
                 };
                 const slaIsPaused = !!pausedSla;
                 const pausedElapsedMs: number = pausedSla?.elapsed_ms || 0;
-                const hasUpdate = issue.updatedAt && issue.createdAt &&
-                  new Date(issue.updatedAt).getTime() - new Date(issue.createdAt).getTime() > 5000;
                 return (
                   <div key={issue.id}
                     className="bg-white rounded-xl border border-gray-150 shadow-sm hover:shadow-md hover:border-blue-200 transition-all cursor-pointer group"
@@ -2187,12 +2185,6 @@ function SpaceDetailContent() {
                         })}
                       </div>
                     )}
-                    {comments.length === 0 && hasUpdate && (
-                      <div className="mx-4 mb-3 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100 text-[12px] text-gray-500">
-                        Status changed to <strong>{st?.name}</strong> · {timeAgo(issue.updatedAt!)}
-                      </div>
-                    )}
-
                     {/* Inline comment area */}
                     <div className="mx-4 mb-3" onClick={e => e.stopPropagation()}>
                       {commentingOn === issue.key ? (
