@@ -83,6 +83,27 @@ WHERE EXISTS (
 );
 SQL
 
+echo "==> Clearing stale 'Waiting for X' status markers left by tickets transferred before the department-change fix..."
+# Old department-transfer code overwrote a department's own dept_statuses entry with a
+# synthetic "Waiting for <newDept>" marker (id: '') instead of the ticket's real status —
+# already fixed for new transfers, but tickets moved before this fix still carry the stale
+# marker. Real DB statuses always have a non-empty id, so this only ever touches the
+# synthetic placeholders, never a real status reference. Once cleared, the display falls
+# back to the ticket's actual current status. Safe to re-run — no-op once cleaned up.
+docker exec -i jira_postgres psql -U jirauser -d jiradb <<'SQL' 2>&1 | grep -v NOTICE || true
+UPDATE issues
+SET dept_statuses = COALESCE((
+  SELECT jsonb_object_agg(key, value)
+  FROM jsonb_each(dept_statuses)
+  WHERE NOT (value->>'id' = '' AND lower(value->>'name') LIKE 'waiting for %')
+), '{}'::jsonb)
+WHERE dept_statuses IS NOT NULL AND dept_statuses != '{}'::jsonb
+  AND EXISTS (
+    SELECT 1 FROM jsonb_each(dept_statuses) e
+    WHERE e.value->>'id' = '' AND lower(e.value->>'name') LIKE 'waiting for %'
+  );
+SQL
+
 echo ""
 echo "==> Deploy complete! App is running."
 echo "==> Space members and all production data are preserved."
