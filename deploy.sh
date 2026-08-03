@@ -55,7 +55,7 @@ docker exec -i jira_postgres psql -U jirauser -d jiradb -c "
 
 DATABASE_URL="postgresql://jirauser:Neutara%402024@localhost:5434/jiradb" node /root/Jira-v2.0/seed-queues.mjs 2>/dev/null || true
 
-echo "==> Setting Infra queue's status list (Open, In Progress, Waiting for Dev, Waiting for QA, Resolved)..."
+echo "==> Setting Infra queue's status list (Open, In Progress, Waiting for Migration, Resolved)..."
 # The Infra custom queue had no queueStatuses configured, so its status dropdown fell back to
 # the space's full unscoped status list, and newly-arrived tickets got the generic
 # "Waiting for Infra" transit marker instead of an actual Open status. This sets Infra's own
@@ -69,9 +69,8 @@ SET queues = (
       THEN elem || jsonb_build_object('queueStatuses', '[
         {"id":"qst_infra_open","name":"Open","color":"#6366f1","category":"todo","order":0},
         {"id":"qst_infra_inprogress","name":"In Progress","color":"#3B82F6","category":"in_progress","order":1},
-        {"id":"qst_infra_waitdev","name":"Waiting for Dev","color":"#F59E0B","category":"todo","order":2},
-        {"id":"qst_infra_waitqa","name":"Waiting for QA","color":"#F59E0B","category":"todo","order":3},
-        {"id":"qst_infra_resolved","name":"Resolved","color":"#10B981","category":"done","order":4}
+        {"id":"qst_infra_waitmigration","name":"Waiting for Migration","color":"#F59E0B","category":"todo","order":2},
+        {"id":"qst_infra_resolved","name":"Resolved","color":"#10B981","category":"done","order":3}
       ]'::jsonb)
       ELSE elem
     END
