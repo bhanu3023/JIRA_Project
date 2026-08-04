@@ -1962,36 +1962,47 @@ async function _handleJiraPgApi(
     }
 
     // Count and paginate Ã¢â‚¬â€ sort descending by issue number (extracted from key suffix)
-    const [total, issues] = await Promise.all([
-      db.issue.count({ where: where as any }),
-      db.issue.findMany({
-        where: where as any,
-        include: {
-          status: true,
-          assignee: true,
-          reporter: true,
-          space: { select: { key: true, name: true } },
-          },
-        orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
-    ]);
-
-    // Fetch department data for listed issues (raw SQL columns not in Prisma schema)
+    // dept is a raw ALTER TABLE column the `where` object above can't filter
+    // on -- when it's set, the block below re-queries via raw SQL and
+    // completely discards whatever this section fetches, so skip these
+    // queries (and the deptMap merge, which only annotates the rows this
+    // section fetches) rather than running them just to throw the result
+    // away. This was doubling every department-queue-view load (most list
+    // views in this app) with a wasted count + fetch of the whole space.
+    const deptParamEarly = url.searchParams.get('dept');
+    let total = 0;
+    let issues: any[] = [];
     let deptMap: Record<string, any> = {};
-    try {
-      const issueKeys = issues.map((i: any) => i.key);
-      if (issueKeys.length) {
-        const deptRows = await pool.query(
-          `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name FROM issues WHERE key = ANY($1::text[])`,
-          [issueKeys]
-        );
-        for (const row of deptRows.rows) {
-          deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name };
+    if (!deptParamEarly) {
+      [total, issues] = await Promise.all([
+        db.issue.count({ where: where as any }),
+        db.issue.findMany({
+          where: where as any,
+          include: {
+            status: true,
+            assignee: true,
+            reporter: true,
+            space: { select: { key: true, name: true } },
+            },
+          orderBy: { createdAt: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+      ]);
+
+      try {
+        const issueKeys = issues.map((i: any) => i.key);
+        if (issueKeys.length) {
+          const deptRows = await pool.query(
+            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name FROM issues WHERE key = ANY($1::text[])`,
+            [issueKeys]
+          );
+          for (const row of deptRows.rows) {
+            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name };
+          }
         }
-      }
-    } catch { /* ignore */ }
+      } catch { /* ignore */ }
+    }
 
     // sentDept filter Ã¢â‚¬â€ shows all tickets that MOVED OUT of this dept (to another dept)
     // Uses issue_dept_transitions (tracked moves) + queue_closed_tickets fallback for historical data
