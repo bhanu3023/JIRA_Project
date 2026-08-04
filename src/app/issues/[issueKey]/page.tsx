@@ -19,6 +19,18 @@ import {
   ExternalLink, Copy, Upload, Tag, Calendar, Target, Layers, Settings, RefreshCw, Pin, PinOff
 } from 'lucide-react';
 
+// Fallback status list for a department whose queue is configured (it shows up
+// in custom_queues) but has no queueStatuses of its own set up yet — shows this
+// minimal set instead of dumping the space's entire unscoped status list, which
+// is what the dropdown showed before and is rarely what any specific queue
+// actually wants. Uses the same qst_ id scheme as real custom queue statuses so
+// picking one goes through the existing per-queue status storage path.
+const DEFAULT_QUEUE_STATUSES = [
+  { id: 'qst_default_open', name: 'Open', category: 'todo', color: '#6366F1' },
+  { id: 'qst_default_inprogress', name: 'In Progress', category: 'in_progress', color: '#3B82F6' },
+  { id: 'qst_default_resolved', name: 'Resolved', category: 'done', color: '#10B981' },
+];
+
 export default function IssueDetailPage() {
   const params = useParams();
   // Normalize key: strip Jira sub-issue colon suffix (e.g. L2B-12718:1 → L2B-12718)
@@ -361,9 +373,12 @@ export default function IssueDetailPage() {
                     fromStatusId: t.fromStatusId ?? t.from,
                     toStatusId: t.toStatusId ?? t.to,
                   })));
-                } else {
+                } else if (matchedQueue.statusIds?.length) {
                   const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
                   loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
+                } else {
+                  setSpaceStatuses(DEFAULT_QUEUE_STATUSES);
+                  setWorkflowTransitions([]);
                 }
                 resolvedFromCache = true;
                 break;
@@ -403,8 +418,13 @@ export default function IssueDetailPage() {
                 })));
                 return;
               }
-              const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
-              loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
+              if (matchedQueue.statusIds?.length) {
+                const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
+                loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
+                return;
+              }
+              setSpaceStatuses(DEFAULT_QUEUE_STATUSES);
+              setWorkflowTransitions([]);
               return;
             }
           }

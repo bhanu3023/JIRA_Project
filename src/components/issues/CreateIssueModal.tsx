@@ -22,6 +22,16 @@ interface Props {
   onCreated: (issue?: any) => void;
 }
 
+// Fallback status list for a queue that's configured but has no queueStatuses
+// of its own — shows this minimal set instead of the space's entire unscoped
+// list, matching the same default used on the issue detail page's status
+// dropdown for the same situation.
+const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
+  { id: 'qst_default_open', name: 'Open', category: 'todo', color: '#6366F1' } as WorkflowStatus,
+  { id: 'qst_default_inprogress', name: 'In Progress', category: 'in_progress', color: '#3B82F6' } as WorkflowStatus,
+  { id: 'qst_default_resolved', name: 'Resolved', category: 'done', color: '#10B981' } as WorkflowStatus,
+];
+
 const WORK_TYPES = [
   { value: 'task',            label: 'Task' },
   { value: 'bug',             label: 'Bug' },
@@ -253,7 +263,15 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // as the issue detail page's department status dropdown already does —
   // falls back to the space's full list when the queue has no restricted one.
   useEffect(() => {
-    const nextStatuses = selectedQueue?.queueStatuses?.length ? selectedQueue.queueStatuses : baseStatuses;
+    // Selected a queue but it has no status list of its own configured — use
+    // the minimal default rather than the space's entire unscoped list. No
+    // queue selected yet (department not chosen) still shows the full list,
+    // since there's no queue context to narrow by.
+    const nextStatuses = selectedQueue?.queueStatuses?.length
+      ? selectedQueue.queueStatuses
+      : selectedQueue
+      ? DEFAULT_QUEUE_STATUSES
+      : baseStatuses;
     setSpaceStatuses(nextStatuses);
     // If the currently-selected status isn't valid for this queue, clear it
     // so the "Set default status" effect below picks a valid one.
