@@ -20,6 +20,11 @@ import { fireConnectorEvent, listConnectors, getConnector, createConnector, upda
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db',
   max: 20,
+  // Without this, pg defaults to waiting forever for a free connection once the
+  // pool is saturated — a starved/exhausted pool then hangs every request
+  // instead of failing fast (this is what caused issue pages to spin forever).
+  connectionTimeoutMillis: 10_000,
+  idleTimeoutMillis: 30_000,
 });
 
 // 60-second in-memory cache for user role lookups so every API request

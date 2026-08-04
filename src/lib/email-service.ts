@@ -662,10 +662,10 @@ export function startImapPoller(
   if (!(globalThis as any).__processedMsgIdsLoaded) {
     (globalThis as any).__processedMsgIdsLoaded = true;
     (async () => {
+      const { Pool } = await import('pg');
+      const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
+      const pool = new Pool({ connectionString: DB, connectionTimeoutMillis: 10_000 });
       try {
-        const { Pool } = await import('pg');
-        const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
-        const pool = new Pool({ connectionString: DB });
         await pool.query(`
           CREATE TABLE IF NOT EXISTS processed_emails (
             message_id TEXT PRIMARY KEY,
@@ -673,22 +673,23 @@ export function startImapPoller(
           )
         `);
         const res = await pool.query(`SELECT message_id FROM processed_emails`);
-        await pool.end();
         const ids = (globalThis as any).__processedMsgIds as Set<string>;
         res.rows.forEach((r: any) => { if (r.message_id) ids.add(r.message_id); });
         console.log(`[EmailPoller] Bootstrapped ${res.rows.length} processed message IDs from DB`);
       } catch (e) {
         console.error('[EmailPoller] Failed to bootstrap processedMsgIds:', e);
+      } finally {
+        await pool.end().catch(() => {});
       }
     })();
   }
 
   // ── Also ensure email_configs table has this entry ───────────────────────
   (async () => {
+    const { Pool } = await import('pg');
+    const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
+    const pool = new Pool({ connectionString: DB, connectionTimeoutMillis: 10_000 });
     try {
-      const { Pool } = await import('pg');
-      const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
-      const pool = new Pool({ connectionString: DB });
       await pool.query(`
         CREATE TABLE IF NOT EXISTS email_configs (
           id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -706,10 +707,11 @@ export function startImapPoller(
           imap_host=EXCLUDED.imap_host, smtp_host=EXCLUDED.smtp_host, auto_reply=EXCLUDED.auto_reply
       `, [config.spaceKey, config.imap.user, config.imap.host, config.imap.port,
           config.smtp?.host || 'smtp.office365.com', config.smtp?.port || 587, true]);
-      await pool.end();
       console.log(`[EmailPoller] Config persisted for ${config.imap.user} → space ${config.spaceKey}`);
     } catch (e) {
       console.error('[EmailPoller] Failed to persist email config:', e);
+    } finally {
+      await pool.end().catch(() => {});
     }
   })();
 
