@@ -2739,44 +2739,52 @@ async function _handleJiraPgApi(
         }
       } catch {}
 
-      // Notifications on dept change
-      try {
-        // Notify reporter that ticket was sent to new dept
-        if (issue.reporterId) {
-          await notifyUsers(
-            [issue.reporterId],
-            userId,
-            { type: 'DEPT_CHANGE', title: `Ticket ${key} sent to ${newDept}`, message: `Your ticket "${issue.summary}" has been transferred to ${newDept}.`, issueKey: key }
-          );
-        }
-        // Notify the RR-assigned agent
-        if (rrAssigneeId) {
-          await notifyUsers(
-            [rrAssigneeId],
-            userId,
-            { type: 'ASSIGNED', title: `Ticket assigned to you: ${key}`, message: `You have been assigned to "${issue.summary}" in the ${newDept} queue.`, issueKey: key }
-          );
-        }
-        // Notify space members of the target dept (agents + leads/shift_leads in that dept)
-        const spaceMembers = await db.spaceMember.findMany({
-          where: { spaceId: issue.spaceId },
-          include: { user: { select: { id: true } } }
-        });
-        const targetDeptMemberIds = spaceMembers
-          .filter((m: any) => (m as any).department?.toLowerCase() === newDept.toLowerCase())
-          .map((m: any) => m.user?.id)
-          .filter((id: any) => id && id !== rrAssigneeId); // skip already-notified assignee
-        // Also include leads/shift_leads for this dept (those with matching dept or no dept set)
-        const deptLeadIds = await getSpaceLeadUserIds(issue.spaceId, newDept);
-        const allDeptIds = [...new Set([...targetDeptMemberIds, ...deptLeadIds])].filter((id) => id !== rrAssigneeId);
-        if (allDeptIds.length > 0) {
-          await notifyUsers(
-            allDeptIds,
-            userId,
-            { type: 'DEPT_ASSIGNED', title: `New ticket in ${newDept}: ${key}`, message: `Ticket "${issue.summary}" has arrived in the ${newDept} queue.`, issueKey: key }
-          );
-        }
-      } catch { /* ignore notification errors */ }
+      // Notifications on dept change — fire-and-forget. This used to await three
+      // sequential notifyUsers calls (each with its own per-recipient DB lookups)
+      // plus a spaceMember query and a lead lookup, all before the response went
+      // back — so confirming a transfer was only as fast as the whole
+      // notification pipeline. The transfer itself has already fully committed
+      // above; notifications reaching people doesn't need to block confirming
+      // that to the user who just moved it.
+      (async () => {
+        try {
+          // Notify reporter that ticket was sent to new dept
+          if (issue.reporterId) {
+            await notifyUsers(
+              [issue.reporterId],
+              userId,
+              { type: 'DEPT_CHANGE', title: `Ticket ${key} sent to ${newDept}`, message: `Your ticket "${issue.summary}" has been transferred to ${newDept}.`, issueKey: key }
+            );
+          }
+          // Notify the RR-assigned agent
+          if (rrAssigneeId) {
+            await notifyUsers(
+              [rrAssigneeId],
+              userId,
+              { type: 'ASSIGNED', title: `Ticket assigned to you: ${key}`, message: `You have been assigned to "${issue.summary}" in the ${newDept} queue.`, issueKey: key }
+            );
+          }
+          // Notify space members of the target dept (agents + leads/shift_leads in that dept)
+          const spaceMembers = await db.spaceMember.findMany({
+            where: { spaceId: issue.spaceId },
+            include: { user: { select: { id: true } } }
+          });
+          const targetDeptMemberIds = spaceMembers
+            .filter((m: any) => (m as any).department?.toLowerCase() === newDept.toLowerCase())
+            .map((m: any) => m.user?.id)
+            .filter((id: any) => id && id !== rrAssigneeId); // skip already-notified assignee
+          // Also include leads/shift_leads for this dept (those with matching dept or no dept set)
+          const deptLeadIds = await getSpaceLeadUserIds(issue.spaceId, newDept);
+          const allDeptIds = [...new Set([...targetDeptMemberIds, ...deptLeadIds])].filter((id) => id !== rrAssigneeId);
+          if (allDeptIds.length > 0) {
+            await notifyUsers(
+              allDeptIds,
+              userId,
+              { type: 'DEPT_ASSIGNED', title: `New ticket in ${newDept}: ${key}`, message: `Ticket "${issue.summary}" has arrived in the ${newDept} queue.`, issueKey: key }
+            );
+          }
+        } catch { /* ignore notification errors */ }
+      })();
 
       // History entry (non-critical)
       try {
