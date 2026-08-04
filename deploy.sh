@@ -55,29 +55,59 @@ docker exec -i jira_postgres psql -U jirauser -d jiradb -c "
 
 DATABASE_URL="postgresql://jirauser:Neutara%402024@localhost:5434/jiradb" node /root/Jira-v2.0/seed-queues.mjs 2>/dev/null || true
 
-echo "==> Setting Infra queue's status list (Open, In Progress, Resolved)..."
-# The Infra custom queue had no queueStatuses configured, so its status dropdown fell back to
-# the space's full unscoped status list, and newly-arrived tickets got the generic
-# "Waiting for Infra" transit marker instead of an actual Open status. This sets Infra's own
-# status list (applies to all roles, per queue status scoping in the app) and is safe to
-# re-run on every deploy — it only touches the "Infra" queue entry's queueStatuses field.
+echo "==> Setting the final per-department status lists (Migration, Dev, QA, Infra)..."
+# Each of these 4 queues had no (or an incomplete) queueStatuses configured, so their status
+# dropdown fell back to the space's full unscoped status list (every status ever used across
+# every board — dozens of entries). This sets each queue's own final status list (applies to
+# all roles, per queue status scoping in the app) and is safe to re-run on every deploy — it
+# only touches these 4 queue entries' queueStatuses field, matched by department name.
 docker exec -i jira_postgres psql -U jirauser -d jiradb <<'SQL' 2>&1 | grep -v NOTICE || true
 UPDATE custom_queues
 SET queues = (
   SELECT jsonb_agg(
-    CASE WHEN lower(elem->>'name') = 'infra'
-      THEN elem || jsonb_build_object('queueStatuses', '[
-        {"id":"qst_infra_open","name":"Open","color":"#6366f1","category":"todo","order":0},
-        {"id":"qst_infra_inprogress","name":"In Progress","color":"#3B82F6","category":"in_progress","order":1},
-        {"id":"qst_infra_resolved","name":"Resolved","color":"#10B981","category":"done","order":2}
-      ]'::jsonb)
+    CASE
+      WHEN lower(elem->>'name') = 'migration'
+        THEN elem || jsonb_build_object('queueStatuses', '[
+          {"id":"qst_migration_open","name":"Open","color":"#6366F1","category":"todo","order":0},
+          {"id":"qst_migration_inprogress","name":"In Progress","color":"#3B82F6","category":"in_progress","order":1},
+          {"id":"qst_migration_waitingdev","name":"Waiting for Dev","color":"#F59E0B","category":"in_progress","order":2},
+          {"id":"qst_migration_waitinginfra","name":"Waiting for Infra","color":"#F59E0B","category":"in_progress","order":3},
+          {"id":"qst_migration_waitingqa","name":"Waiting for QA","color":"#F59E0B","category":"in_progress","order":4},
+          {"id":"qst_migration_resolved","name":"Resolved","color":"#10B981","category":"done","order":5}
+        ]'::jsonb)
+      WHEN lower(elem->>'name') = 'dev'
+        THEN elem || jsonb_build_object('queueStatuses', '[
+          {"id":"qst_dev_open","name":"Open","color":"#6366F1","category":"todo","order":0},
+          {"id":"qst_dev_inprogress","name":"In Progress","color":"#3B82F6","category":"in_progress","order":1},
+          {"id":"qst_dev_waitingmigration","name":"Waiting for Migration","color":"#F59E0B","category":"in_progress","order":2},
+          {"id":"qst_dev_waitingqa","name":"Waiting for QA","color":"#F59E0B","category":"in_progress","order":3},
+          {"id":"qst_dev_waitinginfra","name":"Waiting for Infra","color":"#F59E0B","category":"in_progress","order":4},
+          {"id":"qst_dev_resolved","name":"Resolved","color":"#10B981","category":"done","order":5}
+        ]'::jsonb)
+      WHEN lower(elem->>'name') = 'qa'
+        THEN elem || jsonb_build_object('queueStatuses', '[
+          {"id":"qst_qa_open","name":"Open","color":"#6366F1","category":"todo","order":0},
+          {"id":"qst_qa_inprogress","name":"In Progress","color":"#3B82F6","category":"in_progress","order":1},
+          {"id":"qst_qa_waitingdev","name":"Waiting for Dev","color":"#F59E0B","category":"in_progress","order":2},
+          {"id":"qst_qa_waitinginfra","name":"Waiting for Infra","color":"#F59E0B","category":"in_progress","order":3},
+          {"id":"qst_qa_resolved","name":"Resolved","color":"#10B981","category":"done","order":4}
+        ]'::jsonb)
+      WHEN lower(elem->>'name') = 'infra'
+        THEN elem || jsonb_build_object('queueStatuses', '[
+          {"id":"qst_infra_open","name":"Open","color":"#6366F1","category":"todo","order":0},
+          {"id":"qst_infra_inprogress","name":"In Progress","color":"#3B82F6","category":"in_progress","order":1},
+          {"id":"qst_infra_waitingqa","name":"Waiting for QA","color":"#F59E0B","category":"in_progress","order":2},
+          {"id":"qst_infra_waitingdev","name":"Waiting for Dev","color":"#F59E0B","category":"in_progress","order":3},
+          {"id":"qst_infra_resolved","name":"Resolved","color":"#10B981","category":"done","order":4}
+        ]'::jsonb)
       ELSE elem
     END
   )
   FROM jsonb_array_elements(queues) elem
 )
 WHERE EXISTS (
-  SELECT 1 FROM jsonb_array_elements(queues) e WHERE lower(e->>'name') = 'infra'
+  SELECT 1 FROM jsonb_array_elements(queues) e
+  WHERE lower(e->>'name') IN ('migration', 'dev', 'qa', 'infra')
 );
 SQL
 
