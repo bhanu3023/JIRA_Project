@@ -9,18 +9,21 @@
 import fs from 'fs';
 import { Pool } from 'pg';
 
-// Load DATABASE_URL from .env in the current directory if it's not already
-// set in the environment -- avoids depending on the `dotenv` package being
-// installed on whatever host this script is run from.
-if (!process.env.DATABASE_URL && fs.existsSync('.env')) {
-  for (const line of fs.readFileSync('.env', 'utf8').split('\n')) {
+// Load DATABASE_URL from an env file in the current directory if it's not
+// already set in the environment -- avoids depending on the `dotenv` package
+// being installed on whatever host this script is run from. .env is
+// gitignored (local/dev only); .env.server is the one actually deployed and
+// read by the running containers, so check it too.
+for (const envFile of ['.env', '.env.server']) {
+  if (process.env.DATABASE_URL || !fs.existsSync(envFile)) continue;
+  for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
     const m = line.match(/^\s*DATABASE_URL\s*=\s*(.*)\s*$/);
     if (m) { process.env.DATABASE_URL = m[1].replace(/^["']|["']$/g, ''); break; }
   }
 }
 
 if (!process.env.DATABASE_URL) {
-  console.error('DATABASE_URL is not set (checked .env in the current directory). Run this from the project root.');
+  console.error('DATABASE_URL is not set (checked .env and .env.server in the current directory). Run this from the project root.');
   process.exit(1);
 }
 
