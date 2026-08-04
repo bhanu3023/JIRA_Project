@@ -3267,10 +3267,23 @@ async function _handleJiraPgApi(
       };
     });
 
+    // cf_key is a raw ALTER TABLE column Prisma doesn't know about, so
+    // db.issue.findMany above never returns it for children -- fetch it
+    // separately so subtasks show their CF-#### key like every other issue,
+    // instead of falling back to the raw space-prefixed key.
+    const childCfKeys = childIssues.length
+      ? await pool.query<{ id: string; cf_key: string | null }>(
+          `SELECT id, cf_key FROM issues WHERE id = ANY($1::text[])`,
+          [childIssues.map(c => c.id)]
+        )
+      : { rows: [] as { id: string; cf_key: string | null }[] };
+    const childCfKeyMap = new Map(childCfKeys.rows.map(r => [r.id, r.cf_key]));
+
     // Format children
     const children = childIssues.map(c => ({
       id: c.id,
       key: c.key,
+      cfKey: childCfKeyMap.get(c.id) ?? null,
       summary: c.summary,
       type: c.type ?? 'subtask',
       priority: c.priority ?? 'medium',

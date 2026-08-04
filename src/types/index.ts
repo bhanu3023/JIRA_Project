@@ -115,10 +115,12 @@ export interface IssueLink {
 export interface ChildIssue {
   id: string;
   key: string;
+  cfKey?: string | null;
   summary: string;
   type: string;
   priority: string;
   status: { name: string; color: string };
+  assignee?: { id: string; firstName: string; lastName: string; avatarUrl?: string | null } | null;
 }
 
 export interface ActivityLog {
