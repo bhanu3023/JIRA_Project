@@ -39,6 +39,10 @@ const TYPE_LABELS: Record<string, string> = {
   bug: 'Bug', task: 'Task', subtask: 'Subtask',
 };
 const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
+// Same fixed list the ticket's own Project Manager field picks from (CreateIssueModal.tsx,
+// issues/[issueKey]/page.tsx) — individual people, not the comma-joined combinations a
+// ticket ends up storing once multiple are picked (e.g. "Abhishikth, Abhishek").
+const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan'];
 const PRIORITY_LABELS: Record<string, string> = {
   highest: 'Highest', high: 'High', medium: 'Medium', low: 'Low', lowest: 'Lowest',
 };
@@ -67,6 +71,26 @@ function DropBtn({
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
+
+  // dropPos was only ever computed once, at the moment the button was clicked — scrolling
+  // the page (or the results table) while the panel stayed open left it hanging wherever it
+  // first appeared instead of following the button. Recompute on every scroll/resize while
+  // open; capture:true on scroll so this also catches scrolling inside a nested container,
+  // not just the window itself (scroll events don't bubble, but they do fire in capture).
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => {
+      if (!ref.current) return;
+      const rect = ref.current.getBoundingClientRect();
+      setDropPos({ top: rect.bottom + 4, left: align === 'right' ? rect.right - 240 : rect.left });
+    };
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, [open, align]);
 
   const filtered = options.filter((o) => o.label.toLowerCase().includes(q.toLowerCase()));
   const toggle = (val: string) =>
@@ -683,6 +707,22 @@ function TextFilterBtn({ label, value, onChange }: { label: string; value: strin
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
+  // Keep the panel glued to the button while scrolling instead of staying wherever
+  // it first appeared (see the identical fix + comment on DropBtn above).
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => {
+      if (!ref.current) return;
+      const r = ref.current.getBoundingClientRect();
+      setDropPos({ top: r.bottom + 4, left: r.left });
+    };
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, [open]);
   const active = Boolean(value);
   const handleToggle = () => {
     if (!open && ref.current) {
@@ -927,7 +967,6 @@ export default function FiltersPage() {
   const [selCustomerName, setSelCustomerName] = useState('');
   const [selClientName, setSelClientName] = useState('');
   const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
-  const [pmOptions, setPmOptions] = useState<string[]>([]);
   const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
 
   /* issues */
@@ -994,18 +1033,6 @@ export default function FiltersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Project Manager options come from real values already saved on tickets — fetch
-  // once, lazily, the first time the filter is added (was previously a blind text
-  // box with no visibility into what values actually exist).
-  useEffect(() => {
-    if (!activeExtras.includes('projectManager') || pmOptions.length > 0) return;
-    fetch('/api/field-values?field=projectManager', {
-      headers: { Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}` },
-    })
-      .then(r => (r.ok ? r.json() : []))
-      .then((vals: string[]) => setPmOptions(vals))
-      .catch(() => {});
-  }, [activeExtras, pmOptions.length]);
 
   /* derived */
   // When specific spaces are selected, only show statuses that belong to those spaces.
@@ -1543,7 +1570,7 @@ export default function FiltersPage() {
               <div className="flex items-center gap-1">
                 <DropBtn
                   label="Project Manager"
-                  options={pmOptions.map(v => ({ value: v, label: v }))}
+                  options={PROJECT_MANAGER_OPTIONS.map(v => ({ value: v, label: v }))}
                   selected={selProjectManager}
                   onChange={setSelProjectManager}
                 />

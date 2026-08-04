@@ -1919,14 +1919,21 @@ async function _handleJiraPgApi(
     };
     applyMultiField(customerNameParam,   'customerName');
     applyMultiField(clientNameParam,     'clientName');
-    // Project Manager supports true multi-select (checkbox list of real values),
-    // and a single value can itself contain a comma (e.g. "Abhishikth, Abhishek"
-    // naming two people) — so multiple selections are joined with "|||" instead,
-    // which won't collide with that.
+    // Project Manager filter checkboxes are individual people (the same fixed list
+    // the ticket's own Project Manager field picks from), but a ticket's stored
+    // value can be several of them joined together (e.g. "Abhishikth, Abhishek"
+    // when both are picked) — so this has to be a "contains" match per selected
+    // name, not an exact/IN match against the whole stored string, or picking
+    // "Abhishek" alone would miss every ticket where he's one of several PMs.
+    // Selections are joined with "|||" (not ",") since a name list can itself
+    // contain a comma.
     if (projectManagerParam) {
       const vals = projectManagerParam.split('|||').map(v => v.trim()).filter(Boolean);
-      if (vals.length === 1) where.projectManager = vals[0];
-      else if (vals.length > 1) where.projectManager = { in: vals };
+      if (vals.length) {
+        const pmOr = vals.map((v) => ({ projectManager: { contains: v, mode: 'insensitive' as const } }));
+        if (!where.AND) where.AND = [];
+        (where.AND as any[]).push({ OR: pmOr });
+      }
     }
     applyMultiField(workTypeParam,       'workType');
     applyMultiField(productTypeParam,    'productType');
@@ -2222,6 +2229,16 @@ async function _handleJiraPgApi(
         deptExtraClauses.push(`LOWER(s.name) = ANY($${deptParamIdx}::text[])`);
         deptExtraParams.push(statusParam.split(',').map((s2) => s2.trim().toLowerCase()));
         deptParamIdx++;
+      }
+      if (projectManagerParam) {
+        // Same "contains any selected name" match as the general branch — a ticket's
+        // stored value can be several names joined together.
+        const pmVals = projectManagerParam.split('|||').map((v) => v.trim()).filter(Boolean);
+        if (pmVals.length) {
+          deptExtraClauses.push(`i."projectManager" ILIKE ANY($${deptParamIdx}::text[])`);
+          deptExtraParams.push(pmVals.map((v) => `%${v}%`));
+          deptParamIdx++;
+        }
       }
       const deptExtraSql = deptExtraClauses.map((c) => `AND ${c}`).join('\n');
 
