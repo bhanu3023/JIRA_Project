@@ -2252,9 +2252,12 @@ async function _handleJiraPgApi(
           id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: row.description,
           priority: row.priority, type: row.type, labels: row.labels,
           createdAt: row.createdAt, updatedAt: row.updatedAt,
+          spaceId: row.spaceId, dueDate: row.dueDate,
           current_department: row.current_department,
           dept_statuses: row.dept_statuses || {},
           dept_assignees: row.dept_assignees || {},
+          dept_sla_started_at: row.dept_sla_started_at,
+          dept_sla_log: row.dept_sla_log,
           status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
           assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null,
           reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) } : null,
@@ -2265,43 +2268,73 @@ async function _handleJiraPgApi(
       } catch { /* keep Prisma results as fallback */ }
     }
 
-    // SLA breach filter — resolve breached set once, then apply to the full result
+    // Breached field — live Yes/No: No by default (just created, nothing overdue),
+    // flips to Yes once the ticket's due date has passed OR its department SLA goal
+    // has been exceeded. Previously this only checked whether an SLA_BREACH warning
+    // notification had ever been sent — stayed "No" forever if that cron missed a
+    // ticket, never looked at the due date at all, and never cleared once resolved.
     const slaBreachedParam = url.searchParams.get('slaBreached'); // 'yes' | 'no' | null
     try {
-      if (slaBreachedParam === 'yes' || slaBreachedParam === 'no') {
-        // Fetch ALL breached keys for the spaces in scope (not just current page)
-        // so the filter is accurate across the full dataset
-        const spaceConstraint = spaceKey
-          ? `AND i."spaceId" = (SELECT id FROM spaces WHERE key = $1 LIMIT 1)`
-          : '';
-        const breachResult = await pool.query<{ issueKey: string }>(
-          `SELECT DISTINCT n."issueKey"
-           FROM notifications n
-           JOIN issues i ON (i.key = n."issueKey" OR i.cf_key = n."issueKey")
-           WHERE n.type = 'SLA_BREACH' ${spaceConstraint}`,
-          spaceKey ? [spaceKey] : []
+      const distinctSpaceIds = Array.from(new Set(enrichedIssues.map((i: any) => i.spaceId).filter(Boolean)));
+      const policiesBySpace: Record<string, any[]> = {};
+      if (distinctSpaceIds.length) {
+        const polRows = await pool.query(
+          `SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`,
+          [distinctSpaceIds]
         );
-        const breachedSet = new Set(breachResult.rows.map((r: any) => r.issueKey));
-        enrichedIssues = enrichedIssues
-          .map((i: any) => {
-            const breached = breachedSet.has(i.key) || breachedSet.has(i.cfKey);
-            return { ...i, sla_breached: breached };
-          })
-          .filter((i: any) => slaBreachedParam === 'yes' ? i.sla_breached : !i.sla_breached);
-        deptTotal = enrichedIssues.length;
-      } else {
-        // No breach filter — still mark so the column shows correctly
-        const allKeys = enrichedIssues.flatMap((i: any) => [i.key, i.cfKey].filter(Boolean));
-        if (allKeys.length > 0) {
-          const breachRows = await pool.query<{ issueKey: string }>(
-            `SELECT DISTINCT "issueKey" FROM notifications WHERE "issueKey" = ANY($1) AND type = 'SLA_BREACH'`,
-            [allKeys]
-          );
-          const breachedKeys = new Set(breachRows.rows.map((r: any) => r.issueKey));
-          enrichedIssues = enrichedIssues.map((i: any) =>
-            breachedKeys.has(i.key) || breachedKeys.has(i.cfKey) ? { ...i, sla_breached: true } : i
-          );
+        for (const p of polRows.rows) {
+          if (!policiesBySpace[p.spaceId]) policiesBySpace[p.spaceId] = [];
+          policiesBySpace[p.spaceId].push(p);
         }
+      }
+      const nowMs = Date.now();
+      enrichedIssues = enrichedIssues.map((i: any) => {
+        const isResolved = i.status?.category === 'done';
+        let breached = false;
+        if (!isResolved) {
+          if (i.dueDate && new Date(i.dueDate).getTime() < nowMs) breached = true;
+          // Same fallback as computeIssueSLAsFromDb: tickets never routed through a
+          // department transfer have no dept_sla_started_at, so measure from creation.
+          const slaStartedAt = i.dept_sla_started_at || i.createdAt;
+          if (!breached && slaStartedAt) {
+            const dept = (i.current_department || '').trim().toLowerCase();
+            const priority = (i.priority || 'medium').toLowerCase();
+            const currentStatusName = (i.status?.name || '').trim().toLowerCase();
+            const policies = (policiesBySpace[i.spaceId] || []).filter((p: any) => {
+              const pDept = (p.dept_name || '').trim().toLowerCase();
+              return !pDept || pDept === dept;
+            });
+            for (const policy of policies) {
+              const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
+                ? policy.pauseStatuses.map((s: string) => s.trim().toLowerCase())
+                : [];
+              if (pauseStatuses.includes(currentStatusName)) continue; // paused — clock stopped
+              let durationMs = 8 * 60 * 60 * 1000; // default 8h, same fallback as computeIssueSLAsFromDb
+              for (const goal of (policy.goals || [])) {
+                if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
+                  const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
+                  if (row?.timeValue) {
+                    const val = parseFloat(row.timeValue);
+                    const unit = (row.timeUnit || 'hours').toLowerCase();
+                    durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+                    break;
+                  }
+                } else if (goal.timeValue) {
+                  const val = parseFloat(goal.timeValue);
+                  const unit = (goal.timeUnit || 'hours').toLowerCase();
+                  durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+                  break;
+                }
+              }
+              if (new Date(slaStartedAt).getTime() + durationMs < nowMs) { breached = true; break; }
+            }
+          }
+        }
+        return { ...i, sla_breached: breached };
+      });
+      if (slaBreachedParam === 'yes' || slaBreachedParam === 'no') {
+        enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParam === 'yes' ? i.sla_breached : !i.sla_breached);
+        deptTotal = enrichedIssues.length;
       }
     } catch { /* sla breach is best-effort */ }
 

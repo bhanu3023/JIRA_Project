@@ -3163,20 +3163,20 @@ export default function IssueDetailPage() {
               return `${Math.round(ms / 86400000)}d`;
             };
 
-            // ── top-level SLA entries — show only one (best match for current dept) ──
-            const currentDeptForSla: string = ((issue as any).current_department || '').toLowerCase();
+            // ── top-level SLA entries — show every SLA that applies to this ticket's dept ──
             const seen = new Set<string>();
             const dedupedEntries = (issue.sla as any[])
-              .sort((a, b) => Number(a.isBreached) - Number(b.isBreached))
+              .sort((a, b) => Number(b.isBreached) - Number(a.isBreached))
               .filter(s => {
                 const k = s.policyId || s.policyName || s.id;
                 if (seen.has(k)) return false;
                 seen.add(k);
                 return true;
               });
-            // Pick: dept-matching entry first, then breached entry, then first entry
-            const deptMatch = dedupedEntries.find(s => s.deptName?.toLowerCase() === currentDeptForSla);
-            const finalEntries = [deptMatch || dedupedEntries.find(s => s.isBreached) || dedupedEntries[0]].filter(Boolean);
+            // The API already scopes issue.sla to this ticket's department (plus any
+            // space-wide, no-dept SLAs), so every deduped entry is relevant — show them all
+            // instead of collapsing down to a single "best match".
+            const finalEntries = dedupedEntries;
 
             // Any SLA breached right now (live check)?
             const anyBreached = finalEntries.some(s => !s.isPaused && (s.isBreached || new Date(s.dueTime).getTime() - slaNow <= 0));
