@@ -818,6 +818,35 @@ function SpaceDetailContent() {
     finally { setUpdating(null); }
   }, [spaceKey, loadIssues, clearIssuesCache, queueFilter, currentPage]);
 
+  // Custom-queue statuses (qst_...) aren't real Status rows — they live in
+  // dept_statuses[dept], set via queueStatusId/Name/Color/Category, same as
+  // handleStatusChange on the issue detail page.
+  const handleInlineQueueStatusUpdate = useCallback(async (issueKey: string, dept: string, s: any) => {
+    setOpenDropdown(null); setUpdating(issueKey);
+    const prevIssues = useStore.getState().issues;
+    const queueSt = { id: s.id, name: s.name, color: s.color || '#64748B', category: s.category || 'todo' };
+    useStore.setState(st => ({
+      issues: st.issues.map((i: any) => i.key === issueKey
+        ? { ...i, dept_statuses: { ...(i.dept_statuses || {}), [dept]: queueSt } }
+        : i),
+    }));
+    try {
+      await api.updateIssue(issueKey, {
+        queueStatusId: queueSt.id,
+        queueStatusName: queueSt.name,
+        queueStatusColor: queueSt.color,
+        queueStatusCategory: queueSt.category,
+      } as any);
+      const params = { spaceKey, page: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(currentPage) : '1', limit: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(PAGE_SIZE) : '500' };
+      clearIssuesCache(params);
+      loadIssues(params);
+    } catch (err) {
+      console.error(err);
+      useStore.setState({ issues: prevIssues });
+    }
+    finally { setUpdating(null); }
+  }, [spaceKey, loadIssues, clearIssuesCache, queueFilter, currentPage]);
+
   const recallIssue = async (issueKey: string) => {
     const prevIssues = useStore.getState().issues;
     // Remove from the list immediately — recalling should make the ticket
@@ -2509,9 +2538,22 @@ function SpaceDetailContent() {
                           <span className="truncate">{st.name}</span><ChevronDown size={8} className="flex-shrink-0" />
                         </button>
                         {openDropdown?.key === issue.key && openDropdown.field === 'status' && (() => {
-                          const spaceTransitions: {fromStatusId:string; toStatusId:string}[] = (currentSpace as any).transitions || [];
-                          const validIds = spaceTransitions.filter(t => t.fromStatusId === st.id).map(t => t.toStatusId);
-                          const options = validIds.length > 0 ? statuses.filter(s => validIds.includes(s.id)) : statuses.filter(s => s.id !== st.id);
+                          // If this ticket's current department maps to a configured custom
+                          // queue, show THAT queue's statuses/transitions (matching the issue
+                          // detail page) instead of the space's full/generic status list —
+                          // otherwise this dropdown offers moves the queue's workflow doesn't
+                          // even have, and disagrees with what the detail page shows.
+                          const rowQueue: any = ticketCurrentDept
+                            ? allCustomQueues.find((q: any) => (q.name || '').toLowerCase() === ticketCurrentDept.toLowerCase())
+                            : null;
+                          const queueStatusList: any[] = rowQueue?.queueStatuses || [];
+                          const isQueueStatus = queueStatusList.length > 0;
+                          const optionStatuses = isQueueStatus ? queueStatusList : statuses;
+                          const optionTransitions: {fromStatusId:string; toStatusId:string}[] = isQueueStatus
+                            ? (rowQueue?.queueTransitions || []).map((t: any) => ({ fromStatusId: t.fromStatusId ?? t.from, toStatusId: t.toStatusId ?? t.to }))
+                            : ((currentSpace as any).transitions || []);
+                          const validIds = optionTransitions.filter(t => t.fromStatusId === st.id).map(t => t.toStatusId);
+                          const options = validIds.length > 0 ? optionStatuses.filter(s => validIds.includes(s.id)) : optionStatuses.filter(s => s.id !== st.id);
                           return (
                             <InlineDropdown onClose={() => setOpenDropdown(null)} anchorRect={openDropdown.rect}>
                               <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Move to</div>
@@ -2522,7 +2564,11 @@ function SpaceDetailContent() {
                                     setAssigneeRequiredModal(true);
                                     return;
                                   }
-                                  handleInlineUpdate(issue.key, 'statusId', s.id, { status: { id: s.id, name: s.name, category: (s as any).category, color: (s as any).color } });
+                                  if (isQueueStatus) {
+                                    handleInlineQueueStatusUpdate(issue.key, ticketCurrentDept, s);
+                                  } else {
+                                    handleInlineUpdate(issue.key, 'statusId', s.id, { status: { id: s.id, name: s.name, category: (s as any).category, color: (s as any).color } });
+                                  }
                                 }}
                                   className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-50 transition-colors">
                                   {s.name}

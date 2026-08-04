@@ -15,7 +15,10 @@ function createPrismaClient() {
   // fast or running in parallel. 20 gives real headroom while staying well
   // under Postgres's default max_connections (100), leaving room for the
   // other pools in this app (jira-pg-api.ts's raw pool, email pollers, etc).
-  const adapter = new PrismaPg({ connectionString: DB_URL, max: 20 });
+  // connectionTimeoutMillis bounds how long a query waits for a free connection
+  // in the pool — without it (pg's default is 0 = wait forever), a saturated or
+  // exhausted pool makes every request hang indefinitely instead of failing fast.
+  const adapter = new PrismaPg({ connectionString: DB_URL, max: 20, connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000 });
   return new PrismaClient({ adapter });
 }
 

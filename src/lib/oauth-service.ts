@@ -37,9 +37,9 @@ declare global { var __oauthTokenStore: Map<string, OAuthTokens> | undefined; }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 async function ensureOAuthTable() {
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString: DB_URL, connectionTimeoutMillis: 10_000 });
   try {
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: DB_URL });
     await pool.query(`
       CREATE TABLE IF NOT EXISTS oauth_tokens (
         email       TEXT PRIMARY KEY,
@@ -47,36 +47,38 @@ async function ensureOAuthTable() {
         updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-    await pool.end();
-  } catch {}
+  } catch {
+  } finally {
+    await pool.end().catch(() => {});
+  }
 }
 
 async function saveTokensToDB(email: string, tokens: OAuthTokens) {
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString: DB_URL, connectionTimeoutMillis: 10_000 });
   try {
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: DB_URL });
     await pool.query(`
       INSERT INTO oauth_tokens (email, tokens_json, updated_at)
       VALUES ($1, $2, NOW())
       ON CONFLICT (email) DO UPDATE SET tokens_json = EXCLUDED.tokens_json, updated_at = NOW()
     `, [email.toLowerCase(), JSON.stringify(tokens)]);
-    await pool.end();
   } catch (e) {
     console.error('[OAuthService] Failed to persist tokens to DB:', e);
+  } finally {
+    await pool.end().catch(() => {});
   }
 }
 
 async function loadTokensFromDB(): Promise<Map<string, OAuthTokens>> {
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString: DB_URL, connectionTimeoutMillis: 10_000 });
   try {
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: DB_URL });
     await pool.query(`
       CREATE TABLE IF NOT EXISTS oauth_tokens (
         email TEXT PRIMARY KEY, tokens_json TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
       )
     `).catch(() => {});
     const rows = await pool.query(`SELECT email, tokens_json FROM oauth_tokens`);
-    await pool.end();
     const map = new Map<string, OAuthTokens>();
     for (const row of rows.rows) {
       try { map.set(row.email, JSON.parse(row.tokens_json)); } catch {}
@@ -86,6 +88,8 @@ async function loadTokensFromDB(): Promise<Map<string, OAuthTokens>> {
   } catch (e) {
     console.error('[OAuthService] Failed to load tokens from DB:', e);
     return new Map();
+  } finally {
+    await pool.end().catch(() => {});
   }
 }
 
