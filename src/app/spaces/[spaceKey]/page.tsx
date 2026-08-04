@@ -114,7 +114,7 @@ function SpaceDetailContent() {
       : Array.isArray(rawKey)
         ? (rawKey[0] || '').toUpperCase()
         : '';
-  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion } = useStore(
+  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion, bumpIssuesVersion } = useStore(
     useShallow((s) => ({
       currentSpace: s.currentSpace,
       loadSpace: s.loadSpace,
@@ -126,6 +126,7 @@ function SpaceDetailContent() {
       loading: s.loading,
       user: s.user,
       issuesVersion: s.issuesVersion,
+      bumpIssuesVersion: s.bumpIssuesVersion,
     })),
   );
   // Static column definitions (always available)
@@ -287,8 +288,15 @@ function SpaceDetailContent() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 50;
-  // Reset to page 1 when queue changes
-  useEffect(() => { setCurrentPage(1); }, [queueFilter]);
+  // Queue types with real pagination (fetch currentPage/PAGE_SIZE and trust the
+  // backend's total) rather than a one-shot fixed-size fetch — a whole
+  // department's open tickets can run into the thousands, same as All Requests
+  // and custom queues.
+  const isPaginatedQueue = queueFilter === 'all-requests' || queueFilter.startsWith('cq_')
+    || queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned';
+  // Reset to page 1 when queue changes (including switching departments within
+  // the same dept_all/dept_unassigned/dept_assigned queue type)
+  useEffect(() => { setCurrentPage(1); }, [queueFilter, deptParam]);
 
   // Immediately clear stale issues when the queue changes so old tickets never
   // flash while the new fetch is in flight (handles early-return guard cases too)
@@ -438,21 +446,31 @@ function SpaceDetailContent() {
             params.limit = '100';
             if (deptParam) params.sentDept = deptParam;
           }
-          // Dept sub-queue: all open tickets in dept (any assignee)
+          // Dept sub-queue: all open tickets in dept (any assignee) — a whole
+          // department's open tickets can run into the thousands (unlike the
+          // personal views above), so this needs real pagination instead of the
+          // fixed page 1 / 100-row cap every other branch here uses, or anything
+          // past the first 100 is silently unreachable.
           if (queueFilter === 'dept_all') {
             params.excludeDone = 'true';
+            params.page = String(currentPage);
+            params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
           // Dept sub-queue: unassigned in dept
           if (queueFilter === 'dept_unassigned') {
             params.unassigned = 'true';
             params.excludeDone = 'true';
+            params.page = String(currentPage);
+            params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
           // Dept sub-queue: assigned to me in dept
           if (queueFilter === 'dept_assigned') {
             if (user?.id) params.assignee = user.id;
             params.excludeDone = 'true';
+            params.page = String(currentPage);
+            params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
           // Dept sub-queue: closed tickets — fetched separately, auto-refreshed every 30s
@@ -904,7 +922,14 @@ function SpaceDetailContent() {
       } catch { /* ignore individual errors */ }
     }
     setSelectedRows(new Set());
-    await loadIssues({ spaceKey, page: String(currentPage), limit: queueFilter === 'all-requests' ? String(PAGE_SIZE) : '500' });
+    // Re-run the main load effect's own (correctly dept/filter-scoped) params instead
+    // of rebuilding a partial copy here — this reload used to drop the dept/queue
+    // scoping entirely (no `dept`, no `excludeDone`), so after deleting from a
+    // custom queue or a department view the list would silently repopulate with an
+    // unscoped, unrelated set of tickets — looking like "delete didn't work" even
+    // though the deletes themselves succeeded.
+    clearIssuesCache();
+    bumpIssuesVersion();
   };
 
   if (!spaceKey) {
@@ -1261,6 +1286,14 @@ function SpaceDetailContent() {
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border text-[12px] font-medium bg-blue-50 text-blue-700 border-blue-200">
               <span className="font-bold text-[15px]">{(issueTotal ?? issues.length).toLocaleString()}</span>
               <span>{queueFilter.startsWith('cq_') ? 'Total' : 'Total Requests'}</span>
+            </div>
+          ) : ['dept_all', 'dept_unassigned', 'dept_assigned'].includes(queueFilter) ? (
+            // Department-wide queues — also paginated, so use the real backend
+            // total rather than the current page's row count (which used to show
+            // as e.g. "100 Open" even when the department actually had thousands).
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border text-[12px] font-medium bg-blue-50 text-blue-700 border-blue-200">
+              <span className="font-bold text-[15px]">{(issueTotal ?? filteredIssues.length).toLocaleString()}</span>
+              <span>Open</span>
             </div>
           ) : (
             // All open / Assigned — show only filtered open count
@@ -1940,10 +1973,14 @@ function SpaceDetailContent() {
             {(isFetching || isQueuesLoading) ? 'Loading…' : `${filteredIssues.length} issue${filteredIssues.length !== 1 ? 's' : ''}`}
           </span>
           <button
-            onClick={async () => {
+            onClick={() => {
               setRefreshing(true);
               try {
-                await loadIssues({ spaceKey, page: String(currentPage), limit: queueFilter === 'all-requests' ? String(PAGE_SIZE) : '500' });
+                // Same fix as bulk delete — re-run the main load effect's own
+                // dept/filter-scoped params instead of a partial rebuild that
+                // used to drop dept/excludeDone scoping on refresh.
+                clearIssuesCache();
+                bumpIssuesVersion();
               } finally {
                 setRefreshing(false);
               }
@@ -2541,8 +2578,8 @@ function SpaceDetailContent() {
         </div>
       </div>
 
-      {/* ── Pagination bar — for All Requests and custom queues ── */}
-      {(queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) && issueTotal > PAGE_SIZE && (
+      {/* ── Pagination bar — for All Requests, custom queues, and department-wide queues (a whole department's tickets can run into the thousands) ── */}
+      {(queueFilter === 'all-requests' || queueFilter.startsWith('cq_') || queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') && issueTotal > PAGE_SIZE && (
         <div className="flex items-center justify-between px-6 py-3 bg-white border-t border-gray-200 flex-shrink-0">
           <span className="text-[12px] text-gray-500">
             Showing {((currentPage - 1) * PAGE_SIZE) + 1}–{Math.min(currentPage * PAGE_SIZE, issueTotal)} of <strong>{issueTotal.toLocaleString()}</strong> issues
@@ -2572,8 +2609,12 @@ function SpaceDetailContent() {
           </div>
         </div>
       )}
-      {/* All open — simple count footer */}
-      {queueFilter !== 'all-requests' && (
+      {/* All open — simple count footer (hidden once the paginated bar above is
+          showing a real total, so this doesn't contradict it with just the
+          current page's count) */}
+      {queueFilter !== 'all-requests' && !(
+        ['dept_all', 'dept_unassigned', 'dept_assigned'].includes(queueFilter) && issueTotal > PAGE_SIZE
+      ) && (
         <div className="px-6 py-2.5 bg-white border-t border-gray-200 flex-shrink-0">
           <span className="text-[12px] text-gray-400">
             Showing <strong>{filteredIssues.length}</strong> {filters.status ? `"${filters.status}" issues` : 'open issues'}
@@ -2599,22 +2640,10 @@ function SpaceDetailContent() {
               setCreatedToast({ key: newIssue.key, cfKey: navKey });
               setTimeout(() => setCreatedToast(null), 10000);
             }
-            // Stay on current queue — just refresh the list
-            const params: Record<string, string> = { spaceKey, page: '1', limit: '500' };
-            if (queueFilter === 'sent-watching' && deptParam) params.sentDept = deptParam;
-            if (queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
-              params.excludeDone = 'true';
-              if (deptParam) params.dept = deptParam;
-            }
-            if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned') {
-              params.excludeDone = 'true';
-            }
-            if (['all-requests'].includes(queueFilter) || queueFilter.startsWith('cq_')) {
-              params.page = String(currentPage);
-              params.limit = String(PAGE_SIZE);
-              if (queueFilter.startsWith('cq_') && activeCustomQueue?.name) params.dept = activeCustomQueue.name;
-            }
-            loadIssues(params);
+            // Stay on current queue — just refresh the list via the main load
+            // effect's own params instead of a partial rebuild here.
+            clearIssuesCache();
+            bumpIssuesVersion();
           }} />
       )}
 

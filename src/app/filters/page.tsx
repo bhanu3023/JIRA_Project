@@ -1042,7 +1042,11 @@ export default function FiltersPage() {
     debounceRef.current = setTimeout(async () => {
       setLoadingIssues(true);
       try {
-        const params: Record<string, string> = { page: '1', limit: '1000' };
+        // limit was 1000 — on an unfiltered view that's a ~2.7MB response (1000 full
+        // issue objects with nested status/assignee/reporter), which is what made this
+        // page take multiple seconds to load. 100 keeps a generous browsing window
+        // while cutting the payload by ~90%.
+        const params: Record<string, string> = { page: '1', limit: '100' };
 
         // Space(s) — always restrict to user's accessible spaces
         // If specific spaces are selected, use those; otherwise use ALL accessible spaces
