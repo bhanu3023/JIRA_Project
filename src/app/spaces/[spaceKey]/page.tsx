@@ -284,6 +284,17 @@ function SpaceDetailContent() {
   const [visibleCols, setVisibleCols] = useState<string[]>(DEFAULT_COLS);
   const [serverFieldOptions, setServerFieldOptions] = useState<Record<string, string[]>>({});
   const [updating, setUpdating] = useState<string | null>(null);
+  // Safety net: a row dims (opacity-50) while `updating` names its key, cleared
+  // in the `finally` of whatever inline edit set it. If that edit's request
+  // hangs on something outside normal success/failure (a dropped connection,
+  // a browser tab going to sleep mid-request, etc.) the row would stay dimmed
+  // indefinitely with no way to clear itself short of a full page reload.
+  // Force it back to normal a few seconds after any edit starts, regardless.
+  useEffect(() => {
+    if (!updating) return;
+    const t = setTimeout(() => setUpdating(null), 6000);
+    return () => clearTimeout(t);
+  }, [updating]);
   const [assigneeRequiredModal, setAssigneeRequiredModal] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
