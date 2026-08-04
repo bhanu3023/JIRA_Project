@@ -4163,6 +4163,15 @@ async function _handleJiraPgApi(
       take: 5,
     });
 
+    // Typing a ticket number (e.g. "CF-1234") should feel instant -- an exact
+    // key match is unambiguous, so return it right away instead of also
+    // waiting on startsWith + the full-text `contains` scan across
+    // summary/description on every issue in the space, which is the slow
+    // part of this endpoint and pointless once the exact ticket is found.
+    if (exactMatches.length > 0) {
+      return json({ issues: exactMatches.map(formatIssue), total: exactMatches.length, page: 1, totalPages: 1 });
+    }
+
     const startsWithMatches = await db.issue.findMany({
       where: {
         OR: [
