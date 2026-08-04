@@ -137,6 +137,7 @@ function SpaceDetailContent() {
     { id: 'created',        label: 'Created',             width: '150px' },
     { id: 'updated',        label: 'Updated',             width: '150px' },
     { id: 'dueDate',        label: 'Due Date',            width: '120px' },
+    { id: 'breached',       label: 'Breached',            width: '90px'  },
     { id: 'labels',         label: 'Labels',              width: '130px' },
     { id: 'storyPoints',    label: 'Story Points',        width: '90px'  },
     { id: 'type',           label: 'Type',                width: '100px' },
@@ -2500,6 +2501,7 @@ function SpaceDetailContent() {
                     if (id === 'created') return <div key={id} className="px-2 text-[11px] text-gray-500 whitespace-nowrap">{formatJiraDateTime(issue.createdAt)}</div>;
                     if (id === 'updated') return <div key={id} className="px-2 text-[11px] text-gray-500 whitespace-nowrap">{formatJiraDateTime(issue.updatedAt)}</div>;
                     if (id === 'dueDate') return <div key={id} className="px-2 text-[11px] whitespace-nowrap">{issue.dueDate ? <span className={`font-medium ${new Date(issue.dueDate) < new Date() ? 'text-red-500' : 'text-gray-500'}`}>{new Date(issue.dueDate).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span> : <span className="text-gray-300">—</span>}</div>;
+                    if (id === 'breached') return <div key={id} className="px-2">{(issue as any).sla_breached ? <span className="text-[11px] font-medium text-red-600 bg-red-50 border border-red-100 rounded px-1.5 py-0.5">Yes</span> : <span className="text-[11px] font-medium text-emerald-600 bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5">No</span>}</div>;
                     if (id === 'labels') return <div key={id} className="px-2 flex flex-wrap gap-1">{(issue.labels||[]).length > 0 ? ((issue.labels as unknown) as string[]).slice(0,2).map((l:string) => <span key={l} className="text-[10px] bg-blue-50 text-blue-600 border border-blue-100 rounded px-1.5 py-0.5">{l}</span>) : <span className="text-[11px] text-gray-300">—</span>}</div>;
                     if (id === 'storyPoints') return <div key={id} className="px-2">{issue.storyPoints ? <span className="text-[11.5px] font-semibold text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{issue.storyPoints}</span> : <span className="text-[11px] text-gray-300">—</span>}</div>;
                     if (id === 'type') return <div key={id} className="px-2 text-[11px] text-gray-600 capitalize">{issue.type || '—'}</div>;

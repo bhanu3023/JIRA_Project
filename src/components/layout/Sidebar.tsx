@@ -1028,11 +1028,19 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                     queueParam === subQueue && deptParam === q.name;
                   return (
                     <div key={q.id}>
+                      {(() => {
+                        // Clicking the queue name itself opens the same "All Tickets"
+                        // view as the sub-item below it, instead of a separate
+                        // cq_ view — one destination for "show me Migration's
+                        // tickets," not two different counts depending on which
+                        // link you happened to click.
+                        const isActive = queueActive(q.id) || (queueParam === 'dept_all' && deptParam === q.name);
+                        return (
                       <div className="group relative flex items-center rounded-md transition-colors hover:bg-gray-100">
-                        <Link href={`/spaces/${spaceKey}?queue=${q.id}`}
+                        <Link href={`/spaces/${spaceKey}?queue=dept_all&dept=${encodeURIComponent(q.name)}`}
                           className={cn('flex flex-1 min-w-0 items-center gap-2 px-2 py-1.5 text-[12px] transition-colors',
-                            queueActive(q.id) ? 'text-blue-700' : 'text-gray-600')}>
-                          <ClipboardList size={12} className={cn('flex-shrink-0', queueActive(q.id) ? 'text-blue-500' : 'text-gray-400')} />
+                            isActive ? 'text-blue-700' : 'text-gray-600')}>
+                          <ClipboardList size={12} className={cn('flex-shrink-0', isActive ? 'text-blue-500' : 'text-gray-400')} />
                           <span className="flex-1 truncate">{q.name}</span>
                         </Link>
                         {/* Three-dot menu — admin/manager only */}
@@ -1065,6 +1073,8 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                           )}
                         </div>
                       </div>
+                        );
+                      })()}
 
                       {/* Sub-items */}
                       {isSubExpanded && (
