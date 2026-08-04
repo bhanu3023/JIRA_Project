@@ -42,6 +42,13 @@ export default function IssueDetailPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
+  // Sent/Watching lets other departments monitor a ticket after it moves on —
+  // but that's viewing, not managing. True once we've confirmed (via the
+  // ticket's current-department queue membership) that this viewer can edit
+  // it; defaults to true so nothing flickers disabled before that resolves,
+  // matching the backend's fail-open behavior for tickets outside the
+  // department-routing model.
+  const [canEditTicket, setCanEditTicket] = useState(true);
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
@@ -379,6 +386,13 @@ export default function IssueDetailPage() {
             const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
             if (matchedQueue) {
               try { localStorage.setItem(`custom_queues_${spKey}`, JSON.stringify(queues)); } catch {}
+              // Editing is gated to this queue's own members (admins bypass this
+              // separately wherever it's checked) — a dept just monitoring via
+              // Sent/Watching shouldn't see edit affordances for a ticket it no
+              // longer manages.
+              const memberIds: string[] = matchedQueue.memberIds || [];
+              const suspendedIds: string[] = matchedQueue.suspendedIds || [];
+              setCanEditTicket(memberIds.includes(user?.id || '') && !suspendedIds.includes(user?.id || ''));
               const qSt = matchedQueue.queueStatuses;
               const qTr = matchedQueue.queueTransitions;
               if (qSt?.length) {
@@ -394,10 +408,13 @@ export default function IssueDetailPage() {
               return;
             }
           }
-          // Nothing found anywhere — fall back to the original space
+          // Nothing found anywhere — dept doesn't map to a configured queue, so
+          // don't restrict (matches the backend's fail-open behavior)
+          setCanEditTicket(true);
           if (!resolvedFromCache) loadStatusesForSpace(currentIssue.spaceKey);
         })();
       } else {
+        setCanEditTicket(true);
         loadStatusesForSpace(currentIssue.spaceKey);
       }
     }
@@ -488,7 +505,7 @@ export default function IssueDetailPage() {
         } catch { /* ignore */ }
       })();
     }
-  }, [currentIssue?.spaceKey, currentIssue?.id, currentIssue?.spaceId, spaces]);
+  }, [currentIssue?.spaceKey, currentIssue?.id, currentIssue?.spaceId, spaces, user?.id]);
 
   // Periodically re-check SLA breach status every 30s and sync custom fields
   useEffect(() => {
@@ -803,6 +820,10 @@ export default function IssueDetailPage() {
     const role = (myMembership.role || '').toLowerCase();
     return role === 'admin' || role === 'administrator' || role === 'owner';
   }, [user, spaceMembers]);
+
+  // Admins always can; everyone else only if they're a member of the queue
+  // this ticket currently sits in (computed above from current_department).
+  const canEdit = isSpaceAdmin || canEditTicket;
 
   // Resolve the correct per-queue workflow URL for a ticket with current_department.
   // Checks the issue's own space first, then all loaded spaces — no type filter needed.
@@ -1931,8 +1952,10 @@ export default function IssueDetailPage() {
             <div className="relative">
               {/* Current status badge button — matches Jira's colored pill */}
               <button
-                onClick={() => setShowStatusDropdown(v => !v)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-bold uppercase tracking-wide transition-all hover:brightness-95 select-none"
+                onClick={() => canEdit && setShowStatusDropdown(v => !v)}
+                disabled={!canEdit}
+                title={canEdit ? undefined : 'This ticket has moved to another queue — only that queue can change its status'}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-bold uppercase tracking-wide transition-all select-none ${canEdit ? 'hover:brightness-95' : 'cursor-not-allowed opacity-70'}`}
                 style={{
                   backgroundColor: issueStat.color + '25',
                   color: issueStat.color,
@@ -1940,7 +1963,7 @@ export default function IssueDetailPage() {
                 }}
               >
                 {issueStat.name}
-                <ChevronDown size={11} strokeWidth={2.5} />
+                {canEdit && <ChevronDown size={11} strokeWidth={2.5} />}
               </button>
 
               {showStatusDropdown && (() => {
@@ -2026,8 +2049,13 @@ export default function IssueDetailPage() {
           <div className="h-px bg-gray-200 mx-4" />
 
           {/* Properties */}
-          <div className="px-4 py-3 space-y-0">
+          <div className={`px-4 py-3 space-y-0 ${!canEdit ? 'pointer-events-none opacity-70' : ''}`}>
             <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-3">Properties</p>
+            {!canEdit && (
+              <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 mb-2 -mt-1">
+                This ticket has moved to another queue — you can view and comment, but only that queue can edit it.
+              </p>
+            )}
 
             {/* Pinned divider */}
             {pinnedFields.length > 0 && (
@@ -2339,6 +2367,7 @@ export default function IssueDetailPage() {
             {/* Department — only shown when the field is assigned to this space */}
             <DepartmentField
               issueKey={issueKey}
+              canEdit={canEdit}
               currentDepartment={(issue as any).current_department || null}
               spaceKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
               spaceId={issue.spaceId}
@@ -3560,13 +3589,14 @@ export default function IssueDetailPage() {
 }
 
 /* ===== Department Field ===== */
-function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, currentStatusName, onChanged, onDeptChangeBlocked, onSetWaitingStatus, onRequestDeptChange }: {
+function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, currentStatusName, canEdit = true, onChanged, onDeptChangeBlocked, onSetWaitingStatus, onRequestDeptChange }: {
   issueKey: string;
   currentDepartment: string | null;
   spaceKey: string;
   spaceId?: string;
   currentBoardKey?: string;
   currentStatusName?: string;
+  canEdit?: boolean;
   onChanged: () => void;
   onDeptChangeBlocked?: () => void;
   onSetWaitingStatus?: (deptName: string) => Promise<void>;
@@ -3708,8 +3738,10 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
         {showDrop && <div className="fixed inset-0 z-40" onClick={() => setShowDrop(false)} />}
 
         <button
-          onClick={() => !saving && setShowDrop(s => !s)}
-          className="flex items-center gap-1.5 hover:bg-gray-50 rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left"
+          onClick={() => !saving && canEdit && setShowDrop(s => !s)}
+          disabled={!canEdit}
+          title={canEdit ? undefined : 'This ticket has moved to another queue — only that queue can change its department'}
+          className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left ${canEdit ? 'hover:bg-gray-50' : 'cursor-not-allowed opacity-70'}`}
         >
           {displayDept ? (
             <span
