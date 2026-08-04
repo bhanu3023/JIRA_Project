@@ -2559,15 +2559,31 @@ async function _handleJiraPgApi(
         // current_department is a raw ALTER TABLE column -- Prisma doesn't know it, so set via raw SQL
         const deptToSet = body.department ? String(body.department) : (rrDepartment || null);
         if (deptToSet) {
-          // Also seed dept_statuses so the queue shows the initial "open" status
-          const initStatus = openStatus || sp.statuses[0];
+          // Seed dept_statuses with the QUEUE's own configured "open" status (same
+          // lookup the department-transfer path uses below) rather than the space's
+          // generic status list -- otherwise a freshly created ticket shows "To Do"
+          // even when the queue's workflow has no such status (e.g. it only has
+          // Open/Inprogress/Waiting For Dev/...), and the status pill disagrees with
+          // the dropdown options (which ARE queue-aware).
+          let queueStatuses: any[] = [];
+          try {
+            const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
+            for (const row of allQueueRows.rows) {
+              const queues: any[] = row.queues || [];
+              const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === deptToSet.toLowerCase());
+              if (matchedQ?.queueStatuses?.length) { queueStatuses = matchedQ.queueStatuses; break; }
+            }
+          } catch {}
+          const queueOpenStatus = queueStatuses.find((s: any) => s.category === 'todo') || queueStatuses[0];
+          const initStatus = queueOpenStatus || openStatus || sp.statuses[0];
           const initDeptStatuses = initStatus
             ? JSON.stringify({ [deptToSet]: { id: initStatus.id, name: initStatus.name, color: initStatus.color, category: initStatus.category } })
             : '{}';
           await pool.query(
-            `UPDATE issues SET current_department=$1, original_dept=$1, dept_statuses=$2::jsonb WHERE id=$3`,
+            `UPDATE issues SET current_department=$1, original_dept=$1, dept_statuses=$2::jsonb, dept_sla_started_at=NOW() WHERE id=$3`,
             [deptToSet, initDeptStatuses, issue.id]
           );
+          await startDeptSLA(null, issue.id, deptToSet);
         } else {
           await pool.query(
             `UPDATE issues SET original_dept = current_department WHERE id = $1 AND original_dept IS NULL`,
