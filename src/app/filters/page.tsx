@@ -1459,7 +1459,11 @@ export default function FiltersPage() {
       )}
 
       {/* ── Filter bar (only on All Work tab) ── */}
-      {!showSavedPanel && <div className="sticky top-0 z-[100] rounded-xl border border-gray-200 bg-white shadow-sm overflow-visible">
+      {/* z-30, not the z-[100] this had before — that was higher than modals opened from
+          elsewhere in the app (e.g. Create Task's z-50 backdrop), so this sticky bar was
+          painting over the top of them. It only needs to stay above this page's own
+          scrolling table rows, not above app-wide modals. */}
+      {!showSavedPanel && <div className="sticky top-0 z-30 rounded-xl border border-gray-200 bg-white shadow-sm overflow-visible">
 
         {/* Row 1: fixed filters */}
         <div className="flex items-center gap-2 px-4 py-3 flex-wrap border-b border-gray-100">
