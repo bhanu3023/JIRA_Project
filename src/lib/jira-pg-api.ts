@@ -399,6 +399,23 @@ async function resolveUserId(auth: string | null, reqIp?: string): Promise<strin
   return null;
 }
 
+// A data-URI avatar (a real uploaded photo, not a lightweight Gravatar link)
+// gets re-embedded in FULL on every single API response that mentions that
+// user — once per issue's assignee/reporter, once per comment author, once
+// per row on a 100-row list page. One heavily-used account with a real photo
+// (~4.5KB) turns an ordinary list page into hundreds of KB of pure repeated
+// avatar bytes (confirmed in production: 500+ KB responses, 17-19s each,
+// queuing other requests behind them on the browser's connection limit).
+// This swaps a data-URI for a reference to the cached proxy endpoint below,
+// so the browser fetches those bytes once and reuses them everywhere,
+// instead of every response re-sending them. Lightweight external URLs
+// (Gravatar, etc.) are left untouched — they're already cheap and cacheable.
+function avatarRef(userId: string | null | undefined, avatarUrl: string | null | undefined): string | null {
+  if (!avatarUrl) return null;
+  if (!userId || !avatarUrl.startsWith('data:')) return avatarUrl;
+  return `/api/users/${userId}/avatar`;
+}
+
 /** Format a DB user record to the API shape the frontend expects */
 function formatUser(u: {
   id: string; email: string; firstName: string; lastName: string;
@@ -413,7 +430,7 @@ function formatUser(u: {
     displayName: `${u.firstName} ${u.lastName}`.trim(),
     role: u.role,
     organizationId: 'org_demo',
-    avatarUrl: u.avatarUrl ?? null,
+    avatarUrl: avatarRef(u.id, u.avatarUrl),
     isActive: u.isActive,
     status,
     createdAt: u.createdAt?.toISOString() ?? nowIso(),
@@ -437,7 +454,7 @@ function formatSpace(sp: any) {
     email: m.user?.email ?? '',
     firstName: m.user?.firstName ?? '',
     lastName: m.user?.lastName ?? '',
-    avatarUrl: m.user?.avatarUrl ?? null,
+    avatarUrl: avatarRef(m.userId, m.user?.avatarUrl),
     role: m.role,
     department: m.department ?? null,
   }));
@@ -666,7 +683,7 @@ function formatIssue(issue: any) {
         firstName: issue.assignee.firstName,
         lastName: issue.assignee.lastName,
         displayName: `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim(),
-        avatarUrl: issue.assignee.avatarUrl ?? null,
+        avatarUrl: avatarRef(issue.assignee.id, issue.assignee.avatarUrl),
       }
     : issue.jira_assignee_name
     ? { id: null, email: null, firstName: issue.jira_assignee_name.split(' ')[0], lastName: issue.jira_assignee_name.split(' ').slice(1).join(' '), displayName: issue.jira_assignee_name, avatarUrl: null }
@@ -679,7 +696,7 @@ function formatIssue(issue: any) {
         firstName: issue.reporter.firstName,
         lastName: issue.reporter.lastName,
         displayName: `${issue.reporter.firstName} ${issue.reporter.lastName}`.trim(),
-        avatarUrl: issue.reporter.avatarUrl ?? null,
+        avatarUrl: avatarRef(issue.reporter.id, issue.reporter.avatarUrl),
       }
     : issue.jira_reporter_name
     ? { id: null, email: null, firstName: issue.jira_reporter_name.split(' ')[0], lastName: issue.jira_reporter_name.split(' ').slice(1).join(' '), displayName: issue.jira_reporter_name, avatarUrl: null }
@@ -1307,7 +1324,11 @@ async function _handleJiraPgApi(
     path.startsWith('auth/') ||
     path === 'email/receive' ||
     path.startsWith('email-logs/') ||
-    path === 'stats';
+    path === 'stats' ||
+    // Avatar bytes served through the proxy in avatarRef() above — must stay
+    // reachable via a plain <img src>, which never sends an Authorization
+    // header. Not sensitive: same visibility as any avatar shown in the app.
+    /^users\/[^/]+\/avatar$/.test(path);
 
   if (!userId && !isPublicPath) {
     return json({ error: 'Forbidden' }, 403);
@@ -1329,6 +1350,29 @@ async function _handleJiraPgApi(
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Users Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+
+  // Serves a user's real uploaded photo (stored as a data-URI) as actual image
+  // bytes with aggressive caching, so the browser fetches it once instead of
+  // every API response re-embedding the full base64 blob (see avatarRef above).
+  const userAvatarMatch = path.match(/^users\/([^/]+)\/avatar$/);
+  if (userAvatarMatch && method === 'GET') {
+    try {
+      const u = await db.user.findUnique({ where: { id: userAvatarMatch[1] }, select: { avatarUrl: true } });
+      const dataUri = u?.avatarUrl;
+      if (!dataUri || !dataUri.startsWith('data:')) return new NextResponse(null, { status: 404 });
+      const match = dataUri.match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) return new NextResponse(null, { status: 404 });
+      const [, contentType, base64Data] = match;
+      return new NextResponse(Buffer.from(base64Data, 'base64'), {
+        headers: {
+          'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=86400',
+        },
+      });
+    } catch {
+      return new NextResponse(null, { status: 500 });
+    }
+  }
 
   if (path === 'users' && method === 'GET') {
     // All authenticated users can list users (needed for queue member search)
@@ -2035,7 +2079,7 @@ async function _handleJiraPgApi(
               const toIso = (v: any) => { if (!v) return null; try { if (v instanceof Date) return v.toISOString(); const s = String(v); const adj = s.includes('+') || s.endsWith('Z') ? s : s + ' UTC'; const d = new Date(adj); return isNaN(d.getTime()) ? null : d.toISOString(); } catch { return null; } };
               commentsMap[c.issueId].push({
                 id: c.id, body: c.body, createdAt: toIso(c.createdAt), updatedAt: toIso(c.updatedAt),
-                author: c.authorId ? { id: c.authorId, firstName: c.firstName, lastName: c.lastName, email: c.user_email, avatarUrl: c.avatarUrl } : null,
+                author: c.authorId ? { id: c.authorId, firstName: c.firstName, lastName: c.lastName, email: c.user_email, avatarUrl: avatarRef(c.authorId, c.avatarUrl) } : null,
                 authorName: c.authorName, authorEmail: c.authorEmail,
               });
             }
@@ -2067,8 +2111,8 @@ async function _handleJiraPgApi(
               dept_statuses: row.dept_statuses || {},
               comments: commentsMap[row.id] || [],
               status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
-              assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: row.assignee_avatar } : null,
-              reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: row.reporter_avatar } : null,
+              assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null,
+              reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) } : null,
               space: { key: row.space_key || spaceKeyForSent },
             });
             const pausedSla = await computePausedDeptSLA(row, sentDeptParam, slaPolicies);
@@ -2212,8 +2256,8 @@ async function _handleJiraPgApi(
           dept_statuses: row.dept_statuses || {},
           dept_assignees: row.dept_assignees || {},
           status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
-          assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: row.assignee_avatar } : null,
-          reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: row.reporter_avatar } : null,
+          assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null,
+          reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) } : null,
           jira_assignee_name: row.jira_assignee_name || null,
           jira_reporter_name: row.jira_reporter_name || null,
           space: { key: row.space_key || spaceKey },
@@ -2638,7 +2682,7 @@ async function _handleJiraPgApi(
           firstName: (issue.assignee as any).firstName,
           lastName: (issue.assignee as any).lastName,
           displayName: `${(issue.assignee as any).firstName} ${(issue.assignee as any).lastName}`.trim(),
-          avatarUrl: (issue.assignee as any).avatarUrl ?? null,
+          avatarUrl: avatarRef(issue.assignee.id, (issue.assignee as any).avatarUrl),
         };
       }
       deptAssignees[newDept] = null; // new dept starts unassigned
@@ -3141,7 +3185,7 @@ async function _handleJiraPgApi(
         ? { id: c.status.id, name: c.status.name, color: c.status.color, category: c.status.category }
         : { id: '', name: 'Open', color: '#6b7280', category: 'todo' },
       assignee: c.assignee
-        ? { id: c.assignee.id, firstName: c.assignee.firstName, lastName: c.assignee.lastName ?? '', avatarUrl: c.assignee.avatarUrl ?? null }
+        ? { id: c.assignee.id, firstName: c.assignee.firstName, lastName: c.assignee.lastName ?? '', avatarUrl: avatarRef(c.assignee.id, c.assignee.avatarUrl) }
         : null,
       parentKey: key,
     }));
@@ -3393,7 +3437,7 @@ async function _handleJiraPgApi(
           } else {
             const newAssignee = await db.user.findUnique({ where: { id: data.assigneeId as string }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
             if (newAssignee) {
-              deptAssignees[currentDept] = { id: newAssignee.id, email: newAssignee.email, firstName: newAssignee.firstName, lastName: newAssignee.lastName, displayName: `${newAssignee.firstName} ${newAssignee.lastName}`.trim(), avatarUrl: newAssignee.avatarUrl ?? null };
+              deptAssignees[currentDept] = { id: newAssignee.id, email: newAssignee.email, firstName: newAssignee.firstName, lastName: newAssignee.lastName, displayName: `${newAssignee.firstName} ${newAssignee.lastName}`.trim(), avatarUrl: avatarRef(newAssignee.id, newAssignee.avatarUrl) };
             }
           }
           await pool.query(`UPDATE issues SET dept_assignees=$1::jsonb WHERE key=$2`, [JSON.stringify(deptAssignees), key]);
@@ -3436,7 +3480,7 @@ async function _handleJiraPgApi(
           if (handoffOldDept && curAssigneeId) {
             const curAssignee = await db.user.findUnique({ where: { id: curAssigneeId }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
             if (curAssignee) {
-              deptAssignees[handoffOldDept] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: curAssignee.avatarUrl ?? null };
+              deptAssignees[handoffOldDept] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: avatarRef(curAssignee.id, curAssignee.avatarUrl) };
             }
           }
           deptAssignees[handoffTargetDept] = deptAssignees[handoffTargetDept] ?? null;
