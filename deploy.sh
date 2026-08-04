@@ -51,6 +51,14 @@ docker exec -i jira_postgres psql -U jirauser -d jiradb -c "
   -- jira-pg-api.ts's dept-filtered queries so it can use an index scan
   -- instead (confirmed via EXPLAIN ANALYZE: ~48ms scan -> ~0.5ms).
   CREATE INDEX IF NOT EXISTS idx_issues_space_dept_lower ON issues (\"spaceId\", LOWER(current_department));
+  -- cf_key and partnerKey are raw columns (not in the Prisma schema, so Prisma's
+  -- own migrations never index them) but are on hot paths: cf_key is scanned with
+  -- MAX(...) on every single ticket creation to assign the next CF-#### number,
+  -- and partnerKey is looked up on every ticket detail page load to merge in a
+  -- linked partner ticket's comments. Both were sequential-scanning the full
+  -- issues table without these.
+  CREATE INDEX IF NOT EXISTS idx_issues_cf_key ON issues (cf_key);
+  CREATE INDEX IF NOT EXISTS issues_partner_key_idx ON issues (\"partnerKey\");
 " 2>&1 | grep -v NOTICE || true
 
 DATABASE_URL="postgresql://jirauser:Neutara%402024@localhost:5434/jiradb" node /root/Jira-v2.0/seed-queues.mjs 2>/dev/null || true
