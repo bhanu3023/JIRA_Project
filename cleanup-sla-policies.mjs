@@ -6,11 +6,25 @@
 // Usage (run on the server, where DATABASE_URL points at the real DB):
 //   node cleanup-sla-policies.mjs            -- lists matching policies only
 //   node cleanup-sla-policies.mjs --yes      -- actually deletes them
+import fs from 'fs';
 import { Pool } from 'pg';
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db',
-});
+// Load DATABASE_URL from .env in the current directory if it's not already
+// set in the environment -- avoids depending on the `dotenv` package being
+// installed on whatever host this script is run from.
+if (!process.env.DATABASE_URL && fs.existsSync('.env')) {
+  for (const line of fs.readFileSync('.env', 'utf8').split('\n')) {
+    const m = line.match(/^\s*DATABASE_URL\s*=\s*(.*)\s*$/);
+    if (m) { process.env.DATABASE_URL = m[1].replace(/^["']|["']$/g, ''); break; }
+  }
+}
+
+if (!process.env.DATABASE_URL) {
+  console.error('DATABASE_URL is not set (checked .env in the current directory). Run this from the project root.');
+  process.exit(1);
+}
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 const TARGET_NAMES = ['tsa', 'testing'];
 const confirmed = process.argv.includes('--yes');
