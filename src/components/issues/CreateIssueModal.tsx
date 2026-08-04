@@ -262,14 +262,19 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // Narrow the Status dropdown to the selected queue's own status list, same
   // as the issue detail page's department status dropdown already does —
   // falls back to the space's full list when the queue has no restricted one.
+  const hasDeptQueues = spaceQueues.some(q => !!q.dept);
   useEffect(() => {
     // Selected a queue but it has no status list of its own configured — use
-    // the minimal default rather than the space's entire unscoped list. No
-    // queue selected yet (department not chosen) still shows the full list,
-    // since there's no queue context to narrow by.
+    // the minimal default rather than the space's entire unscoped list. If
+    // this space routes through departments at all but none is picked yet,
+    // show that same minimal default too — the full unscoped list (every
+    // status ever used on every board) is never a useful thing to show here,
+    // and a department must be chosen before the ticket can be created
+    // anyway. Only spaces with no department concept at all fall back to
+    // the space's full list, since there's no queue context to narrow by.
     const nextStatuses = selectedQueue?.queueStatuses?.length
       ? selectedQueue.queueStatuses
-      : selectedQueue
+      : selectedQueue || hasDeptQueues
       ? DEFAULT_QUEUE_STATUSES
       : baseStatuses;
     setSpaceStatuses(nextStatuses);
@@ -278,7 +283,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     if (form.statusId && !nextStatuses.some(s => s.id === form.statusId)) {
       setForm(f => ({ ...f, statusId: '' }));
     }
-  }, [selectedQueue, baseStatuses]);
+  }, [selectedQueue, baseStatuses, hasDeptQueues]);
 
   // Assignee options — only members with access to the selected queue (its
   // memberIds, minus anyone suspended from it), not every member of the whole

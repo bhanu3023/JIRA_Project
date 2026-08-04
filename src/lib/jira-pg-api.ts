@@ -1559,6 +1559,20 @@ async function _handleJiraPgApi(
     return json(rows.rows.map((r: any) => r.val));
   }
 
+  // GET /field-values?field=projectManager — same as above but across every space,
+  // for filter UIs (e.g. /filters) that aren't scoped to a single space.
+  if (path === 'field-values' && method === 'GET') {
+    const field = url.searchParams.get('field') || '';
+    const ALLOWED = new Set(['workType','productType','combination','testEnvironment','rootCause',
+      'fixDescription','customerName','clientName','projectManager','manageClientName','customerPlan']);
+    if (!ALLOWED.has(field)) return json({ error: 'Invalid field' }, 400);
+    const col = field;
+    const rows = await pool.query(
+      `SELECT DISTINCT "${col}" AS val FROM issues WHERE "${col}" IS NOT NULL AND "${col}" <> '' ORDER BY val`
+    );
+    return json(rows.rows.map((r: any) => r.val));
+  }
+
   if (spaceKeyMatch && method === 'PATCH') {
     const key = spaceKeyMatch[1].toUpperCase();
     const body = await readJson(req);
@@ -1905,7 +1919,15 @@ async function _handleJiraPgApi(
     };
     applyMultiField(customerNameParam,   'customerName');
     applyMultiField(clientNameParam,     'clientName');
-    applyMultiField(projectManagerParam, 'projectManager');
+    // Project Manager supports true multi-select (checkbox list of real values),
+    // and a single value can itself contain a comma (e.g. "Abhishikth, Abhishek"
+    // naming two people) — so multiple selections are joined with "|||" instead,
+    // which won't collide with that.
+    if (projectManagerParam) {
+      const vals = projectManagerParam.split('|||').map(v => v.trim()).filter(Boolean);
+      if (vals.length === 1) where.projectManager = vals[0];
+      else if (vals.length > 1) where.projectManager = { in: vals };
+    }
     applyMultiField(workTypeParam,       'workType');
     applyMultiField(productTypeParam,    'productType');
     applyMultiField(combinationParam,    'combination');

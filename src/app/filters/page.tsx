@@ -926,7 +926,8 @@ export default function FiltersPage() {
   const [selCombination, setSelCombination] = useState('');
   const [selCustomerName, setSelCustomerName] = useState('');
   const [selClientName, setSelClientName] = useState('');
-  const [selProjectManager, setSelProjectManager] = useState('');
+  const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
+  const [pmOptions, setPmOptions] = useState<string[]>([]);
   const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
 
   /* issues */
@@ -959,7 +960,7 @@ export default function FiltersPage() {
         if (key === 'combination')    setSelCombination('');
         if (key === 'customerName')   setSelCustomerName('');
         if (key === 'clientName')     setSelClientName('');
-        if (key === 'projectManager') setSelProjectManager('');
+        if (key === 'projectManager') setSelProjectManager([]);
         return prev.filter((k) => k !== key);
       }
       return [...prev, key];
@@ -993,6 +994,19 @@ export default function FiltersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Project Manager options come from real values already saved on tickets — fetch
+  // once, lazily, the first time the filter is added (was previously a blind text
+  // box with no visibility into what values actually exist).
+  useEffect(() => {
+    if (!activeExtras.includes('projectManager') || pmOptions.length > 0) return;
+    fetch('/api/field-values?field=projectManager', {
+      headers: { Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}` },
+    })
+      .then(r => (r.ok ? r.json() : []))
+      .then((vals: string[]) => setPmOptions(vals))
+      .catch(() => {});
+  }, [activeExtras, pmOptions.length]);
+
   /* derived */
   // When specific spaces are selected, only show statuses that belong to those spaces.
   // If no space filter is active, show statuses from all spaces.
@@ -1019,7 +1033,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selDueDate || selDepartment ||
-    selProductType || selCombination || selCustomerName || selClientName || selProjectManager || selBreached,
+    selProductType || selCombination || selCustomerName || selClientName || selProjectManager.length || selBreached,
   );
 
   /* fetch issues — all filtering done server-side for accuracy */
@@ -1086,7 +1100,9 @@ export default function FiltersPage() {
         if (selCombination)    params.combination    = selCombination;
         if (selCustomerName)   params.customerName   = selCustomerName;
         if (selClientName)     params.clientName     = selClientName;
-        if (selProjectManager) params.projectManager = selProjectManager;
+        // Joined with a delimiter that won't collide with commas already inside a
+        // stored value (e.g. "Abhishikth, Abhishek" naming two people as one value).
+        if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
         if (selBreached) params.slaBreached = selBreached;
 
         // Text search
@@ -1122,7 +1138,7 @@ export default function FiltersPage() {
     setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
     setSelDepartment(''); setSelProductType('');
-    setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager('');
+    setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager([]);
     setSelBreached('');
     setActiveExtras([]);
     setActiveFilterId(null);
@@ -1521,7 +1537,12 @@ export default function FiltersPage() {
             )}
             {activeExtras.includes('projectManager') && (
               <div className="flex items-center gap-1">
-                <TextFilterBtn label="Project Manager" value={selProjectManager} onChange={setSelProjectManager} />
+                <DropBtn
+                  label="Project Manager"
+                  options={pmOptions.map(v => ({ value: v, label: v }))}
+                  selected={selProjectManager}
+                  onChange={setSelProjectManager}
+                />
                 <button onClick={() => toggleExtra('projectManager')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
