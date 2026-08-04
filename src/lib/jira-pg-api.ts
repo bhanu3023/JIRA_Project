@@ -594,19 +594,16 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
   try {
     const spaceId = issue.spaceId ?? issue.space?.id;
     if (!spaceId) return [];
-    const res = await pool.query(
-      `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`, [spaceId]
-    );
-
-    // Check if an SLA_BREACH warning notification was already sent for this issue
-    let isNotified = false;
-    try {
-      const notifRes = await pool.query(
+    // These don't depend on each other -- run together instead of one after
+    // the other, same as the other independent queries on this page load.
+    const [res, notifRes] = await Promise.all([
+      pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`, [spaceId]),
+      pool.query(
         `SELECT id FROM notifications WHERE "issueKey" = $1 AND type = 'SLA_BREACH' LIMIT 1`,
         [issue.cf_key || issue.key]
-      );
-      isNotified = notifRes.rows.length > 0;
-    } catch { /* notifications table may not have issueKey column */ }
+      ).catch(() => ({ rows: [] as any[] })), // notifications table may not have issueKey column
+    ]);
+    const isNotified = notifRes.rows.length > 0;
     const allPolicies = res.rows;
     if (!allPolicies.length) return [];
 
@@ -3124,16 +3121,6 @@ async function _handleJiraPgApi(
       return json({ error: 'Issue not found' }, 404);
     }
 
-    if (!isAdmin && issue.space?.key) {
-      try {
-        const deptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
-        const issueDept = deptRow.rows[0]?.current_department;
-        if (issueDept && await isUserSuspendedFromQueue(issue.space.key, issueDept, userId)) {
-          return json({ error: 'Your access to this queue has been suspended.' }, 403);
-        }
-      } catch { /* non-critical — don't block ticket viewing on this lookup failing */ }
-    }
-
     // Auto-refresh custom fields from Jira if all 5 are null (never synced).
     // Fire-and-forget: this hits a real external Jira Cloud API with no timeout
     // on the fetch calls, so awaiting it here could hang the whole issue page
@@ -3213,18 +3200,22 @@ async function _handleJiraPgApi(
       })().catch(() => {});
     }
 
-    // Load attachments, history, links (both directions)
-    const dbAttachments = await (db as any).attachment.findMany({
-      where: { issueId: issue.id },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    const dbHistory = await (db as any).issueHistory.findMany({
-      where: { issueId: issue.id },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    const [outLinksRaw, inLinksRaw, childIssues] = await Promise.all([
+    // Load the suspension-check row, attachments, history, and links (both
+    // directions) + children all together -- these were previously five
+    // sequential round trips to the DB, each adding its own latency to every
+    // ticket-open, even though none of them depend on each other's results.
+    const [deptRow, dbAttachments, dbHistory, outLinksRaw, inLinksRaw, childIssues, rawDeptRow, partnerRows] = await Promise.all([
+      (!isAdmin && issue.space?.key)
+        ? pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]).catch(() => null)
+        : Promise.resolve(null),
+      (db as any).attachment.findMany({
+        where: { issueId: issue.id },
+        orderBy: { createdAt: 'asc' },
+      }),
+      (db as any).issueHistory.findMany({
+        where: { issueId: issue.id },
+        orderBy: { createdAt: 'desc' },
+      }),
       db.issueLink.findMany({ where: { sourceKey: key } }),
       db.issueLink.findMany({ where: { targetKey: key } }),
       db.issue.findMany({
@@ -3232,7 +3223,27 @@ async function _handleJiraPgApi(
         include: { status: true, assignee: true, space: { select: { key: true, name: true } } },
         orderBy: { createdAt: 'asc' },
       }),
+      // Raw columns Prisma's schema doesn't know about -- only needs `key`,
+      // so it can run alongside everything else instead of after it.
+      pool.query(
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey" FROM issues WHERE key = $1 LIMIT 1`,
+        [key]
+      ).catch(() => ({ rows: [] as any[] })),
+      // Partner-ticket comment merge lookup -- also only needs `key`.
+      pool.query(
+        `SELECT i.id FROM issues i WHERE i."partnerKey" = $1`,
+        [key]
+      ).catch(() => ({ rows: [] as any[] })),
     ]);
+
+    if (!isAdmin && issue.space?.key && deptRow) {
+      try {
+        const issueDept = deptRow.rows[0]?.current_department;
+        if (issueDept && await isUserSuspendedFromQueue(issue.space.key, issueDept, userId)) {
+          return json({ error: 'Your access to this queue has been suspended.' }, 403);
+        }
+      } catch { /* non-critical — don't block ticket viewing on this lookup failing */ }
+    }
 
     // Normalize colon-suffix keys in link records (e.g. "L2B-12718:1" Ã¢â€ ' "L2B-12718")
     const normalizeKey = (k: string) => k?.includes(':') ? k.split(':')[0] : k;
@@ -3330,25 +3341,14 @@ async function _handleJiraPgApi(
       };
     });
 
-    // Fetch raw columns not in Prisma schema
-    let rawDeptData: any = {};
-    try {
-      const rawRow = await pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key FROM issues WHERE key = $1 LIMIT 1`,
-        [key]
-      );
-      if (rawRow.rows[0]) rawDeptData = rawRow.rows[0];
-    } catch { /* ignore if columns don't exist */ }
+    // Raw columns not in Prisma schema -- fetched in the Promise.all above
+    const rawDeptData: any = rawDeptRow.rows[0] || {};
 
     // Merge comments from partner tickets Ã¢â‚¬â€ only tickets explicitly linked via partnerKey
     // (set during department pass). This prevents accidentally merging comments from
     // unrelated tickets that happen to share the same number suffix.
     let allComments = [...(issue.comments || [])];
     try {
-      const partnerRows = await pool.query(
-        `SELECT i.id FROM issues i WHERE i."partnerKey" = $1 OR (i.key = $2 AND $2 != '')`,
-        [key, (issue as any).partnerKey || '']
-      );
       for (const pr of partnerRows.rows) {
         const partnerComments = await db.comment.findMany({
           where: { issueId: pr.id },
