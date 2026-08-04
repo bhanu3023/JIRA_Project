@@ -203,6 +203,27 @@ async function isUserSuspendedFromQueue(spaceKey: string, department: string | n
   } catch { return false; }
 }
 
+// Sent/Watching lets a department monitor a ticket after it moves to another
+// queue, but that's monitoring, not managing: once a ticket has moved on, only
+// the queue it currently sits in (or an admin) should be able to edit it —
+// assignee, department, or any other field. Viewing and commenting stay open
+// to everyone with access to the space; this only gates edits. Fails OPEN
+// (returns true / "authorized") whenever the department doesn't map to a
+// configured queue or on a lookup error, so this never blocks tickets outside
+// the custom-queue/department-routing model.
+async function isUserAuthorizedForDeptQueue(spaceKey: string, department: string | null | undefined, userId: string | null | undefined): Promise<boolean> {
+  if (!department || !userId) return true;
+  try {
+    const row = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey.toUpperCase()]);
+    const queues: any[] = row.rows[0]?.queues || [];
+    const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === department.toLowerCase());
+    if (!q) return true;
+    const memberIds: string[] = Array.isArray(q.memberIds) ? q.memberIds : [];
+    const suspendedIds: string[] = Array.isArray(q.suspendedIds) ? q.suspendedIds : [];
+    return memberIds.includes(userId) && !suspendedIds.includes(userId);
+  } catch { return true; }
+}
+
 // Find previously RESOLVED issues with a similar summary (to detect recurring issues)
 async function findPreviouslyResolvedSimilar(spaceId: string, excludeId: string, summary: string): Promise<Array<{ key: string; cf_key: string; summary: string }>> {
   try {
@@ -2567,7 +2588,23 @@ async function _handleJiraPgApi(
     });
     if (!issue) return json({ error: 'Not found' }, 404);
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ Single-board mode: no targetBoard or same board as source Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // Only the department that currently owns this ticket (or an admin) can
+    // move it elsewhere — a dept just monitoring it via Sent/Watching shouldn't
+    // be able to transfer a ticket it no longer manages.
+    if (!isAdmin) {
+      try {
+        const deptRow = await pool.query(`SELECT current_department FROM issues WHERE key=$1 LIMIT 1`, [key]);
+        const currentDept: string | null = deptRow.rows[0]?.current_department || null;
+        if (currentDept && issue.space?.key) {
+          const authorized = await isUserAuthorizedForDeptQueue(issue.space.key, currentDept, userId);
+          if (!authorized) {
+            return json({ error: `You can view and comment on this ticket, but it has moved to ${currentDept} — only that queue can move it.` }, 403);
+          }
+        }
+      } catch { /* fail open on lookup errors */ }
+    }
+
+    //Ã¢â€â‚¬Ã¢â€â‚¬ Single-board mode: no targetBoard or same board as source Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (!targetBoardKey || targetBoardKey === issue.space?.key?.toUpperCase()) {
       // Old dept status: "Waiting for <newDept>" (or create a virtual one)
       const waitingForNew = await db.status.findFirst({
@@ -3259,6 +3296,24 @@ async function _handleJiraPgApi(
         : Promise.resolve(null),
     ]);
     if (!issue) return json({ error: 'Not found' }, 404);
+
+    // Sent/Watching monitoring shouldn't extend to editing — once a ticket has
+    // moved to another department's queue, only that queue's members (or an
+    // admin) can change it, including its per-queue custom status
+    // (queueStatusId is handled further below, but gated by the same check).
+    if (!isAdmin) {
+      try {
+        const deptRow = await pool.query(`SELECT current_department FROM issues WHERE key=$1 LIMIT 1`, [key]);
+        const currentDept: string | null = deptRow.rows[0]?.current_department || null;
+        if (currentDept && issue.space?.key) {
+          const authorized = await isUserAuthorizedForDeptQueue(issue.space.key, currentDept, userId);
+          if (!authorized) {
+            return json({ error: `You can view and comment on this ticket, but it has moved to ${currentDept} — only that queue can edit it.` }, 403);
+          }
+        }
+      } catch { /* fail open on lookup errors */ }
+    }
+
     const data: Record<string, unknown> = {};
     if (body.summary !== undefined) data.summary = String(body.summary);
     if (body.description !== undefined) data.description = body.description === null ? null : String(body.description);
