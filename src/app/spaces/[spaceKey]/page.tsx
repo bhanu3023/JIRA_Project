@@ -805,18 +805,21 @@ function SpaceDetailContent() {
     }));
     try {
       await api.updateIssue(issueKey, { [field]: value });
-      const params = { spaceKey, page: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(currentPage) : '1', limit: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(PAGE_SIZE) : '500' };
       // Force a fresh fetch (not a cache hit) so the background reconcile reflects
-      // this edit and any server-side side effects, instead of re-showing stale data.
-      clearIssuesCache(params);
-      loadIssues(params);
+      // this edit and any server-side side effects, instead of re-showing stale
+      // data. Guessing the reload params here (as this used to) drops whatever
+      // this view's actual filter state is (dept, excludeDone, custom filters,
+      // etc.) -- bumping the version instead lets the main load effect re-fetch
+      // with its own already-correct params, same as any other list mutation.
+      clearIssuesCache();
+      bumpIssuesVersion();
     }
     catch (err) {
       console.error(err);
       useStore.setState({ issues: prevIssues });
     }
     finally { setUpdating(null); }
-  }, [spaceKey, loadIssues, clearIssuesCache, queueFilter, currentPage]);
+  }, [clearIssuesCache, bumpIssuesVersion]);
 
   // Custom-queue statuses (qst_...) aren't real Status rows — they live in
   // dept_statuses[dept], set via queueStatusId/Name/Color/Category, same as
@@ -837,15 +840,14 @@ function SpaceDetailContent() {
         queueStatusColor: queueSt.color,
         queueStatusCategory: queueSt.category,
       } as any);
-      const params = { spaceKey, page: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(currentPage) : '1', limit: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(PAGE_SIZE) : '500' };
-      clearIssuesCache(params);
-      loadIssues(params);
+      clearIssuesCache();
+      bumpIssuesVersion();
     } catch (err) {
       console.error(err);
       useStore.setState({ issues: prevIssues });
     }
     finally { setUpdating(null); }
-  }, [spaceKey, loadIssues, clearIssuesCache, queueFilter, currentPage]);
+  }, [clearIssuesCache, bumpIssuesVersion]);
 
   const recallIssue = async (issueKey: string) => {
     const prevIssues = useStore.getState().issues;
@@ -860,13 +862,13 @@ function SpaceDetailContent() {
       useStore.setState({ issues: prevIssues });
       return;
     }
-    // Background reconcile — no need to block the UI on this
-    try {
-      const reloadParams: Record<string, string> = { spaceKey, page: '1', limit: '500' };
-      if (queueFilter === 'sent-watching' && deptParam) reloadParams.sentDept = deptParam;
-      clearIssuesCache(reloadParams);
-      loadIssues(reloadParams);
-    } catch { /* non-critical */ }
+    // Background reconcile — no need to block the UI on this. Bump the
+    // version instead of guessing reload params (this only covered
+    // sent-watching, so recalling from a dept-filtered view like "All
+    // Tickets — Migration" reloaded without the dept filter and could
+    // flash "0 Tickets").
+    clearIssuesCache();
+    bumpIssuesVersion();
   };
 
   const [commentingOn, setCommentingOn] = useState<string | null>(null); // issueKey
