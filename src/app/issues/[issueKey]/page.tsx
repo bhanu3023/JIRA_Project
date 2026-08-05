@@ -340,27 +340,13 @@ export default function IssueDetailPage() {
       };
 
       if (dept) {
-        // Search all spaces for a queue matching current_department. Must search
-        // EVERY space, not just ones the viewing user is a member of — a department's
-        // workflow can live in a space a regular agent was never added to, and the
-        // status dropdown should still work for them. GET /spaces is membership-
-        // filtered for non-admins, which is why this used to only work for admins
-        // (they're the only ones who see every space there); all-space-keys isn't.
+        // Resolve which space's custom queue matches this department in ONE
+        // targeted request (department-queue) instead of fetching
+        // all-space-keys and then firing one custom-queues/:spaceKey request
+        // PER SPACE IN THE SYSTEM to find the same thing — that used to run
+        // on every single ticket open, turning "open one ticket" into
+        // 10-20+ parallel requests.
         (async () => {
-          let allSpaceKeys: string[] = [currentIssue.spaceKey];
-          try {
-            const keys = await api.request<string[]>('all-space-keys');
-            if (Array.isArray(keys)) {
-              allSpaceKeys = [currentIssue.spaceKey, ...keys.filter((k: string) => k !== currentIssue.spaceKey)];
-            }
-          } catch {
-            // Fall back to whatever spaces this user can already see
-            allSpaceKeys = [
-              currentIssue.spaceKey,
-              ...(spaces as any[]).map((s: any) => s.key).filter((k: string) => k !== currentIssue.spaceKey),
-            ];
-          }
-
           // Cheap first pass: localStorage cache from spaces this browser has visited —
           // shows something instantly, but must NOT be trusted as final: it goes stale
           // the moment a queue's status list changes on the server (e.g. an admin
@@ -369,7 +355,11 @@ export default function IssueDetailPage() {
           // the dropdown on whatever was cached the first time this browser saw the
           // queue — always re-verifying against the live API below fixes that.
           let resolvedFromCache = false;
-          for (const spKey of allSpaceKeys) {
+          const cachedSpaceKeys = [
+            currentIssue.spaceKey,
+            ...(spaces as any[]).map((s: any) => s.key).filter((k: string) => k !== currentIssue.spaceKey),
+          ];
+          for (const spKey of cachedSpaceKeys) {
             try {
               const stored = localStorage.getItem(`custom_queues_${spKey}`);
               if (!stored) continue;
@@ -398,20 +388,19 @@ export default function IssueDetailPage() {
           }
 
           // Always verify against the live API and correct the display if the cached
-          // snapshot was stale — also refreshes the cache for next time. Fetch every
-          // space concurrently instead of one at a time: this runs on every single
-          // ticket open now (not just as a rare cache-miss fallback like before), so
-          // awaiting spaces one-by-one would scale the load time with the number of
-          // spaces in the system.
-          const liveResults = await Promise.allSettled(
-            allSpaceKeys.map(spKey => api.request<any[]>(`custom-queues/${spKey}`).then(queues => ({ spKey, queues })))
-          );
-          for (const r of liveResults) {
-            if (r.status !== 'fulfilled' || !Array.isArray(r.value.queues)) continue;
-            const { spKey, queues } = r.value;
-            const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
-            if (matchedQueue) {
-              try { localStorage.setItem(`custom_queues_${spKey}`, JSON.stringify(queues)); } catch {}
+          // snapshot was stale — also refreshes the cache for next time.
+          try {
+            const result = await api.request<{ spaceKey: string | null; queue: any }>(
+              `department-queue?dept=${encodeURIComponent(dept)}`
+            );
+            const matchedQueue = result?.queue;
+            const spKey = result?.spaceKey;
+            if (matchedQueue && spKey) {
+              try {
+                const existing: any[] = JSON.parse(localStorage.getItem(`custom_queues_${spKey}`) || '[]');
+                const others = existing.filter((q: any) => q.id !== matchedQueue.id);
+                localStorage.setItem(`custom_queues_${spKey}`, JSON.stringify([...others, matchedQueue]));
+              } catch {}
               // Editing is gated to this queue's own members (admins bypass this
               // separately wherever it's checked) — a dept just monitoring via
               // Sent/Watching shouldn't see edit affordances for a ticket it no
@@ -438,7 +427,7 @@ export default function IssueDetailPage() {
               setWorkflowTransitions([]);
               return;
             }
-          }
+          } catch {}
           // Nothing found anywhere — dept doesn't map to a configured queue, so
           // don't restrict (matches the backend's fail-open behavior)
           setCanEditTicket(true);

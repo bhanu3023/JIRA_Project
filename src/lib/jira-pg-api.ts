@@ -5169,6 +5169,23 @@ async function _handleJiraPgApi(
     }
   }
 
+  // GET /department-queue?dept=<name> -- find which space's custom queue matches
+  // a department name, in one query across every space's custom_queues row,
+  // instead of the caller fetching all-space-keys then firing one
+  // custom-queues/:spaceKey request PER SPACE to find the same thing (which is
+  // what the issue detail page used to do on every single ticket open).
+  if (path === 'department-queue' && method === 'GET') {
+    const dept = (url.searchParams.get('dept') || '').trim();
+    if (!dept) return json({ spaceKey: null, queue: null });
+    const rows = await pool.query(`SELECT space_key, queues FROM custom_queues`);
+    for (const row of rows.rows) {
+      const queues: any[] = row.queues || [];
+      const matched = queues.find((q: any) => (q.name || '').toLowerCase() === dept.toLowerCase());
+      if (matched) return json({ spaceKey: row.space_key, queue: matched });
+    }
+    return json({ spaceKey: null, queue: null });
+  }
+
   // GET /custom-queues/:spaceKey -- load queues from DB
   // PUT /custom-queues/:spaceKey -- save queues to DB
   if (path.startsWith('custom-queues/')) {
