@@ -256,7 +256,7 @@ export default function SummaryPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      await loadSpace(spaceKey);
+      await loadSpace(spaceKey, true);
       const [{ issues: allIssues }, policies] = await Promise.all([
         api.getIssues({ spaceKey, limit: '200' }),
         api.getSLAs(spaceKey).catch(() => [] as any[]),
