@@ -54,6 +54,13 @@ export default function IssueDetailPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
+  // Attachment uploads insert a placeholder chip that only gets swapped for the
+  // real image/link once the upload resolves — saving while one is still pending
+  // bakes that inert placeholder into the stored content permanently (clicking it
+  // does nothing since it was never a real link). Gate each Save button on this.
+  const [isUploadingComment, setIsUploadingComment] = useState(false);
+  const [isUploadingDescription, setIsUploadingDescription] = useState(false);
+  const [isUploadingEditComment, setIsUploadingEditComment] = useState(false);
   // Sent/Watching lets other departments monitor a ticket after it moves on —
   // but that's viewing, not managing. True once we've confirmed (via the
   // ticket's current-department queue membership) that this viewer can edit
@@ -109,6 +116,10 @@ export default function IssueDetailPage() {
         customerName: (currentIssue as any).customerName || undefined,
         clientName: (currentIssue as any).clientName || undefined,
         projectManager: (currentIssue as any).projectManager || undefined,
+        // Without this, the subtask never got a current_department at all, so it
+        // fell back to the space's generic "To Do" status instead of the parent's
+        // queue's own Open status (and wouldn't show up in that queue's lists).
+        department: (currentIssue as any).current_department || undefined,
       });
       setShowSubtaskModal(false);
       setSubtaskSummary('');
@@ -1118,10 +1129,13 @@ export default function IssueDetailPage() {
                   placeholder="Add a description... (paste or drag images, use toolbar to format)"
                   minHeight="180px"
                   members={allMembers}
+                  onUploadingChange={setIsUploadingDescription}
                 />
                 <div className="flex gap-2 mt-2">
-                  <button onClick={() => handleUpdate('description', editValue)}
-                    className="bg-blue-600 text-white text-[13px] font-medium px-4 py-1.5 rounded hover:bg-blue-700 transition-colors">Save</button>
+                  <button onClick={() => handleUpdate('description', editValue)} disabled={isUploadingDescription}
+                    className="bg-blue-600 text-white text-[13px] font-medium px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                    {isUploadingDescription ? 'Uploading…' : 'Save'}
+                  </button>
                   <button onClick={() => setEditing(null)}
                     className="text-[13px] text-gray-600 px-4 py-1.5 rounded border border-gray-200 hover:bg-gray-50 transition-colors">Cancel</button>
                 </div>
@@ -1746,12 +1760,13 @@ export default function IssueDetailPage() {
                       minHeight="100px"
                       compact={true}
                       members={allMembers}
+                      onUploadingChange={setIsUploadingComment}
                     />
                     <div className="flex items-center gap-3 mt-2">
-                      <button onClick={handleAddComment} disabled={!commentText.trim() || submittingComment}
+                      <button onClick={handleAddComment} disabled={!commentText.trim() || submittingComment || isUploadingComment}
                         className="bg-blue-600 text-white text-[13px] font-medium px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5">
                         {submittingComment && <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                        {submittingComment ? 'Saving…' : 'Save'}
+                        {submittingComment ? 'Saving…' : isUploadingComment ? 'Uploading…' : 'Save'}
                       </button>
                       <label className="flex items-center gap-1.5 text-[12px] text-gray-500 cursor-pointer select-none">
                         <input type="checkbox" checked={isInternal} onChange={e => setIsInternal(e.target.checked)} className="rounded border-gray-300" />
@@ -1786,17 +1801,19 @@ export default function IssueDetailPage() {
                             minHeight="80px"
                             compact={true}
                             members={allMembers}
+                            onUploadingChange={setIsUploadingEditComment}
                           />
                           <div className="flex gap-2 mt-1.5">
                             <button
                               onClick={async () => {
-                                if (!editingCommentText.trim()) return;
+                                if (!editingCommentText.trim() || isUploadingEditComment) return;
                                 await api.updateComment(comment.id, { body: editingCommentText });
                                 setEditingCommentId(null);
                                 loadIssue(issueKey);
                               }}
-                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 font-medium"
-                            >Save</button>
+                              disabled={isUploadingEditComment}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                            >{isUploadingEditComment ? 'Uploading…' : 'Save'}</button>
                             <button
                               onClick={() => setEditingCommentId(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100"

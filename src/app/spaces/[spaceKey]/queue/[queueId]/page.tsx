@@ -719,6 +719,10 @@ function RoundRobinTab({ spaceKey, queueName, spaceMembers }: {
   const [search, setSearch] = useState('');
   const [allDepts, setAllDepts] = useState<any[]>([]);
   const [isDefault, setIsDefault] = useState(false);
+  const [productTypeRules, setProductTypeRules] = useState<Array<{ productType: string; userId: string; name: string }>>([]);
+  const [showAddRule, setShowAddRule] = useState(false);
+  const [ruleProductType, setRuleProductType] = useState('');
+  const [ruleAgentSearch, setRuleAgentSearch] = useState('');
 
   // Load existing RR config for this department
   useEffect(() => {
@@ -733,11 +737,12 @@ function RoundRobinTab({ spaceKey, queueName, spaceMembers }: {
           shiftStart: a.shiftStart || '', shiftEnd: a.shiftEnd || '',
           isActive: a.isActive !== false,
         })));
+        setProductTypeRules(dept.productTypeRules || []);
       }
     }).catch(() => {}).finally(() => setLoading(false));
   }, [spaceKey, queueName]);
 
-  const persist = async (nextAgents: typeof agents, nextIsDefault = isDefault) => {
+  const persist = async (nextAgents: typeof agents, nextIsDefault = isDefault, nextRules = productTypeRules) => {
     setSaving(true);
     try {
       const existing = allDepts.filter((d: any) => d.name.toLowerCase() !== queueName.toLowerCase());
@@ -747,17 +752,30 @@ function RoundRobinTab({ spaceKey, queueName, spaceMembers }: {
         isDefault: nextIsDefault,
         agents: nextAgents.map((a, i) => ({ ...a, maxTickets: 10 })),
         currentIndex: allDepts.find((d: any) => d.name.toLowerCase() === queueName.toLowerCase())?.currentIndex ?? 0,
+        productTypeRules: nextRules,
       };
       const updated = [...existing, thisDept];
       await api.saveRrConfig(spaceKey, updated);
       setAllDepts(updated);
       setAgents(nextAgents);
       setIsDefault(nextIsDefault);
+      setProductTypeRules(nextRules);
       setSavedMsg('Saved');
       setTimeout(() => setSavedMsg(''), 2000);
     } catch { setSavedMsg('Failed to save'); setTimeout(() => setSavedMsg(''), 2500); }
     finally { setSaving(false); }
   };
+
+  const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others'];
+  const addRule = (member: any) => {
+    if (!ruleProductType) return;
+    const mb = member.user || member;
+    const name = `${mb.firstName || ''} ${mb.lastName || ''}`.trim();
+    const nextRules = [...productTypeRules.filter(r => r.productType !== ruleProductType), { productType: ruleProductType, userId: mb.id, name }];
+    persist(agents, isDefault, nextRules);
+    setShowAddRule(false); setRuleProductType(''); setRuleAgentSearch('');
+  };
+  const removeRule = (productType: string) => persist(agents, isDefault, productTypeRules.filter(r => r.productType !== productType));
 
   const addAgent = (member: any) => {
     const mb = member.user || member;
@@ -895,10 +913,90 @@ function RoundRobinTab({ spaceKey, queueName, spaceMembers }: {
         )}
       </div>
 
+      {/* Product Type Rules — deterministic override, bypasses rotation entirely */}
+      <div className="flex items-center justify-between mt-8 mb-4">
+        <div>
+          <h2 className="text-[15px] font-bold text-gray-900">Product Type Rules</h2>
+          <p className="text-[12.5px] text-gray-500 mt-0.5">
+            Send tickets of a specific product type straight to one person, instead of the rotation above — e.g. Content Migration always goes to the same agent.
+          </p>
+        </div>
+        <button onClick={() => setShowAddRule(v => !v)}
+          className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-gray-200 text-gray-700 text-[12.5px] font-medium rounded-lg hover:bg-gray-50 transition-colors flex-shrink-0">
+          <Plus size={13} /> Add rule
+        </button>
+      </div>
+
+      {showAddRule && (
+        <div className="bg-blue-50 rounded-xl border border-blue-200 p-4 mb-5">
+          <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">Product type</label>
+          <select value={ruleProductType} onChange={e => setRuleProductType(e.target.value)}
+            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-[13px] text-gray-700 bg-white mb-3 focus:outline-none focus:border-blue-400">
+            <option value="">Select product type…</option>
+            {PRODUCT_TYPE_OPTIONS.map(pt => <option key={pt} value={pt}>{pt}</option>)}
+          </select>
+          {ruleProductType && (
+            <>
+              <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 focus-within:border-blue-500 mb-3">
+                <Search size={14} className="text-gray-400" />
+                <input autoFocus value={ruleAgentSearch} onChange={e => setRuleAgentSearch(e.target.value)}
+                  placeholder="Search person to assign…"
+                  className="flex-1 text-[13px] outline-none text-gray-700 placeholder:text-gray-400" />
+              </div>
+              <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                {spaceMembers
+                  .filter(m => { const mb = m.user||m; const s = ruleAgentSearch.toLowerCase(); return !s || `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(s) || (mb.email||'').toLowerCase().includes(s); })
+                  .map(m => { const mb = m.user||m; return (
+                    <div key={mb.id} onClick={() => addRule(m)}
+                      className="flex items-center gap-3 px-4 py-2.5 bg-white rounded-xl border border-gray-100 hover:border-blue-300 hover:bg-blue-50 cursor-pointer transition-colors">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white ${avatarColor(mb.firstName||'')}`}>{mkInitials(mb.firstName||'',mb.lastName||'')}</div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[13px] font-medium text-gray-800">{mb.firstName} {mb.lastName}</p>
+                        <p className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                      </div>
+                      <span className="text-[12px] text-blue-600 font-medium">+ Assign</span>
+                    </div>
+                  );})}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {productTypeRules.length === 0 ? (
+          <div className="flex flex-col items-center py-12 text-center">
+            <RefreshCw size={24} className="text-gray-200 mb-2" />
+            <p className="text-[13.5px] font-medium text-gray-400">No product type rules</p>
+            <p className="text-[12px] text-gray-400 mt-1">Every ticket follows the rotation above.</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-50">
+            {productTypeRules.map(rule => (
+              <div key={rule.productType} className="flex items-center justify-between px-5 py-3.5 hover:bg-gray-50/50">
+                <div className="flex items-center gap-3">
+                  <span className="text-[11.5px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2.5 py-1">{rule.productType}</span>
+                  <span className="text-[12.5px] text-gray-400">→</span>
+                  <div className="flex items-center gap-2">
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white ${avatarColor(rule.name.split(' ')[0]||'')}`}>{mkInitials(rule.name.split(' ')[0]||'',rule.name.split(' ')[1]||'')}</div>
+                    <span className="text-[13px] font-medium text-gray-800">{rule.name}</span>
+                  </div>
+                </div>
+                <button onClick={() => removeRule(rule.productType)}
+                  className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors">
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="mt-4 p-4 bg-blue-50 rounded-xl border border-blue-100">
         <p className="text-[12px] text-blue-700">
-          <strong>How it works:</strong> When a ticket arrives in this queue, it is assigned to the next active agent in the list whose shift is currently active.
-          If no agent is on shift, it falls back to all active agents. Tickets from email are auto-assigned; manually created tickets follow the same rotation.
+          <strong>How it works:</strong> When a ticket arrives in this queue, a matching product type rule (if any) assigns it directly to that person.
+          Otherwise it goes to the next active agent in the rotation whose shift is currently active — falling back to all active agents if no one is on
+          shift. This applies whether the ticket was just created or transferred in from another queue.
         </p>
       </div>
     </div>
