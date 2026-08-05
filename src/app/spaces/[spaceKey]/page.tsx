@@ -580,8 +580,15 @@ function SpaceDetailContent() {
   // prefetchIssues never touches display.
   useEffect(() => {
     if (!spaceKey || allCustomQueues.length === 0) return;
+    // Only prefetch queues this user can actually open — a non-admin with access to
+    // one queue was triggering warm-cache calls for every queue on the board (up to
+    // 2 requests each), most of which they could never even navigate to.
+    const isAdminUser = user?.role === 'admin';
+    const accessibleQueues = isAdminUser
+      ? allCustomQueues
+      : allCustomQueues.filter(q => (q.memberIds || []).includes(user?.id || '') && !((q as any).suspendedIds || []).includes(user?.id || ''));
     const timers: ReturnType<typeof setTimeout>[] = [];
-    allCustomQueues.forEach((q, i) => {
+    accessibleQueues.forEach((q, i) => {
       timers.push(setTimeout(() => {
         prefetchIssues({ spaceKey, page: '1', limit: String(PAGE_SIZE), dept: q.name }).catch(() => {});
       }, (i + 1) * 400));
@@ -590,7 +597,7 @@ function SpaceDetailContent() {
       }, (i + 1) * 400 + 200));
     });
     return () => timers.forEach(clearTimeout);
-  }, [spaceKey, allCustomQueues, prefetchIssues]);
+  }, [spaceKey, allCustomQueues, prefetchIssues, user?.id, user?.role]);
 
   // Auto-refresh every 15s for all dept_queue spaces — silent background refresh, never clears display
   useEffect(() => {
