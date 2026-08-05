@@ -1849,7 +1849,17 @@ async function _handleJiraPgApi(
       where: { key },
       include: { statuses: { orderBy: { order: 'asc' } }, members: { include: { user: true } } },
     });
-    return json(formatSpace(updated));
+    const result = formatSpace(updated);
+    // Merge raw department column (not in Prisma schema) -- same as GET
+    // /spaces/:key, otherwise the member just added always comes back with
+    // department: null even when one was set, until the next full reload.
+    try {
+      const deptRows = await pool.query(`SELECT "userId", department FROM space_members WHERE "spaceId"=$1`, [sp.id]);
+      const deptByUser: Record<string, string> = {};
+      for (const r of deptRows.rows) deptByUser[r.userId] = r.department;
+      result.members = result.members.map((m: any) => ({ ...m, department: deptByUser[m.userId] ?? null }));
+    } catch {}
+    return json(result);
   }
 
   // PATCH /spaces/{key}/members/{userId} Ã¢â‚¬â€ update role or department
