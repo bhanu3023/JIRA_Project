@@ -77,23 +77,36 @@ export default function RichTextEditor({
     warnTimer.current = setTimeout(() => setWarning(null), 5000);
   };
 
-  const uploadFile = async (file: File): Promise<{ url: string } | null> => {
-    try {
+  // XHR (not fetch) so we get real upload-progress events — large files can take
+  // a while purely due to network transfer time, and a static "Uploading…" with
+  // no feedback looks stuck even when it's working fine.
+  const uploadFile = (file: File, onProgress?: (pct: number) => void): Promise<{ url: string } | null> => {
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/uploads');
+      const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        let data: any = {};
+        try { data = JSON.parse(xhr.responseText || '{}'); } catch {}
+        if (xhr.status < 200 || xhr.status >= 300) {
+          warn(`Failed to upload "${file.name}": ${data.error || 'Upload failed'}`);
+          resolve(null);
+          return;
+        }
+        resolve(data);
+      };
+      xhr.onerror = () => {
+        warn(`Failed to upload "${file.name}": network error`);
+        resolve(null);
+      };
       const fd = new FormData();
       fd.append('file', file, file.name);
-      const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
-      const res = await fetch('/api/uploads', {
-        method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        body: fd,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
-      return data;
-    } catch (e: any) {
-      warn(`Failed to upload "${file.name}": ${e?.message || 'unknown error'}`);
-      return null;
-    }
+      xhr.send(fd);
+    });
   };
 
   // ── @ Mention state ──────────────────────────────────────────────────
@@ -297,7 +310,10 @@ export default function RichTextEditor({
             return;
           }
           const uploadName = file.name.replace(/\.\w+$/, '.jpg');
-          const result = await uploadFile(new File([blob], uploadName, { type: 'image/jpeg' }));
+          const result = await uploadFile(new File([blob], uploadName, { type: 'image/jpeg' }), (pct) => {
+            const p = document.getElementById(placeholderId);
+            if (p) p.textContent = `Uploading "${file.name}" ${pct}%…`;
+          });
           const el = document.getElementById(placeholderId);
           if (!result) { el?.remove(); emit(); endUpload(); return; }
           const imgEl = document.createElement('img');
@@ -337,7 +353,10 @@ export default function RichTextEditor({
     emit();
     beginUpload();
 
-    uploadFile(file).then((result) => {
+    uploadFile(file, (pct) => {
+      const p = document.getElementById(placeholderId);
+      if (p) p.textContent = `Uploading "${file.name}" ${pct}%…`;
+    }).then((result) => {
       const el = document.getElementById(placeholderId);
       if (!result) { el?.remove(); emit(); endUpload(); return; }
       const a = document.createElement('a');
