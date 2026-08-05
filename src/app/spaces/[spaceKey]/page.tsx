@@ -447,6 +447,12 @@ function SpaceDetailContent() {
           if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-dept' || queueFilter === 'my-queue') {
             params.excludeDone = 'true';
           }
+          // Closed tickets (service_desk boards) — the inverse of "All open": only
+          // resolved/done tickets. This used to link to all-requests, which has no
+          // status filtering at all, so open tickets showed up under "Closed tickets".
+          if (queueFilter === 'closed') {
+            params.statusCategory = 'done';
+          }
           // Unassigned queue — pass unassigned flag; dept-scoped users get filtered by dept
           if (queueFilter === 'unassigned') {
             params.unassigned = 'true';
@@ -611,6 +617,7 @@ function SpaceDetailContent() {
       if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-queue') params.excludeDone = 'true';
       if (queueFilter === 'unassigned') params.unassigned = 'true';
       if (queueFilter === 'assigned' && user?.id) params.assignee = user.id;
+      if (queueFilter === 'closed') params.statusCategory = 'done';
       if (queueFilter === 'all-requests') params.limit = '50';
       prefetchIssues(params).catch(() => {});
     }, 30_000);
@@ -1025,6 +1032,7 @@ function SpaceDetailContent() {
     'assigned':        'Assigned to me',
     'unassigned':      'Unassigned',
     'all-requests':    'All Requests',
+    'closed':          'Closed tickets',
     'my-dept':         'My Dept',
     'my-queue':        'My Queue',
     'sent-watching':   'Sent / Watching',
@@ -1034,7 +1042,7 @@ function SpaceDetailContent() {
     'dept_closed':     deptParam ? `Closed Tickets — ${deptParam}` : 'Closed Tickets',
   };
   const queueLabel = (activeCustomQueue?.name) || QUEUE_LABELS[queueFilter] || 'Queues';
-  const isQueueView = ['all-open', 'assigned', 'unassigned', 'all-requests', 'my-dept', 'my-queue', 'sent-watching', 'dept_all', 'dept_unassigned', 'dept_assigned', 'dept_closed'].includes(queueFilter) || queueFilter.startsWith('cq_');
+  const isQueueView = ['all-open', 'assigned', 'unassigned', 'all-requests', 'closed', 'my-dept', 'my-queue', 'sent-watching', 'dept_all', 'dept_unassigned', 'dept_assigned', 'dept_closed'].includes(queueFilter) || queueFilter.startsWith('cq_');
 
   const filteredIssues = issues.filter((issue) => {
     // Queue filter — skip category check when user has explicitly selected a status
@@ -1044,6 +1052,11 @@ function SpaceDetailContent() {
         const cat = (issue.status?.category || '').toLowerCase();
         const name = (issue.status?.name || '').toLowerCase();
         if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
+      } else if (queueFilter === 'closed') {
+        // Inverse of all-open — only resolved/done tickets
+        const cat = (issue.status?.category || '').toLowerCase();
+        const name = (issue.status?.name || '').toLowerCase();
+        if (!(cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed'))) return false;
       } else if (queueFilter === 'assigned') {
         if (!user || issue.assignee?.id !== user.id) return false;
       } else if (queueFilter === 'unassigned') {
