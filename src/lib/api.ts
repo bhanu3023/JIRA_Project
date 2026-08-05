@@ -14,6 +14,19 @@ class ApiClient {
   // restructure which component owns the data.
   private inFlightGets = new Map<string, Promise<any>>();
 
+  // The in-flight map above only catches callers that overlap WHILE the first
+  // request is still pending. Every actual duplicate-fetch bug found in this
+  // app (sidebar + page each independently fetching custom-fields, custom-
+  // queues/:key, rr-config, or the plain spaces list on the same page load)
+  // was two callers just far enough apart in time to miss that window — not
+  // simultaneous, just both firing on mount a few effects apart. Rather than
+  // hunting down and merging each new instance of that pattern as it's found,
+  // keep the resolved value around briefly for exactly this class of endpoint:
+  // static/config data that doesn't need to reflect a mutation a moment ago.
+  // Deliberately NOT applied to issues/notifications/anything else that does.
+  private static STATIC_GET_PATTERNS = [/^custom-fields$/, /^custom-queues\//, /\/rr-config$/, /^spaces$/];
+  private static STATIC_CACHE_MS = 5000;
+
   async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const method = (options.method || 'GET').toUpperCase();
     if (method === 'GET') {
@@ -22,9 +35,15 @@ class ApiClient {
       const dedupKey = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
       const existing = this.inFlightGets.get(dedupKey);
       if (existing) return existing as Promise<T>;
-      const promise = this.requestUncoalesced<T>(endpoint, options).finally(() => {
-        this.inFlightGets.delete(dedupKey);
-      });
+      const isStatic = ApiClient.STATIC_GET_PATTERNS.some((re) => re.test(dedupKey));
+      const promise = this.requestUncoalesced<T>(endpoint, options);
+      promise.then(
+        () => {
+          if (isStatic) setTimeout(() => this.inFlightGets.delete(dedupKey), ApiClient.STATIC_CACHE_MS);
+          else this.inFlightGets.delete(dedupKey);
+        },
+        () => { this.inFlightGets.delete(dedupKey); }, // always drop on failure so a retry can go straight to the network
+      );
       this.inFlightGets.set(dedupKey, promise);
       return promise;
     }
