@@ -1366,7 +1366,12 @@ function SpaceDetailContent() {
                 <p className="text-[13px] text-gray-400 py-4">No queues available.</p>
               )}
               {customQueues.map(q => (
-                <Link key={q.id} href={`/spaces/${spaceKey}?queue=${q.id}`}
+                // Same fix as the sidebar's queue-name link (commit e78b353): route to
+                // dept_all (open tickets, paginated) instead of the cq_<id> custom-queue
+                // view, which loads every ticket ever routed there including closed ones
+                // — for a queue with years of history that's thousands of rows, and this
+                // page appeared to hang because that load was so much heavier than expected.
+                <Link key={q.id} href={`/spaces/${spaceKey}?queue=dept_all&dept=${encodeURIComponent(q.name)}`}
                   className="flex items-center gap-4 px-4 py-3 rounded-lg border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all group">
                   <div className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0" style={{ backgroundColor: getDeptColor(q.name) + '20' }}>
                     <Layers size={15} style={{ color: getDeptColor(q.name) }} />
