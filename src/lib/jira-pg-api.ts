@@ -2826,6 +2826,15 @@ async function _handleJiraPgApi(
       }
     } catch {}
 
+    // Everything below is a side effect the client doesn't need to wait on —
+    // email/in-app notifications, connector events, history logging, and
+    // recurring-issue detection (which runs a similarity/keyword scan over
+    // every resolved ticket in the space). None of it was needed to answer
+    // "was the ticket created," so it was making every single create wait on
+    // a scan of potentially tens of thousands of rows before the client ever
+    // saw a response. Fire it all in the background and respond immediately.
+    (async () => {
+      try {
     // Update space issue count
     await db.space.update({
       where: { id: sp.id },
@@ -2922,6 +2931,11 @@ async function _handleJiraPgApi(
         url: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/issues/${issue.key}`,
       },
     }).catch(() => {});
+
+      } catch (err: any) {
+        console.error('[Issue creation background tasks] Failed:', err?.message || err);
+      }
+    })();
 
     return json(formatIssue(issue));
   }
