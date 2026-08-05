@@ -210,6 +210,23 @@ function SpaceDetailContent() {
     }).catch(() => { setCustomQueuesLoadedFor(spaceKey); });
   }, [spaceKey]);
 
+  // A plain (non-dept_queue) board has no custom queues to pick from, so landing
+  // on the bare board URL (no ?queue=) showed a dead-end "Select a queue... No
+  // queues available" page instead of any tickets — while the sidebar still
+  // highlighted "All Tickets" as active, since it defaults the missing param to
+  // 'all-open', not 'queues'. Once we actually know (custom queues fetched +
+  // space loaded) that this board has none, redirect straight to the tickets
+  // list instead of the queue-picker landing page.
+  useEffect(() => {
+    if (!spaceKey || queueFilter !== 'queues') return;
+    if (customQueuesLoadedFor !== spaceKey) return;
+    if (currentSpace?.key !== spaceKey) return;
+    const isDeptQueueBoard = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
+    if (!isDeptQueueBoard) {
+      router.replace(`/spaces/${spaceKey}?queue=all-open`);
+    }
+  }, [spaceKey, queueFilter, customQueuesLoadedFor, currentSpace?.key, currentSpace?.type, allCustomQueues.length, router]);
+
   // Extract stable primitives from the matched queue so activeCustomQueue only gets a new
   // reference when the queue's id or name actually changes — not every time allCustomQueues
   // gets a new array reference (e.g. localStorage load → API response with same data).
@@ -224,9 +241,16 @@ function SpaceDetailContent() {
   }, [_matchId, _matchName, _matchMembers]);
   const [rrDepartments, setRrDepartments] = useState<string[]>([]); // from RR config
 
-  // Load departments from both RR config + Department Routing custom fields
+  // Load departments from both RR config + Department Routing custom fields, and
+  // derive this space's dynamic custom-field columns from the same custom-fields
+  // response — these used to be two separate effects that each independently
+  // fetched the exact same (space-agnostic) GET /custom-fields list, doubling
+  // that call on every board load for no reason since it's the same data either
+  // way. Gated on currentSpace.id too now (not just spaceKey) since the column
+  // computation needs it to filter fields by spaceIds.
   useEffect(() => {
-    if (!spaceKey) return;
+    if (!spaceKey || !currentSpace?.id) return;
+    const spaceId = currentSpace.id;
     const combined: string[] = [];
 
     // Routed through api.request so identical concurrent calls (e.g. the sidebar
@@ -247,6 +271,21 @@ function SpaceDetailContent() {
             }
           }
         }
+
+        // Dynamic columns for this space (previously its own effect + fetch)
+        const spaceFields = fields.filter((f: any) =>
+          !f.isDeleted &&
+          f.source !== 'system' &&
+          Array.isArray(f.spaceIds) &&
+          f.spaceIds.includes(spaceId)
+        );
+        setCustomFieldCols(spaceFields.map((f: any) => ({
+          id: `cf_${f.id}`,
+          label: f.name,
+          width: '110px',
+          fieldId: f.id,
+        })));
+        setSpaceFieldLabels(new Set(spaceFields.map((f: any) => (f.name as string).toLowerCase().trim())));
       }
       // 2. RR config — add any not already in list
       if (rrRes.status === 'fulfilled' && rrRes.value?.config?.departments?.length) {
@@ -257,7 +296,7 @@ function SpaceDetailContent() {
       }
       if (combined.length) setRrDepartments(combined);
     }).catch(() => {});
-  }, [spaceKey]);
+  }, [spaceKey, currentSpace?.id]);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
 
   // Clear selection whenever the issues list reloads (filter/page change)
@@ -626,26 +665,8 @@ function SpaceDetailContent() {
     return () => clearInterval(id);
   }, [spaceKey, queueFilter, currentPage, currentSpace?.type, allCustomQueues.length, user?.id, prefetchIssues]);
 
-  // Load custom fields assigned to this space → dynamic columns
-  useEffect(() => {
-    if (!currentSpace?.id) return;
-    api.getCustomFields().then((fields: any[]) => {
-      const spaceFields = fields.filter((f: any) =>
-        !f.isDeleted &&
-        f.source !== 'system' &&
-        Array.isArray(f.spaceIds) &&
-        f.spaceIds.includes(currentSpace.id)
-      );
-      setCustomFieldCols(spaceFields.map((f: any) => ({
-        id: `cf_${f.id}`,
-        label: f.name,
-        width: '110px',
-        fieldId: f.id,
-      })));
-      // Track field names enabled for this space (used to filter the "+ Fields" dropdown)
-      setSpaceFieldLabels(new Set(spaceFields.map((f: any) => (f.name as string).toLowerCase().trim())));
-    }).catch(() => {});
-  }, [currentSpace?.id]);
+  // Custom-field columns are now derived in the RR-departments effect above,
+  // from the same GET /custom-fields response instead of a second fetch.
 
   // Load SLA policies for this space (used to compute SLA field values inline)
   useEffect(() => {
