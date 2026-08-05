@@ -886,6 +886,10 @@ function SpaceDetailContent() {
   const [commentText, setCommentText] = useState('');
   const [richCommentHtml, setRichCommentHtml] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
+  // Same upload-in-flight guard as the ticket detail page's comment box — saving
+  // before an attachment upload resolves bakes its inert "Uploading…" placeholder
+  // into the stored comment permanently.
+  const [isUploadingSentComment, setIsUploadingSentComment] = useState(false);
   const submitComment = async (issueKey: string) => {
     const body = richCommentHtml.replace(/<[^>]+>/g, '').trim() ? richCommentHtml : commentText.trim();
     if (!body) return;
@@ -2335,6 +2339,7 @@ function SpaceDetailContent() {
                             minHeight="80px"
                             compact
                             members={members}
+                            onUploadingChange={setIsUploadingSentComment}
                           />
                           <div className="flex items-center justify-between px-3 pb-2.5 border-t border-gray-100 pt-2 bg-gray-50">
                             <span className="text-[11px] text-gray-400">Ctrl+Enter to send · Esc to cancel</span>
@@ -2346,10 +2351,10 @@ function SpaceDetailContent() {
                               </button>
                               <button
                                 onClick={() => submitComment(issue.key)}
-                                disabled={!commentText.trim() || submittingComment}
+                                disabled={!commentText.trim() || submittingComment || isUploadingSentComment}
                                 className="px-4 py-1.5 text-[12px] font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5">
                                 {submittingComment && <div className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                                Send
+                                {isUploadingSentComment ? 'Uploading…' : 'Send'}
                               </button>
                             </div>
                           </div>
