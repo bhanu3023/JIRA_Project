@@ -7,8 +7,18 @@ set -e
 echo "==> Pulling latest code..."
 git pull origin fresh-start
 
-echo "==> Rebuilding and restarting containers..."
-docker compose down
+echo "==> Rebuilding and restarting only what changed..."
+# Previously: `docker compose down` + `up -d --build`, which unconditionally
+# stops and recreates EVERY container together, including Postgres — which
+# has no code changes to pick up. That gave every deploy a window where
+# Postgres itself was restarting, so the app's DB pool failed to connect:
+# session lookups silently failed (users appeared logged out -> spurious
+# 403s) and in-flight queries threw raw pg connection-timeout errors that
+# leaked into 500 responses. `up -d --build` alone rebuilds the image and
+# recreates only the container(s) whose image/config actually changed —
+# Postgres stays up the whole time since its own service definition never
+# changes here, and the app's own downtime window shrinks to just its own
+# restart instead of the whole stack's.
 docker compose up -d --build
 
 echo "==> Waiting for Postgres to be ready..."

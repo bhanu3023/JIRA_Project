@@ -1331,7 +1331,10 @@ export async function handleJiraPgApi(
       return json(isArrayPath ? [] : { total: 0, data: [], dev_db_unavailable: true });
     }
     console.error('[API] Unhandled error:', err?.message || err, err?.stack);
-    return json({ error: err?.message || 'Internal server error' }, 500);
+    // Never echo the raw error (e.g. a pg driver message like "timeout exceeded
+    // when trying to connect" during a deploy restart) to the client in prod —
+    // it's an internal detail, not something callers should branch on or show.
+    return json({ error: isDev ? (err?.message || 'Internal server error') : 'Internal server error' }, 500);
   }
 }
 
