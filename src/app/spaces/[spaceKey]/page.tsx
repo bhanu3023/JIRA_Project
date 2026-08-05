@@ -443,11 +443,13 @@ function SpaceDetailContent() {
         } else {
           params.page  = '1';
           params.limit = '100';
-          // Exclude done issues at DB level for open queues
-          if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-dept' || queueFilter === 'my-queue') {
+          // Exclude done issues at DB level for open queues. "all-open" is
+          // deliberately NOT here — renamed to "All Tickets" in the sidebar, it
+          // now shows every ticket in the space regardless of status.
+          if (queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-dept' || queueFilter === 'my-queue') {
             params.excludeDone = 'true';
           }
-          // Closed tickets (service_desk boards) — the inverse of "All open": only
+          // Closed tickets (service_desk boards) — the inverse of "All Tickets": only
           // resolved/done tickets. This used to link to all-requests, which has no
           // status filtering at all, so open tickets showed up under "Closed tickets".
           if (queueFilter === 'closed') {
@@ -614,7 +616,7 @@ function SpaceDetailContent() {
     if (!spaceKey || !queueFilter || queueFilter === 'queues' || queueFilter === 'summary') return;
     const id = setInterval(() => {
       const params: Record<string, string> = { spaceKey, page: String(currentPage), limit: '100' };
-      if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-queue') params.excludeDone = 'true';
+      if (queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-queue') params.excludeDone = 'true';
       if (queueFilter === 'unassigned') params.unassigned = 'true';
       if (queueFilter === 'assigned' && user?.id) params.assignee = user.id;
       if (queueFilter === 'closed') params.statusCategory = 'done';
@@ -905,7 +907,7 @@ function SpaceDetailContent() {
       } else if (queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
         params.excludeDone = 'true';
         if (deptParam) params.dept = deptParam;
-      } else if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned') {
+      } else if (queueFilter === 'assigned' || queueFilter === 'unassigned') {
         params.excludeDone = 'true';
       } else if (queueFilter.startsWith('cq_') && activeCustomQueue?.name) {
         params.dept = activeCustomQueue.name;
@@ -1028,7 +1030,7 @@ function SpaceDetailContent() {
   })();
 
   const QUEUE_LABELS: Record<string, string> = {
-    'all-open':        'All open',
+    'all-open':        'All Tickets',
     'assigned':        'Assigned to me',
     'unassigned':      'Unassigned',
     'all-requests':    'All Requests',
@@ -1047,23 +1049,25 @@ function SpaceDetailContent() {
   const filteredIssues = issues.filter((issue) => {
     // Queue filter — skip category check when user has explicitly selected a status
     if (!filters.status) {
-      if (queueFilter === 'all-open') {
-        // Only show open (non-done) tickets
+      if (queueFilter === 'closed') {
+        // Inverse of "All Tickets" — only resolved/done tickets. Matching on
+        // category alone (not a name substring like "done"/"resolved") — this
+        // codebase has real in-progress statuses whose NAME happens to contain
+        // one of those words (e.g. "ASSUMED CODE DONE", "API NOT AVAILABLE
+        // DONE"), which a substring match would wrongly treat as done and hide
+        // from "All Tickets" / wrongly show under "Closed tickets".
         const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
-      } else if (queueFilter === 'closed') {
-        // Inverse of all-open — only resolved/done tickets
-        const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (!(cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed'))) return false;
+        if (cat !== 'done') return false;
       } else if (queueFilter === 'assigned') {
         if (!user || issue.assignee?.id !== user.id) return false;
       } else if (queueFilter === 'unassigned') {
         // Only show open tickets with no assignee
         const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
+        // Category alone, not a name substring — this codebase has real non-done
+        // statuses whose NAME happens to contain "done"/"resolved" (e.g. "ASSUMED
+        // CODE DONE", "API NOT AVAILABLE DONE"), which a substring match would
+        // wrongly treat as done and hide from these views.
+        if (cat === 'done') return false;
         if (issue.assignee) return false;
         // If dept-scoped (user clicked Unassigned (Dev) etc.), filter by that dept
         if (deptParam) {
@@ -1073,8 +1077,11 @@ function SpaceDetailContent() {
       } else if (queueFilter === 'my-dept') {
         // Show open tickets that have a department set (unassigned or assigned to me)
         const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
+        // Category alone, not a name substring — this codebase has real non-done
+        // statuses whose NAME happens to contain "done"/"resolved" (e.g. "ASSUMED
+        // CODE DONE", "API NOT AVAILABLE DONE"), which a substring match would
+        // wrongly treat as done and hide from these views.
+        if (cat === 'done') return false;
         const issueDept = ((issue as any).current_department || '').toLowerCase();
         if (!issueDept) return false;
         const userDept = mySpaceDept.toLowerCase();
@@ -1085,8 +1092,11 @@ function SpaceDetailContent() {
       } else if (queueFilter === 'my-queue') {
         // Show open tickets where current_department matches user's dept
         const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
+        // Category alone, not a name substring — this codebase has real non-done
+        // statuses whose NAME happens to contain "done"/"resolved" (e.g. "ASSUMED
+        // CODE DONE", "API NOT AVAILABLE DONE"), which a substring match would
+        // wrongly treat as done and hide from these views.
+        if (cat === 'done') return false;
         const issueDept = ((issue as any).current_department || '').toLowerCase();
         const userDept = (mySpaceDept || '').toLowerCase();
         if (!userDept || issueDept !== userDept) return false;
@@ -1326,10 +1336,10 @@ function SpaceDetailContent() {
               <span>Open</span>
             </div>
           ) : (
-            // All open / Assigned — show only filtered open count
+            // All Tickets / Assigned — show only filtered count
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border text-[12px] font-medium bg-blue-50 text-blue-700 border-blue-200">
               <span className="font-bold text-[15px]">{filteredIssues.length}</span>
-              <span>{queueFilter === 'assigned' ? 'Assigned to me' : 'Open'}</span>
+              <span>{queueFilter === 'assigned' ? 'Assigned to me' : queueFilter === 'all-open' ? 'Tickets' : 'Open'}</span>
             </div>
           )}
         </div>
