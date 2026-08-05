@@ -1006,8 +1006,8 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
             <span className="flex-1">Assigned to me</span>
             {counts.assigned > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">{counts.assigned}</span>}
           </Link>
-          <Link href={`/spaces/${spaceKey}?queue=all-requests`} className={subCls(queueActive('all-requests'))}>
-            <Archive size={13} className={queueActive('all-requests') ? 'text-blue-600' : 'text-gray-400'} />
+          <Link href={`/spaces/${spaceKey}?queue=closed`} className={subCls(queueActive('closed'))}>
+            <Archive size={13} className={queueActive('closed') ? 'text-blue-600' : 'text-gray-400'} />
             <span className="flex-1">Closed tickets</span>
           </Link>
         </>
