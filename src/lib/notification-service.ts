@@ -346,7 +346,7 @@ export async function notifyIssueCreated(issue: {
     eventLabel:   'New Issue Created',
     eventColor:   '#0052CC',
     fields: [
-      { label: 'Ticket #', value: `${displayKey} (${issue.key})` },
+      { label: 'Ticket #', value: displayKey },
       { label: 'Type',     value: issue.type },
       { label: 'Priority', value: issue.priority, color: PRIORITY_COLOR[issue.priority.toLowerCase()] },
       { label: 'Status',   value: issue.status.name, color: STATUS_COLOR[issue.status.category] },
@@ -360,7 +360,7 @@ export async function notifyIssueCreated(issue: {
     to,
     `[${displayKey}] ${issue.summary}`,
     html,
-    `New issue created: ${displayKey} (${issue.key}) - ${issue.summary}\nAssignee: ${assigneeName}\nView: ${issueUrl(issue.key)}`,
+    `New issue created: ${displayKey} - ${issue.summary}\nAssignee: ${assigneeName}\nView: ${issueUrl(issue.key)}`,
     undefined,
     inboxEmail || undefined,
   );
