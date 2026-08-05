@@ -83,10 +83,12 @@ export default function Header() {
     loadNotifications();
     // Poll for new notifications every 30 seconds (real-time feel without WebSocket)
     const interval = setInterval(() => { loadNotifications(); }, 30000);
-    // Run monitor agent every 5 minutes (SLA breach warnings + duplicate detection)
-    api.triggerMonitorAgent().catch(() => {}); // run immediately on mount
-    const monitorInterval = setInterval(() => { api.triggerMonitorAgent().catch(() => {}); }, 5 * 60 * 1000);
-    return () => { clearInterval(interval); clearInterval(monitorInterval); };
+    // Monitor agent (SLA breach warnings + duplicate detection) used to be triggered
+    // from here too — every open tab ran its own copy every 5 minutes, so N staff with
+    // the app open meant N concurrent full scans hammering the shared DB pool. It now
+    // runs server-side once per process instead (see runMonitorAgentScan in
+    // jira-pg-api.ts), independent of how many tabs are open.
+    return () => { clearInterval(interval); };
   }, [loadNotifications]);
 
   const closeAll = () => {

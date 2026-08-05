@@ -267,6 +267,212 @@ async function findPreviouslyResolvedSimilar(spaceId: string, excludeId: string,
   }
 }
 
+/**
+ * Combined periodic scan: SLA breach warnings (30 min before), due-date-approaching
+ * warnings (30 min before), and a duplicate-ticket scan over the last 24h of tickets.
+ * Batches the SLA-policy lookup and the notification-dedup check per section (one query
+ * for all candidate issues, not one per row) — the original version queried
+ * sla_definitions and notifications inside a per-row loop over up to ~4200 rows, i.e.
+ * several thousand sequential DB round trips per run.
+ */
+async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNotified: number; duplicatesFound: number }> {
+  const results = { slaNotified: 0, dueDateNotified: 0, duplicatesFound: 0 };
+  const warnMs = 30 * 60 * 1000;
+  const oneHourAgo = () => new Date(Date.now() - 60 * 60 * 1000);
+
+  // 1. SLA breach warnings (30 min before)
+  try {
+    const activeIssues = await pool.query(
+      `SELECT i.*, s.category AS status_category
+       FROM issues i
+       LEFT JOIN statuses s ON i."statusId" = s.id
+       WHERE i.dept_sla_started_at IS NOT NULL
+         AND (s.category IS NULL OR s.category != 'done')
+       LIMIT 2000`
+    );
+    const rows = activeIssues.rows;
+    const spaceIds = Array.from(new Set(rows.map((r: any) => r.spaceId).filter(Boolean)));
+    const policiesBySpace: Record<string, any[]> = {};
+    if (spaceIds.length) {
+      const polRows = await pool.query(
+        `SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`,
+        [spaceIds]
+      );
+      for (const p of polRows.rows) {
+        if (!policiesBySpace[p.spaceId]) policiesBySpace[p.spaceId] = [];
+        policiesBySpace[p.spaceId].push(p);
+      }
+    }
+
+    const candidates: Array<{ row: any; policy: any; minsLeft: number }> = [];
+    for (const row of rows) {
+      const policies = policiesBySpace[row.spaceId] || [];
+      if (!policies.length) continue;
+      const priority = (row.priority || 'medium').toLowerCase();
+      for (const policy of policies) {
+        let durationMs = 8 * 60 * 60 * 1000;
+        const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
+        for (const goal of goals) {
+          if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
+            const pr = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
+            if (pr?.timeValue) {
+              const val = parseFloat(pr.timeValue);
+              const unit = (pr.timeUnit || 'hours').toLowerCase();
+              durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+              break;
+            }
+          } else if (goal.timeValue) {
+            const val = parseFloat(goal.timeValue);
+            const unit = (goal.timeUnit || 'hours').toLowerCase();
+            durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+            break;
+          }
+        }
+        const dueAt = new Date(row.dept_sla_started_at).getTime() + durationMs;
+        const timeToBreachMs = dueAt - Date.now();
+        if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
+          candidates.push({ row, policy, minsLeft: Math.ceil(timeToBreachMs / 60_000) });
+        }
+      }
+    }
+
+    if (candidates.length) {
+      const keys = Array.from(new Set(candidates.map((c) => c.row.cf_key || c.row.key)));
+      const existing = await (db as any).notification.findMany({
+        where: { issueKey: { in: keys }, type: 'SLA_BREACH', createdAt: { gte: oneHourAgo() } },
+        select: { issueKey: true },
+      });
+      const already = new Set(existing.map((e: any) => e.issueKey));
+      for (const { row, policy, minsLeft } of candidates) {
+        const key = row.cf_key || row.key;
+        if (already.has(key)) continue;
+        already.add(key); // don't double-notify if more than one policy triggers this run
+        const leadIds = await getSpaceLeadUserIds(row.spaceId);
+        await notifyUsers([row.assigneeId, row.reporterId, ...leadIds], null, {
+          type: 'SLA_BREACH',
+          title: `SLA breaching in ${minsLeft} min: ${key}`,
+          message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes for: ${row.summary || key}`,
+          issueKey: key,
+        });
+        try {
+          const emailRecipients = row.assigneeId
+            ? await db.user.findMany({ where: { id: row.assigneeId }, select: { email: true } })
+            : [];
+          const assigneeEmails = emailRecipients.map((u: any) => u.email).filter(Boolean);
+          const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
+          if (assigneeEmails.length && spaceRow) {
+            notifySLABreach({
+              issueKey: key,
+              issueSummary: row.summary || key,
+              spaceKey: spaceRow.key,
+              spaceName: spaceRow.name,
+              slaName: policy.name || 'SLA',
+              minsLeft,
+              assigneeEmails,
+            }).catch(() => {});
+          }
+        } catch { /* non-critical */ }
+        results.slaNotified++;
+      }
+    }
+  } catch (e: any) { console.error('[MonitorAgent:SLA]', e?.message); }
+
+  // 1b. Due date approaching (30 min before) — separate from SLA breach; dueDate is a
+  // field set directly on the ticket, unrelated to the SLA policy's own duration clock.
+  try {
+    const dueSoon = await pool.query(
+      `SELECT i.*, s.category AS status_category
+       FROM issues i
+       LEFT JOIN statuses s ON i."statusId" = s.id
+       WHERE i."dueDate" IS NOT NULL
+         AND i."assigneeId" IS NOT NULL
+         AND (s.category IS NULL OR s.category != 'done')
+       LIMIT 2000`
+    );
+    const candidates = dueSoon.rows
+      .map((row: any) => ({ row, timeToDueMs: new Date(row.dueDate).getTime() - Date.now() }))
+      .filter((c: any) => c.timeToDueMs > 0 && c.timeToDueMs <= warnMs);
+
+    if (candidates.length) {
+      const keys = Array.from(new Set(candidates.map((c: any) => c.row.cf_key || c.row.key)));
+      const existing = await (db as any).notification.findMany({
+        where: { issueKey: { in: keys }, type: 'DUE_DATE', createdAt: { gte: oneHourAgo() } },
+        select: { issueKey: true },
+      });
+      const already = new Set(existing.map((e: any) => e.issueKey));
+      for (const { row, timeToDueMs } of candidates) {
+        const key = row.cf_key || row.key;
+        if (already.has(key)) continue;
+        already.add(key);
+        const minsLeft = Math.ceil(timeToDueMs / 60_000);
+        await notifyUsers([row.assigneeId], null, {
+          type: 'DUE_DATE',
+          title: `Due in ${minsLeft} min: ${key}`,
+          message: `"${row.summary || key}" is due in ${minsLeft} minutes.`,
+          issueKey: key,
+        });
+        results.dueDateNotified++;
+      }
+    }
+  } catch (e: any) { console.error('[MonitorAgent:DueDate]', e?.message); }
+
+  // 2. Duplicate scan — tickets created in the last 24h
+  try {
+    const recentIssues = await pool.query(
+      `SELECT i.id, i.key, i.cf_key, i.summary, i."spaceId", i."reporterId", i."assigneeId"
+       FROM issues i
+       WHERE i."createdAt" > NOW() - INTERVAL '24 hours'
+         AND i.summary IS NOT NULL
+       LIMIT 200`
+    );
+    const rows = recentIssues.rows;
+    if (rows.length) {
+      const keys = Array.from(new Set(rows.map((r: any) => r.cf_key || r.key)));
+      const existing = await (db as any).notification.findMany({
+        where: { issueKey: { in: keys }, type: 'DUPLICATE_ALERT', createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+        select: { issueKey: true },
+      });
+      const already = new Set(existing.map((e: any) => e.issueKey));
+      for (const row of rows) {
+        const newKey = row.cf_key || row.key;
+        if (already.has(newKey)) continue;
+        const prevResolved = await findPreviouslyResolvedSimilar(row.spaceId, row.id, row.summary);
+        if (prevResolved.length > 0) {
+          const refs = prevResolved.map((s: any) => `${s.cf_key || s.key} — ${s.summary.substring(0, 80)}`).join('\n• ');
+          const leadIds = await getSpaceLeadUserIds(row.spaceId);
+          await notifyUsers([row.reporterId, row.assigneeId, ...leadIds], null, {
+            type: 'DUPLICATE_ALERT',
+            title: `Recurring issue: ${newKey}`,
+            message: `This issue was previously reported and resolved:\n• ${refs}\n\nPlease check if the fix is still in place.`,
+            issueKey: newKey,
+          });
+          results.duplicatesFound++;
+        }
+      }
+    }
+  } catch (e: any) { console.error('[MonitorAgent:Dup]', e?.message); }
+
+  return results;
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __monitorAgentInterval: ReturnType<typeof setInterval> | undefined;
+}
+
+// Server-side singleton scheduler. This used to be triggered from every open browser tab
+// (Header.tsx polled it on mount, then every 5 minutes) — with N staff members having the
+// app open at once, N copies of this scan ran concurrently every 5 minutes, each looping
+// through up to ~4200 issues, competing for the same shared DB connection pool as every
+// other request. That's a major contributor to "everything feels slow" across the whole
+// app. Runs exactly once per server process now, regardless of how many tabs are open.
+if (!globalThis.__monitorAgentInterval) {
+  runMonitorAgentScan().catch((e) => console.error('[MonitorAgent] initial run failed:', e?.message));
+  globalThis.__monitorAgentInterval = setInterval(() => {
+    runMonitorAgentScan().catch((e) => console.error('[MonitorAgent] scheduled run failed:', e?.message));
+  }, 5 * 60 * 1000);
+}
+
 // Notify all watchers of an issue (excluding actor)
 async function notifyWatchers(issueKey: string, actorId: string | null | undefined, opts: { title: string; message?: string }) {
   try {
@@ -4936,160 +5142,8 @@ async function _handleJiraPgApi(
   // Ã¢â€â‚¬Ã¢â€â‚¬ SLA Breach Warning Check Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   // POST /monitor-agent Ã¢â‚¬â€ combined: SLA breach warnings + duplicate scan on recent tickets
   if (path === 'monitor-agent' && method === 'POST') {
-    const results = { slaNotified: 0, dueDateNotified: 0, duplicatesFound: 0 };
-    const warnMs = 30 * 60 * 1000;
-
-    try {
-      // Ã¢â€â‚¬Ã¢â€â‚¬ 1. SLA breach warnings (30 min before) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-      const activeIssues = await pool.query(
-        `SELECT i.*, s.category AS status_category
-         FROM issues i
-         LEFT JOIN statuses s ON i."statusId" = s.id
-         WHERE i.dept_sla_started_at IS NOT NULL
-           AND (s.category IS NULL OR s.category != 'done')
-         LIMIT 2000`
-      );
-      for (const row of activeIssues.rows) {
-        const policies = await pool.query(
-          `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active' LIMIT 5`,
-          [row.spaceId]
-        );
-        if (!policies.rows.length) continue;
-        const priority = (row.priority || 'medium').toLowerCase();
-        for (const policy of policies.rows) {
-          let durationMs = 8 * 60 * 60 * 1000;
-          const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
-          for (const goal of goals) {
-            if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
-              const pr = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
-              if (pr?.timeValue) {
-                const val = parseFloat(pr.timeValue);
-                const unit = (pr.timeUnit || 'hours').toLowerCase();
-                durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
-                break;
-              }
-            } else if (goal.timeValue) {
-              const val = parseFloat(goal.timeValue);
-              const unit = (goal.timeUnit || 'hours').toLowerCase();
-              durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
-              break;
-            }
-          }
-          const dueAt = new Date(row.dept_sla_started_at).getTime() + durationMs;
-          const timeToBreachMs = dueAt - Date.now();
-          if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
-            // Dedup must match the key the notification is actually stored under below
-            // (cf_key, not the internal key) — otherwise this never finds the prior
-            // notification and re-sends every 5-min poll for the whole 30-min window.
-            const already = await (db as any).notification.findFirst({
-              where: { issueKey: row.cf_key || row.key, type: 'SLA_BREACH', createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
-            });
-            if (already) continue;
-            const leadIds = await getSpaceLeadUserIds(row.spaceId);
-            const minsLeft = Math.ceil(timeToBreachMs / 60_000);
-            await notifyUsers([row.assigneeId, row.reporterId, ...leadIds], null, {
-              type: 'SLA_BREACH',
-              title: `SLA breaching in ${minsLeft} min: ${row.cf_key || row.key}`,
-              message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes for: ${row.summary || row.key}`,
-              issueKey: row.cf_key || row.key,
-            });
-            // Email the assignee too — this is the endpoint that actually runs
-            // every 5 min (Header.tsx's monitor-agent poll); the sibling
-            // /sla-breach-check endpoint had this email call but nothing ever
-            // invokes it, so assignees were only getting the in-app bell, never
-            // an email, no matter how close the SLA was to breaching.
-            try {
-              const uniqueEmailUserIds = Array.from(new Set([row.assigneeId].filter(Boolean)));
-              const emailRecipients = await db.user.findMany({
-                where: { id: { in: uniqueEmailUserIds } },
-                select: { email: true },
-              });
-              const assigneeEmails = emailRecipients.map((u: any) => u.email).filter(Boolean);
-              const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
-              if (assigneeEmails.length && spaceRow) {
-                notifySLABreach({
-                  issueKey: row.cf_key || row.key,
-                  issueSummary: row.summary || row.key,
-                  spaceKey: spaceRow.key,
-                  spaceName: spaceRow.name,
-                  slaName: policy.name || 'SLA',
-                  minsLeft,
-                  assigneeEmails,
-                }).catch(() => {});
-              }
-            } catch { /* non-critical */ }
-            results.slaNotified++;
-          }
-        }
-      }
-    } catch (e: any) { console.error('[MonitorAgent:SLA]', e?.message); }
-
-    try {
-      // 1b. Due date approaching (30 min before) — separate from SLA breach;
-      // dueDate is a field set directly on the ticket, unrelated to the SLA
-      // policy's own duration clock.
-      const dueSoon = await pool.query(
-        `SELECT i.*, s.category AS status_category
-         FROM issues i
-         LEFT JOIN statuses s ON i."statusId" = s.id
-         WHERE i."dueDate" IS NOT NULL
-           AND i."assigneeId" IS NOT NULL
-           AND (s.category IS NULL OR s.category != 'done')
-         LIMIT 2000`
-      );
-      for (const row of dueSoon.rows) {
-        const timeToDueMs = new Date(row.dueDate).getTime() - Date.now();
-        if (timeToDueMs > 0 && timeToDueMs <= warnMs) {
-          const already = await (db as any).notification.findFirst({
-            where: { issueKey: row.cf_key || row.key, type: 'DUE_DATE', createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) } },
-          });
-          if (already) continue;
-          const minsLeft = Math.ceil(timeToDueMs / 60_000);
-          await notifyUsers([row.assigneeId], null, {
-            type: 'DUE_DATE',
-            title: `Due in ${minsLeft} min: ${row.cf_key || row.key}`,
-            message: `"${row.summary || row.key}" is due in ${minsLeft} minutes.`,
-            issueKey: row.cf_key || row.key,
-          });
-          results.dueDateNotified++;
-        }
-      }
-    } catch (e: any) { console.error('[MonitorAgent:DueDate]', e?.message); }
-
-    try {
-      //Ã¢â€â‚¬Ã¢â€â‚¬ 2. Duplicate scan Ã¢â‚¬â€ check tickets created in the last 24h Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-      const recentIssues = await pool.query(
-        `SELECT i.id, i.key, i.cf_key, i.summary, i."spaceId", i."reporterId", i."assigneeId"
-         FROM issues i
-         WHERE i."createdAt" > NOW() - INTERVAL '24 hours'
-         LIMIT 200`
-      );
-      for (const row of recentIssues.rows) {
-        if (!row.summary) continue;
-        // Skip if we already sent a DUPLICATE_ALERT for this ticket in the last 24h
-        const already = await (db as any).notification.findFirst({
-          where: { issueKey: row.cf_key || row.key, type: 'DUPLICATE_ALERT', createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-        });
-        if (already) continue;
-        const prevResolved = await findPreviouslyResolvedSimilar(row.spaceId, row.id, row.summary);
-        if (prevResolved.length > 0) {
-          const newKey = row.cf_key || row.key;
-          const refs = prevResolved.map((s: any) => `${s.cf_key || s.key} Ã¢â‚¬â€ ${s.summary.substring(0, 80)}`).join('\nÃ¢â‚¬Â¢ ');
-          const leadIds = await getSpaceLeadUserIds(row.spaceId);
-          await notifyUsers([row.reporterId, row.assigneeId, ...leadIds], null, {
-            type: 'DUPLICATE_ALERT',
-            title: `Recurring issue: ${newKey}`,
-            message: `This issue was previously reported and resolved:\nÃ¢â‚¬Â¢ ${refs}\n\nPlease check if the fix is still in place.`,
-            issueKey: newKey,
-          });
-          results.duplicatesFound++;
-        }
-      }
-    } catch (e: any) { console.error('[MonitorAgent:Dup]', e?.message); }
-
-    return json(results);
+    return json(await runMonitorAgentScan());
   }
-
   // GET /app-settings Ã¢â‚¬â€ return all key/value app settings
   // PUT /app-settings Ã¢â‚¬â€ upsert a key/value setting
   if (path === 'app-settings') {
