@@ -2689,14 +2689,14 @@ async function _handleJiraPgApi(
         } else if (requestedDept) {
           // Ticket with an explicit queue/department Ã¢â€ ' RR for that dept
           rrDepartment = requestedDept;
-          const nextAgent = await getNextAgent(sp.id, requestedDept);
+          const nextAgent = await getNextAgent(sp.id, requestedDept, body.productType ? String(body.productType) : null);
           if (nextAgent) resolvedAssigneeId = nextAgent.userId;
         } else if (isEmailCreated) {
           // Email ticket with no dept Ã¢â€ ' use the default department RR
           const defaultDept = await getDefaultDepartment(sp.id);
           if (defaultDept) {
             rrDepartment = defaultDept;
-            const nextAgent = await getNextAgent(sp.id, defaultDept);
+            const nextAgent = await getNextAgent(sp.id, defaultDept, body.productType ? String(body.productType) : null);
             if (nextAgent) resolvedAssigneeId = nextAgent.userId;
           }
         }
@@ -3045,7 +3045,7 @@ async function _handleJiraPgApi(
         rrAgentName = savedAssigneeForNewDept.displayName || null;
       } else {
         try {
-          const rrAgent = await getNextAgent(issue.spaceId, newDept);
+          const rrAgent = await getNextAgent(issue.spaceId, newDept, (issue as any).productType || null);
           if (rrAgent) {
             rrAssigneeId = rrAgent.userId;
             rrAgentName = rrAgent.name;
@@ -3208,8 +3208,8 @@ async function _handleJiraPgApi(
     const newStatusName = firstStatus?.name || 'Open';
 
     // Round Robin assignee from source space RR config (where depts are configured), fallback target
-    const rrAgent = await getNextAgent(issue.spaceId, newDept)
-      || await getNextAgent(targetSpaceId, newDept);
+    const rrAgent = await getNextAgent(issue.spaceId, newDept, (issue as any).productType || null)
+      || await getNextAgent(targetSpaceId, newDept, (issue as any).productType || null);
 
     // Generate next key for target board
     // Use the SAME number from the source key (e.g. L1BOAR-5618 Ã¢â€ ' L2BOARD-5618)
