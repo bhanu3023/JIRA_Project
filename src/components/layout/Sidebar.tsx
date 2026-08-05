@@ -661,7 +661,7 @@ export default function Sidebar() {
             />
           </div>
           <span className="truncate text-[14px] font-semibold tracking-tight text-white">
-            Neutara Technologies Ticketing
+            Neutara Ticketing
           </span>
         </Link>
         <button
