@@ -30,7 +30,7 @@ interface AppState {
   spaces: Space[];
   currentSpace: Space | null;
   loadSpaces: () => Promise<void>;
-  loadSpace: (key: string) => Promise<void>;
+  loadSpace: (key: string, force?: boolean) => Promise<void>;
   createSpace: (data: any) => Promise<void>;
 
   // Issues
@@ -146,9 +146,15 @@ export const useStore = create<AppState>((set, get) => ({
     });
     return loadSpacesInflight;
   },
-  loadSpace: async (key) => {
-    // Skip if already loaded for this key — avoids redundant network call on every re-render
-    if (get().currentSpace?.key?.toUpperCase() === key?.toUpperCase()) return;
+  loadSpace: async (key, force = false) => {
+    // Skip if already loaded for this key — avoids redundant network call on every
+    // re-render. Callers that just mutated this exact space (added/removed a member,
+    // changed a role, etc.) need `force` to actually refetch here, since the whole
+    // point of calling this is to see that change reflected — without it this was a
+    // silent no-op every time, because the space you just changed IS the one already
+    // loaded, so the member (or role, or department) you just changed never showed
+    // up until some unrelated navigation happened to trigger a real refetch.
+    if (!force && get().currentSpace?.key?.toUpperCase() === key?.toUpperCase()) return;
     // Don't clear currentSpace before fetch — keep showing whatever was there so the
     // page never blocks on a spinner just because the user switched boards
     const space = await api.getSpace(key);

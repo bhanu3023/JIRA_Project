@@ -3343,7 +3343,7 @@ function SpaceSettingsContent() {
     }
   }, [currentSpace]);
 
-  const handleAddMember  = async (userId: string, role = 'developer', department = '') => { await api.addSpaceMember(spaceKey, { userId, role, department: department || null }); loadSpace(spaceKey); };
+  const handleAddMember  = async (userId: string, role = 'developer', department = '') => { await api.addSpaceMember(spaceKey, { userId, role, department: department || null }); loadSpace(spaceKey, true); };
   const handleAddLabel   = async (e: React.FormEvent) => { e.preventDefault(); await api.createLabel({ spaceKey, ...newLabel }); setNewLabel({ name: '', color: '#3B82F6' }); api.getLabels(spaceKey).then(setLabels); };
   const handleSaveGeneral = async () => {
     setSaving(true);
@@ -3603,7 +3603,7 @@ function SpaceSettingsContent() {
                 users={users}
                 spaceKey={spaceKey}
                 onAddMember={handleAddMember}
-                onReload={() => loadSpace(spaceKey)}
+                onReload={() => loadSpace(spaceKey, true)}
               />
             : <div className="flex items-center justify-center h-40 text-gray-400 text-sm">Loading…</div>
         )}
