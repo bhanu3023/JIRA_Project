@@ -550,54 +550,18 @@ function SpaceDetailContent() {
     return () => clearInterval(interval);
   }, [queueFilter, spaceKey, deptParam, prefetchIssues]);
 
-  // Prefetch common queues once after the space loads so switching feels instant
-  // NOTE: queueFilter intentionally NOT in deps — prefetch runs once per space/user,
-  // not on every queue switch (which caused stale setTimeout callbacks to overwrite
-  // the active queue's data after the user navigated away).
-  useEffect(() => {
-    if (!spaceKey || !user?.id) return;
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    const QUEUES_TO_PREFETCH = ['all-open', 'assigned', 'unassigned', 'my-queue', 'all-requests'];
-    QUEUES_TO_PREFETCH.forEach((q, i) => {
-      timers.push(setTimeout(() => {
-        const p: Record<string, string> = { spaceKey, page: '1', limit: '100' };
-        if (q === 'all-open' || q === 'assigned' || q === 'unassigned' || q === 'my-queue') p.excludeDone = 'true';
-        if (q === 'unassigned') p.unassigned = 'true';
-        if (q === 'assigned' && user?.id) p.assignee = user.id;
-        if (q === 'all-requests') { p.limit = '50'; }
-        prefetchIssues(p).catch(() => {});
-      }, (i + 1) * 1200));
-    });
-    return () => timers.forEach(clearTimeout);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [spaceKey, user?.id]);
+  // Deliberately NOT prefetching all-open/assigned/unassigned/my-queue/all-requests here
+  // either — same reasoning as above. This fired 5 more background API calls the moment
+  // the space loaded, regardless of which (if any) of those views the user was about to
+  // open.
 
-  // Prefetch every custom queue (Dev/Migration/Bug/etc.) for this space once the queue
-  // list is known, so switching between them hits a warm cache instead of a cold fetch.
-  // Also prefetch each queue's Sent/Watching view — previously missing from any
-  // prefetch list, so it was always a cold load no matter how recently a sibling
-  // queue had been visited. Safe to re-run whenever allCustomQueues changes —
-  // prefetchIssues never touches display.
-  useEffect(() => {
-    if (!spaceKey || allCustomQueues.length === 0) return;
-    // Only prefetch queues this user can actually open — a non-admin with access to
-    // one queue was triggering warm-cache calls for every queue on the board (up to
-    // 2 requests each), most of which they could never even navigate to.
-    const isAdminUser = user?.role === 'admin';
-    const accessibleQueues = isAdminUser
-      ? allCustomQueues
-      : allCustomQueues.filter(q => (q.memberIds || []).includes(user?.id || '') && !((q as any).suspendedIds || []).includes(user?.id || ''));
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    accessibleQueues.forEach((q, i) => {
-      timers.push(setTimeout(() => {
-        prefetchIssues({ spaceKey, page: '1', limit: String(PAGE_SIZE), dept: q.name }).catch(() => {});
-      }, (i + 1) * 400));
-      timers.push(setTimeout(() => {
-        prefetchIssues({ spaceKey, page: '1', limit: '100', sentDept: q.name }).catch(() => {});
-      }, (i + 1) * 400 + 200));
-    });
-    return () => timers.forEach(clearTimeout);
-  }, [spaceKey, allCustomQueues, prefetchIssues, user?.id, user?.role]);
+  // Deliberately NOT prefetching every custom queue here. This used to warm the cache
+  // for every queue on the board as soon as it loaded (2 requests each — a dept-scoped
+  // list plus Sent/Watching), which meant opening a board with, say, 8 queues fired 16+
+  // background API calls whether or not you ever looked at most of them, plus 2 more per
+  // sidebar sub-item Next.js prefetched on hover/viewport. A queue's data should only be
+  // fetched when someone actually opens it — that's what the main load effect below
+  // already does the moment queueFilter/deptParam changes.
 
   // Auto-refresh every 15s for all dept_queue spaces — silent background refresh, never clears display
   useEffect(() => {
