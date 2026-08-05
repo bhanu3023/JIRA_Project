@@ -4273,6 +4273,13 @@ async function _handleJiraPgApi(
     // In-app: notify assignee + reporter + leads/shift leads + watchers (not the commenter)
     const commenterName = authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : 'Someone';
     const commentPreview = `${commenterName}: ${comment.body.replace(/<[^>]+>/g, '').slice(0, 80)}`;
+    // Fire-and-forget from here down — this used to be awaited inline (lead lookup,
+    // notifyUsers, notifyWatchers, then a per-mention user lookup + createNotification),
+    // which held the HTTP response open for the whole chain, so the client's "Saving…"
+    // button never got a response and looked permanently stuck. Same fix as the
+    // department-transfer endpoint's notification block: save the comment and respond
+    // immediately, let notifications land in the background.
+    (async () => { try {
     const commentLeadIds = await getSpaceLeadUserIds(issue.spaceId);
     await notifyUsers(
       [issue.assigneeId, issue.reporterId, ...commentLeadIds],
@@ -4324,6 +4331,7 @@ async function _handleJiraPgApi(
         }).catch((err: any) => console.error('[Mention Email] Failed:', err?.message));
       }
     }
+    } catch (err: any) { console.error('[Comment notifications] Failed:', err?.message || err); } })();
 
     return json({
       id: comment.id,
