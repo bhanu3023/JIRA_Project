@@ -1002,8 +1002,8 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
         <>
           <Link href={`/spaces/${spaceKey}?queue=all-open`} className={subCls(queueActive('all-open'))}>
             <InboxIcon size={13} className={queueActive('all-open') ? 'text-blue-600' : 'text-gray-400'} />
-            <span className="flex-1">All open</span>
-            {counts.allOpen > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-600">{counts.allOpen}</span>}
+            <span className="flex-1">All Tickets</span>
+            {counts.total > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-600">{counts.total}</span>}
           </Link>
           <Link href={`/spaces/${spaceKey}?queue=unassigned`} className={subCls(queueActive('unassigned'))}>
             <UserX size={13} className={queueActive('unassigned') ? 'text-blue-600' : 'text-gray-400'} />
