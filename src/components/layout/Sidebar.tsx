@@ -982,8 +982,17 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     active ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
   );
 
-  // Admins/managers see all queues; other users see only queues they belong to
-  const visibleQueues = canManageSpace ? customQueues : userQueues;
+  // True admins always see every queue. A "manager"-role user is often scoped
+  // to just their own department's queue (e.g. a queue lead who can manage
+  // their queue's members but isn't a global admin) — canManageSpace alone
+  // (isManager: admin OR manager) was rendering every queue's sidebar link for
+  // any manager regardless of which queue(s) they actually belong to, and each
+  // rendered <Link> gets background-prefetched by Next.js, which is what fired
+  // every queue's API on board load for these users. Only fall back to "see
+  // everything" for a manager with no queue membership at all (e.g. freshly
+  // created, not yet assigned to any queue) — same fallback isDeptScoped
+  // already documents above.
+  const visibleQueues = (user?.role === 'admin' || (canManageSpace && !isDeptScoped)) ? customQueues : userQueues;
 
   return (
     <>
