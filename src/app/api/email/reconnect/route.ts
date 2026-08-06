@@ -55,9 +55,25 @@ export async function POST(req: NextRequest) {
   const emails = getAllOAuthEmails();
   const started: string[] = [];
 
-  for (const email of emails) {
+  // Process mailboxes in bounded-concurrency batches instead of one at a
+  // time. getValidAccessToken() below does a real network round trip to
+  // Microsoft's OAuth endpoint whenever a token needs refreshing — several
+  // accounts are permanently stuck in a consent-required failure state, so
+  // they retry that full round trip on every single call. Awaiting 35+ of
+  // these sequentially could take tens of seconds, all while this request
+  // (fired automatically on every page's first load per session, see
+  // RootLayoutClient) holds open DB connections that compete with whatever
+  // page the user actually just loaded (e.g. the Filters page's own query).
+  const RECONNECT_CONCURRENCY = 6;
+  async function processInBatches<T>(items: T[], worker: (item: T) => Promise<void>) {
+    for (let i = 0; i < items.length; i += RECONNECT_CONCURRENCY) {
+      await Promise.all(items.slice(i, i + RECONNECT_CONCURRENCY).map(worker));
+    }
+  }
+
+  await processInBatches(emails, async (email) => {
     const tokens = getOAuthTokens(email);
-    if (!tokens) continue;
+    if (!tokens) return;
 
     // Determine spaceKey: hint → stored in token → derive from email prefix
     const prefix = email.split('@')[0].toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -69,12 +85,12 @@ export async function POST(req: NextRequest) {
     // Skip if already running with the correct spaceKey
     if (isPollerActiveForEmail(email)) {
       console.log(`[Reconnect] Poller already active for ${email} → space ${spaceKey}`);
-      continue;
+      return;
     }
 
     try {
       const accessToken = await getValidAccessToken(email);
-      if (!accessToken) continue;
+      if (!accessToken) return;
 
       startImapPoller(
         {
@@ -121,7 +137,7 @@ export async function POST(req: NextRequest) {
     } catch (err) {
       console.error(`[Reconnect] Failed for ${email}:`, err);
     }
-  }
+  });
 
   // ── Load ALL boards' email configs from DB and restart any missing pollers ──
   try {
@@ -147,13 +163,15 @@ export async function POST(req: NextRequest) {
 
     const dbResult = await pool2.query('SELECT * FROM email_configs ORDER BY created_at');
 
-    for (const row of dbResult.rows) {
+    // Same bounded-concurrency treatment as the loop above — each row can
+    // also trigger a real OAuth token refresh network call.
+    await processInBatches(dbResult.rows, async (row: any) => {
       const emailAddr: string = row.address;
 
       // Skip if already running
       if (isPollerActiveForEmail(emailAddr)) {
         console.log(`[Reconnect] DB poller already active for ${emailAddr} → space ${row.space_key}`);
-        continue;
+        return;
       }
 
       // Try to get OAuth token first
@@ -173,7 +191,7 @@ export async function POST(req: NextRequest) {
       const hasPassword = !!(row.password_enc);
       if (!accessToken && !hasPassword) {
         console.log(`[Reconnect] No credentials for ${emailAddr} — skipping`);
-        continue;
+        return;
       }
 
       const isOAuth = !!accessToken;
@@ -223,7 +241,7 @@ export async function POST(req: NextRequest) {
 
       started.push(emailAddr);
       console.log(`[Reconnect] ✅ Started DB-configured poller for ${emailAddr} → space ${row.space_key}`);
-    }
+    });
   } catch (e) {
     console.error('[Reconnect] Failed to load DB email configs:', e);
   }
