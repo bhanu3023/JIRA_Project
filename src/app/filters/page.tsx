@@ -14,8 +14,9 @@ import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import {
   Search, Star, Plus, MoreHorizontal, Trash2, Edit2,
   Filter, X, ChevronDown, Check, Bookmark, SlidersHorizontal,
-  List, LayoutGrid,
+  List, LayoutGrid, Download,
 } from 'lucide-react';
+import { can } from '@/lib/permissions';
 
 /* ─── types ─── */
 interface FilterCriteria {
@@ -1063,17 +1064,11 @@ export default function FiltersPage() {
     selProductType || selCombination || selCustomerName || selClientName || selProjectManager.length || selBreached,
   );
 
-  /* fetch issues — all filtering done server-side for accuracy */
-  const fetchIssues = useCallback(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(async () => {
-      setLoadingIssues(true);
-      try {
-        // limit was 1000 — on an unfiltered view that's a ~2.7MB response (1000 full
-        // issue objects with nested status/assignee/reporter), which is what made this
-        // page take multiple seconds to load. 100 keeps a generous browsing window
-        // while cutting the payload by ~90%.
-        const params: Record<string, string> = { page: '1', limit: '100' };
+  // Builds the filter params both the live table and the CSV export send —
+  // shared so the export always matches exactly what's currently on screen,
+  // not a second copy of this logic that could drift out of sync with it.
+  const buildFilterParams = useCallback((): Record<string, string> => {
+        const params: Record<string, string> = {};
 
         // Space(s) — always restrict to user's accessible spaces
         // If specific spaces are selected, use those; otherwise use ALL accessible spaces
@@ -1139,15 +1134,80 @@ export default function FiltersPage() {
         // Text search
         if (text.trim()) params.q = text.trim();
 
+        return params;
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text]);
+
+  /* fetch issues — all filtering done server-side for accuracy */
+  const fetchIssues = useCallback(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      setLoadingIssues(true);
+      try {
+        // limit was 1000 — on an unfiltered view that's a ~2.7MB response (1000 full
+        // issue objects with nested status/assignee/reporter), which is what made this
+        // page take multiple seconds to load. 100 keeps a generous browsing window
+        // while cutting the payload by ~90%.
+        const params = { ...buildFilterParams(), page: '1', limit: '100' };
         const { issues: list, total: tot } = await api.getIssues(params);
         setIssues(list as any[]);
         setTotal(tot);
       } catch { setIssues([]); setTotal(0); }
       setLoadingIssues(false);
     }, 400);
-  }, [text, selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, spaces]);
+  }, [buildFilterParams]);
 
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
+
+  /* export current filter results to CSV — same params as the live table,
+     but the server's own max page size (2000) instead of the 100-row
+     browsing cap, so the export covers everything a saved/shared filter
+     would actually match, not just what's currently rendered. */
+  const [exporting, setExporting] = useState(false);
+  const csvCell = (value: unknown): string => {
+    const s = value == null ? '' : String(value);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const EXPORT_LIMIT = 2000; // server's own hard cap (Math.min(2000, ...) in the issues list handler)
+      const params = { ...buildFilterParams(), page: '1', limit: String(EXPORT_LIMIT) };
+      const { issues: rows, total: matchedTotal } = await api.getIssues(params);
+      const list = rows as any[];
+      const header = ['Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department', 'Created', 'Updated'];
+      const lines = [header.map(csvCell).join(',')];
+      for (const issue of list) {
+        lines.push([
+          issue.cfKey ?? issue.key,
+          issue.type ?? '',
+          issue.summary ?? '',
+          issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
+          issue.reporter ? `${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim() : '',
+          issue.status?.name ?? '',
+          issue.priority ?? '',
+          issue.sla_breached ? 'Yes' : 'No',
+          issue.current_department ?? '',
+          issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
+          issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
+        ].map(csvCell).join(','));
+      }
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `filtered-issues-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      if (matchedTotal > EXPORT_LIMIT) {
+        alert(`Exported the first ${EXPORT_LIMIT.toLocaleString()} of ${matchedTotal.toLocaleString()} matching issues. Narrow your filters to export everything.`);
+      }
+    } catch {
+      alert('Export failed. Please try again.');
+    }
+    setExporting(false);
+  };
 
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
@@ -1498,6 +1558,15 @@ export default function FiltersPage() {
             {hasCriteria && (
               <button onClick={clearAll} className="text-[12px] text-gray-400 hover:text-red-500 flex items-center gap-1 transition-colors whitespace-nowrap">
                 <X size={12} /> Clear
+              </button>
+            )}
+            {can(user?.role, 'exportData') && (
+              <button
+                onClick={handleExport}
+                disabled={exporting || issues.length === 0}
+                className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-[12.5px] font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+              >
+                <Download size={13} /> {exporting ? 'Exporting…' : 'Export'}
               </button>
             )}
             <button
