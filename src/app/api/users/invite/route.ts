@@ -4,7 +4,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import nodemailer from 'nodemailer';
-import { Pool } from 'pg';
+import { pgPool as pool } from '@/lib/pg-pool';
 
 export const runtime = 'nodejs';
 
@@ -12,9 +12,7 @@ let cachedAppUrl: string | null = null;
 async function getAppUrl(): Promise<string> {
   if (cachedAppUrl) return cachedAppUrl;
   try {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
     const res = await pool.query(`SELECT value FROM app_settings WHERE key = 'app_url'`);
-    await pool.end();
     if (res.rows[0]?.value) {
       cachedAppUrl = res.rows[0].value.replace(/\/$/, '');
       return cachedAppUrl!;

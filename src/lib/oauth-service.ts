@@ -31,14 +31,19 @@ import fs from 'fs';
 import path from 'path';
 
 const TOKEN_FILE = path.join(process.cwd(), '.oauth-tokens.json');
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
 
 declare global { var __oauthTokenStore: Map<string, OAuthTokens> | undefined; }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
+// All three used to open a BRAND NEW Pool (a real Postgres connection) and
+// close it again on every single call. saveTokensToDB in particular runs on
+// every OAuth token refresh — with dozens of mailboxes refreshing
+// continuously, that was a constant churn of extra connections competing
+// with every other pool in the app for the same finite max_connections,
+// causing unrelated features (login, JWT verification, the monitor agent) to
+// intermittently fail to get a connection. Now uses the one shared pool.
 async function ensureOAuthTable() {
-  const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: DB_URL, connectionTimeoutMillis: 10_000 });
+  const { pgPool: pool } = await import('@/lib/pg-pool');
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS oauth_tokens (
@@ -47,15 +52,11 @@ async function ensureOAuthTable() {
         updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-  } catch {
-  } finally {
-    await pool.end().catch(() => {});
-  }
+  } catch {}
 }
 
 async function saveTokensToDB(email: string, tokens: OAuthTokens) {
-  const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: DB_URL, connectionTimeoutMillis: 10_000 });
+  const { pgPool: pool } = await import('@/lib/pg-pool');
   try {
     await pool.query(`
       INSERT INTO oauth_tokens (email, tokens_json, updated_at)
@@ -64,14 +65,11 @@ async function saveTokensToDB(email: string, tokens: OAuthTokens) {
     `, [email.toLowerCase(), JSON.stringify(tokens)]);
   } catch (e) {
     console.error('[OAuthService] Failed to persist tokens to DB:', e);
-  } finally {
-    await pool.end().catch(() => {});
   }
 }
 
 async function loadTokensFromDB(): Promise<Map<string, OAuthTokens>> {
-  const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: DB_URL, connectionTimeoutMillis: 10_000 });
+  const { pgPool: pool } = await import('@/lib/pg-pool');
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS oauth_tokens (
@@ -88,8 +86,6 @@ async function loadTokensFromDB(): Promise<Map<string, OAuthTokens>> {
   } catch (e) {
     console.error('[OAuthService] Failed to load tokens from DB:', e);
     return new Map();
-  } finally {
-    await pool.end().catch(() => {});
   }
 }
 

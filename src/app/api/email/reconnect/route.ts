@@ -22,8 +22,7 @@ export async function POST(req: NextRequest) {
 
   // Ensure persistent processed_emails table exists and pre-load all processed message IDs
   try {
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+    const { pgPool: pool } = await import('@/lib/pg-pool');
 
     // Create the table if it doesn't exist (survives ticket deletions)
     await pool.query(`
@@ -42,7 +41,6 @@ export async function POST(req: NextRequest) {
 
     // Load ALL processed message IDs from the dedicated table
     const res = await pool.query(`SELECT message_id FROM processed_emails`);
-    await pool.end();
 
     // Always REPLACE the in-memory set with the DB contents so any emails that
     // failed (webhook returned ok:false) and were wrongly added to in-memory
@@ -127,8 +125,7 @@ export async function POST(req: NextRequest) {
 
   // ── Load ALL boards' email configs from DB and restart any missing pollers ──
   try {
-    const { Pool } = await import('pg');
-    const pool2 = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+    const { pgPool: pool2 } = await import('@/lib/pg-pool');
 
     // Ensure table exists (in case it was never created yet)
     await pool2.query(`
@@ -149,7 +146,6 @@ export async function POST(req: NextRequest) {
     `);
 
     const dbResult = await pool2.query('SELECT * FROM email_configs ORDER BY created_at');
-    await pool2.end();
 
     for (const row of dbResult.rows) {
       const emailAddr: string = row.address;

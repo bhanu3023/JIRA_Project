@@ -662,9 +662,7 @@ export function startImapPoller(
   if (!(globalThis as any).__processedMsgIdsLoaded) {
     (globalThis as any).__processedMsgIdsLoaded = true;
     (async () => {
-      const { Pool } = await import('pg');
-      const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
-      const pool = new Pool({ connectionString: DB, connectionTimeoutMillis: 10_000 });
+      const { pgPool: pool } = await import('@/lib/pg-pool');
       try {
         await pool.query(`
           CREATE TABLE IF NOT EXISTS processed_emails (
@@ -678,17 +676,13 @@ export function startImapPoller(
         console.log(`[EmailPoller] Bootstrapped ${res.rows.length} processed message IDs from DB`);
       } catch (e) {
         console.error('[EmailPoller] Failed to bootstrap processedMsgIds:', e);
-      } finally {
-        await pool.end().catch(() => {});
       }
     })();
   }
 
   // ── Also ensure email_configs table has this entry ───────────────────────
   (async () => {
-    const { Pool } = await import('pg');
-    const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
-    const pool = new Pool({ connectionString: DB, connectionTimeoutMillis: 10_000 });
+    const { pgPool: pool } = await import('@/lib/pg-pool');
     try {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS email_configs (
@@ -710,8 +704,6 @@ export function startImapPoller(
       console.log(`[EmailPoller] Config persisted for ${config.imap.user} → space ${config.spaceKey}`);
     } catch (e) {
       console.error('[EmailPoller] Failed to persist email config:', e);
-    } finally {
-      await pool.end().catch(() => {});
     }
   })();
 

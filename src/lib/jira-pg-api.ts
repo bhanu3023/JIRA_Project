@@ -9,23 +9,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { handleJiraDevMock } from '@/lib/jira-dev-mock';
-import { Pool } from 'pg';
 import { getNextAgent, getDefaultDepartment, getRrConfig, saveRrConfig } from '@/lib/rr-service';
 import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs } from '@/lib/connector-service';
-
-// max: 20 — default pg pool max (10) queues requests behind a shared handful
-// of connections once concurrent users stack up. This pool backs almost every
-// raw SQL call in the app (issue creation, lists, comments, etc.), so it's
-// worth sizing deliberately rather than leaving it at the client default.
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db',
-  max: 20,
-  // Without this, pg defaults to waiting forever for a free connection once the
-  // pool is saturated — a starved/exhausted pool then hangs every request
-  // instead of failing fast (this is what caused issue pages to spin forever).
-  connectionTimeoutMillis: 10_000,
-  idleTimeoutMillis: 30_000,
-});
+import { pgPool as pool } from '@/lib/pg-pool';
 
 // 60-second in-memory cache for user role lookups so every API request
 // doesn't pay an extra DB round-trip just to check isAdmin.

@@ -2505,9 +2505,14 @@ export default function IssueDetailPage() {
                             const newVal = type === 'multiselect'
                               ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
                               : customFieldEditValue;
-                            await api.updateIssue(issueKey, { [key]: newVal });
-                            loadIssue(issueKey);
-                            setEditingCustomField(null);
+                            try {
+                              await api.updateIssue(issueKey, { [key]: newVal });
+                              await loadIssue(issueKey);
+                              setEditingCustomField(null);
+                            } catch (e: any) {
+                              console.error(`Save ${key} failed`, e);
+                              alert('Failed to save. Please try again.');
+                            }
                           }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
                           <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
                         </div>
@@ -2576,9 +2581,14 @@ export default function IssueDetailPage() {
                             const newVal = type === 'multiselect'
                               ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
                               : customFieldEditValue;
-                            await api.updateIssue(issueKey, { [key]: newVal });
-                            loadIssue(issueKey);
-                            setEditingCustomField(null);
+                            try {
+                              await api.updateIssue(issueKey, { [key]: newVal });
+                              await loadIssue(issueKey);
+                              setEditingCustomField(null);
+                            } catch (e: any) {
+                              console.error(`Save ${key} failed`, e);
+                              alert('Failed to save. Please try again.');
+                            }
                           }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
                           <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
                         </div>
@@ -2643,9 +2653,14 @@ export default function IssueDetailPage() {
                             const newVal = type === 'multiselect'
                               ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
                               : customFieldEditValue;
-                            await api.updateIssue(issueKey, { [key]: newVal });
-                            loadIssue(issueKey);
-                            setEditingCustomField(null);
+                            try {
+                              await api.updateIssue(issueKey, { [key]: newVal });
+                              await loadIssue(issueKey);
+                              setEditingCustomField(null);
+                            } catch (e: any) {
+                              console.error(`Save ${key} failed`, e);
+                              alert('Failed to save. Please try again.');
+                            }
                           }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
                           <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
                         </div>
@@ -2714,9 +2729,14 @@ export default function IssueDetailPage() {
                             const newVal = type === 'multiselect'
                               ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
                               : customFieldEditValue;
-                            await api.updateIssue(issueKey, { [key]: newVal });
-                            loadIssue(issueKey);
-                            setEditingCustomField(null);
+                            try {
+                              await api.updateIssue(issueKey, { [key]: newVal });
+                              await loadIssue(issueKey);
+                              setEditingCustomField(null);
+                            } catch (e: any) {
+                              console.error(`Save ${key} failed`, e);
+                              alert('Failed to save. Please try again.');
+                            }
                           }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
                           <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
                         </div>
@@ -2793,9 +2813,14 @@ export default function IssueDetailPage() {
                             const newVal = (type === 'multiselect' || type === 'tags')
                               ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
                               : customFieldEditValue;
-                            await api.updateIssue(issueKey, { [key]: newVal });
-                            loadIssue(issueKey);
-                            setEditingCustomField(null);
+                            try {
+                              await api.updateIssue(issueKey, { [key]: newVal });
+                              await loadIssue(issueKey);
+                              setEditingCustomField(null);
+                            } catch (e: any) {
+                              console.error(`Save ${key} failed`, e);
+                              alert('Failed to save. Please try again.');
+                            }
                           }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
                           <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
                         </div>
@@ -2855,9 +2880,14 @@ export default function IssueDetailPage() {
                         <div className="flex gap-1 mt-0.5">
                           <button onClick={async () => {
                             const newVal = type === 'multiselect' ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean) : customFieldEditValue;
-                            await api.updateIssue(issueKey, { [key]: newVal });
-                            loadIssue(issueKey);
-                            setEditingCustomField(null);
+                            try {
+                              await api.updateIssue(issueKey, { [key]: newVal });
+                              await loadIssue(issueKey);
+                              setEditingCustomField(null);
+                            } catch (e: any) {
+                              console.error(`Save ${key} failed`, e);
+                              alert('Failed to save. Please try again.');
+                            }
                           }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
                           <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
                         </div>
@@ -2917,9 +2947,14 @@ export default function IssueDetailPage() {
                             const newVal = type === 'multiselect'
                               ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
                               : customFieldEditValue;
-                            await api.updateIssue(issueKey, { [key]: newVal });
-                            loadIssue(issueKey);
-                            setEditingCustomField(null);
+                            try {
+                              await api.updateIssue(issueKey, { [key]: newVal });
+                              await loadIssue(issueKey);
+                              setEditingCustomField(null);
+                            } catch (e: any) {
+                              console.error(`Save ${key} failed`, e);
+                              alert('Failed to save. Please try again.');
+                            }
                           }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
                           <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
                         </div>
@@ -2981,9 +3016,14 @@ export default function IssueDetailPage() {
                             const newVal = type === 'multiselect'
                               ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
                               : customFieldEditValue;
-                            await api.updateIssue(issueKey, { [key]: newVal });
-                            loadIssue(issueKey);
-                            setEditingCustomField(null);
+                            try {
+                              await api.updateIssue(issueKey, { [key]: newVal });
+                              await loadIssue(issueKey);
+                              setEditingCustomField(null);
+                            } catch (e: any) {
+                              console.error(`Save ${key} failed`, e);
+                              alert('Failed to save. Please try again.');
+                            }
                           }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
                           <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
                         </div>

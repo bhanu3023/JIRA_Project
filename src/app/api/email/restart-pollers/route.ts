@@ -4,20 +4,16 @@
  * Supports both password-based and OAuth-based (Microsoft/Google) connections.
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { Pool } from 'pg';
+import { pgPool as pool } from '@/lib/pg-pool';
 import { startImapPoller, isPollerActiveForEmail } from '@/lib/email-service';
 import { getOAuthTokens, getValidAccessToken, storeOAuthTokens, type OAuthTokens } from '@/lib/oauth-service';
 
 export const runtime = 'nodejs';
 
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
-
 /** Load OAuth tokens directly from DB and merge into in-memory store */
 async function loadOAuthTokensFromDB(): Promise<void> {
   try {
-    const pool = new Pool({ connectionString: DB_URL });
     const rows = await pool.query(`SELECT email, tokens_json FROM oauth_tokens`).catch(() => ({ rows: [] as any[] }));
-    await pool.end();
     for (const row of rows.rows) {
       try {
         const tokens = JSON.parse(row.tokens_json) as OAuthTokens;
@@ -42,54 +38,44 @@ export async function POST(req: NextRequest) {
   // completed yet when instrumentation.ts calls us 5 seconds after boot.
   await loadOAuthTokensFromDB();
 
-  const pool = new Pool({ connectionString: DB_URL });
   let rows: any[] = [];
-  try {
-    await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
-    const res = await pool.query(
-      `SELECT id, space_key, address, imap_host, imap_port, smtp_host, smtp_port, password_enc, auto_reply, auto_reply_text, department FROM email_configs`
-    );
-    rows = res.rows;
-  } finally {
-    await pool.end();
-  }
+  await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
+  const res = await pool.query(
+    `SELECT id, space_key, address, imap_host, imap_port, smtp_host, smtp_port, password_enc, auto_reply, auto_reply_text, department FROM email_configs`
+  );
+  rows = res.rows;
 
   // ── Fallback: if email_configs is empty, rebuild from oauth_tokens ───────────
   // This happens when an admin "unlinks" an email in settings (which deletes the
   // email_configs row) but the OAuth tokens are still valid in the oauth_tokens table.
   if (rows.length === 0) {
-    const pool2 = new Pool({ connectionString: DB_URL });
-    try {
-      const tokenRows = await pool2.query(`SELECT email, tokens_json FROM oauth_tokens`);
-      for (const tr of tokenRows.rows) {
-        try {
-          const t = JSON.parse(tr.tokens_json) as OAuthTokens;
-          if (!t.spaceKey) continue; // skip tokens not tied to a space
-          // Re-insert email_configs row so the poller can start
-          await pool2.query(`
-            CREATE TABLE IF NOT EXISTS email_configs (
-              id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-              space_key TEXT NOT NULL, address TEXT NOT NULL,
-              imap_host TEXT NOT NULL DEFAULT 'outlook.office365.com',
-              imap_port INT NOT NULL DEFAULT 993,
-              smtp_host TEXT NOT NULL DEFAULT 'smtp.office365.com',
-              smtp_port INT NOT NULL DEFAULT 587,
-              password_enc TEXT, auto_reply BOOLEAN DEFAULT true,
-              auto_reply_text TEXT, department TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
-              UNIQUE(space_key, address)
-            )
-          `).catch(() => {});
-          await pool2.query(`
-            INSERT INTO email_configs (space_key, address, imap_host, imap_port, smtp_host, smtp_port, auto_reply)
-            VALUES ($1,$2,'outlook.office365.com',993,'smtp.office365.com',587,true)
-            ON CONFLICT (space_key, address) DO NOTHING
-          `, [t.spaceKey, tr.email]);
-          rows.push({ space_key: t.spaceKey, address: tr.email, imap_host: 'outlook.office365.com', imap_port: 993, smtp_host: 'smtp.office365.com', smtp_port: 587, password_enc: null, auto_reply: true, auto_reply_text: null, department: null });
-          console.log(`[RestartPollers] Auto-restored email_configs for ${tr.email} → space ${t.spaceKey}`);
-        } catch {}
-      }
-    } finally {
-      await pool2.end();
+    const tokenRows = await pool.query(`SELECT email, tokens_json FROM oauth_tokens`);
+    for (const tr of tokenRows.rows) {
+      try {
+        const t = JSON.parse(tr.tokens_json) as OAuthTokens;
+        if (!t.spaceKey) continue; // skip tokens not tied to a space
+        // Re-insert email_configs row so the poller can start
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS email_configs (
+            id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+            space_key TEXT NOT NULL, address TEXT NOT NULL,
+            imap_host TEXT NOT NULL DEFAULT 'outlook.office365.com',
+            imap_port INT NOT NULL DEFAULT 993,
+            smtp_host TEXT NOT NULL DEFAULT 'smtp.office365.com',
+            smtp_port INT NOT NULL DEFAULT 587,
+            password_enc TEXT, auto_reply BOOLEAN DEFAULT true,
+            auto_reply_text TEXT, department TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(space_key, address)
+          )
+        `).catch(() => {});
+        await pool.query(`
+          INSERT INTO email_configs (space_key, address, imap_host, imap_port, smtp_host, smtp_port, auto_reply)
+          VALUES ($1,$2,'outlook.office365.com',993,'smtp.office365.com',587,true)
+          ON CONFLICT (space_key, address) DO NOTHING
+        `, [t.spaceKey, tr.email]);
+        rows.push({ space_key: t.spaceKey, address: tr.email, imap_host: 'outlook.office365.com', imap_port: 993, smtp_host: 'smtp.office365.com', smtp_port: 587, password_enc: null, auto_reply: true, auto_reply_text: null, department: null });
+        console.log(`[RestartPollers] Auto-restored email_configs for ${tr.email} → space ${t.spaceKey}`);
+      } catch {}
     }
   }
 
