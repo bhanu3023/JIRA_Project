@@ -1130,19 +1130,32 @@ export function startImapPoller(
     }
   }
 
-  pollOnce().catch(err => console.error('[EmailPoller] pollOnce unhandled error:', err));
-  const interval = setInterval(() => {
-    pollOnce().catch(err => console.error('[EmailPoller] pollOnce unhandled error:', err));
-  }, 30000);
-  pollerInterval = interval; // legacy shim
-
-  // Register in multi-poller map
-  globalThis.__imapPollers!.set(emailKey, {
+  // Stagger this mailbox's poll cycle instead of syncing to every other
+  // mailbox's interval. All pollers get started back-to-back at app boot
+  // (see the restart loop below), so without jitter every one of them fires
+  // in the same instant every 30s — with ~40 mailboxes that's a synchronized
+  // burst of Graph API calls + OAuth token refreshes + DB writes that can
+  // starve the shared connection pool / event loop long enough to stall
+  // unrelated requests (e.g. the Filters page's own query) landing in that
+  // window. A random initial delay spreads the 40 cycles across the full
+  // 30s period instead of piling them all onto the same tick.
+  const pollerEntry: PollerInstance = {
     config,
-    interval,
+    interval: null as any,
     running: true,
     spaceKey: config.spaceKey,
-  });
+  };
+  globalThis.__imapPollers!.set(emailKey, pollerEntry);
+
+  const jitterMs = Math.floor(Math.random() * 30000);
+  pollerEntry.interval = setTimeout(() => {
+    pollOnce().catch(err => console.error('[EmailPoller] pollOnce unhandled error:', err));
+    pollerEntry.interval = setInterval(() => {
+      pollOnce().catch(err => console.error('[EmailPoller] pollOnce unhandled error:', err));
+    }, 30000);
+    pollerInterval = pollerEntry.interval; // legacy shim
+  }, jitterMs) as any;
+  pollerInterval = pollerEntry.interval; // legacy shim
 }
 
 /** Stop poller for a specific email address */
