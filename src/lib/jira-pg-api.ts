@@ -774,7 +774,14 @@ async function computePausedDeptSLA(
         break;
       }
     }
-    const isBreached = elapsed_ms > goalDurationMs;
+    // Paused SLAs are never breached — clock stopped, same rule as
+    // computeIssueSLAsFromDb. This panel only renders once a ticket has
+    // moved OUT of `dept` (Sent/Watching), so by definition the SLA clock
+    // for `dept` is no longer running; flagging it "BREACHED" here was
+    // judging a stopped clock as if it were still ticking, which read as
+    // an active, urgent alarm for a department that no longer owns the
+    // ticket.
+    const isBreached = false;
     const remainingMs = Math.max(0, goalDurationMs - elapsed_ms);
     return { elapsed_ms, goalDurationMs, isBreached, remainingMs, policyName: policy.name || 'SLA', paused_at: deptLog?.paused_at || null };
   } catch { return null; }
@@ -2346,8 +2353,11 @@ async function _handleJiraPgApi(
 
           // Build sentEnriched with paused SLA state per issue
           const sentEnriched = (await Promise.all(rows.rows.map(async (row: any) => { try {
+            // Truncated — same reasoning as the other two list branches: this
+            // Sent/Watching list never renders description, but a legacy
+            // base64-embedded image in it can balloon the response by tens of MB.
             const base = formatIssue({
-              id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: row.description,
+              id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: (row.description || '').slice(0, 500),
               priority: row.priority, type: row.type, labels: row.labels,
               createdAt: row.createdAt, updatedAt: row.updatedAt,
               current_department: row.current_department,
