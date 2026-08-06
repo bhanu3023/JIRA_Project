@@ -223,13 +223,11 @@ async function getBestSenderEmail(): Promise<string | null> {
 async function getInboxEmailForSpace(spaceKey: string): Promise<string | null> {
   if (!spaceKey) return null;
   try {
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+    const { pgPool: pool } = await import('@/lib/pg-pool');
     const row = await pool.query(
       `SELECT address FROM email_configs WHERE LOWER(space_key) = LOWER($1) LIMIT 1`,
       [spaceKey]
     );
-    await pool.end();
     return row.rows[0]?.address || null;
   } catch { return null; }
 }
@@ -237,8 +235,7 @@ async function getInboxEmailForSpace(spaceKey: string): Promise<string | null> {
 // ── Look up emailthreadid + inbox email for a ticket in one query ──────────────
 async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: string; inboxEmail?: string }> {
   try {
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+    const { pgPool: pool } = await import('@/lib/pg-pool');
     const row = await pool.query(`
       SELECT i.emailthreadid, ec.address AS inbox_email
       FROM issues i
@@ -247,7 +244,6 @@ async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: 
       WHERE i.key = $1
       LIMIT 1
     `, [issueKey]);
-    await pool.end();
     return {
       emailthreadid: row.rows[0]?.emailthreadid || undefined,
       inboxEmail:    row.rows[0]?.inbox_email    || undefined,

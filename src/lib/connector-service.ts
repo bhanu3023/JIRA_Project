@@ -4,12 +4,8 @@
  * when issue events happen in the ticketing system.
  */
 
-import { Pool } from 'pg';
 import crypto from 'crypto';
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db',
-});
+import { pgPool as pool } from '@/lib/pg-pool';
 
 // Create table on startup
 pool.query(`

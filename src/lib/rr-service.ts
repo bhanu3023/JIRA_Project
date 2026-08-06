@@ -2,9 +2,7 @@
  * Round Robin Assignment Service
  * Assigns agents to tickets based on department round robin config + shift timings
  */
-import { Pool } from 'pg';
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+import { pgPool as pool } from '@/lib/pg-pool';
 
 export interface RrDepartment {
   name: string;

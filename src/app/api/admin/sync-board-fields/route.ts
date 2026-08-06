@@ -13,9 +13,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { Pool } from 'pg';
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+import { pgPool as pool } from '@/lib/pg-pool';
 
 async function getStoredJiraCreds(): Promise<{ url: string; email: string; token: string } | null> {
   try {

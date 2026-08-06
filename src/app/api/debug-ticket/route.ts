@@ -1,9 +1,5 @@
 import { NextRequest } from 'next/server';
-import { Pool } from 'pg';
-
-const dbPool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db',
-});
+import { pgPool as dbPool } from '@/lib/pg-pool';
 
 export async function GET(req: NextRequest) {
   const dept = req.nextUrl.searchParams.get('dept') || 'Migration';

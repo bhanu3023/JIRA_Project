@@ -8,14 +8,11 @@
  * Safe to call multiple times.
  */
 import { NextResponse } from 'next/server';
-import { Pool } from 'pg';
+import { pgPool as pool } from '@/lib/pg-pool';
 
 export const runtime = 'nodejs';
 
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
-
 export async function GET() {
-  const pool = new Pool({ connectionString: DB_URL });
   const log: string[] = [];
 
   try {
@@ -31,7 +28,6 @@ export async function GET() {
                       spacesRes.rows[0];
 
     if (!realSpace) {
-      await pool.end();
       return NextResponse.json({ ok: false, error: 'No Customer_Board space found. Please create it first via the UI.', log });
     }
     log.push(`✅ Using space: ${realSpace.key} (id=${realSpace.id})`);
@@ -110,8 +106,6 @@ export async function GET() {
     } catch { oauthStatus = 'unknown'; }
     log.push(`OAuth status: ${oauthStatus}`);
 
-    await pool.end();
-
     const needsOAuth = oauthStatus.includes('❌');
     return NextResponse.json({
       ok: true,
@@ -125,7 +119,6 @@ export async function GET() {
     });
 
   } catch (err: any) {
-    await pool.end().catch(() => {});
     return NextResponse.json({ ok: false, error: err.message, log }, { status: 500 });
   }
 }

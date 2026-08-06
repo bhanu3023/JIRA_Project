@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { Pool } from 'pg';
+import { pgPool as pool } from '@/lib/pg-pool';
 import {
   startImapPoller,
   stopImapPoller,
@@ -18,7 +18,6 @@ import {
   type EmailConfig,
 } from '@/lib/email-service';
 
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db';
 
 export const runtime = 'nodejs';
 
@@ -141,7 +140,6 @@ export async function POST(req: NextRequest) {
 
   // Persist config to DB so it survives server restarts
   try {
-    const pool = new Pool({ connectionString: DB_URL });
     await pool.query(`
       CREATE TABLE IF NOT EXISTS email_configs (
         id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -177,7 +175,6 @@ export async function POST(req: NextRequest) {
       isOAuth ? null : (config.imap.password || null),
       config.autoReply, config.autoReplyText, dept,
     ]);
-    await pool.end();
     console.log(`[EmailConnect] Saved config for ${config.address} → space ${config.spaceKey}`);
   } catch (e) {
     console.error('[EmailConnect] Failed to persist email config to DB:', e);
@@ -200,9 +197,7 @@ export async function DELETE(req: NextRequest) {
     stopImapPollerForEmail(email);
     // Remove from DB
     try {
-      const pool = new Pool({ connectionString: DB_URL });
       await pool.query('DELETE FROM email_configs WHERE address = $1', [email]);
-      await pool.end();
     } catch (e) {
       console.error('[EmailConnect] Failed to delete email config from DB:', e);
     }

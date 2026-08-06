@@ -2451,14 +2451,12 @@ export async function handleJiraDevMock(req: NextRequest, segments: string[], me
     // Persist department change to DB so email/receive picks it up
     if (patchedAddress && 'department' in body) {
       try {
-        const { Pool } = await import('pg');
-        const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+        const { pgPool: pool } = await import('@/lib/pg-pool');
         await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`);
         await pool.query(
           `UPDATE email_configs SET department = $1 WHERE LOWER(address) = $2`,
           [body.department ?? null, patchedAddress.toLowerCase()]
         );
-        await pool.end();
       } catch { /* non-critical — in-memory store still updated */ }
     }
     return json({ ok: true });
