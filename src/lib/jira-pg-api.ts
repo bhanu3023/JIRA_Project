@@ -12,6 +12,7 @@ import { handleJiraDevMock } from '@/lib/jira-dev-mock';
 import { getNextAgent, getDefaultDepartment, getRrConfig, saveRrConfig } from '@/lib/rr-service';
 import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs } from '@/lib/connector-service';
 import { pgPool as pool } from '@/lib/pg-pool';
+import { isManager } from '@/lib/permissions';
 
 // 60-second in-memory cache for user role lookups so every API request
 // doesn't pay an extra DB round-trip just to check isAdmin.
@@ -2380,10 +2381,20 @@ async function _handleJiraPgApi(
       } catch (sentErr: any) { console.error('[SentWatching ERROR]', sentErr?.message || sentErr); return json({ issues: [], total: 0, page, totalPages: 1 }); }
     }
 
-    // Filter by dept param if provided Ã¢â‚¬â€ use raw SQL count so total is accurate
+    // Filter by dept param if provided — use raw SQL count so total is accurate
     const deptParam = url.searchParams.get('dept');
-    if (deptParam && spaceKey && !isAdmin && await isUserSuspendedFromQueue(spaceKey, deptParam, userId)) {
+    const deptCallerIsPrivileged = isAdmin || isManager(currentUser?.role);
+    if (deptParam && spaceKey && !deptCallerIsPrivileged && await isUserSuspendedFromQueue(spaceKey, deptParam, userId)) {
       return json({ error: 'Your access to this queue has been suspended.' }, 403);
+    }
+    // A user restricted to specific queues (via that queue's memberIds) could
+    // previously still pull another queue's issues by requesting its dept
+    // name directly — the switcher only hid the other queues in the UI, it
+    // never stopped the API call itself. Same allow-list check the client
+    // already applies when deciding what to show in the queue switcher, now
+    // actually enforced here too.
+    if (deptParam && spaceKey && !deptCallerIsPrivileged && !(await isUserAuthorizedForDeptQueue(spaceKey, deptParam, userId))) {
+      return json({ error: 'You do not have access to this queue.' }, 403);
     }
     // Truncate description for list rows — the list UI never renders it (only the
     // single-issue detail page does), but Prisma's default findMany() returns every
@@ -5232,7 +5243,20 @@ async function _handleJiraPgApi(
     const spaceKey = path.split('/')[1];
     if (method === 'GET') {
       const row = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey]);
-      return json(row.rows[0]?.queues || []);
+      const allQueues: any[] = row.rows[0]?.queues || [];
+      // A regular member sees (and can call the API for) only the queues
+      // they're explicitly assigned to — admins/managers see every queue.
+      // This used to return the full unfiltered list to any caller, relying
+      // on the client (Sidebar/board page) to hide the rest; that meant a
+      // restricted user's browser could still fetch every other queue's
+      // metadata (including their memberIds) and, since nothing server-side
+      // gated it, could call the issues API for queues they were never
+      // granted access to. Filtering here closes that gap and also means a
+      // restricted user's queue switcher has exactly one entry to call.
+      const visibleQueues = isAdmin || isManager(currentUser?.role)
+        ? allQueues
+        : allQueues.filter((q: any) => Array.isArray(q.memberIds) && q.memberIds.includes(userId));
+      return json(visibleQueues);
     }
     if (method === 'PUT') {
       const queues = await req.json();

@@ -1368,6 +1368,19 @@ function SpaceDetailContent() {
 
       {/* ── Queues overview — default landing when clicking a space ── */}
       {queueFilter === 'queues' && (() => {
+        // Until the custom-queues fetch resolves, we don't yet know whether
+        // this board has any — rendering "No queues available." here was a
+        // premature (and usually wrong) conclusion that flashed for however
+        // long the fetch took, right before the redirect effect above sent
+        // plain boards on to the tickets list. Show a spinner instead of a
+        // false negative while that's still in flight.
+        if (customQueuesLoadedFor !== spaceKey) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <DotLoader className="h-64" />
+            </div>
+          );
+        }
         const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
         const customQueues = isDeptQueue
           ? (isAdmin ? allCustomQueues : allCustomQueues.filter(q => q.memberIds.includes(user?.id || '')))
