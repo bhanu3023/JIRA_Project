@@ -111,6 +111,14 @@ export async function POST(req: NextRequest) {
 </body>
 </html>`;
 
+    // Local/dev environments share the same production SMTP credentials with
+    // no separate test account — only the actual production deployment may
+    // send for real.
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[Invite] DEV MODE — would send invite email to ${email} (not actually sent)`);
+      return NextResponse.json({ ok: true, emailSent: false, reason: 'DEV MODE — email not sent' });
+    }
+
     // Fire-and-forget — return immediately, email sends in background
     transporter.sendMail({
       from:    `"${FROM_NAME}" <${FROM_EMAIL}>`,
