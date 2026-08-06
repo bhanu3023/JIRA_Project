@@ -67,6 +67,17 @@ async function sendGraphAutoReply(opts: {
   sk: string;
   messageId?: string;
 }) {
+  // Local/dev environments share the same production OAuth mailbox
+  // credentials with no separate test account — nothing else stops a local
+  // test from auto-replying to whoever "sent" the test email. Only the
+  // actual production deployment may send for real. This guards the direct
+  // Graph sendMail call below too, not just the sendAutoReply() fallbacks
+  // (which are already guarded in email-service.ts).
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[AutoReply] DEV MODE — would reply to ${opts.fromEmail} for ticket ${opts.issueKey} (not actually sent)`);
+    return;
+  }
+
   // Try Graph token first; if consent not granted, fall back to IMAP access token via SMTP
   let accessToken = await getGraphToken(opts.toAddress);
   let useSmtpFallback = false;

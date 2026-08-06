@@ -83,6 +83,16 @@ export async function sendAutoReply(opts: {
   references?: string;
   outboundMessageId?: string;
 }) {
+  // Same guard as notification-service.ts's sendNotification — local/dev
+  // environments share the same production SMTP/OAuth mailbox credentials
+  // with no separate test account, so nothing else stops a local test from
+  // auto-replying to a real customer's email address. Only the actual
+  // production deployment may send for real.
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[EmailPoller] DEV MODE — would send auto-reply "${opts.subject}" to ${opts.to} (not actually sent)`);
+    return;
+  }
+
   const smtpAuth: any = opts.smtp.oauthAccessToken
     ? { type: 'OAuth2', user: opts.smtp.user, accessToken: opts.smtp.oauthAccessToken }
     : { user: opts.smtp.user, pass: opts.smtp.password };

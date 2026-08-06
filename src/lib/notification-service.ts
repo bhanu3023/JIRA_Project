@@ -264,6 +264,18 @@ async function sendNotification(to: string[], subject: string, html: string, tex
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
   if (!uniqueTo.length) return;
 
+  // Local/dev environments reuse the SAME production SMTP and OAuth mailbox
+  // credentials with no separate test account — there is nothing else
+  // stopping a local test run from emailing a real customer. That already
+  // happened once: a local test of the @mention notification path sent a
+  // real "mentioned you" email to a real customer's inbox. Only the actual
+  // production deployment (NODE_ENV=production) may send for real; every
+  // other environment logs what would have been sent instead of sending it.
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[Notification] DEV MODE — would send "${subject}" to ${uniqueTo.join(', ')} (not actually sent)`);
+    return;
+  }
+
   if (fromEmail) {
     const sentViaTicketInbox = await sendViaGraph({ from: fromEmail, to: uniqueTo, subject, html, text, inReplyTo });
     if (sentViaTicketInbox) return;

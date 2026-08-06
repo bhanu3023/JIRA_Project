@@ -2375,7 +2375,12 @@ async function _handleJiraPgApi(
     if (deptParam && spaceKey && !isAdmin && await isUserSuspendedFromQueue(spaceKey, deptParam, userId)) {
       return json({ error: 'Your access to this queue has been suspended.' }, 403);
     }
-    let enrichedIssues = issues.map((i: any) => formatIssue({ ...i, ...(deptMap[i.key] || {}) }));
+    // Truncate description for list rows — the list UI never renders it (only the
+    // single-issue detail page does), but Prisma's default findMany() returns every
+    // scalar column including the full raw description. A legacy ticket with a
+    // base64-embedded image in its description (from before uploads moved to
+    // URL-based storage) could balloon this list response by tens of MB on its own.
+    let enrichedIssues = issues.map((i: any) => formatIssue({ ...i, ...(deptMap[i.key] || {}), description: (i.description || '').slice(0, 500) }));
     let deptTotal = total;
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
@@ -2506,7 +2511,11 @@ async function _handleJiraPgApi(
           rowParams
         );
         enrichedIssues = rows.rows.map((row: any) => formatIssue({
-          id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: row.description,
+          // Truncated — see comment above the other formatIssue list call site.
+          // This branch's SELECT i.* pulls the full raw description for every
+          // row; a single legacy ticket with a base64-embedded image in it can
+          // balloon this response by tens of MB on its own.
+          id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: (row.description || '').slice(0, 500),
           priority: row.priority, type: row.type, labels: row.labels,
           createdAt: row.createdAt, updatedAt: row.updatedAt,
           spaceId: row.spaceId, dueDate: row.dueDate,
