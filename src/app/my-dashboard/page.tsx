@@ -312,13 +312,19 @@ export default function MyDashboardPage() {
   const dateRangeLabel = DATE_RANGE_OPTIONS.find((o) => o.key === dateRangeKey)?.label;
 
   return (
-    // min-h-full so the gray background fills the whole scrollable area even
-    // when there's little data (a sparse dashboard's actual content is much
-    // shorter than a tall screen) — otherwise the empty area below the last
-    // row stayed plain white, reading as a cut-off/broken layout rather than
-    // page background.
-    <div className="min-h-full bg-gray-50 p-6">
-    <div className="mx-auto max-w-[1400px] space-y-4">
+    // min-h-full so the gray page background fills the whole scrollable area
+    // even when there's little data (a sparse dashboard's actual content is
+    // much shorter than a tall screen) — otherwise the empty area below the
+    // last row stayed plain white, reading as a cut-off/broken layout rather
+    // than page background. gray-100 (not gray-50) so the contrast against
+    // the white content card is actually visible, not just a few points of
+    // RGB apart. The content itself sits inside one bordered, rounded white
+    // card (rather than floating loose on the page) so the whole dashboard
+    // reads as a single contained panel with a visible edge, matching how
+    // the individual stat/report tiles inside it are already framed.
+    <div className="min-h-full bg-gray-100 p-6">
+    <div className="mx-auto max-w-[1400px]">
+    <div className="space-y-4 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2 text-[22px] font-semibold text-gray-900">
@@ -457,6 +463,7 @@ export default function MyDashboardPage() {
           </div>
         </Card>
       )}
+    </div>
     </div>
     </div>
   );
