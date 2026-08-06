@@ -4057,9 +4057,9 @@ async function _handleJiraPgApi(
       await notifyUsers(
         [updated.assigneeId, updated.reporterId],
         userId,
-        { type: 'STATUS_CHANGED', title: `${updated.key} status Ã¢â€ ' ${issueForNotif.status.name}`, message: updated.summary, issueKey: updated.key }
+        { type: 'STATUS_CHANGED', title: `${updated.key} status → ${issueForNotif.status.name}`, message: updated.summary, issueKey: updated.key }
       );
-      await notifyWatchers(updated.key, userId, { title: `${updated.key} status Ã¢â€ ' ${issueForNotif.status.name}`, message: updated.summary });
+      await notifyWatchers(updated.key, userId, { title: `${updated.key} status → ${issueForNotif.status.name}`, message: updated.summary });
     }
     // Assignee changed?
     else if (body.assigneeId !== undefined && issue.assigneeId !== data.assigneeId) {
