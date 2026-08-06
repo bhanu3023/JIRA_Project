@@ -312,6 +312,12 @@ export default function MyDashboardPage() {
   const dateRangeLabel = DATE_RANGE_OPTIONS.find((o) => o.key === dateRangeKey)?.label;
 
   return (
+    // min-h-full so the gray background fills the whole scrollable area even
+    // when there's little data (a sparse dashboard's actual content is much
+    // shorter than a tall screen) — otherwise the empty area below the last
+    // row stayed plain white, reading as a cut-off/broken layout rather than
+    // page background.
+    <div className="min-h-full bg-gray-50 p-6">
     <div className="mx-auto max-w-[1400px] space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
@@ -451,6 +457,7 @@ export default function MyDashboardPage() {
           </div>
         </Card>
       )}
+    </div>
     </div>
   );
 }
