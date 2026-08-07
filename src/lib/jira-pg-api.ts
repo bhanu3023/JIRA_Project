@@ -4305,7 +4305,19 @@ async function _handleJiraPgApi(
 
     // In-app: notify assignee + reporter + leads/shift leads + watchers (not the commenter)
     const commenterName = authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : 'Someone';
-    const commentPreview = `${commenterName}: ${comment.body.replace(/<[^>]+>/g, '').slice(0, 80)}`;
+    // Same entity-decode as mentionPreview below — stripping tags alone leaves
+    // literal "&nbsp;"/"&amp;" etc. visible in the plain-text preview.
+    const commentBodyPreview = comment.body
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
+    const commentPreview = `${commenterName}: ${commentBodyPreview}`;
     // Fire-and-forget from here down — this used to be awaited inline (lead lookup,
     // notifyUsers, notifyWatchers, then a per-mention user lookup + createNotification),
     // which held the HTTP response open for the whole chain, so the client's "Saving…"
@@ -4339,7 +4351,20 @@ async function _handleJiraPgApi(
       }
     }
     // Send in-app + email notification to each mentioned user
-    const mentionPreview = comment.body.replace(/<[^>]+>/g, '').slice(0, 200);
+    // Stripping tags alone leaves entities like the literal "&nbsp;" the rich
+    // text editor inserts right after a mention span (to guarantee a following
+    // space) sitting in the plain-text preview as visible "&nbsp;" characters.
+    // Same decode used for comment previews elsewhere (spaces/[spaceKey]/page.tsx).
+    const mentionPreview = comment.body
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
     for (const mentionedId of mentionedUserIds) {
       if (mentionedId === userId) continue; // don't notify self
       const mentionedUser = await db.user.findUnique({ where: { id: mentionedId } });
