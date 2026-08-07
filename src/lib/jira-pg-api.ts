@@ -4305,7 +4305,19 @@ async function _handleJiraPgApi(
 
     // In-app: notify assignee + reporter + leads/shift leads + watchers (not the commenter)
     const commenterName = authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : 'Someone';
-    const commentPreview = `${commenterName}: ${comment.body.replace(/<[^>]+>/g, '').slice(0, 80)}`;
+    // Same entity-decode as mentionPreview below — stripping tags alone leaves
+    // literal "&nbsp;"/"&amp;" etc. visible in the plain-text preview.
+    const commentBodyPreview = comment.body
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
+    const commentPreview = `${commenterName}: ${commentBodyPreview}`;
     // Fire-and-forget from here down — this used to be awaited inline (lead lookup,
     // notifyUsers, notifyWatchers, then a per-mention user lookup + createNotification),
     // which held the HTTP response open for the whole chain, so the client's "Saving…"
@@ -4339,7 +4351,20 @@ async function _handleJiraPgApi(
       }
     }
     // Send in-app + email notification to each mentioned user
-    const mentionPreview = comment.body.replace(/<[^>]+>/g, '').slice(0, 200);
+    // Stripping tags alone leaves entities like the literal "&nbsp;" the rich
+    // text editor inserts right after a mention span (to guarantee a following
+    // space) sitting in the plain-text preview as visible "&nbsp;" characters.
+    // Same decode used for comment previews elsewhere (spaces/[spaceKey]/page.tsx).
+    const mentionPreview = comment.body
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
     for (const mentionedId of mentionedUserIds) {
       if (mentionedId === userId) continue; // don't notify self
       const mentionedUser = await db.user.findUnique({ where: { id: mentionedId } });
@@ -5218,6 +5243,44 @@ async function _handleJiraPgApi(
       }
       return json({ ok: true });
     }
+  }
+
+  // GET /migration-reporters -- every distinct reporter with at least one
+  // ticket currently sitting in the "Migration" department, across every
+  // space, for the Migration Manager's Home dashboard section. This reaches
+  // across boards the caller may not otherwise have access to, so it's
+  // gated here server-side rather than just hidden in the UI.
+  if (path === 'migration-reporters' && method === 'GET') {
+    if (!isAdmin && currentUser?.role !== 'migration_manager') {
+      return json({ error: 'Forbidden' }, 403);
+    }
+    const rows = await pool.query(`
+      SELECT
+        MAX(r.id) AS reporter_id,
+        MAX(r."firstName") AS first_name,
+        MAX(r."lastName") AS last_name,
+        MAX(r.email) AS email,
+        MAX(i.jira_reporter_name) AS jira_reporter_name,
+        COUNT(*)::int AS ticket_count,
+        MAX(i."updatedAt") AS last_activity
+      FROM issues i
+      LEFT JOIN users r ON r.id = i."reporterId"
+      WHERE LOWER(i.current_department) = 'migration'
+      GROUP BY COALESCE(r.id, i.jira_reporter_name)
+      ORDER BY ticket_count DESC
+    `);
+    const reporters = rows.rows
+      .map((row: any) => ({
+        id: row.reporter_id || null,
+        name: row.reporter_id
+          ? `${row.first_name || ''} ${row.last_name || ''}`.trim()
+          : (row.jira_reporter_name || ''),
+        email: row.email || null,
+        ticketCount: row.ticket_count,
+        lastActivity: row.last_activity,
+      }))
+      .filter((r: any) => r.name);
+    return json({ reporters });
   }
 
   // GET /department-queue?dept=<name> -- find which space's custom queue matches
