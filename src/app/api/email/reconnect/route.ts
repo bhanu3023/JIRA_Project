@@ -42,14 +42,24 @@ export async function POST(req: NextRequest) {
     // Load ALL processed message IDs from the dedicated table
     const res = await pool.query(`SELECT message_id FROM processed_emails`);
 
-    // Always REPLACE the in-memory set with the DB contents so any emails that
-    // failed (webhook returned ok:false) and were wrongly added to in-memory
-    // get a fresh retry on the next poll cycle.
-    const processedIds: Set<string> = new Set();
+    // MERGE the DB contents into the existing in-memory set — never replace
+    // it outright. This used to build a brand-new Set from just the DB rows
+    // and swap it in wholesale, on the theory that anything missing from the
+    // DB had failed and deserved "a fresh retry." That was true when only
+    // successful ticket-creations were ever persisted. Now that permanent
+    // failures (e.g. "no space found for this address") are also persisted
+    // immediately when the webhook returns them, replacing the whole set on
+    // every reconnect call (fired automatically on page load, at most once
+    // per browser session per 10 minutes — but that adds up fast across a
+    // whole team's simultaneous sessions) could race a just-written DB
+    // insert and silently un-mark it, making it eligible for retry again.
+    // Merging only ever adds — it can't undo an in-memory mark that hasn't
+    // reached the DB yet for any reason.
+    const processedIds: Set<string> = (globalThis as any).__processedMsgIds || new Set();
     res.rows.forEach((r: any) => { if (r.message_id) processedIds.add(r.message_id); });
     (globalThis as any).__processedMsgIds = processedIds;
     (globalThis as any).__processedMsgIdsLoaded = true;
-    console.log(`[Reconnect] Reloaded ${processedIds.size} processed message IDs from DB (in-memory reset)`);
+    console.log(`[Reconnect] Merged ${res.rows.length} processed message IDs from DB (now tracking ${processedIds.size} total)`);
   } catch (e) { console.error('[Reconnect] Failed to pre-load processed IDs:', e); }
 
   const emails = getAllOAuthEmails();
