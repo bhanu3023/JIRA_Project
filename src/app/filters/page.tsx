@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
@@ -1053,9 +1053,15 @@ export default function FiltersPage() {
     .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
     .map((s: any) => ({ value: s.name, label: s.name }));
 
-  const allMembers: any[] = Array.from(
+  // Memoized: this feeds buildFilterParams' dependency array below. Without
+  // useMemo, this array got a brand-new reference every render, which broke
+  // buildFilterParams' own memoization, which broke fetchIssues' memoization,
+  // which re-ran the fetch effect on every render — and each fetch's state
+  // update triggered another render, looping forever (visible as the table
+  // repeatedly flashing "Loading..." then results, then "Loading..." again).
+  const allMembers: any[] = useMemo(() => Array.from(
     new Map(spaces.flatMap((sp: any) => (sp.members || []).map((m: any) => [m.id, m]))).values(),
-  );
+  ), [spaces]);
 
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
