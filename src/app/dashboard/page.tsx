@@ -33,15 +33,14 @@ function useCountUp(target: number, duration = 1200) {
 import Link from 'next/link';
 import { typeIcons, timeAgo, cn, resolveStatusColor } from '@/lib/utils';
 import { PriorityIcon } from '@/components/ui/PriorityIcon';
-import SpaceIcon from '@/components/ui/SpaceIcon';
 import DotLoader from '@/components/ui/DotLoader';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import {
-  ChevronRight, CheckCircle2, LayoutGrid, AlertCircle,
+  ChevronRight, CheckCircle2, AlertCircle,
   Zap, ArrowUpRight, Users, Plus
 } from 'lucide-react';
 
-type TabType = 'assigned' | 'worked_on' | 'viewed' | 'starred' | 'boards';
+type TabType = 'assigned' | 'worked_on' | 'viewed' | 'migration_reporters';
 
 type DashboardHighlight = 'stat-0' | 'stat-1' | 'stat-2' | 'stat-3' | 'spaces' | 'issues';
 
@@ -119,23 +118,6 @@ export default function DashboardPage() {
       .then((d: any) => setResolvedTodayCount(d.total ?? 0))
       .catch(() => {});
   }, [user?.id]);
-  const [starredSpaceIds, setStarredSpaceIds] = useState<string[]>([]);
-
-  // Helper to read starred spaces from localStorage
-  const readStarred = () => {
-    try {
-      const key = `starred_spaces_${user?.id || 'default'}`;
-      return JSON.parse(localStorage.getItem(key) || '[]') as string[];
-    } catch { return []; }
-  };
-
-  // Load on mount + when user changes
-  useEffect(() => { setStarredSpaceIds(readStarred()); }, [user?.id]);
-
-  // Re-read whenever the Starred tab becomes active
-  useEffect(() => {
-    if (activeTab === 'starred') setStarredSpaceIds(readStarred());
-  }, [activeTab]);
   const [showWelcome, setShowWelcome] = useState(false);
   // Increments every time this page mounts → forces StatCards to remount and re-animate
   const [animKey, setAnimKey] = useState(0);
@@ -174,10 +156,16 @@ export default function DashboardPage() {
     if (user?.id) loadTabData(activeTab);
   }, [activeTab, user?.id]);
 
+  // Distinct reporters with at least one ticket currently in the Migration
+  // department — Migration Manager / admin only, see the tab below.
+  const [migrationReporters, setMigrationReporters] = useState<any[]>([]);
+  const canSeeMigrationReporters = user?.role === 'admin' || user?.role === 'migration_manager';
+
   const loadTabData = async (tab: TabType, forceRefresh = false) => {
     // Return cached data instantly if available and not forcing refresh
     if (!forceRefresh && tabCache.current[tab]) {
       if (tab === 'assigned') setAssignedIssues(tabCache.current[tab]!);
+      else if (tab === 'migration_reporters') setMigrationReporters(tabCache.current[tab]!);
       else setRecentIssues(tabCache.current[tab]!);
       return;
     }
@@ -206,6 +194,10 @@ export default function DashboardPage() {
         const ordered = keys.map(k => issueMap.get(k)).filter(Boolean) as any[];
         setRecentIssues(ordered);
         tabCache.current[tab] = ordered;
+      } else if (tab === 'migration_reporters' && canSeeMigrationReporters) {
+        const data = await api.request<{ reporters: any[] }>('/migration-reporters').catch(() => ({ reporters: [] }));
+        setMigrationReporters(data.reporters || []);
+        tabCache.current[tab] = data.reporters || [];
       } else {
         setRecentIssues([]);
       }
@@ -219,8 +211,7 @@ export default function DashboardPage() {
     { key: 'assigned', label: 'My Assigned Tickets', count: assignedIssues.length },
     { key: 'worked_on', label: 'Worked On' },
     { key: 'viewed', label: 'Viewed' },
-    { key: 'starred', label: 'Starred' },
-    { key: 'boards', label: 'Boards' },
+    ...(canSeeMigrationReporters ? [{ key: 'migration_reporters' as const, label: 'Migration Reporters' }] : []),
   ];
 
   const hour = new Date().getHours();
@@ -314,45 +305,43 @@ export default function DashboardPage() {
           <div className="min-h-[320px]">
             {loading ? (
               <DotLoader className="py-20" />
-            ) : activeTab === 'boards' ? (
-              <div className="divide-y divide-gray-100">
-                {spaces.map(space => (
-                  <Link key={space.id} href={`/spaces/${space.key}/board`}
-                    className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-gray-50">
-                    <SpaceIcon icon={space.icon} spaceKey={space.key} spaceName={space.name} spaceType={space.type} size="md" />
-                    <div className="flex-1">
-                      <p className="text-[13px] font-medium text-gray-900 transition-colors group-hover:text-blue-600">{space.name} Board</p>
-                      <p className="text-[11px] text-gray-500">{space.type === 'scrum' ? 'Scrum' : space.type === 'kanban' ? 'Kanban' : 'Service desk'}</p>
-                    </div>
-                    <LayoutGrid size={14} className="text-gray-300" />
-                  </Link>
-                ))}
-              </div>
-            ) : activeTab === 'starred' ? (
-              (() => {
-                const starredList = spaces.filter(s => starredSpaceIds.includes(s.id));
-                return starredList.length > 0 ? (
-                  <div className="divide-y divide-gray-100">
-                    {starredList.map(space => (
-                      <Link key={space.id} href={`/spaces/${space.key}/board`}
-                        className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-gray-50">
-                        <SpaceIcon icon={space.icon} spaceKey={space.key} spaceName={space.name} spaceType={space.type} size="md" />
-                        <div className="flex-1">
-                          <p className="text-[13px] font-medium text-gray-900 transition-colors group-hover:text-blue-600">{space.name}</p>
-                          <p className="text-[11px] text-gray-500 capitalize">{space.type?.replace('_', ' ')}</p>
-                        </div>
-                        <LayoutGrid size={14} className="text-gray-300" />
-                      </Link>
+            ) : activeTab === 'migration_reporters' ? (
+              migrationReporters.length > 0 ? (
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
+                      <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Reporter</th>
+                      <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Email</th>
+                      <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Migration Tickets</th>
+                      <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Last Activity</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {migrationReporters.map((r, idx) => (
+                      <tr key={r.id || `${r.name}-${idx}`} className="transition-colors hover:bg-gray-50">
+                        <td className="px-4 py-2.5">
+                          <Link
+                            href={r.id ? `/filters?reporter=${r.id}&department=Migration` : '#'}
+                            className={cn('text-[13px] font-medium', r.id ? 'text-blue-600 hover:text-blue-800' : 'text-gray-700')}
+                          >
+                            {r.name}
+                          </Link>
+                        </td>
+                        <td className="px-2 py-2.5 text-[12.5px] text-gray-600">{r.email || '—'}</td>
+                        <td className="px-2 py-2.5 text-[12.5px] text-gray-900 font-medium">{r.ticketCount}</td>
+                        <td className="whitespace-nowrap px-4 py-2.5 text-[11px] text-gray-500">
+                          {r.lastActivity ? timeAgo(r.lastActivity) : '—'}
+                        </td>
+                      </tr>
                     ))}
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center py-16 text-center">
-                    <CheckCircle2 size={32} className="mb-3 text-gray-300" />
-                    <p className="text-[13px] font-medium text-gray-500">No starred items</p>
-                    <p className="mt-1 text-[12px] text-gray-400">Star a space from the sidebar to see it here</p>
-                  </div>
-                );
-              })()
+                  </tbody>
+                </table>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <Users size={32} className="mb-3 text-gray-300" />
+                  <p className="text-[13px] font-medium text-gray-500">No reporters in the Migration queue right now</p>
+                </div>
+              )
             ) : currentIssues.length > 0 ? (
               <table className="w-full">
                 <thead>
