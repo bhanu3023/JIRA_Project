@@ -890,8 +890,11 @@ export function startImapPoller(
         console.log(`[EmailPoller] EWS email: "${subject}" from ${from}`);
         try {
           await onEmail({ from, to, cc: '', subject, body, messageId: msgId, inReplyTo: '', references: '', attachments: [] });
-          const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean } | undefined;
-          if (!webhookResult || webhookResult.ok !== false) {
+          // permanent:true (e.g. "no space found for this address") means retrying
+          // will never succeed — mark it processed instead of re-fetching this same
+          // message (and its attachments) every single poll cycle forever.
+          const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean; permanent?: boolean } | undefined;
+          if (!webhookResult || webhookResult.ok !== false || webhookResult.permanent) {
             processedIds.add(msgId);
           } else {
             console.warn(`[EmailPoller] EWS: webhook failed for "${subject}" — will retry`);
@@ -979,8 +982,11 @@ export function startImapPoller(
         console.log(`[EmailPoller] Graph email: "${subject}" from ${from} to ${to}`);
         try {
           await onEmail({ from, to, cc, subject, body, messageId: msgId, inReplyTo: '', references: '', attachments: [] });
-          const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean } | undefined;
-          if (!webhookResult || webhookResult.ok !== false) {
+          // permanent:true (e.g. "no space found for this address") means retrying
+          // will never succeed — mark it processed instead of re-fetching this same
+          // message (and its attachments) every single poll cycle forever.
+          const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean; permanent?: boolean } | undefined;
+          if (!webhookResult || webhookResult.ok !== false || webhookResult.permanent) {
             processedIds.add(msgId);
           } else {
             console.warn(`[EmailPoller] Graph: webhook failed for "${subject}" — will retry`);
@@ -1105,12 +1111,14 @@ export function startImapPoller(
 
           try {
             await onEmail({ from, to, cc, subject, body, messageId: msgId, inReplyTo, references, attachments });
-            // Only mark as processed if the webhook call SUCCEEDED (returned ok:true).
-            // If webhook failed (space not found, DB error etc.) we do NOT add to processedIds
-            // so the next poll will retry.
+            // Only mark as processed if the webhook call SUCCEEDED (returned ok:true)
+            // OR failed for a permanent reason (e.g. "no space found for this address"
+            // — a deterministic lookup that retrying will never fix). Genuinely
+            // transient failures (DB error etc.) still go unmarked so the next poll
+            // retries them.
             // onEmail calls fetch() internally — we check the response via a shared result slot.
-            const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean } | undefined;
-            const webhookOk = !webhookResult || webhookResult.ok !== false;
+            const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean; permanent?: boolean } | undefined;
+            const webhookOk = !webhookResult || webhookResult.ok !== false || webhookResult.permanent;
             if (webhookOk) {
               processedIds.add(msgId);
               await client.messageFlagsAdd({ uid: msg.uid }, ['\\Seen']).catch(() => {});

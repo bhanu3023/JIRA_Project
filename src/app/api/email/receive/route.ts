@@ -482,8 +482,31 @@ export async function POST(req: NextRequest) {
 
   if (!space) {
     console.error(`[EmailWebhook] Space not found for key "${spaceKey}" (to: ${toAddress})`);
-    (globalThis as any).__lastWebhookResult = { ok: false };
-    return NextResponse.json({ ok: false, reason: `No space found for ${toAddress} (spaceKey: ${spaceKey})` });
+    // This lookup is deterministic on the recipient address — it will not
+    // start succeeding on its own, only if an admin deliberately configures
+    // a matching space later (rare). Marking it processed anyway (instead of
+    // the normal "leave unprocessed, retry next poll" behavior for transient
+    // failures) stops every poller cycle from re-fetching this same message
+    // — attachments and all — forever. Without this, every personal/business
+    // email in a polled inbox that will never map to a ticket space (payslips,
+    // Teams notifications, unrelated threads) got re-processed every single
+    // poll cycle across every mailbox, indefinitely — a continuously growing
+    // background load that was severe enough to stall the whole app.
+    if (messageId) {
+      const mid = messageId.trim();
+      const processedIds: Set<string> = (globalThis as any).__processedMsgIds || new Set();
+      processedIds.add(mid);
+      (globalThis as any).__processedMsgIds = processedIds;
+      try {
+        const { pgPool: pool } = await import('@/lib/pg-pool');
+        await pool.query(
+          `INSERT INTO processed_emails (message_id) VALUES ($1) ON CONFLICT (message_id) DO NOTHING`,
+          [mid]
+        );
+      } catch { /* non-critical */ }
+    }
+    (globalThis as any).__lastWebhookResult = { ok: false, permanent: true };
+    return NextResponse.json({ ok: false, permanent: true, reason: `No space found for ${toAddress} (spaceKey: ${spaceKey})` });
   }
 
   const sk = space.key; // use canonical key from DB
