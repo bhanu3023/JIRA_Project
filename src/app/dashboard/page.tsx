@@ -301,14 +301,17 @@ export default function DashboardPage() {
             ))}
           </div>
 
-          {/* Tab content */}
-          <div className="min-h-[320px]">
+          {/* Tab content — capped height + its own scroll, so a long list
+              (e.g. ~200 Migration reporters) scrolls in place instead of
+              growing the whole page and pushing the header/stats/tabs
+              off-screen as you scroll down. */}
+          <div className="min-h-[320px] max-h-[560px] overflow-y-auto">
             {loading ? (
               <DotLoader className="py-20" />
             ) : activeTab === 'migration_reporters' ? (
               migrationReporters.length > 0 ? (
                 <table className="w-full">
-                  <thead>
+                  <thead className="sticky top-0 z-10">
                     <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
                       <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Reporter</th>
                       <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Email</th>
@@ -344,7 +347,7 @@ export default function DashboardPage() {
               )
             ) : currentIssues.length > 0 ? (
               <table className="w-full">
-                <thead>
+                <thead className="sticky top-0 z-10">
                   <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
                     <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Summary</th>
