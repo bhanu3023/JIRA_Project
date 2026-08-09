@@ -146,6 +146,7 @@ async function userWantsNotif(userId: string, type: string): Promise<boolean> {
       ASSIGNED: 'onAssigned', COMMENTED: 'onCommented', STATUS_CHANGED: 'onStatusChanged',
       MENTIONED: 'onMentioned', WATCHED: 'onWatchedUpdated', CREATED: 'onCreated', UPDATED: 'onUpdated',
       DUE_DATE: 'onAssigned', SLA_BREACH: 'onAssigned', DUPLICATE_ALERT: 'onCreated',
+      SLA_PAUSED: 'onAssigned', SLA_RESUMED: 'onAssigned',
     };
     const prefKey = map[type];
     return prefKey ? (prefs[prefKey] ?? true) : true;
@@ -3186,6 +3187,25 @@ async function _handleJiraPgApi(
               { type: 'DEPT_ASSIGNED', title: `New ticket in ${newDept}: ${key}`, message: `Ticket "${issue.summary}" has arrived in the ${newDept} queue.`, issueKey: key }
             );
           }
+          // SLA pause/resume — distinct from the DEPT_CHANGE/ASSIGNED notices
+          // above, which announce the handoff itself, not the SLA clock state.
+          // Tell whoever was actively working oldDept that their clock just
+          // stopped (pauseDeptSLA already ran above), and tell newDept's
+          // assignee their clock just started (startDeptSLA already ran too).
+          if (oldDept && issue.assignee?.id) {
+            await notifyUsers(
+              [issue.assignee.id],
+              userId,
+              { type: 'SLA_PAUSED', title: `SLA paused for ${key}`, message: `Ticket "${issue.summary}" moved out of ${oldDept} — its SLA clock has been paused.`, issueKey: key }
+            );
+          }
+          if (rrAssigneeId) {
+            await notifyUsers(
+              [rrAssigneeId],
+              userId,
+              { type: 'SLA_RESUMED', title: `SLA running for ${key}`, message: `Ticket "${issue.summary}" has arrived in ${newDept} — its SLA clock is now running.`, issueKey: key }
+            );
+          }
         } catch { /* ignore notification errors */ }
       })();
 
@@ -4854,23 +4874,33 @@ async function _handleJiraPgApi(
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Worked-on tickets Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-  // GET /worked-on Ã¢â‚¬â€ tickets the user passed to another dept or closed
+  // GET /worked-on — tickets the user passed to another dept or closed.
+  // Optional dept filter (e.g. ?dept=Migration) scopes to just that queue's
+  // hand-off/close events, since a ticket that moved through several
+  // departments can show up once per dept it was actually worked in.
   if (path === 'worked-on' && method === 'GET') {
     if (!userId) return json({ issues: [] });
     const targetUserId = url.searchParams.get('userId') || userId;
+    const deptFilter = (url.searchParams.get('dept') || '').trim();
+    const params: any[] = [targetUserId];
+    let deptClause = '';
+    if (deptFilter) {
+      params.push(deptFilter);
+      deptClause = `AND LOWER(w.dept) = LOWER($${params.length})`;
+    }
     const rows = await pool.query(
       `SELECT w.issue_id, w.dept, w.reason, w.worked_at,
-              i.key, i.summary, i.type, i.priority, i.â€statusIdâ€,
+              i.key, i.summary, i.type, i.priority, i."statusId",
               s.name AS status_name, s.category AS status_category, s.color AS status_color,
               sp.key AS space_key, sp.name AS space_name
        FROM user_worked_on_tickets w
        JOIN issues i ON i.id = w.issue_id
-       LEFT JOIN statuses s ON s.id = i.â€statusIdâ€
-       LEFT JOIN spaces sp ON sp.id = i.â€spaceIdâ€
-       WHERE w.user_id = $1
+       LEFT JOIN statuses s ON s.id = i."statusId"
+       LEFT JOIN spaces sp ON sp.id = i."spaceId"
+       WHERE w.user_id = $1 ${deptClause}
        ORDER BY w.worked_at DESC
        LIMIT 100`,
-      [targetUserId]
+      params
     );
     const issues = rows.rows.map((r: any) => ({
       id: r.issue_id,
