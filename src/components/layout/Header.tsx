@@ -290,7 +290,7 @@ export default function Header() {
           {showNotifications && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)} />
-              <div className="absolute right-0 top-full z-50 mt-2 max-h-96 w-80 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+              <div className="absolute right-0 top-full z-50 mt-2 max-h-96 w-80 snap-y snap-proximity overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
                 <div className="sticky top-0 flex items-center justify-between rounded-t-lg border-b border-gray-200 bg-white px-4 py-3">
                   <span className="text-[15px] font-semibold text-jira-dark">Notifications</span>
                   <button
@@ -309,7 +309,12 @@ export default function Header() {
                   notifications.slice(0, 50).map((n) => (
                     <div
                       key={n.id}
-                      className={`group relative border-b border-gray-100 px-4 py-3 transition-colors hover:bg-gray-50 ${!n.isRead ? 'bg-blue-50/50' : ''}`}
+                      // snap-start + scroll-mt so scrolling settles on a full item
+                      // instead of stopping mid-item with its title tucked behind
+                      // the sticky "Notifications" header above — scroll-mt offsets
+                      // the snap point by the header's own height so the item's
+                      // title lands just below it, not underneath it.
+                      className={`group relative snap-start scroll-mt-12 border-b border-gray-100 px-4 py-3 transition-colors hover:bg-gray-50 ${!n.isRead ? 'bg-blue-50/50' : ''}`}
                     >
                       <div className="flex items-start gap-2">
                         {/* Blue dot for unread */}
