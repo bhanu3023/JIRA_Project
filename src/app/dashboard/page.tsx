@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -220,6 +220,18 @@ export default function DashboardPage() {
 
   const currentIssues = activeTab === 'assigned' ? assignedIssues : recentIssues;
 
+  // Worked On mixes hand-offs across every department a ticket passed
+  // through — filter down to just one queue's entries (e.g. only Migration
+  // or only Dev) instead of always showing everything at once.
+  const [workedOnDeptFilter, setWorkedOnDeptFilter] = useState('');
+  const workedOnDepts = useMemo(
+    () => Array.from(new Set(recentIssues.map((i: any) => i.dept).filter(Boolean))).sort(),
+    [recentIssues],
+  );
+  const displayedIssues = (activeTab === 'worked_on' && workedOnDeptFilter)
+    ? currentIssues.filter((i: any) => (i.dept || '').toLowerCase() === workedOnDeptFilter.toLowerCase())
+    : currentIssues;
+
   const tabs: { key: TabType; label: string; count?: number }[] = [
     { key: 'assigned', label: 'My Assigned Tickets', count: assignedIssues.length },
     { key: 'worked_on', label: 'Worked On' },
@@ -296,22 +308,39 @@ export default function DashboardPage() {
           )}
         >
           {/* Tabs */}
-          <div className="flex items-center overflow-x-auto border-b border-gray-200 bg-gray-50 px-4">
-            {tabs.map(tab => (
-              <button key={tab.key} onClick={() => setActiveTab(tab.key)}
-                className={`whitespace-nowrap border-b-2 px-3 py-3 text-[12.5px] font-medium transition-colors ${
-                  activeTab === tab.key
-                    ? 'border-blue-600 text-jira-dark'
-                    : 'border-transparent text-gray-500 hover:text-gray-900'
-                }`}>
-                {tab.label}
-                {tab.count !== undefined && (
-                  <span className={`ml-1.5 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold ${
-                    activeTab === tab.key ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-600'
-                  }`}>{tab.count}</span>
-                )}
-              </button>
-            ))}
+          <div className="flex items-center justify-between overflow-x-auto border-b border-gray-200 bg-gray-50 px-4">
+            <div className="flex items-center">
+              {tabs.map(tab => (
+                <button key={tab.key} onClick={() => setActiveTab(tab.key)}
+                  className={`whitespace-nowrap border-b-2 px-3 py-3 text-[12.5px] font-medium transition-colors ${
+                    activeTab === tab.key
+                      ? 'border-blue-600 text-jira-dark'
+                      : 'border-transparent text-gray-500 hover:text-gray-900'
+                  }`}>
+                  {tab.label}
+                  {tab.count !== undefined && (
+                    <span className={`ml-1.5 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold ${
+                      activeTab === tab.key ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-600'
+                    }`}>{tab.count}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            {/* Worked On mixes every department a ticket passed through into one
+                list — let it be scoped down to just one queue (e.g. Migration
+                or Dev) instead of always showing the mix. */}
+            {activeTab === 'worked_on' && workedOnDepts.length > 0 && (
+              <select
+                value={workedOnDeptFilter}
+                onChange={(e) => setWorkedOnDeptFilter(e.target.value)}
+                className="flex-shrink-0 rounded-md border border-gray-300 bg-white px-2 py-1.5 text-[12px] font-medium text-gray-700 outline-none focus:border-blue-500"
+              >
+                <option value="">All queues</option>
+                {workedOnDepts.map((d: string) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            )}
           </div>
 
           {/* Tab content — capped height + its own scroll, so a long list
@@ -358,19 +387,22 @@ export default function DashboardPage() {
                   <p className="text-[13px] font-medium text-gray-500">No reporters in the Migration queue right now</p>
                 </div>
               )
-            ) : currentIssues.length > 0 ? (
+            ) : displayedIssues.length > 0 ? (
               <table className="w-full">
                 <thead className="sticky top-0 z-10">
                   <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
                     <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Summary</th>
+                    {activeTab === 'worked_on' && (
+                      <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Queue</th>
+                    )}
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Status</th>
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-10">P</th>
                     <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">Updated</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {currentIssues.slice(0, 12).map(issue => {
+                  {displayedIssues.slice(0, 12).map(issue => {
                     return (
                       <tr key={issue.id} className="group transition-colors hover:bg-gray-50">
                         <td className="px-4 py-2.5">
@@ -386,6 +418,9 @@ export default function DashboardPage() {
                             {issue.summary}
                           </Link>
                         </td>
+                        {activeTab === 'worked_on' && (
+                          <td className="px-2 py-2.5 text-[11.5px] text-gray-600">{(issue as any).dept || '—'}</td>
+                        )}
                         <td className="px-2 py-2.5">
                           <span className="text-[11px] font-medium text-white px-2 py-0.5 rounded whitespace-nowrap"
                             style={{ backgroundColor: issue.status ? resolveStatusColor(issue.status) : '#6B7280' }}>
