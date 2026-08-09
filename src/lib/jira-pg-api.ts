@@ -3035,7 +3035,16 @@ async function _handleJiraPgApi(
           avatarUrl: avatarRef(issue.assignee.id, (issue.assignee as any).avatarUrl),
         };
       }
-      deptAssignees[newDept] = null; // new dept starts unassigned
+      // Deliberately NOT resetting deptAssignees[newDept] here. It already
+      // holds whatever was saved from the LAST time this ticket was in
+      // newDept (if ever) — wiping it right before the restore-or-assign
+      // check below made that check always see null, so a ticket bouncing
+      // Queue2 -> Queue1 -> Queue2 always got a fresh round-robin pick in
+      // Queue2 instead of going back to the same person who had it there
+      // the first time. Leaving it untouched lets that check actually see
+      // prior history; a dept that's never been visited is simply absent
+      // from the map (undefined), which the check below already treats the
+      // same as null.
 
       // Per-dept statuses
       const existingStatuses = await pool.query(`SELECT dept_statuses FROM issues WHERE key=$1`, [key]);
