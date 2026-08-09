@@ -541,7 +541,7 @@ async function resolveUserId(auth: string | null, reqIp?: string): Promise<strin
   if (t.startsWith('dev.')) {
     try {
       const payload = JSON.parse(Buffer.from(t.slice(4), 'base64url').toString('utf8')) as { sub: string };
-      console.warn('[Security] Legacy unsigned token used Ã¢â‚¬â€ user should re-login');
+      console.warn('[Security] Legacy unsigned token used — user should re-login');
       return payload.sub || null;
     } catch { return null; }
   }
@@ -2913,13 +2913,13 @@ async function _handleJiraPgApi(
       const prevResolved = await findPreviouslyResolvedSimilar(sp.id, issue.id, issue.summary);
       if (prevResolved.length > 0) {
         const newKey = (issue as any).cf_key || issue.key;
-        const refs = prevResolved.map((s) => `${s.cf_key || s.key} Ã¢â‚¬â€ ${s.summary.substring(0, 80)}`).join('\nÃ¢â‚¬Â¢ ');
+        const refs = prevResolved.map((s) => `${s.cf_key || s.key} — ${s.summary.substring(0, 80)}`).join('\n• ');
         const leadIds = await getSpaceLeadUserIds(sp.id, issueDept);
         const recipients = [issue.reporterId, issue.assigneeId, ...leadIds];
         await notifyUsers(recipients, null, {
           type: 'DUPLICATE_ALERT',
           title: `Recurring issue: ${newKey}`,
-          message: `This issue was previously reported and resolved:\nÃ¢â‚¬Â¢ ${refs}\n\nPlease check if the fix is still in place.`,
+          message: `This issue was previously reported and resolved:\n• ${refs}\n\nPlease check if the fix is still in place.`,
           issueKey: newKey,
         });
       }
@@ -3370,7 +3370,7 @@ async function _handleJiraPgApi(
       data: {
         id: rid(), issueId: issue.id, field: 'department',
         oldValue: (issue as any).current_department || 'None',
-        newValue: `Passed to ${newDept} Ã¢â€ ' ${targetSpace.key} (${newKey})`,
+        newValue: `Passed to ${newDept} → ${targetSpace.key} (${newKey})`,
         authorName, createdAt: new Date(),
       },
     });
@@ -4830,7 +4830,7 @@ async function _handleJiraPgApi(
         try {
           await (db as any).workflowTransition.upsert({
             where: { spaceId_fromStatusId_toStatusId: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id } },
-            create: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id, name: `Ã¢â€ ' ${to.name}` },
+            create: { spaceId: space.id, fromStatusId: from.id, toStatusId: to.id, name: `→ ${to.name}` },
             update: {},
           });
           created++;
