@@ -25,7 +25,20 @@ function useCountUp(target: number, duration = 1200) {
     };
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(tick);
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+    // requestAnimationFrame is throttled — and can be paused indefinitely —
+    // for a tab that isn't actively visible/focused. A stat card landing here
+    // right as the page loads in a background tab (a very ordinary thing to
+    // happen: switching away right after clicking a link, an occluded window,
+    // etc.) meant rAF might never fire even once, permanently stuck at 0 with
+    // no way to recover since the effect never re-fires once mounted.
+    // setTimeout still fires (throttled to at most ~1/sec in background tabs,
+    // but never fully suspended) so this guarantees the real value eventually
+    // lands regardless of whether the animation itself ever got to run.
+    const fallback = setTimeout(() => setDisplay(target), duration + 100);
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      clearTimeout(fallback);
+    };
   }, [target, duration]);
 
   return display;
