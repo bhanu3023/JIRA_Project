@@ -805,7 +805,17 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
       ).catch(() => ({ rows: [] as any[] })), // notifications table may not have issueKey column
     ]);
     const isNotified = notifRes.rows.length > 0;
-    const allPolicies = res.rows;
+    return computeSLAInstancesPure(issue, res.rows, isNotified);
+  } catch { return []; }
+}
+
+// Pure computation half of computeIssueSLAsFromDb, split out so a caller that
+// needs this for MANY issues at once (my-dashboard) can batch-fetch policies
+// and notification flags ONCE per space/issue-set up front, instead of
+// computeIssueSLAsFromDb's own two-query-per-issue fetch repeating the exact
+// same "SLA policies for this space" lookup once per issue in that space.
+function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean): any[] {
+  try {
     if (!allPolicies.length) return [];
 
     // Only apply policies that target this issue's dept (or have no dept restriction)
@@ -5021,8 +5031,39 @@ async function _handleJiraPgApi(
     let slaTrackedCount = 0;
     let slaBreachedCount = 0;
     const slaStatus = { withinSla: 0, nearBreach: 0, breachingSoon: 0, breached: 0 };
+    // Batch what computeIssueSLAsFromDb would otherwise fetch once PER ISSUE —
+    // for a user with dozens of open tickets (almost always concentrated in
+    // a small handful of spaces) that was dozens of sequential round trips
+    // for policies that turn out identical within each space, plus one more
+    // per issue for its notification flag. Two queries total instead.
+    const openSpaceIds = Array.from(new Set(openIssues.map((r: any) => r.spaceId).filter(Boolean)));
+    const policiesBySpace: Record<string, any[]> = {};
+    if (openSpaceIds.length) {
+      const policyRows = await pool.query(
+        `SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`,
+        [openSpaceIds]
+      );
+      for (const p of policyRows.rows) {
+        (policiesBySpace[p.spaceId] ??= []).push(p);
+      }
+    }
+    const openIssueKeys = openIssues.map((r: any) => r.cf_key || r.key).filter(Boolean);
+    const notifiedKeys = new Set<string>();
+    if (openIssueKeys.length) {
+      try {
+        const notifRows = await pool.query(
+          `SELECT DISTINCT "issueKey" FROM notifications WHERE "issueKey" = ANY($1::text[]) AND type = 'SLA_BREACH'`,
+          [openIssueKeys]
+        );
+        for (const nr of notifRows.rows) notifiedKeys.add(nr.issueKey);
+      } catch { /* notifications table may not have issueKey column */ }
+    }
     for (const r of openIssues) {
-      const instances = await computeIssueSLAsFromDb({ ...r, status: { name: r.status_name, category: r.status_category } });
+      const instances = computeSLAInstancesPure(
+        { ...r, status: { name: r.status_name, category: r.status_category } },
+        policiesBySpace[r.spaceId] || [],
+        notifiedKeys.has(r.cf_key || r.key),
+      );
       if (!instances.length) continue;
       // Most urgent applicable policy: an already-breached one first, else the soonest due.
       const primary = instances.slice().sort((a: any, b: any) => {
