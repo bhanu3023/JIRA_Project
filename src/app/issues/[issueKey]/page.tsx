@@ -3670,7 +3670,14 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
 }) {
   const router = useRouter();
   const [deptOptions, setDeptOptions] = React.useState<{ name: string; boardKey: string }[]>([]);
-  const [spaceAssigned, setSpaceAssigned] = React.useState<boolean | null>(null);
+  // A ticket that already has a department is itself proof this board uses
+  // department routing — show it immediately instead of waiting on the
+  // separate custom-fields/rr-config fetch below to confirm that. Previously
+  // this always started at null (hides the field) regardless of the ticket's
+  // own data, so any slowness or failure in that other fetch — unrelated to
+  // whether the field should show at all — left Department invisible on
+  // every queue, not just Migration, until the fetch happened to resolve.
+  const [spaceAssigned, setSpaceAssigned] = React.useState<boolean | null>(currentDepartment ? true : null);
   const [showDrop, setShowDrop] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [optimisticDept, setOptimisticDept] = React.useState<string | null>(null);
@@ -3693,6 +3700,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
       fetch(`/api/custom-fields`, { headers }).then(r => r.ok ? r.json() : null),
     ]).then(([rrRes, cfRes]) => {
       const combined: { name: string; boardKey: string }[] = [];
+      let allDeptFieldsCount = 0;
 
       // 1. From Department Routing custom fields (options encoded as "DeptName|boardKey|emp1,emp2")
       if (cfRes.status === 'fulfilled' && cfRes.value) {
@@ -3700,6 +3708,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
         const allDeptFields = fields.filter((f: any) =>
           f.fieldType === 'department-routing' || f.type === 'Department Routing'
         );
+        allDeptFieldsCount = allDeptFields.length;
         const deptFields = allDeptFields.filter((f: any) => {
           // Only show if this space is assigned to the field (Manage boards checkbox)
           if (spaceId) {
@@ -3722,6 +3731,14 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
             }
           }
         }
+      }
+
+      // Covers both "no department-routing custom field exists anywhere" and
+      // "the custom-fields fetch itself failed" — either way we still know
+      // the answer from the ticket's own data: if it already has a
+      // department, this board obviously uses department routing.
+      if (allDeptFieldsCount === 0) {
+        setSpaceAssigned(prev => prev === true ? true : Boolean(currentDepartment));
       }
 
       // 2. From RR config — add any missing depts, and clear boardKey for existing ones
