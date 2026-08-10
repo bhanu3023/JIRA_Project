@@ -884,7 +884,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
       d.agents?.some((a: any) => a.userId === userId && a.isShiftLead)
     );
 
-  // Load custom queues from DB (migrate from localStorage if DB is empty)
+  // Load custom queues from DB.
   useEffect(() => {
     if (!spaceKey) return;
     api.request<any[]>(`custom-queues/${spaceKey}`).then((q) => {
@@ -892,7 +892,16 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
         setCustomQueues(q);
         setIsDeptQueue(true);
       } else {
-        // DB is empty — check localStorage and migrate
+        // Empty response here isn't necessarily "this space has never had
+        // queues" — the GET filters to only the CALLER's own queues for
+        // non-admins/managers, so a member of zero queues legitimately gets
+        // back []. This used to treat that the same as "DB truly empty" and,
+        // if this browser's localStorage had ANY cached queues from an
+        // earlier visit (even a stale/incorrect snapshot), silently PUT that
+        // stale data back to the server as the new "real" list — permanently
+        // overwriting whatever the actual current data was, from a passive
+        // page load with no explicit user action at all. Only ever display
+        // the cached fallback locally now; never write it back automatically.
         try {
           const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
           if (stored) {
@@ -900,8 +909,6 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
             if (Array.isArray(local) && local.length > 0) {
               setCustomQueues(local);
               setIsDeptQueue(true);
-              // Push to DB so server has them too
-              api.request(`custom-queues/${spaceKey}`, { method: 'PUT', body: JSON.stringify(local) }).catch(() => {});
             }
           }
         } catch {}
