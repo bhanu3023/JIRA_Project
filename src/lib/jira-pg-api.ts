@@ -47,6 +47,13 @@ pool.query(`CREATE TABLE IF NOT EXISTS issue_dept_transitions (
   to_dept TEXT NOT NULL,
   moved_at TIMESTAMPTZ DEFAULT NOW()
 )`).catch(() => {});
+// Records who moved a ticket out of a dept — the worked-on reconstruction on
+// ticket close falls back to this when no assignee was ever set in that dept
+// (e.g. people just changing status without formally "assigning" themselves).
+// Code elsewhere had assumed this column existed for a while; every insert/select
+// against it was silently failing (wrapped in a catch), so that fallback never
+// actually worked and depts with no formal assignee dropped out of worked-on.
+pool.query(`ALTER TABLE issue_dept_transitions ADD COLUMN IF NOT EXISTS moved_by TEXT`).catch(() => {});
 
 // Track per-user worked-on history
 pool.query(`CREATE TABLE IF NOT EXISTS user_worked_on_tickets (
@@ -3334,8 +3341,8 @@ async function _handleJiraPgApi(
         }
         // Always log transition (from_dept = '' means ticket had no prior dept)
         await pool.query(
-          `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept) VALUES ($1, $2, $3, $4)`,
-          [issue.id, issue.spaceId, oldDept || '', newDept]
+          `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept, moved_by) VALUES ($1, $2, $3, $4, $5)`,
+          [issue.id, issue.spaceId, oldDept || '', newDept, userId || null]
         );
         // Record worked-on for whoever handled this ticket in oldDept
         if (oldDept && issue.assigneeId) {
