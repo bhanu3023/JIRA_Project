@@ -2440,15 +2440,95 @@ async function _handleJiraPgApi(
             )
           )`;
 
+          // Same active filters (assignee, type, priority, status, project manager,
+          // the custom text fields like Product Type/Combination, and the
+          // Created/Updated date range) that the dept-scoped "All Tickets" branch
+          // applies — this Sent/Watching branch never applied any of them, so
+          // picking a filter here silently had zero effect no matter the field.
+          const sentExtraClauses: string[] = [];
+          const sentExtraParams: any[] = [];
+          let sentParamIdx = 3;
+          if (assignees) {
+            const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
+            const resolvedIds = await resolveUserIds(ids);
+            sentExtraClauses.push(resolvedIds.length ? `i."assigneeId" = ANY($${sentParamIdx}::text[])` : '1=0');
+            if (resolvedIds.length) { sentExtraParams.push(resolvedIds); sentParamIdx++; }
+          }
+          if (reporters) {
+            const ids = reporters.split(',').map((x) => x.trim()).filter(Boolean);
+            const resolvedIds = await resolveUserIds(ids);
+            sentExtraClauses.push(resolvedIds.length ? `i."reporterId" = ANY($${sentParamIdx}::text[])` : '1=0');
+            if (resolvedIds.length) { sentExtraParams.push(resolvedIds); sentParamIdx++; }
+          }
+          if (typeParam) {
+            sentExtraClauses.push(`LOWER(i.type) = ANY($${sentParamIdx}::text[])`);
+            sentExtraParams.push(typeParam.split(',').map((t) => t.trim().toLowerCase()));
+            sentParamIdx++;
+          }
+          if (priorityParam) {
+            sentExtraClauses.push(`LOWER(i.priority) = ANY($${sentParamIdx}::text[])`);
+            sentExtraParams.push(priorityParam.split(',').map((p) => p.trim().toLowerCase()));
+            sentParamIdx++;
+          }
+          if (statusParam) {
+            const names = statusParam.split(',').map((s2) => s2.trim().toLowerCase());
+            sentExtraClauses.push(`i."statusId" IN (SELECT id FROM statuses WHERE LOWER(name) = ANY($${sentParamIdx}::text[]))`);
+            sentExtraParams.push(names);
+            sentParamIdx++;
+          }
+          if (projectManagerParam) {
+            const pmVals = projectManagerParam.split('|||').map((v) => v.trim()).filter(Boolean);
+            if (pmVals.length) {
+              sentExtraClauses.push(`i."projectManager" ILIKE ANY($${sentParamIdx}::text[])`);
+              sentExtraParams.push(pmVals.map((v) => `%${v}%`));
+              sentParamIdx++;
+            }
+          }
+          const sentSimpleTextFields: [string | null, string][] = [
+            [productTypeParam, 'productType'],
+            [combinationParam, 'combination'],
+            [workTypeParam, 'workType'],
+            [testEnvParam, 'testEnvironment'],
+            [rootCauseParam, 'rootCause'],
+            [fixDescParam, 'fixDescription'],
+            [customerNameParam, 'customerName'],
+            [clientNameParam, 'clientName'],
+            [manageClientParam, 'manageClientName'],
+            [customerPlanParam, 'customerPlan'],
+          ];
+          for (const [param, col] of sentSimpleTextFields) {
+            if (!param) continue;
+            const vals = param.split(',').map((v) => v.trim()).filter(Boolean);
+            if (!vals.length) continue;
+            sentExtraClauses.push(`i."${col}" = ANY($${sentParamIdx}::text[])`);
+            sentExtraParams.push(vals);
+            sentParamIdx++;
+          }
+          if (createdRange) {
+            const { from, to } = parseDateRange(createdRange);
+            sentExtraClauses.push(`i."createdAt" >= $${sentParamIdx} AND i."createdAt" <= $${sentParamIdx + 1}`);
+            sentExtraParams.push(from, to);
+            sentParamIdx += 2;
+          }
+          if (updatedRange) {
+            const { from, to } = parseDateRange(updatedRange);
+            sentExtraClauses.push(`i."updatedAt" >= $${sentParamIdx} AND i."updatedAt" <= $${sentParamIdx + 1}`);
+            sentExtraParams.push(from, to);
+            sentParamIdx += 2;
+          }
+          const sentExtraSql = sentExtraClauses.map((c) => `AND ${c}`).join('\n');
+
           let sentDeptTotal = 0;
           try {
+            const countParams: any[] = [allSpaceIds, sentDeptParam, ...sentExtraParams];
             const countRow = await pool.query(
               `SELECT COUNT(DISTINCT i.id)::int AS cnt
                FROM issues i
                WHERE i."spaceId" = ANY($1::text[])
                  AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
-                 AND ${sentExistsClause}`,
-              [allSpaceIds, sentDeptParam]
+                 AND ${sentExistsClause}
+               ${sentExtraSql}`,
+              countParams
             );
             sentDeptTotal = countRow.rows[0]?.cnt ?? 0;
           } catch (countErr: any) {
@@ -2456,6 +2536,10 @@ async function _handleJiraPgApi(
             throw countErr;
           }
 
+          const rowParams: any[] = [allSpaceIds, sentDeptParam, ...sentExtraParams];
+          const limitIdx = rowParams.length + 1;
+          const offsetIdx = rowParams.length + 2;
+          rowParams.push(limit, (page - 1) * limit);
           const rows = await pool.query(
             `SELECT DISTINCT ON (i.id) i.*, sp.key AS space_key,
                     s.name AS status_name, s.category AS status_category, s.color AS status_color,
@@ -2469,9 +2553,10 @@ async function _handleJiraPgApi(
              WHERE i."spaceId" = ANY($1::text[])
                AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
                AND ${sentExistsClause}
+             ${sentExtraSql}
              ORDER BY i.id, i."updatedAt" DESC, i."createdAt" DESC
-             LIMIT $3 OFFSET $4`,
-            [allSpaceIds, sentDeptParam, limit, (page - 1) * limit]
+             LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+            rowParams
           );
           // Load comments for all returned issues
           const issueIds = rows.rows.map((r: any) => r.id);
@@ -2517,6 +2602,11 @@ async function _handleJiraPgApi(
               id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: (row.description || '').slice(0, 500),
               priority: row.priority, type: row.type, labels: row.labels,
               createdAt: row.createdAt, updatedAt: row.updatedAt,
+              workType: row.workType, productType: row.productType, combination: row.combination,
+              testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
+              customerName: row.customerName, clientName: row.clientName,
+              manageClientName: row.manageClientName, customerPlan: row.customerPlan,
+              projectManager: row.projectManager,
               current_department: row.current_department,
               original_dept: row.original_dept,
               dept_sla_log: row.dept_sla_log || {},
