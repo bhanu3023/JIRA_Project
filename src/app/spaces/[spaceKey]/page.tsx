@@ -219,12 +219,17 @@ function SpaceDetailContent() {
   // list instead of the queue-picker landing page.
   useEffect(() => {
     if (!spaceKey || queueFilter !== 'queues') return;
-    if (customQueuesLoadedFor !== spaceKey) return;
     if (currentSpace?.key !== spaceKey) return;
-    const isDeptQueueBoard = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
-    if (!isDeptQueueBoard) {
-      router.replace(`/spaces/${spaceKey}?queue=all-open`);
+    // Only dept_queue boards can have custom queues, so a non-dept_queue board
+    // can redirect the moment currentSpace resolves — no need to also wait on
+    // customQueuesLoadedFor first. That extra wait was showing its own "Queues"
+    // spinner in between the initial page spinner and the tickets-list spinner,
+    // i.e. 3 loading states in a row for what's really just one board load.
+    if (currentSpace?.type === 'dept_queue') {
+      if (customQueuesLoadedFor !== spaceKey) return;
+      if (allCustomQueues.length > 0) return;
     }
+    router.replace(`/spaces/${spaceKey}?queue=all-open`);
   }, [spaceKey, queueFilter, customQueuesLoadedFor, currentSpace?.key, currentSpace?.type, allCustomQueues.length, router]);
 
   // Extract stable primitives from the matched queue so activeCustomQueue only gets a new
@@ -1373,8 +1378,12 @@ function SpaceDetailContent() {
         // premature (and usually wrong) conclusion that flashed for however
         // long the fetch took, right before the redirect effect above sent
         // plain boards on to the tickets list. Show a spinner instead of a
-        // false negative while that's still in flight.
-        if (customQueuesLoadedFor !== spaceKey) {
+        // false negative while that's still in flight. Once currentSpace is
+        // known to be a non-dept_queue board, the redirect effect above is
+        // about to fire on the next tick regardless of customQueuesLoadedFor
+        // — keep showing the spinner rather than painting this landing page
+        // for the one render it'd otherwise flash on screen.
+        if (customQueuesLoadedFor !== spaceKey || currentSpace?.type !== 'dept_queue') {
           return (
             <div className="flex-1 flex items-center justify-center">
               <DotLoader className="h-64" />

@@ -270,7 +270,15 @@ export default function MyDashboardPage() {
   }, [viewedUserId, dateRangeKey]);
 
   if (loading || !data) {
-    return <DotLoader className="py-24" />;
+    // py-24 was just top/bottom padding on a small inline element — it sat
+    // near the top of the page instead of centered in the actual available
+    // height, leaving a large, obviously-empty area below it. min-h-full +
+    // flex centers it in the full height of the content area instead.
+    return (
+      <div className="flex min-h-full items-center justify-center">
+        <DotLoader />
+      </div>
+    );
   }
 
   const cards = data.cards || {};
