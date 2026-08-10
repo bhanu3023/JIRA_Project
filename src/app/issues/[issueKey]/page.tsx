@@ -31,6 +31,18 @@ const DEFAULT_QUEUE_STATUSES = [
   { id: 'qst_default_resolved', name: 'Resolved', category: 'done', color: '#10B981' },
 ];
 
+// History's comment preview shows the raw stored comment body — which is
+// HTML (mentions are `<span class="mention">@Name</span>`, plus whatever
+// formatting the rich text editor added) — as plain text, so it needs
+// stripping down to just the readable text first or it prints the markup
+// literally (e.g. `<span class="mention" data-userid="...">`).
+function stripHtmlToText(html: string): string {
+  if (typeof document === 'undefined') return html.replace(/<[^>]*>/g, '');
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  return div.textContent || '';
+}
+
 export default function IssueDetailPage() {
   const params = useParams();
   // Normalize key: strip Jira sub-issue colon suffix (e.g. L2B-12718:1 → L2B-12718)
@@ -2070,9 +2082,12 @@ export default function IssueDetailPage() {
                               </div>
                             )}
                             {/* Comment preview */}
-                            {a.field === 'comment' && a.newValue && (
-                              <div className="text-[12px] text-gray-500 italic truncate max-w-sm">"{a.newValue.slice(0, 120)}{a.newValue.length > 120 ? '…' : ''}"</div>
-                            )}
+                            {a.field === 'comment' && a.newValue && (() => {
+                              const plain = stripHtmlToText(a.newValue).trim();
+                              return (
+                                <div className="text-[12px] text-gray-500 italic truncate max-w-sm">"{plain.slice(0, 120)}{plain.length > 120 ? '…' : ''}"</div>
+                              );
+                            })()}
                           </div>
                         </div>
                       ))}
