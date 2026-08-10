@@ -2633,6 +2633,33 @@ async function _handleJiraPgApi(
           deptParamIdx++;
         }
       }
+      // The custom text-field filters (Product Type, Combination, etc.) were never
+      // layered into this dept-scoped branch at all — every per-department queue view
+      // (Dev, Migration, QA, Infra, ...) runs through here, so selecting any of these
+      // filters while viewing a department queue silently had zero effect on the
+      // results, no matter which value was picked. Exact/IN match, same as
+      // applyMultiField in the general (non-dept) branch — these values come from a
+      // DB-driven dropdown so they match exactly.
+      const deptSimpleTextFields: [string | null, string][] = [
+        [productTypeParam, 'productType'],
+        [combinationParam, 'combination'],
+        [workTypeParam, 'workType'],
+        [testEnvParam, 'testEnvironment'],
+        [rootCauseParam, 'rootCause'],
+        [fixDescParam, 'fixDescription'],
+        [customerNameParam, 'customerName'],
+        [clientNameParam, 'clientName'],
+        [manageClientParam, 'manageClientName'],
+        [customerPlanParam, 'customerPlan'],
+      ];
+      for (const [param, col] of deptSimpleTextFields) {
+        if (!param) continue;
+        const vals = param.split(',').map((v) => v.trim()).filter(Boolean);
+        if (!vals.length) continue;
+        deptExtraClauses.push(`i."${col}" = ANY($${deptParamIdx}::text[])`);
+        deptExtraParams.push(vals);
+        deptParamIdx++;
+      }
       const deptExtraSql = deptExtraClauses.map((c) => `AND ${c}`).join('\n');
 
       try {
@@ -2689,6 +2716,11 @@ async function _handleJiraPgApi(
           priority: row.priority, type: row.type, labels: row.labels,
           createdAt: row.createdAt, updatedAt: row.updatedAt,
           spaceId: row.spaceId, dueDate: row.dueDate,
+          workType: row.workType, productType: row.productType, combination: row.combination,
+          testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
+          customerName: row.customerName, clientName: row.clientName,
+          manageClientName: row.manageClientName, customerPlan: row.customerPlan,
+          projectManager: row.projectManager,
           current_department: row.current_department,
           dept_statuses: row.dept_statuses || {},
           dept_assignees: row.dept_assignees || {},
