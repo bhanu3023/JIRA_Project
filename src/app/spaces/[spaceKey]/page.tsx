@@ -524,10 +524,14 @@ function SpaceDetailContent() {
             params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
-          // Dept sub-queue: assigned to me in dept
+          // Dept sub-queue: assigned to me in dept — includeHistory keeps a
+          // ticket showing here (with its real current status/department)
+          // after it's resolved or handed to another department, instead of
+          // it just disappearing once it's no longer open-and-assigned-to-me.
           if (queueFilter === 'dept_assigned') {
             if (user?.id) params.assignee = user.id;
             params.excludeDone = 'true';
+            params.includeHistory = 'true';
             params.page = String(currentPage);
             params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;

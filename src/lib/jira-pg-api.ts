@@ -2629,6 +2629,14 @@ async function _handleJiraPgApi(
 
     // Filter by dept param if provided — use raw SQL count so total is accurate
     const deptParam = url.searchParams.get('dept');
+    // "Assigned to me" under a department: without this, a ticket vanished from
+    // that list the moment it was resolved (excludeDone) or handed to another
+    // department (current_department no longer matches) — even though the user
+    // was the one who actually worked it. When set, tickets this user has a
+    // user_worked_on_tickets record for in this dept are included too, so a
+    // resolved/moved-on ticket still shows here instead of disappearing without
+    // a trace.
+    const includeHistoryParam = url.searchParams.get('includeHistory') === 'true';
     const deptCallerIsPrivileged = isAdmin || isManager(currentUser?.role);
     if (deptParam && spaceKey && !deptCallerIsPrivileged && await isUserSuspendedFromQueue(spaceKey, deptParam, userId)) {
       return json({ error: 'Your access to this queue has been suspended.' }, 403);
@@ -2693,7 +2701,21 @@ async function _handleJiraPgApi(
       const deptExtraClauses: string[] = [];
       const deptExtraParams: any[] = [];
       let deptParamIdx = deptSearchParam ? 4 : 3;
-      if (assignees) {
+      // When includeHistoryParam is set, the assignee match is folded into
+      // deptDeptMatchSql below (current dept OR ever-worked-on-in-this-dept)
+      // instead of a plain required AND clause here — a moved-on ticket's
+      // current assigneeId is no longer this user, so requiring it here would
+      // filter the historical rows right back out.
+      let historyAssigneeIdx: number | null = null;
+      if (includeHistoryParam && assignees) {
+        const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
+        const resolvedIds = await resolveUserIds(ids);
+        if (resolvedIds.length) {
+          historyAssigneeIdx = deptParamIdx;
+          deptExtraParams.push(resolvedIds);
+          deptParamIdx++;
+        }
+      } else if (assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         const resolvedIds = await resolveUserIds(ids);
         deptExtraClauses.push(resolvedIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0');
@@ -2775,6 +2797,21 @@ async function _handleJiraPgApi(
       }
       const deptExtraSql = deptExtraClauses.map((c) => `AND ${c}`).join('\n');
 
+      const deptDoneClause = deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : '';
+      // Plain case: ticket must currently be in this dept (and, if requested,
+      // currently open). History case: ALSO match if this user has ever been
+      // credited with working this ticket while it was in this dept — covers
+      // it having since been resolved or handed to another department.
+      const deptDeptMatchSql = historyAssigneeIdx
+        ? `(
+            (LOWER(i.current_department) = LOWER($2) AND i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) ${deptDoneClause})
+            OR EXISTS (
+              SELECT 1 FROM user_worked_on_tickets w
+              WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2)
+            )
+          )`
+        : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
+
       try {
         const countParams: any[] = [allSpaceIds, deptParam];
         if (deptSearchParam) countParams.push(deptSearchParam);
@@ -2784,8 +2821,7 @@ async function _handleJiraPgApi(
            FROM issues i
            LEFT JOIN statuses s ON i."statusId" = s.id
            WHERE i."spaceId" = ANY($1::text[])
-             AND LOWER(i.current_department) = LOWER($2)
-           ${deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : ''}
+             AND ${deptDeptMatchSql}
            ${deptSearchClause}
            ${deptExtraSql}`,
           countParams
@@ -2812,8 +2848,7 @@ async function _handleJiraPgApi(
            LEFT JOIN users a ON i."assigneeId" = a.id
            LEFT JOIN users r ON i."reporterId" = r.id
            WHERE i."spaceId" = ANY($1::text[])
-             AND LOWER(i.current_department) = LOWER($2)
-           ${deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : ''}
+             AND ${deptDeptMatchSql}
            ${deptSearchClause}
            ${deptExtraSql}
            ORDER BY i."updatedAt" DESC, i."createdAt" DESC
