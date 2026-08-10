@@ -2187,9 +2187,17 @@ function SpaceDetailContent() {
                   ? `${currentAssignee.firstName || ''} ${currentAssignee.lastName || ''}`.trim()
                   : null;
                 // Show the status this dept (deptParam, the one we're watching FROM) had it at
-                // right before the ticket transferred out — not the new dept's status.
+                // right before the ticket transferred out — not the new dept's status. But
+                // that snapshot is frozen the moment the ticket leaves and never updates again,
+                // so once the ticket is genuinely closed (wherever it ended up), showing the
+                // stale pre-transfer snapshot instead of "Closed"/"Resolved" reads as if nothing
+                // ever happened to it after it left. Once truly done, always show the real
+                // current status instead.
                 const sentDeptStatusMap: Record<string, any> = (issue as any).dept_statuses || {};
-                const st = (deptParam && sentDeptStatusMap[deptParam]) ? sentDeptStatusMap[deptParam] : getIssueStatus(issue);
+                const liveStatus = getIssueStatus(issue);
+                const st = liveStatus.category === 'done'
+                  ? liveStatus
+                  : ((deptParam && sentDeptStatusMap[deptParam]) ? sentDeptStatusMap[deptParam] : liveStatus);
                 const stColor = st ? resolveStatusColor(st) : '#6B7280';
                 // Last comment from issue (if comments loaded)
                 const comments: any[] = (issue as any).comments || [];
