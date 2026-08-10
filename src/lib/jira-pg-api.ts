@@ -1546,8 +1546,16 @@ async function _handleJiraPgApi(
     // header. Not sensitive: same visibility as any avatar shown in the app.
     /^users\/[^/]+\/avatar$/.test(path);
 
+  // This is "not authenticated" (no valid session), not "authenticated but not
+  // allowed" — those are semantically 401 and 403 respectively, and the client
+  // only treats 401 specially: it clears the stale token and redirects to
+  // /auth/login. Returning 403 here (an expired/revoked/invalid token — see
+  // resolveUserId above) meant every fetch on the page just failed silently
+  // with a generic "Forbidden" error, no redirect, no message — the page kept
+  // rendering from cached client state as if still logged in, while every
+  // list on it quietly came back empty with no indication why.
   if (!userId && !isPublicPath) {
-    return json({ error: 'Forbidden' }, 403);
+    return json({ error: 'Unauthorized' }, 401);
   }
 
   // Load current user for role checks (cached 60s to avoid a DB round-trip on every request)
