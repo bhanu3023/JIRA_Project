@@ -14,7 +14,7 @@ import SpaceIcon from '@/components/ui/SpaceIcon';
 import DotLoader from '@/components/ui/DotLoader';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import {
-  Plus, LayoutGrid, Settings, ChevronDown, Check, User,
+  LayoutGrid, Settings, ChevronDown, Check, User,
   Search, CheckCircle2, ClipboardList, X, Tag, Calendar, UserCheck,
   Briefcase, Package, Layers, Monitor, Clock, AlertCircle, Building2, SlidersHorizontal, RefreshCw, BarChart2,
   ChevronRight, Inbox as InboxIcon
@@ -290,7 +290,6 @@ function SpaceDetailContent() {
           width: '110px',
           fieldId: f.id,
         })));
-        setSpaceFieldLabels(new Set(spaceFields.map((f: any) => (f.name as string).toLowerCase().trim())));
       }
       // 2. RR config — add any not already in list
       if (rrRes.status === 'fulfilled' && rrRes.value?.config?.departments?.length) {
@@ -319,11 +318,8 @@ function SpaceDetailContent() {
   const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [filterCategory, setFilterCategory] = useState<string>('type');
   const [dropdownSearch, setDropdownSearch] = useState<string>('');
-  // Extra ("added") filter fields – persisted per space in localStorage
   const colsStorageKey    = `visibleCols_${spaceKey}`;
-  const fieldsStorageKey  = `addedFields_${spaceKey}`;
 
-  const [addedFilterIds, setAddedFilterIds] = useState<string[]>([]);
   const [addFilterDropPos, setAddFilterDropPos] = useState<{ top: number; left: number } | null>(null);
   const [visibleCols, setVisibleCols] = useState<string[]>(DEFAULT_COLS);
   const [serverFieldOptions, setServerFieldOptions] = useState<Record<string, string[]>>({});
@@ -361,7 +357,7 @@ function SpaceDetailContent() {
     }
   }, [queueFilter]);
 
-  // Fetch distinct values from server whenever addedFilterIds changes. Scoped to the
+  // Fetch distinct values from server for every field filter. Scoped to the
   // currently-viewed department when there is one — without this, a filter's options
   // came from the WHOLE space regardless of which queue you were looking at, so you
   // could pick e.g. a Product Type value that no ticket in "Dev" has ever had, and
@@ -370,10 +366,10 @@ function SpaceDetailContent() {
   // another department's (or the space-wide) option list.
   const effectiveDept = queueFilter.startsWith('cq_') ? (activeCustomQueue?.name || '') : deptParam;
   useEffect(() => {
-    if (!spaceKey || addedFilterIds.length === 0) return;
+    if (!spaceKey) return;
     const textFields = new Set(['workType','productType','combination','testEnvironment','rootCause',
       'fixDescription','customerName','clientName','projectManager','manageClientName','customerPlan']);
-    addedFilterIds.forEach(fieldId => {
+    ADDABLE_FILTER_DEFS.forEach(({ id: fieldId }) => {
       if (!textFields.has(fieldId)) return;
       const cacheKey = `${fieldId}::${effectiveDept}`;
       if (serverFieldOptions[cacheKey]) return; // already loaded
@@ -387,9 +383,9 @@ function SpaceDetailContent() {
         })
         .catch(() => {});
     });
-  }, [spaceKey, addedFilterIds, effectiveDept]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [spaceKey, effectiveDept]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load persisted columns and added field filters once spaceKey is known
+  // Load persisted columns once spaceKey is known
   useEffect(() => {
     if (!spaceKey) return;
     try {
@@ -404,26 +400,16 @@ function SpaceDetailContent() {
         setVisibleCols(parsed);
       }
     } catch {}
-    try {
-      const savedFields = localStorage.getItem(`addedFields_${spaceKey}`);
-      if (savedFields) setAddedFilterIds(JSON.parse(savedFields));
-    } catch {}
   }, [spaceKey]);
 
-  // Persist visible columns and added field filters to localStorage
+  // Persist visible columns to localStorage
   useEffect(() => {
     if (!spaceKey) return;
     try { localStorage.setItem(colsStorageKey, JSON.stringify(visibleCols)); } catch {}
   }, [visibleCols, colsStorageKey, spaceKey]);
 
-  useEffect(() => {
-    if (!spaceKey) return;
-    try { localStorage.setItem(fieldsStorageKey, JSON.stringify(addedFilterIds)); } catch {}
-  }, [addedFilterIds, fieldsStorageKey, spaceKey]);
-
   // Dynamic custom-field columns for this space
   const [customFieldCols, setCustomFieldCols] = useState<Array<{ id: string; label: string; width: string; fieldId: string }>>([]);
-  const [spaceFieldLabels, setSpaceFieldLabels] = useState<Set<string>>(new Set());
   const [cfValuesMap, setCfValuesMap] = useState<Map<string, Record<string, string>>>(new Map());
   const [slaPolicies, setSlaPolicies] = useState<any[]>([]);
   const [assigneeSearch, setAssigneeSearch] = useState('');
@@ -784,27 +770,7 @@ function SpaceDetailContent() {
   const clearAllFilters = () => {
     setFilters({});
     setSearch('');
-    // Remove any field-filter columns that were auto-added, keeping only manually toggled ones
-    const fieldFilterIds = ADDABLE_FILTER_DEFS.map(d => d.id);
-    setVisibleCols(prev => prev.filter(c => !fieldFilterIds.includes(c) || DEFAULT_COLS.includes(c)));
-    setAddedFilterIds([]);
     setCurrentPage(1);
-    // Clear persisted field state
-    try { localStorage.removeItem(fieldsStorageKey); } catch {}
-  };
-
-  const addExtraFilter = (id: string) => {
-    setAddedFilterIds(prev => prev.includes(id) ? prev : [...prev, id]);
-    // Also make the column visible so data shows immediately
-    setVisibleCols(prev => prev.includes(id) ? prev : [...prev, id]);
-    setOpenFilter(null);
-    setAddFilterDropPos(null);
-  };
-  const removeExtraFilter = (id: string) => {
-    setAddedFilterIds(prev => prev.filter(x => x !== id));
-    clearFilter(id);
-    // Remove column visibility when filter is removed
-    setVisibleCols(prev => prev.filter(x => x !== id));
   };
 
   // Track recently visited space — per user
@@ -1556,33 +1522,18 @@ function SpaceDetailContent() {
         {/* ── Unified Filter button ── */}
         {(() => {
           const allMembers = members.map((m: any) => m.user || m);
-          // Every ADDABLE_FILTER_DEFS entry (Product Type, Combination, Project
-          // Manager, etc.) is backed by a native issue column, not a dynamic
-          // custom field — formatIssue() always returns them and the load
-          // effect above already sends params.productType/combination/etc. to
-          // the server regardless of this space's custom-field setup. Gating
-          // "+ More Fields" on spaceFieldLabels (which only lists this space's
-          // registered dynamic custom fields) hid all of them on any board —
-          // like CloudFuze Board — that manages these as native columns
-          // instead of registering matching custom-field records. All of them
-          // are always offered now; spaceFieldLabels stays as a fallback for
-          // any future addable field that genuinely only exists as a custom
-          // field with no native column backing it.
-          const ALWAYS_AVAILABLE = new Set(ADDABLE_FILTER_DEFS.map(d => d.id));
-          const availableToAdd = ADDABLE_FILTER_DEFS.filter(d =>
-            !addedFilterIds.includes(d.id) &&
-            (ALWAYS_AVAILABLE.has(d.id) || spaceFieldLabels.has(d.label.toLowerCase().trim()))
-          );
 
           // Count active filters for badge
           const activeFilterCount = [
             filters.type, filters.status, filters.priority, filters.assignee,
             filters.reporter, filters.label, filters.created,
             deptFilter,
-            ...addedFilterIds.filter(id => filters[id]),
+            ...ADDABLE_FILTER_DEFS.map(d => filters[d.id]).filter(Boolean),
           ].filter(Boolean).length;
 
-          // Build filter category list
+          // Build filter category list — every field (Product Type, Combination,
+          // Project Manager, etc.) is listed directly instead of behind a
+          // "+ More Fields" sub-step, so it's reachable in a single click.
           const filterCats = [
             { id: 'type', label: 'Type', icon: <SlidersHorizontal size={13} /> },
             ...(rrDepartments.length > 0 ? [{ id: 'department', label: 'Department', icon: <SlidersHorizontal size={13} /> }] : []),
@@ -1592,17 +1543,12 @@ function SpaceDetailContent() {
             { id: 'reporter', label: 'Reporter', icon: <UserCheck size={13} /> },
             { id: 'label', label: 'Label', icon: <Tag size={13} /> },
             { id: 'created', label: 'Created', icon: <Calendar size={13} /> },
-            ...addedFilterIds.map(id => {
-              const def = ADDABLE_FILTER_DEFS.find(d => d.id === id);
-              return def ? { id, label: def.label, icon: <AddableIcon icon={def.icon} size={13} />, isExtra: true } : null;
-            }).filter(Boolean) as { id: string; label: string; icon: React.ReactNode; isExtra?: boolean }[],
-            ...(availableToAdd.length > 0 ? [{ id: '__addFields', label: '+ More Fields', icon: <Plus size={13} /> }] : []),
+            ...ADDABLE_FILTER_DEFS.map(def => ({ id: def.id, label: def.label, icon: <AddableIcon icon={def.icon} size={13} /> })),
           ];
 
           // Helper: is a category active?
           const isCatActive = (catId: string) => {
             if (catId === 'department') return !!deptFilter;
-            if (catId === '__addFields') return false;
             return !!filters[catId];
           };
 
@@ -1810,25 +1756,7 @@ function SpaceDetailContent() {
               );
             }
 
-            if (cat === '__addFields') {
-              return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {availableToAdd.length === 0
-                    ? <p className="px-3 py-4 text-[12.5px] text-gray-400 text-center">All fields added</p>
-                    : availableToAdd.map(def => (
-                        <button key={def.id} onClick={() => { addExtraFilter(def.id); setFilterCategory(def.id); }}
-                          className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors">
-                          <AddableIcon icon={def.icon} size={13} />
-                          <span>{def.label}</span>
-                          <Plus size={11} className="ml-auto text-gray-300" />
-                        </button>
-                      ))
-                  }
-                </div>
-              );
-            }
-
-            // Extra added field filter
+            // Extra field filter (Product Type, Combination, etc.)
             const def = ADDABLE_FILTER_DEFS.find(d => d.id === cat);
             if (def) {
               const isDate = def.id === 'updated' || def.id === 'dueDate';
@@ -1927,7 +1855,7 @@ function SpaceDetailContent() {
           if (filters.reporter) chips.push({ key: 'reporter', val: filters.reporter });
           if (filters.label) chips.push({ key: 'label', val: filters.label });
           if (filters.created) chips.push({ key: 'created', val: filters.created });
-          addedFilterIds.forEach(id => { if (filters[id]) chips.push({ key: id, val: filters[id] }); });
+          ADDABLE_FILTER_DEFS.forEach(({ id }) => { if (filters[id]) chips.push({ key: id, val: filters[id] }); });
 
           return (
             <>
