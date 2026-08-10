@@ -2660,6 +2660,22 @@ async function _handleJiraPgApi(
         deptExtraParams.push(vals);
         deptParamIdx++;
       }
+      // Created/Updated date-range filters (Filter > Created: Today/Last 7 days/...)
+      // were likewise only ever wired into the general Prisma branch — picking any
+      // of these while viewing a department queue showed "0 issues" even for tickets
+      // created that same day.
+      if (createdRange) {
+        const { from, to } = parseDateRange(createdRange);
+        deptExtraClauses.push(`i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}`);
+        deptExtraParams.push(from, to);
+        deptParamIdx += 2;
+      }
+      if (updatedRange) {
+        const { from, to } = parseDateRange(updatedRange);
+        deptExtraClauses.push(`i."updatedAt" >= $${deptParamIdx} AND i."updatedAt" <= $${deptParamIdx + 1}`);
+        deptExtraParams.push(from, to);
+        deptParamIdx += 2;
+      }
       const deptExtraSql = deptExtraClauses.map((c) => `AND ${c}`).join('\n');
 
       try {
