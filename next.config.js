@@ -1,6 +1,14 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Next 14 only calls src/instrumentation.ts's register() in production
+  // (never in `next dev`) AND only when this flag is on — without it, the
+  // file's register() function is dead code. This is what actually starts
+  // the email-poller bootstrap and the periodic SLA breach-warning check on
+  // server boot; neither was ever running without this.
+  experimental: {
+    instrumentationHook: true,
+  },
   typescript: {
     ignoreBuildErrors: true,
   },

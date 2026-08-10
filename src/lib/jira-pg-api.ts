@@ -1546,8 +1546,16 @@ async function _handleJiraPgApi(
     // header. Not sensitive: same visibility as any avatar shown in the app.
     /^users\/[^/]+\/avatar$/.test(path);
 
+  // This is "not authenticated" (no valid session), not "authenticated but not
+  // allowed" — those are semantically 401 and 403 respectively, and the client
+  // only treats 401 specially: it clears the stale token and redirects to
+  // /auth/login. Returning 403 here (an expired/revoked/invalid token — see
+  // resolveUserId above) meant every fetch on the page just failed silently
+  // with a generic "Forbidden" error, no redirect, no message — the page kept
+  // rendering from cached client state as if still logged in, while every
+  // list on it quietly came back empty with no indication why.
   if (!userId && !isPublicPath) {
-    return json({ error: 'Forbidden' }, 403);
+    return json({ error: 'Unauthorized' }, 401);
   }
 
   // Load current user for role checks (cached 60s to avoid a DB round-trip on every request)
@@ -2008,8 +2016,19 @@ async function _handleJiraPgApi(
     const reporters     = url.searchParams.get('reporters') || url.searchParams.get('reporter');
     const labelsParam   = url.searchParams.get('labels');
     const rawSearchQ    = url.searchParams.get('q');
-    // Normalize CF key searches: "CF - 27210" Ã¢â€ ' "CF-27210"
-    const searchQ       = rawSearchQ ? rawSearchQ.replace(/\s*-\s*/g, '-').trim() : rawSearchQ;
+    // Normalize CF key searches: "CF - 27210" -> "CF-27210". This used to run
+    // unconditionally on every search, collapsing " - " anywhere in the query
+    // -- which also fires on completely ordinary summary text that happens to
+    // contain " - " as punctuation (e.g. searching "DME Capital - Permission"
+    // for a ticket titled "DME Capital - Permission mapping" turned the query
+    // into "DME Capital-Permission", which no longer substring-matches the
+    // real summary's spaced-out hyphen and silently returned zero results).
+    // Only collapse the spacing when the whole query already looks like a key
+    // reference (letters/digits, a hyphen, digits) -- never for free text.
+    const looksLikeKeyQuery = rawSearchQ ? /^[A-Za-z][A-Za-z0-9]*\s*-\s*\d+$/.test(rawSearchQ.trim()) : false;
+    const searchQ       = rawSearchQ
+      ? (looksLikeKeyQuery ? rawSearchQ.replace(/\s*-\s*/g, '-').trim() : rawSearchQ.trim())
+      : rawSearchQ;
     const createdRange  = url.searchParams.get('createdRange');
     const updatedRange  = url.searchParams.get('updatedRange');
     const excludeDone   = url.searchParams.get('excludeDone') === 'true';
@@ -5664,6 +5683,12 @@ async function _handleJiraPgApi(
         const formData = await req.formData();
         const file = formData.get('file') as File | null;
         if (!file) return json({ error: 'No file provided' }, 400);
+        // Same cap as /api/uploads (used by the description/comment editor) —
+        // this endpoint had no size check at all, so a ticket's dedicated
+        // Attachments section enforced a different (unlimited) limit than
+        // everywhere else attachments get uploaded from.
+        const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024 * 1024;
+        if (file.size > MAX_ATTACHMENT_BYTES) return json({ error: 'File too large (max 10GB)' }, 413);
         const issueRow = await pool.query(`SELECT id FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`, [issueKey]);
         if (!issueRow.rows[0]) return json({ error: 'Issue not found' }, 404);
         const issueId = issueRow.rows[0].id;

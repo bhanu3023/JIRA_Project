@@ -4,7 +4,7 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import {
   Bold, Italic, Underline, Strikethrough,
   List, ListOrdered, Code, Quote, Link2,
-  Image as ImageIcon, Minus, Paperclip,
+  Image as ImageIcon, Minus, Paperclip, FolderUp,
   Heading1, Heading2, Type,
 } from 'lucide-react';
 
@@ -49,6 +49,7 @@ export default function RichTextEditor({
   const editorRef  = useRef<HTMLDivElement>(null);
   const imgRef     = useRef<HTMLInputElement>(null);
   const fileRef    = useRef<HTMLInputElement>(null);
+  const folderRef  = useRef<HTMLInputElement>(null);
   const pendingUploads = useRef(0);
   const beginUpload = () => {
     pendingUploads.current += 1;
@@ -400,10 +401,46 @@ export default function RichTextEditor({
     setTimeout(emit, 0);
   };
 
-  /* ── Drag-drop ───────────────────────────────────────────────────── */
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+  /* ── Recursively read a dropped folder's contents ──────────────────
+   * Plain `e.dataTransfer.files` only ever contains files dropped directly
+   * — dropping a folder yields nothing from it, silently discarding every
+   * file inside. The Chromium/WebKit-only FileSystemEntry API
+   * (webkitGetAsEntry) is the only way to see into a dropped directory. */
+  const readEntry = (entry: any): Promise<File[]> => {
+    return new Promise((resolve) => {
+      if (entry.isFile) {
+        entry.file((f: File) => resolve([f]), () => resolve([]));
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        const all: File[] = [];
+        const readBatch = () => {
+          reader.readEntries(async (entries: any[]) => {
+            if (!entries.length) { resolve(all); return; }
+            const nested = await Promise.all(entries.map(readEntry));
+            nested.forEach(files => all.push(...files));
+            readBatch(); // readEntries only returns a batch at a time — keep going until empty
+          }, () => resolve(all));
+        };
+        readBatch();
+      } else {
+        resolve([]);
+      }
+    });
+  };
+
+  /* ── Drag-drop (files or whole folders) ─────────────────────────── */
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    Array.from(e.dataTransfer.files).forEach(f => {
+    const items = e.dataTransfer.items;
+    const hasFolderApi = items && Array.from(items).some(i => typeof (i as any).webkitGetAsEntry === 'function');
+    let files: File[];
+    if (hasFolderApi) {
+      const entries = Array.from(items).map(i => (i as any).webkitGetAsEntry()).filter(Boolean);
+      files = (await Promise.all(entries.map(readEntry))).flat();
+    } else {
+      files = Array.from(e.dataTransfer.files);
+    }
+    files.forEach(f => {
       if (f.type.startsWith('image/')) insertImage(f);
       else insertFile(f);
     });
@@ -515,7 +552,8 @@ export default function RichTextEditor({
         <Divider />
         <TBtn title="Insert link"  onClick={insertLink}><Link2 size={13} /></TBtn>
         <TBtn title="Insert image" onClick={() => imgRef.current?.click()}><ImageIcon size={13} /></TBtn>
-        <TBtn title="Attach file"  onClick={() => fileRef.current?.click()}><Paperclip size={13} /></TBtn>
+        <TBtn title="Attach file"   onClick={() => fileRef.current?.click()}><Paperclip size={13} /></TBtn>
+        <TBtn title="Attach folder" onClick={() => folderRef.current?.click()}><FolderUp size={13} /></TBtn>
       </div>
 
       {warning && (
@@ -645,6 +683,9 @@ export default function RichTextEditor({
       {/* Hidden inputs */}
       <input ref={imgRef}  type="file" accept="image/*" multiple hidden onChange={handleImgInput} />
       <input ref={fileRef} type="file" accept="*/*"     multiple hidden onChange={handleFileInput} />
+      {/* webkitdirectory isn't in React's DOM typings — spread it in untyped so
+          the folder picker (not just multi-file select) actually opens. */}
+      <input ref={folderRef} type="file" multiple hidden onChange={handleFileInput} {...({ webkitdirectory: '' } as any)} />
     </div>
   );
 }

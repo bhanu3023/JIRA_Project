@@ -163,9 +163,9 @@ class ApiClient {
   addIssueLink(key: string, data: { targetKey: string; linkType: string }) { return this.addLink(key, data); }
   deleteIssueLink(linkId: string) { return this.request<any>(`/issues/links/${linkId}`, { method: 'DELETE' }); }
 
-  uploadAttachment(key: string, file: File) {
+  uploadAttachment(key: string, file: File, displayName?: string) {
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', file, displayName || file.name);
     return this.request<any>(`/issues/${key}/attachments`, { method: 'POST', body: formData });
   }
 

@@ -96,12 +96,24 @@ export default function Header() {
     setShowUserMenu(false);
   };
 
-  // Close search dropdown when clicking outside
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchQuery('');
+    setSearchResults([]);
+    setActiveIdx(-1);
+    inputRef.current?.blur();
+  };
+
+  // Clicking outside used to only close the dropdown (setSearchOpen(false)),
+  // leaving the typed query sitting in the box with no results visible and no
+  // way to tell the search was still "active" — every OTHER way of dismissing
+  // the search (the X button, Escape, picking a result) fully resets it via
+  // closeSearch(). Use the same reset here so dismissing it is consistent
+  // regardless of how it happens.
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
-        setSearchOpen(false);
-        setActiveIdx(-1);
+        closeSearch();
       }
     };
     document.addEventListener('mousedown', handler);
@@ -161,14 +173,6 @@ export default function Header() {
       }
     }
     if (e.key === 'Escape') closeSearch();
-  };
-
-  const closeSearch = () => {
-    setSearchOpen(false);
-    setSearchQuery('');
-    setSearchResults([]);
-    setActiveIdx(-1);
-    inputRef.current?.blur();
   };
 
   return (
