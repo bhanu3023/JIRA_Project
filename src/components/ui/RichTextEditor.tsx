@@ -400,6 +400,26 @@ export default function RichTextEditor({
     const hasStructuralText = /<table[\s>]|<td[\s>]|<tr[\s>]/i.test(cleaned)
       && /[a-zA-Z0-9]/.test(cleaned.replace(/<[^>]+>/g, ''));
     if (hasStructuralText) cleaned = cleaned.replace(/<img\b[^>]*>/gi, '');
+
+    // Word/Outlook exports comment threads, revision marks, and "important"
+    // callouts as a plain colored border on a <div>/<p>/<span> wrapping that
+    // text — nothing marks it as a comment once pasted elsewhere, it just
+    // shows up as a random red (or other colored) box around part of the
+    // ticket with no indication why. Strip border styling from everything
+    // EXCEPT table cells, where a border is the actual visible grid lines a
+    // pasted spreadsheet needs to stay readable.
+    try {
+      const container = document.createElement('div');
+      container.innerHTML = cleaned;
+      const borderProps = ['border', 'borderTop', 'borderRight', 'borderBottom', 'borderLeft', 'outline'];
+      container.querySelectorAll<HTMLElement>('*').forEach(el => {
+        if (['TABLE', 'TD', 'TH', 'TR', 'THEAD', 'TBODY'].includes(el.tagName)) return;
+        for (const prop of borderProps) (el.style as any)[prop] = '';
+        el.removeAttribute('bordercolor');
+      });
+      cleaned = container.innerHTML;
+    } catch { /* if DOM parsing itself fails, fall back to the regex-cleaned string as-is */ }
+
     return cleaned;
   };
 
