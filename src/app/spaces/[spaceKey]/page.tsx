@@ -1544,7 +1544,19 @@ function SpaceDetailContent() {
         {/* ── Unified Filter button ── */}
         {(() => {
           const allMembers = members.map((m: any) => m.user || m);
-          const ALWAYS_AVAILABLE = new Set(['updated', 'dueDate']);
+          // Every ADDABLE_FILTER_DEFS entry (Product Type, Combination, Project
+          // Manager, etc.) is backed by a native issue column, not a dynamic
+          // custom field — formatIssue() always returns them and the load
+          // effect above already sends params.productType/combination/etc. to
+          // the server regardless of this space's custom-field setup. Gating
+          // "+ More Fields" on spaceFieldLabels (which only lists this space's
+          // registered dynamic custom fields) hid all of them on any board —
+          // like CloudFuze Board — that manages these as native columns
+          // instead of registering matching custom-field records. All of them
+          // are always offered now; spaceFieldLabels stays as a fallback for
+          // any future addable field that genuinely only exists as a custom
+          // field with no native column backing it.
+          const ALWAYS_AVAILABLE = new Set(ADDABLE_FILTER_DEFS.map(d => d.id));
           const availableToAdd = ADDABLE_FILTER_DEFS.filter(d =>
             !addedFilterIds.includes(d.id) &&
             (ALWAYS_AVAILABLE.has(d.id) || spaceFieldLabels.has(d.label.toLowerCase().trim()))
