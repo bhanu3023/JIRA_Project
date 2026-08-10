@@ -5568,6 +5568,41 @@ async function _handleJiraPgApi(
     }
   }
 
+  // PATCH /custom-queues/:spaceKey/:queueId — replace ONE queue's object within
+  // the space's stored array, entirely server-side.
+  //
+  // The GET above deliberately filters to only the caller's own queues for
+  // non-admins/managers (a member of "Dev" gets back just [Dev], not all 10).
+  // Two callers (the per-queue settings page and its workflow page) used to
+  // GET that list, replace their one queue's entry in it, and PUT the WHOLE
+  // thing back — for a plain member acting on their own queue, that GET had
+  // already filtered out every other queue, so the PUT permanently deleted
+  // them from the space's stored array. This endpoint never round-trips the
+  // filtered client view: it reads the full array straight from the DB, finds
+  // the one queue by id, and only ever writes that one queue back — no other
+  // queue's data ever passes through a permission-filtered response.
+  const customQueueItemMatch = path.match(/^custom-queues\/([^/]+)\/([^/]+)$/);
+  if (customQueueItemMatch && method === 'PATCH') {
+    const spaceKey = customQueueItemMatch[1];
+    const queueId = customQueueItemMatch[2];
+    const row = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey]);
+    const allQueues: any[] = row.rows[0]?.queues || [];
+    const target = allQueues.find((q: any) => q.id === queueId);
+    if (!target) return json({ error: 'Queue not found' }, 404);
+    const isMemberOfQueue = Array.isArray(target.memberIds) && !!userId && target.memberIds.includes(userId);
+    if (!isAdmin && !isManager(currentUser?.role) && !isMemberOfQueue) {
+      return json({ error: 'You do not have access to this queue.' }, 403);
+    }
+    const updated = await req.json();
+    const nextQueues = allQueues.map((q: any) => q.id === queueId ? updated : q);
+    await pool.query(
+      `INSERT INTO custom_queues (space_key, queues, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (space_key) DO UPDATE SET queues = EXCLUDED.queues, updated_at = NOW()`,
+      [spaceKey, JSON.stringify(nextQueues)]
+    );
+    return json({ ok: true, queue: updated });
+  }
+
   // POST /sla-breach-check Ã¢â‚¬â€ notify assignee, reporter, leads/shift leads 30 min before breach
   if (path === 'sla-breach-check' && method === 'POST') {
     const notified = await runSlaBreachCheck();

@@ -1066,11 +1066,19 @@ export default function QueueSettingsPage() {
 
   const persistQueue = async (updated: CustomQueue) => {
     try {
-      const queues = await api.request<any[]>(`custom-queues/${spaceKey}`).catch(() => []);
-      const list: CustomQueue[] = Array.isArray(queues) ? queues : [];
-      const next = list.map(q => q.id === queueId ? updated : q);
-      await api.request(`custom-queues/${spaceKey}`, { method: 'PUT', body: JSON.stringify(next) });
-      try { localStorage.setItem(`custom_queues_${spaceKey}`, JSON.stringify(next)); } catch {}
+      // Was GET custom-queues/:spaceKey (which the server filters to only the
+      // caller's OWN queues if they're not an admin/manager) → replace this
+      // queue in that list → PUT the whole thing back. For a plain member
+      // managing just their own queue, that GET had already filtered out
+      // every other queue — so the PUT permanently deleted them. This PATCH
+      // updates only this one queue, entirely server-side, and never
+      // round-trips a possibly-filtered view of the others.
+      await api.request(`custom-queues/${spaceKey}/${queueId}`, { method: 'PATCH', body: JSON.stringify(updated) });
+      try {
+        const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
+        const list: CustomQueue[] = stored ? JSON.parse(stored) : [];
+        localStorage.setItem(`custom_queues_${spaceKey}`, JSON.stringify(list.map(q => q.id === queueId ? updated : q)));
+      } catch {}
       setQueue(updated);
     } catch {}
   };
