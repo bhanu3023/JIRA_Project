@@ -1241,13 +1241,14 @@ function SpaceDetailContent() {
       if (filters.dueDate === 'this_month') { if (!dd || dd < now || dd > now + 30*86400000) return false; }
       if (filters.dueDate === 'no_due')     { if (dd) return false; }
     }
-    // Search filter
-    if (search) {
-      const q = search.toLowerCase();
-      const sum = String(issue.summary ?? '').toLowerCase();
-      const k = String(issue.cfKey ?? issue.key ?? '').toLowerCase();
-      if (!sum.includes(q) && !k.includes(q)) return false;
-    }
+    // Search is already applied server-side (params.q, above) against summary/key/
+    // cf_key/description for every queue variant. A second, cruder client-side
+    // re-filter used to run here on top of that — plain lowercase .includes() with
+    // no key normalization — which could re-exclude a result the server had
+    // already correctly matched (e.g. searching "CF - 29236" reached the server
+    // as-is, which normalizes it to "CF-29236" and matches; this client filter
+    // then compared literal "cf - 29236" against "cf-29236" and dropped it,
+    // showing "No issues found" for a query that had a real match).
     return true;
   // Newest first — sort by createdAt descending
   }).sort((a, b) => {

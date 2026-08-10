@@ -2008,8 +2008,19 @@ async function _handleJiraPgApi(
     const reporters     = url.searchParams.get('reporters') || url.searchParams.get('reporter');
     const labelsParam   = url.searchParams.get('labels');
     const rawSearchQ    = url.searchParams.get('q');
-    // Normalize CF key searches: "CF - 27210" Ã¢â€ ' "CF-27210"
-    const searchQ       = rawSearchQ ? rawSearchQ.replace(/\s*-\s*/g, '-').trim() : rawSearchQ;
+    // Normalize CF key searches: "CF - 27210" -> "CF-27210". This used to run
+    // unconditionally on every search, collapsing " - " anywhere in the query
+    // -- which also fires on completely ordinary summary text that happens to
+    // contain " - " as punctuation (e.g. searching "DME Capital - Permission"
+    // for a ticket titled "DME Capital - Permission mapping" turned the query
+    // into "DME Capital-Permission", which no longer substring-matches the
+    // real summary's spaced-out hyphen and silently returned zero results).
+    // Only collapse the spacing when the whole query already looks like a key
+    // reference (letters/digits, a hyphen, digits) -- never for free text.
+    const looksLikeKeyQuery = rawSearchQ ? /^[A-Za-z][A-Za-z0-9]*\s*-\s*\d+$/.test(rawSearchQ.trim()) : false;
+    const searchQ       = rawSearchQ
+      ? (looksLikeKeyQuery ? rawSearchQ.replace(/\s*-\s*/g, '-').trim() : rawSearchQ.trim())
+      : rawSearchQ;
     const createdRange  = url.searchParams.get('createdRange');
     const updatedRange  = url.searchParams.get('updatedRange');
     const excludeDone   = url.searchParams.get('excludeDone') === 'true';
