@@ -2009,13 +2009,26 @@ function SpaceDetailContent() {
 
               {/* Active filter chips */}
               {chips.map(chip => (
-                <span key={chip.key} className="flex items-center gap-1 px-2 py-1 text-[11.5px] bg-blue-50 text-blue-700 border border-blue-200 rounded-full whitespace-nowrap flex-shrink-0 font-medium">
-                  <span className="text-blue-400 text-[10px] font-normal capitalize">{chip.key === 'department' ? 'Dept' : chip.key}:</span>
-                  <span className="max-w-[100px] truncate">{getChipLabel(chip.key, chip.val)}</span>
+                <span key={chip.key} className="flex items-center gap-1 pl-0.5 pr-1 py-1 text-[11.5px] bg-blue-50 text-blue-700 border border-blue-200 rounded-full whitespace-nowrap flex-shrink-0 font-medium">
+                  <button
+                    title="Click to change this filter's values"
+                    onClick={() => {
+                      // Reopen the same picker this chip belongs to, so clicking an
+                      // active filter re-edits its values instead of only offering
+                      // to remove it — matches clicking a filter pill in Jira.
+                      const rect = addFilterRef.current?.getBoundingClientRect();
+                      if (rect) setAddFilterDropPos({ top: rect.bottom + 4, left: rect.left });
+                      setFilterCategory(chip.key === 'department' ? 'department' : chip.key);
+                      setOpenFilter('__filterPanel');
+                      setAssigneeSearch(''); setReporterSearch(''); setDropdownSearch('');
+                    }}
+                    className="max-w-[120px] truncate px-1.5 py-0.5 rounded-full hover:bg-blue-100 transition-colors">
+                    {getChipLabel(chip.key, chip.val)}
+                  </button>
                   <button onClick={() => {
                     if (chip.key === 'department') setDeptFilter('');
                     else clearFilter(chip.key);
-                  }} className="ml-0.5 hover:text-blue-900 flex-shrink-0"><X size={10} /></button>
+                  }} className="hover:text-blue-900 flex-shrink-0"><X size={10} /></button>
                 </span>
               ))}
             </>
