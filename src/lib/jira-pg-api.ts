@@ -4022,7 +4022,15 @@ async function _handleJiraPgApi(
 
     // Reporter -- pre-resolved above in parallel
     if (resolvedReporterPatch) data.reporterId = resolvedReporterPatch.id;
-    // Custom queue status (qst_...) — stored in dept_statuses, not issue.statusId
+    // Custom queue status (qst_...) — stored in dept_statuses, not a real row in
+    // the statuses table, so it can't be written to issue.statusId directly.
+    // When it represents "done" (the dept is closing/resolving the ticket),
+    // also point the issue's real global statusId at a matching done-category
+    // status — otherwise every view that reads the global status instead of
+    // dept_statuses (My Assigned Tickets, the dashboard's Open/Resolved counts,
+    // excludeDone filters) keeps treating the ticket as open forever, even
+    // though the department that owns it just closed it.
+    let queueStatusSyncedDone = false;
     if (body.queueStatusId) {
       try {
         const qRow = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE key=$1 LIMIT 1`, [key]);
@@ -4036,8 +4044,24 @@ async function _handleJiraPgApi(
             category: String(body.queueStatusCategory || 'todo'),
           };
           await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(deptStatuses), key]);
-          const refreshed = await db.issue.findUnique({ where: { key }, include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } } } });
-          if (refreshed) return json(formatIssue(refreshed));
+
+          if (String(body.queueStatusCategory || '') === 'done') {
+            const realStatuses = (issue.space as any)?.statuses || [];
+            const matchedReal = realStatuses.find((s: any) => s.category === 'done' && s.name.toLowerCase() === String(body.queueStatusName || '').toLowerCase())
+              || realStatuses.find((s: any) => s.category === 'done');
+            if (matchedReal) {
+              data.statusId = matchedReal.id;
+              queueStatusSyncedDone = true;
+            }
+          }
+
+          if (!queueStatusSyncedDone) {
+            const refreshed = await db.issue.findUnique({ where: { key }, include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } } } });
+            if (refreshed) return json(formatIssue(refreshed));
+          }
+          // else: fall through into the normal statusId update path below, so
+          // the usual close-time side effects (worked-on recording,
+          // notifications, SLA, history) run exactly as for a plain status change.
         }
       } catch (e) { console.error('[queueStatus update failed]', e); }
     }
@@ -4150,7 +4174,7 @@ async function _handleJiraPgApi(
     }
 
     // ── When ticket is closed (status → done), record worked-on for all depts ──
-    if (body.statusId !== undefined && issue.statusId !== data.statusId && !deptHandoffDone) {
+    if ((body.statusId !== undefined || queueStatusSyncedDone) && issue.statusId !== data.statusId && !deptHandoffDone) {
       const newStForClose = (issue.space?.statuses ?? []).find((s: any) => s.id === data.statusId) as any;
       if (newStForClose?.category === 'done') {
         try {
