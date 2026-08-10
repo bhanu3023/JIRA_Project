@@ -928,14 +928,33 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     try { localStorage.setItem(`custom_queues_${spaceKey}`, JSON.stringify(queues)); } catch {}
   };
 
+  // createQueue/deleteQueue used to mutate the CURRENT customQueues React
+  // state directly and PUT the result, which overwrites the server's entire
+  // stored array. customQueues starts as [] and only becomes accurate once
+  // the mount effect's fetch resolves — clicking create/delete before that
+  // (a slow network moment, or just clicking right after the page loads)
+  // saved that empty/partial snapshot as the new full list, silently
+  // deleting every other queue with no error shown anywhere. Re-fetch the
+  // server's actual current list immediately before mutating instead of
+  // trusting local state, so a stale/incomplete snapshot can never become
+  // the new "whole" list.
+  const mutateQueues = async (mutate: (current: CustomQueue[]) => CustomQueue[]) => {
+    let latest = customQueues;
+    try {
+      const fresh = await api.request<any[]>(`custom-queues/${spaceKey}`);
+      if (Array.isArray(fresh)) latest = fresh as CustomQueue[];
+    } catch { /* fall back to local state if the refetch itself fails */ }
+    saveQueues(mutate(latest));
+  };
+
   const createQueue = () => {
     if (!newQueueName.trim()) return;
     const q: CustomQueue = { id: `cq_${Date.now()}`, name: newQueueName.trim(), memberIds: newQueueMembers };
-    saveQueues([...customQueues, q]);
+    mutateQueues(current => [...current, q]);
     setNewQueueName(''); setNewQueueMembers([]); setShowCreateQueue(false);
   };
 
-  const deleteQueue = (id: string) => saveQueues(customQueues.filter(q => q.id !== id));
+  const deleteQueue = (id: string) => mutateQueues(current => current.filter(q => q.id !== id));
 
   useEffect(() => {
     // Fetch exact open count from DB (excludeDone filters at DB level → total is accurate)
@@ -1255,10 +1274,10 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
       const members = spaceMembers.filter(m => { const mb = m.user || m; return q.memberIds.includes(mb.id); });
       const nonMembers = spaceMembers.filter(m => { const mb = m.user || m; return !q.memberIds.includes(mb.id); });
 
-      const removeMember  = (id: string) => saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, memberIds: cq.memberIds.filter(x => x !== id), suspendedIds: (cq.suspendedIds||[]).filter(x => x !== id) } : cq));
-      const suspendMember = (id: string) => saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, suspendedIds: [...(cq.suspendedIds||[]), id] } : cq));
-      const reactivate    = (id: string) => saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, suspendedIds: (cq.suspendedIds||[]).filter(x => x !== id) } : cq));
-      const addMember     = (id: string) => saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, memberIds: [...cq.memberIds, id] } : cq));
+      const removeMember  = (id: string) => mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, memberIds: cq.memberIds.filter(x => x !== id), suspendedIds: (cq.suspendedIds||[]).filter(x => x !== id) } : cq));
+      const suspendMember = (id: string) => mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, suspendedIds: [...(cq.suspendedIds||[]), id] } : cq));
+      const reactivate    = (id: string) => mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, suspendedIds: (cq.suspendedIds||[]).filter(x => x !== id) } : cq));
+      const addMember     = (id: string) => mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, memberIds: [...cq.memberIds, id] } : cq));
 
       return (
         <div className="fixed inset-0 z-[200] flex items-center justify-center" onClick={() => { setQueuePanelOpen(null); setShowAddMember(false); setAddMemberSearch(''); }}>
@@ -1298,10 +1317,9 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
               {/* ── SLA Tab ── */}
               {settingsTab === 'sla' && (() => {
                 const saveSla = () => {
-                  const updated = customQueues.map(cq => cq.id === q.id
+                  mutateQueues(current => current.map(cq => cq.id === q.id
                     ? { ...cq, sla: slaTimeValue.trim() ? { timeValue: slaTimeValue.trim(), timeUnit: slaTimeUnit } : undefined }
-                    : cq);
-                  saveQueues(updated);
+                    : cq));
                 };
                 const currentSla = q.sla;
                 const fmtTarget = currentSla ? `${currentSla.timeValue} ${currentSla.timeUnit}` : 'Not set';
@@ -1360,7 +1378,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                         Save SLA
                       </button>
                       {currentSla && (
-                        <button onClick={() => { setSlaTimeValue(''); saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, sla: undefined } : cq)); }}
+                        <button onClick={() => { setSlaTimeValue(''); mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, sla: undefined } : cq)); }}
                           className="px-4 py-2.5 text-[13px] font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
                           Remove
                         </button>
