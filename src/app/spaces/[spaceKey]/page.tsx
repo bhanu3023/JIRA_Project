@@ -361,23 +361,33 @@ function SpaceDetailContent() {
     }
   }, [queueFilter]);
 
-  // Fetch distinct values from server whenever addedFilterIds changes
+  // Fetch distinct values from server whenever addedFilterIds changes. Scoped to the
+  // currently-viewed department when there is one — without this, a filter's options
+  // came from the WHOLE space regardless of which queue you were looking at, so you
+  // could pick e.g. a Product Type value that no ticket in "Dev" has ever had, and
+  // the filter would correctly (but confusingly) always return zero results. Cache
+  // key includes the department so switching queues re-fetches instead of reusing
+  // another department's (or the space-wide) option list.
+  const effectiveDept = queueFilter.startsWith('cq_') ? (activeCustomQueue?.name || '') : deptParam;
   useEffect(() => {
     if (!spaceKey || addedFilterIds.length === 0) return;
     const textFields = new Set(['workType','productType','combination','testEnvironment','rootCause',
       'fixDescription','customerName','clientName','projectManager','manageClientName','customerPlan']);
     addedFilterIds.forEach(fieldId => {
-      if (!textFields.has(fieldId) || serverFieldOptions[fieldId]) return; // already loaded
-      fetch(`/api/spaces/${spaceKey}/field-values?field=${fieldId}`, {
+      if (!textFields.has(fieldId)) return;
+      const cacheKey = `${fieldId}::${effectiveDept}`;
+      if (serverFieldOptions[cacheKey]) return; // already loaded
+      const deptQuery = effectiveDept ? `&dept=${encodeURIComponent(effectiveDept)}` : '';
+      fetch(`/api/spaces/${spaceKey}/field-values?field=${fieldId}${deptQuery}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}` },
       })
         .then(r => r.ok ? r.json() : [])
         .then((vals: string[]) => {
-          setServerFieldOptions(prev => ({ ...prev, [fieldId]: vals }));
+          setServerFieldOptions(prev => ({ ...prev, [cacheKey]: vals }));
         })
         .catch(() => {});
     });
-  }, [spaceKey, addedFilterIds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [spaceKey, addedFilterIds, effectiveDept]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load persisted columns and added field filters once spaceKey is known
   useEffect(() => {
@@ -1267,9 +1277,11 @@ function SpaceDetailContent() {
   // Unique values for addable select filters
   const uniqueValues = (field: string): string[] =>
     Array.from(new Set(issues.map((i: any) => i[field]).filter(Boolean))).sort() as string[];
-  // Merge server-fetched values with any locally visible values (dedup + sort)
+  // Merge server-fetched values with any locally visible values (dedup + sort).
+  // Server values are keyed by `${field}::${effectiveDept}` (see the fetch effect
+  // above) since they're scoped to the currently-viewed department.
   const mergedOptions = (field: string): string[] => {
-    const server = serverFieldOptions[field] || [];
+    const server = serverFieldOptions[`${field}::${effectiveDept}`] || [];
     const local  = uniqueValues(field);
     return Array.from(new Set([...server, ...local])).sort();
   };
