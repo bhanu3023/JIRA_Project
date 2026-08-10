@@ -1878,6 +1878,7 @@ async function _handleJiraPgApi(
   if (fieldValuesMatch && method === 'GET') {
     const spaceKeyFv = fieldValuesMatch[1].toUpperCase();
     const field = url.searchParams.get('field') || '';
+    const deptFv = url.searchParams.get('dept') || '';
     const ALLOWED = new Set(['workType','productType','combination','testEnvironment','rootCause',
       'fixDescription','customerName','clientName','projectManager','manageClientName','customerPlan']);
     if (!ALLOWED.has(field)) return json({ error: 'Invalid field' }, 400);
@@ -1885,10 +1886,19 @@ async function _handleJiraPgApi(
     if (!sp) return json([]);
     // Columns are camelCase in the DB (Prisma default)
     const col = field; // already camelCase e.g. customerName, testEnvironment
-    const rows = await pool.query(
-      `SELECT DISTINCT "${col}" AS val FROM issues WHERE "spaceId" = $1 AND "${col}" IS NOT NULL AND "${col}" <> '' ORDER BY val`,
-      [sp.id]
-    );
+    // Scoped to dept when given — without it, this returns every value used ANYWHERE
+    // in the space, so filtering within e.g. the "Dev" queue could offer a Product
+    // Type value no Dev ticket has ever had, and selecting it would correctly (but
+    // confusingly) always return zero results, looking like the filter is broken.
+    const rows = deptFv
+      ? await pool.query(
+          `SELECT DISTINCT "${col}" AS val FROM issues WHERE "spaceId" = $1 AND LOWER(current_department) = LOWER($2) AND "${col}" IS NOT NULL AND "${col}" <> '' ORDER BY val`,
+          [sp.id, deptFv]
+        )
+      : await pool.query(
+          `SELECT DISTINCT "${col}" AS val FROM issues WHERE "spaceId" = $1 AND "${col}" IS NOT NULL AND "${col}" <> '' ORDER BY val`,
+          [sp.id]
+        );
     return json(rows.rows.map((r: any) => r.val));
   }
 
