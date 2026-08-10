@@ -378,7 +378,17 @@ export default function RichTextEditor({
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
     const items = Array.from(e.clipboardData?.items ?? []);
     const imgItem = items.find(i => i.type.startsWith('image/'));
-    if (imgItem) {
+    // Copying cells from Excel/Google Sheets (or a table in Word/Docs) puts a
+    // bitmap preview of the selection on the clipboard ALONGSIDE the real
+    // text/html — this used to check for an image item first and, if found,
+    // always treated the whole paste as that image, discarding the actual
+    // text entirely. A pasted list of IDs from a spreadsheet became a single
+    // screenshot-like image instead of the IDs themselves. Only fall back to
+    // the image when there's truly no text representation to prefer instead
+    // (a real screenshot/copied-image paste has no text/html or text/plain).
+    const htmlContent = e.clipboardData?.getData('text/html');
+    const plainText = e.clipboardData?.getData('text/plain');
+    if (imgItem && !htmlContent && !plainText) {
       e.preventDefault();
       const file = imgItem.getAsFile();
       if (file) insertImage(file);
@@ -386,17 +396,15 @@ export default function RichTextEditor({
     }
     // If HTML is available in clipboard, let the browser paste it natively
     // (preserves bold, links, lists, etc.) — just emit after
-    const htmlContent = e.clipboardData?.getData('text/html');
     if (htmlContent) {
       // Let default browser HTML paste happen, then emit
       setTimeout(emit, 0);
       return;
     }
     // Plain text: insert as-is
-    const text = e.clipboardData?.getData('text/plain');
-    if (text) {
+    if (plainText) {
       e.preventDefault();
-      document.execCommand('insertText', false, text);
+      document.execCommand('insertText', false, plainText);
     }
     setTimeout(emit, 0);
   };
