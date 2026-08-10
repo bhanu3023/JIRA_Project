@@ -374,6 +374,35 @@ export default function RichTextEditor({
     });
   };
 
+  // Office (Excel/Word) clipboard HTML wraps the actual content between these
+  // markers, alongside a <head> full of mso-* styles and XML namespace junk —
+  // extract just the real fragment instead of dumping the whole document in.
+  const extractOfficeFragment = (html: string): string => {
+    const start = html.indexOf('<!--StartFragment-->');
+    const end = html.indexOf('<!--EndFragment-->');
+    return start !== -1 && end !== -1 && end > start
+      ? html.slice(start + '<!--StartFragment-->'.length, end)
+      : html;
+  };
+
+  // Strips Office-specific cruft (conditional comments, o:/v:/w: namespace
+  // tags) and — critically — any standalone <img> Excel/Word sometimes embeds
+  // as a fallback preview ALONGSIDE the real <table>/text markup in the same
+  // HTML payload. Left in place, the browser's native paste renderer for
+  // complex Office content (merged cells, conditional formatting) can prefer
+  // rendering that embedded image over the actual table, even though real
+  // table markup with real, editable text was right there in the same paste.
+  const sanitizeOfficeHtml = (html: string): string => {
+    let cleaned = extractOfficeFragment(html)
+      .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<\/?(?:o|v|w|m):[a-z0-9]+(?:\s[^>]*)?>/gi, '');
+    const hasStructuralText = /<table[\s>]|<td[\s>]|<tr[\s>]/i.test(cleaned)
+      && /[a-zA-Z0-9]/.test(cleaned.replace(/<[^>]+>/g, ''));
+    if (hasStructuralText) cleaned = cleaned.replace(/<img\b[^>]*>/gi, '');
+    return cleaned;
+  };
+
   /* ── Paste: intercept images; keep HTML formatting ─────────────── */
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
     const items = Array.from(e.clipboardData?.items ?? []);
@@ -394,11 +423,18 @@ export default function RichTextEditor({
       if (file) insertImage(file);
       return;
     }
-    // If HTML is available in clipboard, let the browser paste it natively
-    // (preserves bold, links, lists, etc.) — just emit after
+    // Insert HTML ourselves rather than letting the browser's own native
+    // paste handler take over — for complex Office markup (merged cells,
+    // conditional formatting), some browsers' native paste renderer flattens
+    // the whole thing into a single embedded image instead of real table
+    // markup, which we'd never see coming since by that point it's the
+    // browser's own paste rendering, not anything in the clipboard items we
+    // already checked above.
     if (htmlContent) {
-      // Let default browser HTML paste happen, then emit
-      setTimeout(emit, 0);
+      e.preventDefault();
+      editorRef.current?.focus();
+      document.execCommand('insertHTML', false, sanitizeOfficeHtml(htmlContent));
+      emit();
       return;
     }
     // Plain text: insert as-is
