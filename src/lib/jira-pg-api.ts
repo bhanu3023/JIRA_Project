@@ -4047,8 +4047,24 @@ async function _handleJiraPgApi(
 
           if (String(body.queueStatusCategory || '') === 'done') {
             const realStatuses = (issue.space as any)?.statuses || [];
-            const matchedReal = realStatuses.find((s: any) => s.category === 'done' && s.name.toLowerCase() === String(body.queueStatusName || '').toLowerCase())
-              || realStatuses.find((s: any) => s.category === 'done');
+            const queueStName = String(body.queueStatusName || '').trim();
+            let matchedReal = realStatuses.find((s: any) => s.category === 'done' && s.name.toLowerCase() === queueStName.toLowerCase());
+            // No status of this exact name exists yet for the space — falling back
+            // to some unrelated done-category status (e.g. a generic "Done") made
+            // the list view show a different name than the ticket detail page
+            // (which reads dept_statuses and shows the dept's own name, e.g.
+            // "Resolved"). Create a real status matching it instead, so both
+            // views agree on the name.
+            if (!matchedReal && queueStName) {
+              const maxOrder = await pool.query(`SELECT COALESCE(MAX("order"), 0) AS m FROM statuses WHERE "spaceId"=$1`, [issue.spaceId]);
+              const newStatusId = rid();
+              await pool.query(
+                `INSERT INTO statuses (id, name, category, color, "order", "spaceId") VALUES ($1,$2,'done',$3,$4,$5)`,
+                [newStatusId, queueStName, String(body.queueStatusColor || '#64748B'), (maxOrder.rows[0]?.m ?? 0) + 1, issue.spaceId]
+              );
+              matchedReal = { id: newStatusId };
+            }
+            matchedReal = matchedReal || realStatuses.find((s: any) => s.category === 'done');
             if (matchedReal) {
               data.statusId = matchedReal.id;
               queueStatusSyncedDone = true;
