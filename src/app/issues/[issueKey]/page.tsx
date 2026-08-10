@@ -16,7 +16,7 @@ import {
   MessageSquare, Paperclip, Link2, Clock, AlertTriangle,
   Trash2, ChevronDown, ChevronRight, User, Check, X, Plus, Search,
   MoreHorizontal, Share2, Eye, Bookmark, Zap, GitBranch,
-  ExternalLink, Copy, Upload, Tag, Calendar, Target, Layers, Settings, RefreshCw, Pin, PinOff
+  ExternalLink, Copy, Upload, Tag, Calendar, Target, Layers, Settings, RefreshCw, Pin, PinOff, FolderUp
 } from 'lucide-react';
 
 // Fallback status list for a department whose queue is configured (it shows up
@@ -278,6 +278,8 @@ export default function IssueDetailPage() {
   };
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingAttachCount, setUploadingAttachCount] = useState(0);
 
   const [issueLoadDone, setIssueLoadDone] = useState(false);
 
@@ -812,14 +814,33 @@ export default function IssueDetailPage() {
     await handleUpdate('type', type);
   };
 
+  const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024 * 1024; // 10GB, matches the server-side cap
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      await api.uploadAttachment(issueKey, file);
-      loadIssue(issueKey);
-    } catch (err) { console.error(err); }
+    // Selecting multiple files (or a whole folder, via the folder-picker input)
+    // used to only upload files[0] — everything else picked was silently
+    // dropped with no error. Upload every selected file, immediately and in
+    // parallel, so "attach" behaves the same whether it's one file or a
+    // hundred picked from a folder.
+    const files = Array.from(e.target.files ?? []);
     e.target.value = '';
+    if (!files.length) return;
+    setUploadingAttachCount(files.length);
+    await Promise.all(files.map(async (file) => {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        console.error(`"${file.name}" is too large (max 10GB).`);
+        return;
+      }
+      // Directory-picked files only carry their bare name (file.name); the
+      // browser fills in webkitRelativePath with the folder-qualified path
+      // (e.g. "reports/summary.pdf") — pass that through so two files with
+      // the same name in different subfolders don't look identical here.
+      const displayName = (file as any).webkitRelativePath || file.name;
+      try {
+        await api.uploadAttachment(issueKey, file, displayName);
+      } catch (err) { console.error(err); }
+    }));
+    setUploadingAttachCount(0);
+    loadIssue(issueKey);
   };
 
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -1084,12 +1105,23 @@ export default function IssueDetailPage() {
             </button>
 
             {/* Attach */}
-            <button onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-gray-600 bg-white border border-gray-300 rounded hover:bg-gray-50 hover:border-gray-400 transition-all">
+            <button onClick={() => fileInputRef.current?.click()} disabled={uploadingAttachCount > 0}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-gray-600 bg-white border border-gray-300 rounded hover:bg-gray-50 hover:border-gray-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
               <Paperclip size={13} className="text-gray-500" />
               Attach
             </button>
-            <input ref={fileInputRef} type="file" className="hidden" onChange={handleUpload} />
+            <button onClick={() => folderInputRef.current?.click()} disabled={uploadingAttachCount > 0}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-gray-600 bg-white border border-gray-300 rounded hover:bg-gray-50 hover:border-gray-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+              <FolderUp size={13} className="text-gray-500" />
+              Attach folder
+            </button>
+            {uploadingAttachCount > 0 && (
+              <span className="text-[12px] text-gray-500 italic">Uploading {uploadingAttachCount} file{uploadingAttachCount > 1 ? 's' : ''}…</span>
+            )}
+            <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUpload} />
+            {/* webkitdirectory isn't in React's DOM typings — spread it in untyped
+                so the OS folder picker (not just multi-file select) actually opens. */}
+            <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleUpload} {...({ webkitdirectory: '' } as any)} />
           </div>
 
           {/* Reporter Line */}

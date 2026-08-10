@@ -5664,6 +5664,12 @@ async function _handleJiraPgApi(
         const formData = await req.formData();
         const file = formData.get('file') as File | null;
         if (!file) return json({ error: 'No file provided' }, 400);
+        // Same cap as /api/uploads (used by the description/comment editor) —
+        // this endpoint had no size check at all, so a ticket's dedicated
+        // Attachments section enforced a different (unlimited) limit than
+        // everywhere else attachments get uploaded from.
+        const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024 * 1024;
+        if (file.size > MAX_ATTACHMENT_BYTES) return json({ error: 'File too large (max 10GB)' }, 413);
         const issueRow = await pool.query(`SELECT id FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`, [issueKey]);
         if (!issueRow.rows[0]) return json({ error: 'Issue not found' }, 404);
         const issueId = issueRow.rows[0].id;
