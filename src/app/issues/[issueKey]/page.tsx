@@ -150,6 +150,10 @@ export default function IssueDetailPage() {
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
   const [editingCustomField, setEditingCustomField] = useState<string | null>(null);
   const [customFieldEditValue, setCustomFieldEditValue] = useState('');
+  // Search box for multiselect custom fields (Combination has 70+ options,
+  // Client Name has 90+) — reset whenever a different field opens for editing.
+  const [customFieldSearch, setCustomFieldSearch] = useState('');
+  useEffect(() => { setCustomFieldSearch(''); }, [editingCustomField]);
   const [pinnedFields, setPinnedFields] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('jira_pinned_fields') || '[]'); }
     catch { return []; }
@@ -702,6 +706,119 @@ export default function IssueDetailPage() {
         currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: prevValue, ...prevDisplay } as any : s.currentIssue,
       }));
     }
+  };
+
+  // The board-specific custom fields below (Combination, Product Type, Project
+  // Manager, etc.) used to await BOTH the PATCH and a full loadIssue() re-fetch
+  // before closing the edit UI — but PATCH /issues/:key already returns the
+  // fully updated issue, so that second full re-fetch (comments, attachments,
+  // activity, SLA, everything) was a wasted extra round-trip making every save
+  // feel slow just to get back data the PATCH response already had. Same
+  // optimistic-update pattern as handleUpdate above: reflect the change and
+  // close the editor immediately, sync with the server in the background.
+  const saveCustomField = (key: string, newVal: any) => {
+    const prevValue = (issue as any)?.[key];
+    useStore.setState(s => ({
+      currentIssue: s.currentIssue ? { ...s.currentIssue, [key]: newVal } as any : s.currentIssue,
+    }));
+    setEditingCustomField(null);
+    api.updateIssue(issueKey, { [key]: newVal }).catch((e: any) => {
+      console.error(`Save ${key} failed`, e);
+      useStore.setState(s => ({
+        currentIssue: s.currentIssue ? { ...s.currentIssue, [key]: prevValue } as any : s.currentIssue,
+      }));
+      alert('Failed to save. Please try again.');
+    });
+  };
+
+  // Shared renderer for the board-specific custom fields below — this exact
+  // view/edit/save structure was duplicated ~8 times (once per board), differing
+  // only in which fields/options each board uses. Also adds a search box to
+  // multiselect fields with more than a handful of options (Combination has
+  // 70+, Client Name has 90+), instead of just a plain scrollable checkbox list.
+  const renderCustomField = (
+    key: string,
+    label: string,
+    type: 'select' | 'multiselect' | 'tags' | 'text' | 'textarea',
+    options: string[] | undefined,
+    editPrefix: string,
+  ) => {
+    const rawVal = (issue as any)[key];
+    const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
+    const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
+    const editKey = `${editPrefix}_${key}`;
+    const allOptions = options || [];
+    const filteredOptions = customFieldSearch.trim()
+      ? allOptions.filter(o => o.toLowerCase().includes(customFieldSearch.trim().toLowerCase()))
+      : allOptions;
+    return (
+      <PropRow key={key} label={label}>
+        {editingCustomField === editKey ? (
+          <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
+            {type === 'textarea' ? (
+              <textarea value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus rows={3}
+                className="border border-blue-400 rounded px-2 py-1 text-[12px] focus:outline-none w-full resize-none" />
+            ) : type === 'text' ? (
+              <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
+                className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
+            ) : type === 'select' ? (
+              <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
+                className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
+                <option value="">None</option>
+                {allOptions.map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            ) : type === 'tags' ? (
+              <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
+                placeholder="Comma-separated values"
+                className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
+            ) : (
+              /* multiselect — searchable checkbox list */
+              <div className="border border-blue-400 rounded bg-white overflow-hidden">
+                {allOptions.length > 8 && (
+                  <input value={customFieldSearch} onChange={e => setCustomFieldSearch(e.target.value)} autoFocus
+                    placeholder={`Search ${allOptions.length} options…`}
+                    className="w-full px-2 py-1 text-[12px] border-b border-gray-200 focus:outline-none" />
+                )}
+                <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto p-1.5">
+                  {filteredOptions.length === 0 && (
+                    <p className="text-[11px] text-gray-400 px-1 py-1">No matches</p>
+                  )}
+                  {filteredOptions.map(o => {
+                    const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
+                    const checked = selected.includes(o);
+                    return (
+                      <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
+                        <input type="checkbox" checked={checked} onChange={() => {
+                          const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
+                          setCustomFieldEditValue(updated.join(', '));
+                        }} />
+                        {o}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            <div className="flex gap-1 mt-0.5">
+              <button onClick={() => {
+                const newVal = (type === 'multiselect' || type === 'tags')
+                  ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
+                  : customFieldEditValue;
+                saveCustomField(key, newVal);
+              }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
+              <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
+            className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
+            {displayVal
+              ? <span className="text-gray-700 whitespace-pre-wrap">{displayVal}</span>
+              : <span className="text-gray-400">None</span>}
+          </button>
+        )}
+      </PropRow>
+    );
   };
 
   // Combination / Product Type / Project Manager must be filled before resolving a ticket
@@ -2496,70 +2613,7 @@ export default function IssueDetailPage() {
                 { key: 'customerName',  label: 'Customer Name',   type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
                 { key: 'clientName',    label: 'Client Name',     type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
               ];
-              return l2bFields.map(({ key, label, type, options }) => {
-                const rawVal = (issue as any)[key];
-                const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
-                const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
-                const editKey = `l2b_${key}`;
-                return (
-                  <PropRow key={key} label={label}>
-                    {editingCustomField === editKey ? (
-                      <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                        {type === 'textarea' ? (
-                          <textarea value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus rows={3}
-                            className="border border-blue-400 rounded px-2 py-1 text-[12px] focus:outline-none w-full resize-none" />
-                        ) : type === 'select' ? (
-                          <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                            <option value="">None</option>
-                            {options!.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        ) : (
-                          /* multiselect — show checkboxes */
-                          <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto border border-blue-400 rounded p-1.5 bg-white">
-                            {options!.map(o => {
-                              const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                              const checked = selected.includes(o);
-                              return (
-                                <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                                  <input type="checkbox" checked={checked} onChange={() => {
-                                    const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                                    setCustomFieldEditValue(updated.join(', '));
-                                  }} />
-                                  {o}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        )}
-                        <div className="flex gap-1 mt-0.5">
-                          <button onClick={async () => {
-                            const newVal = type === 'multiselect'
-                              ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
-                              : customFieldEditValue;
-                            try {
-                              await api.updateIssue(issueKey, { [key]: newVal });
-                              await loadIssue(issueKey);
-                              setEditingCustomField(null);
-                            } catch (e: any) {
-                              console.error(`Save ${key} failed`, e);
-                              alert('Failed to save. Please try again.');
-                            }
-                          }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
-                        className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                        {displayVal
-                          ? <span className="text-gray-700 whitespace-pre-wrap">{displayVal}</span>
-                          : <span className="text-gray-400">None</span>}
-                      </button>
-                    )}
-                  </PropRow>
-                );
-              });
+              return l2bFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'l2b'));
             })()}
 
             {/* ── TESTBOARD Custom Fields ───────────────────────────────── */}
@@ -2573,69 +2627,7 @@ export default function IssueDetailPage() {
                 { key: 'customerPlan',     label: 'Customer Plan',     type: 'multiselect', options: ['Starter','Professional','Enterprise','Custom','Trial','None'] },
                 { key: 'testStatus',       label: 'Test Status',       type: 'select',      options: ['Open','In Progress','Pass','Fail','Blocked','Not Executed','Skipped'] },
               ];
-              return testFields.map(({ key, label, type, options }) => {
-                const rawVal = (issue as any)[key];
-                const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
-                const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
-                const editKey = `test_${key}`;
-                return (
-                  <PropRow key={key} label={label}>
-                    {editingCustomField === editKey ? (
-                      <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                        {type === 'text' ? (
-                          <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
-                        ) : type === 'select' ? (
-                          <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                            <option value="">None</option>
-                            {options!.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        ) : (
-                          <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto border border-blue-400 rounded p-1.5 bg-white">
-                            {options!.map(o => {
-                              const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                              const checked = selected.includes(o);
-                              return (
-                                <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                                  <input type="checkbox" checked={checked} onChange={() => {
-                                    const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                                    setCustomFieldEditValue(updated.join(', '));
-                                  }} />
-                                  {o}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        )}
-                        <div className="flex gap-1 mt-0.5">
-                          <button onClick={async () => {
-                            const newVal = type === 'multiselect'
-                              ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
-                              : customFieldEditValue;
-                            try {
-                              await api.updateIssue(issueKey, { [key]: newVal });
-                              await loadIssue(issueKey);
-                              setEditingCustomField(null);
-                            } catch (e: any) {
-                              console.error(`Save ${key} failed`, e);
-                              alert('Failed to save. Please try again.');
-                            }
-                          }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
-                        className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                        {displayVal
-                          ? <span className="text-gray-700 whitespace-pre-wrap">{displayVal}</span>
-                          : <span className="text-gray-400">None</span>}
-                      </button>
-                    )}
-                  </PropRow>
-                );
-              });
+              return testFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'test'));
             })()}
 
             {/* ── L3B Custom Fields ─────────────────────────────────────── */}
@@ -2648,66 +2640,7 @@ export default function IssueDetailPage() {
                 { key: 'customerName',   label: 'Customer Name',    type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
                 { key: 'clientName',     label: 'Client Name',      type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
               ];
-              return l3bFields.map(({ key, label, type, options }) => {
-                const rawVal = (issue as any)[key];
-                const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
-                const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
-                const editKey = `l3b_${key}`;
-                return (
-                  <PropRow key={key} label={label}>
-                    {editingCustomField === editKey ? (
-                      <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                        {type === 'select' ? (
-                          <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                            <option value="">None</option>
-                            {options!.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        ) : (
-                          <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto border border-blue-400 rounded p-1.5 bg-white">
-                            {options!.map(o => {
-                              const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                              const checked = selected.includes(o);
-                              return (
-                                <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                                  <input type="checkbox" checked={checked} onChange={() => {
-                                    const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                                    setCustomFieldEditValue(updated.join(', '));
-                                  }} />
-                                  {o}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        )}
-                        <div className="flex gap-1 mt-0.5">
-                          <button onClick={async () => {
-                            const newVal = type === 'multiselect'
-                              ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
-                              : customFieldEditValue;
-                            try {
-                              await api.updateIssue(issueKey, { [key]: newVal });
-                              await loadIssue(issueKey);
-                              setEditingCustomField(null);
-                            } catch (e: any) {
-                              console.error(`Save ${key} failed`, e);
-                              alert('Failed to save. Please try again.');
-                            }
-                          }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
-                        className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                        {displayVal
-                          ? <span className="text-gray-700 whitespace-pre-wrap">{displayVal}</span>
-                          : <span className="text-gray-400">None</span>}
-                      </button>
-                    )}
-                  </PropRow>
-                );
-              });
+              return l3bFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'l3b'));
             })()}
 
             {/* ── CFMBOARD (Service Management) Custom Fields ──────────── */}
@@ -2721,69 +2654,7 @@ export default function IssueDetailPage() {
                 { key: 'customerPlan',     label: 'Customer Plan',      type: 'text' },
                 { key: 'testEnvironment',  label: 'Environment',        type: 'text' },
               ];
-              return cfmFields.map(({ key, label, type, options }) => {
-                const rawVal = (issue as any)[key];
-                const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
-                const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
-                const editKey = `cfm_${key}`;
-                return (
-                  <PropRow key={key} label={label}>
-                    {editingCustomField === editKey ? (
-                      <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                        {type === 'select' ? (
-                          <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                            <option value="">None</option>
-                            {options!.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        ) : type === 'multiselect' ? (
-                          <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto border border-blue-400 rounded p-1.5 bg-white">
-                            {options!.map(o => {
-                              const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                              const checked = selected.includes(o);
-                              return (
-                                <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                                  <input type="checkbox" checked={checked} onChange={() => {
-                                    const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                                    setCustomFieldEditValue(updated.join(', '));
-                                  }} />
-                                  {o}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <input type="text" value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white w-full" />
-                        )}
-                        <div className="flex gap-1 mt-0.5">
-                          <button onClick={async () => {
-                            const newVal = type === 'multiselect'
-                              ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
-                              : customFieldEditValue;
-                            try {
-                              await api.updateIssue(issueKey, { [key]: newVal });
-                              await loadIssue(issueKey);
-                              setEditingCustomField(null);
-                            } catch (e: any) {
-                              console.error(`Save ${key} failed`, e);
-                              alert('Failed to save. Please try again.');
-                            }
-                          }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
-                        className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                        {displayVal
-                          ? <span className="text-gray-700 whitespace-pre-wrap">{displayVal}</span>
-                          : <span className="text-gray-400">None</span>}
-                      </button>
-                    )}
-                  </PropRow>
-                );
-              });
+              return cfmFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'cfm'));
             })()}
 
             {/* ── L1B Custom Fields — also shown for dept-queue tickets (Migration/QA/Dev/etc),
@@ -2804,70 +2675,7 @@ export default function IssueDetailPage() {
                 { key: 'customerName',   label: 'Customer Name',   type: 'multiselect', options: ['Ab-Inbev','CloudFuze','CMS','Epiq_Global','EPIQ-GLOBAL','Global-V','Manypets','MarmicFire','NoahMedical','Thirdpacket'] },
                 { key: 'clientName',     label: 'Client Name',     type: 'multiselect', options: L1_CLIENT_OPTIONS },
               ];
-              return l1bFields.map(({ key, label, type, options }) => {
-                const rawVal = (issue as any)[key];
-                const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
-                const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
-                const editKey = `l1b_${key}`;
-                return (
-                  <PropRow key={key} label={label}>
-                    {editingCustomField === editKey ? (
-                      <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                        {type === 'select' ? (
-                          <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                            <option value="">None</option>
-                            {options!.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        ) : type === 'tags' ? (
-                          <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            placeholder="Comma-separated values"
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
-                        ) : (
-                          <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto border border-blue-400 rounded p-1.5 bg-white">
-                            {options!.map(o => {
-                              const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                              const checked = selected.includes(o);
-                              return (
-                                <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                                  <input type="checkbox" checked={checked} onChange={() => {
-                                    const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                                    setCustomFieldEditValue(updated.join(', '));
-                                  }} />
-                                  {o}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        )}
-                        <div className="flex gap-1 mt-0.5">
-                          <button onClick={async () => {
-                            const newVal = (type === 'multiselect' || type === 'tags')
-                              ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
-                              : customFieldEditValue;
-                            try {
-                              await api.updateIssue(issueKey, { [key]: newVal });
-                              await loadIssue(issueKey);
-                              setEditingCustomField(null);
-                            } catch (e: any) {
-                              console.error(`Save ${key} failed`, e);
-                              alert('Failed to save. Please try again.');
-                            }
-                          }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
-                        className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                        {displayVal
-                          ? <span className="text-gray-700">{displayVal}</span>
-                          : <span className="text-gray-400">None</span>}
-                      </button>
-                    )}
-                  </PropRow>
-                );
-              });
+              return l1bFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'l1b'));
             })()}
 
             {/* ── INFRABOARD Custom Fields ─────────────────────────────── */}
@@ -2877,62 +2685,7 @@ export default function IssueDetailPage() {
                 { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
                 { key: 'combination', label: 'Combination',  type: 'multiselect', options: IB_COMBO_OPTIONS },
               ];
-              return ibFields.map(({ key, label, type, options }) => {
-                const rawVal = (issue as any)[key];
-                const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
-                const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
-                const editKey = `ib_${key}`;
-                return (
-                  <PropRow key={key} label={label}>
-                    {editingCustomField === editKey ? (
-                      <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                        {type === 'select' ? (
-                          <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                            <option value="">None</option>
-                            {options.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        ) : (
-                          <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto border border-blue-400 rounded p-1.5 bg-white">
-                            {options.map(o => {
-                              const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                              const checked = selected.includes(o);
-                              return (
-                                <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                                  <input type="checkbox" checked={checked} onChange={() => {
-                                    const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                                    setCustomFieldEditValue(updated.join(', '));
-                                  }} />
-                                  {o}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        )}
-                        <div className="flex gap-1 mt-0.5">
-                          <button onClick={async () => {
-                            const newVal = type === 'multiselect' ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean) : customFieldEditValue;
-                            try {
-                              await api.updateIssue(issueKey, { [key]: newVal });
-                              await loadIssue(issueKey);
-                              setEditingCustomField(null);
-                            } catch (e: any) {
-                              console.error(`Save ${key} failed`, e);
-                              alert('Failed to save. Please try again.');
-                            }
-                          }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
-                        className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                        {displayVal ? <span className="text-gray-700">{displayVal}</span> : <span className="text-gray-400">None</span>}
-                      </button>
-                    )}
-                  </PropRow>
-                );
-              });
+              return ibFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'ib'));
             })()}
 
             {/* ── QABOAR Custom Fields ──────────────────────────────────── */}
@@ -2942,66 +2695,7 @@ export default function IssueDetailPage() {
                 { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
                 { key: 'combination', label: 'Combination',  type: 'multiselect', options: QAB_COMBO_OPTIONS },
               ];
-              return qabFields.map(({ key, label, type, options }) => {
-                const rawVal = (issue as any)[key];
-                const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
-                const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
-                const editKey = `qab_${key}`;
-                return (
-                  <PropRow key={key} label={label}>
-                    {editingCustomField === editKey ? (
-                      <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                        {type === 'select' ? (
-                          <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                            <option value="">None</option>
-                            {options.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        ) : (
-                          <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto border border-blue-400 rounded p-1.5 bg-white">
-                            {options.map(o => {
-                              const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                              const checked = selected.includes(o);
-                              return (
-                                <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                                  <input type="checkbox" checked={checked} onChange={() => {
-                                    const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                                    setCustomFieldEditValue(updated.join(', '));
-                                  }} />
-                                  {o}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        )}
-                        <div className="flex gap-1 mt-0.5">
-                          <button onClick={async () => {
-                            const newVal = type === 'multiselect'
-                              ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
-                              : customFieldEditValue;
-                            try {
-                              await api.updateIssue(issueKey, { [key]: newVal });
-                              await loadIssue(issueKey);
-                              setEditingCustomField(null);
-                            } catch (e: any) {
-                              console.error(`Save ${key} failed`, e);
-                              alert('Failed to save. Please try again.');
-                            }
-                          }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
-                        className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                        {displayVal
-                          ? <span className="text-gray-700">{displayVal}</span>
-                          : <span className="text-gray-400">None</span>}
-                      </button>
-                    )}
-                  </PropRow>
-                );
-              });
+              return qabFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'qab'));
             })()}
 
             {/* ── PSMBOARD Custom Fields ────────────────────────────────── */}
@@ -3011,66 +2705,7 @@ export default function IssueDetailPage() {
                 { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
                 { key: 'combination', label: 'Combination',  type: 'multiselect', options: PSM_COMBO_OPTIONS },
               ];
-              return psmFields.map(({ key, label, type, options }) => {
-                const rawVal = (issue as any)[key];
-                const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
-                const displayVal = Array.isArray(currentVal) ? currentVal.join(', ') : currentVal;
-                const editKey = `psm_${key}`;
-                return (
-                  <PropRow key={key} label={label}>
-                    {editingCustomField === editKey ? (
-                      <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
-                        {type === 'select' ? (
-                          <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                            className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                            <option value="">None</option>
-                            {options.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        ) : (
-                          <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto border border-blue-400 rounded p-1.5 bg-white">
-                            {options.map(o => {
-                              const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                              const checked = selected.includes(o);
-                              return (
-                                <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                                  <input type="checkbox" checked={checked} onChange={() => {
-                                    const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                                    setCustomFieldEditValue(updated.join(', '));
-                                  }} />
-                                  {o}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        )}
-                        <div className="flex gap-1 mt-0.5">
-                          <button onClick={async () => {
-                            const newVal = type === 'multiselect'
-                              ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
-                              : customFieldEditValue;
-                            try {
-                              await api.updateIssue(issueKey, { [key]: newVal });
-                              await loadIssue(issueKey);
-                              setEditingCustomField(null);
-                            } catch (e: any) {
-                              console.error(`Save ${key} failed`, e);
-                              alert('Failed to save. Please try again.');
-                            }
-                          }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
-                          <button onClick={() => setEditingCustomField(null)} className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
-                        className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
-                        {displayVal
-                          ? <span className="text-gray-700">{displayVal}</span>
-                          : <span className="text-gray-400">None</span>}
-                      </button>
-                    )}
-                  </PropRow>
-                );
-              });
+              return psmFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'psm'));
             })()}
 
             {/* Custom Fields — skip department-routing fields (handled by dedicated DepartmentField above) */}
