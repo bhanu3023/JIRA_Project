@@ -5445,12 +5445,23 @@ async function _handleJiraPgApi(
            AND (s.category IS NULL OR s.category != 'done')
          LIMIT 2000`
       );
-      for (const row of activeIssues.rows) {
-        // Get SLA policies for this space
-        const policies = await pool.query(
-          `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active' LIMIT 5`,
-          [row.spaceId]
+      // This used to run one "SELECT * FROM sla_definitions WHERE spaceId = ..."
+      // per issue inside the loop below — up to 2000 sequential DB round-trips
+      // in a single request. Now scheduled every 5 minutes (see instrumentation.ts),
+      // that's 2000 queries piling up on the connection pool every 5 minutes, which
+      // can starve every other concurrent request on the same pool. Batch-fetch
+      // every distinct space's policies once up front instead.
+      const activeSpaceIds = Array.from(new Set(activeIssues.rows.map((r: any) => r.spaceId).filter(Boolean)));
+      const policiesBySpace: Record<string, any[]> = {};
+      if (activeSpaceIds.length) {
+        const policyRows = await pool.query(
+          `SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`,
+          [activeSpaceIds]
         );
+        for (const p of policyRows.rows) { (policiesBySpace[p.spaceId] ??= []).push(p); }
+      }
+      for (const row of activeIssues.rows) {
+        const policies = { rows: (policiesBySpace[row.spaceId] || []).slice(0, 5) };
         if (!policies.rows.length) continue;
         const priority = (row.priority || 'medium').toLowerCase();
         for (const policy of policies.rows) {
