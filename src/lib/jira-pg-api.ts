@@ -3230,8 +3230,23 @@ async function _handleJiraPgApi(
       let rrAssigneeId: string | null = null;
       let rrAgentName: string | null = null;
       const savedAssigneeForNewDept = deptAssignees[newDept];
+      // dept_assignees is a point-in-time snapshot that can outlive the user it
+      // points to -- if that account was since deleted (a real hard delete via
+      // Settings > User Management, e.g. an offboarded employee), restoring it
+      // here violates issues.assigneeId's foreign key and the whole department
+      // transfer fails with no useful error shown to the user. Verify the user
+      // still exists first; if not, fall through to round robin below instead
+      // (same as if this dept had never been visited before), and drop the
+      // stale reference so this ticket doesn't keep hitting it on every future
+      // visit to this dept.
+      let savedAssigneeStillExists = false;
       if (savedAssigneeForNewDept?.id) {
-        // Dept was visited before Ã¢â‚¬â€ restore the saved assignee
+        const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedAssigneeForNewDept.id]);
+        savedAssigneeStillExists = stillExists.rows.length > 0;
+        if (!savedAssigneeStillExists) delete deptAssignees[newDept];
+      }
+      if (savedAssigneeForNewDept?.id && savedAssigneeStillExists) {
+        // Dept was visited before -- restore the saved assignee
         rrAssigneeId = savedAssigneeForNewDept.id;
         rrAgentName = savedAssigneeForNewDept.displayName || null;
       } else {
@@ -3818,13 +3833,26 @@ async function _handleJiraPgApi(
       const recallDept: string = recallRow.rows[0]?.current_department || '';
       const savedDeptAssignees: Record<string, any> = recallRow.rows[0]?.dept_assignees || {};
       const savedMigrationAssignee = savedDeptAssignees['Migration'];
-      const restoreAssigneeId: string | null = savedMigrationAssignee?.id || null;
+      let restoreAssigneeId: string | null = savedMigrationAssignee?.id || null;
+      // dept_assignees is a point-in-time snapshot that can outlive the user it
+      // points to — if that account was since deleted (e.g. an offboarded
+      // employee via Settings > User Management, a real hard delete), restoring
+      // it here violates issues.assigneeId's foreign key and the whole recall
+      // fails with no useful error shown to the user. Verify the user still
+      // exists first; if not, leave it unassigned instead of failing outright.
+      if (restoreAssigneeId) {
+        const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [restoreAssigneeId]);
+        if (!stillExists.rows.length) {
+          restoreAssigneeId = null;
+          delete savedDeptAssignees['Migration'];
+        }
+      }
 
       await pauseDeptSLA(key, null, recallDept);
       // Restore the saved Migration assignee if available
       await pool.query(
-        `UPDATE issues SET current_department='Migration', "assigneeId"=$2, dept_sla_started_at=NOW(), "updatedAt"=NOW() WHERE key=$1`,
-        [key, restoreAssigneeId]
+        `UPDATE issues SET current_department='Migration', "assigneeId"=$2, dept_sla_started_at=NOW(), dept_assignees=$3::jsonb, "updatedAt"=NOW() WHERE key=$1`,
+        [key, restoreAssigneeId, JSON.stringify(savedDeptAssignees)]
       );
       await startDeptSLA(key, null, 'Migration');
 
