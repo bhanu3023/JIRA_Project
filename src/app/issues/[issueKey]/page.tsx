@@ -43,6 +43,53 @@ function stripHtmlToText(html: string): string {
   return div.textContent || '';
 }
 
+// A bare URL typed as plain text (e.g. "Server - https://qarelease...") only
+// ever got auto-linked when the whole description/comment had literally no
+// HTML tags at all — but content saved from the rich text editor always has
+// at least a <p> wrapper, so that plain-text-only check almost never actually
+// matched for real tickets, leaving typed URLs unclickable. Walk the HTML's
+// text nodes (skipping ones already inside a link or a code block, so an
+// existing <a> never gets double-wrapped and a URL shown as code stays as
+// code) and wrap any bare URL found in one with a real <a> tag.
+const URL_TEST_RE = /https?:\/\/[^\s<>"')\]]+/;
+const URL_REPLACE_RE = /(https?:\/\/[^\s<>"')\]]+)/g;
+function linkifyHtml(html: string): string {
+  if (typeof document === 'undefined' || !html) return html;
+  const container = document.createElement('div');
+  container.innerHTML = html;
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const targets: Text[] = [];
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const text = node as Text;
+    if (text.parentElement?.closest('a, code, pre')) continue;
+    if (URL_TEST_RE.test(text.textContent || '')) targets.push(text);
+  }
+  for (const textNode of targets) {
+    const text = textNode.textContent || '';
+    const frag = document.createDocumentFragment();
+    let lastIndex = 0;
+    for (const match of text.matchAll(URL_REPLACE_RE)) {
+      const url = match[0];
+      const offset = match.index ?? 0;
+      frag.appendChild(document.createTextNode(text.slice(lastIndex, offset)));
+      const clean = url.replace(/[.,;!?]+$/, '');
+      const a = document.createElement('a');
+      a.href = clean;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.style.color = '#2563eb';
+      a.style.textDecoration = 'underline';
+      a.textContent = clean;
+      frag.appendChild(a);
+      lastIndex = offset + url.length;
+    }
+    frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+    textNode.replaceWith(frag);
+  }
+  return container.innerHTML;
+}
+
 export default function IssueDetailPage() {
   const params = useParams();
   // Normalize key: strip Jira sub-issue colon suffix (e.g. L2B-12718:1 → L2B-12718)
@@ -259,7 +306,7 @@ export default function IssueDetailPage() {
       // HTML content — render directly, intercept all link clicks to force new tab
       return <div
         className="text-[13px] text-gray-700 leading-relaxed [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
-        dangerouslySetInnerHTML={{ __html: body }}
+        dangerouslySetInnerHTML={{ __html: linkifyHtml(body) }}
         onClick={(e) => {
           const target = e.target as HTMLElement;
           if (target.tagName === 'IMG') {
@@ -1279,7 +1326,7 @@ export default function IssueDetailPage() {
               issue.description ? (() => {
                 const isHtml = /<[a-z][\s\S]*>/i.test(issue.description);
                 // Convert plain text to formatted HTML if it has === sections or is long plain text
-                const renderHtml = isHtml ? issue.description : (() => {
+                const renderHtml = isHtml ? linkifyHtml(issue.description) : (() => {
                   let t = issue.description;
                   // === Section Name === → bold header
                   t = t.replace(/={3,}\s*([^=]+?)\s*={3,}/g, '<h4 style="font-weight:700;margin:12px 0 4px;color:#374151;border-bottom:1px solid #e5e7eb;padding-bottom:2px;">$1</h4>');
