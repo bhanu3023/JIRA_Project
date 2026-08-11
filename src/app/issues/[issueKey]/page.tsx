@@ -2906,8 +2906,10 @@ export default function IssueDetailPage() {
             // instead of collapsing down to a single "best match".
             const finalEntries = dedupedEntries;
 
-            // Any SLA breached right now (live check)?
-            const anyBreached = finalEntries.some(s => !s.isPaused && (s.isBreached || new Date(s.dueTime).getTime() - slaNow <= 0));
+            // Any SLA breached right now (live check)? A completed ticket's due time
+            // is frozen in the past, which read as breached forever once resolved —
+            // exclude completed entries the same way paused ones already are.
+            const anyBreached = finalEntries.some(s => !s.isPaused && !s.isCompleted && (s.isBreached || new Date(s.dueTime).getTime() - slaNow <= 0));
 
             return (
               <>
@@ -2934,7 +2936,8 @@ export default function IssueDetailPage() {
                         const dueAt = new Date(s.dueTime);
                         const remainingMs = dueAt.getTime() - slaNow;
                         const isPaused = s.isPaused === true;
-                        const isBreached = !isPaused && (s.isBreached || remainingMs <= 0);
+                        const isCompleted = s.isCompleted === true;
+                        const isBreached = !isPaused && !isCompleted && (s.isBreached || remainingMs <= 0);
                         const goalMs: number = s.goalDurationMs || 0;
                         // Paused: freeze elapsed at pause time (now - start), don't count up
                         const elapsedMs = isPaused
@@ -2947,12 +2950,12 @@ export default function IssueDetailPage() {
                         const isNotified = s.isNotified === true && (remainingMs <= warnMs);
 
                         return (
-                          <div key={s.id} className={`rounded-xl border p-3 ${isBreached ? 'border-red-300 bg-red-50' : isPaused ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-white'}`}>
+                          <div key={s.id} className={`rounded-xl border p-3 ${isBreached ? 'border-red-300 bg-red-50' : isCompleted ? 'border-emerald-300 bg-emerald-50' : isPaused ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-white'}`}>
 
                             {/* Row 1: policy name + status badges */}
                             <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-1.5 flex-wrap">
-                                <Clock size={13} className={isBreached ? 'text-red-500' : isPaused ? 'text-amber-500' : 'text-blue-500'} />
+                                <Clock size={13} className={isBreached ? 'text-red-500' : isCompleted ? 'text-emerald-500' : isPaused ? 'text-amber-500' : 'text-blue-500'} />
                                 <span className="text-[12px] font-semibold text-gray-800">{baseName}</span>
                                 {goalMs > 0 && (
                                   <span className="text-[10px] text-gray-400 font-medium">({fmtGoal(goalMs)})</span>
@@ -2966,24 +2969,27 @@ export default function IssueDetailPage() {
                                 )}
                                 <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
                                   isBreached ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse'
+                                  : isCompleted ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
                                   : isPaused ? 'bg-amber-100 text-amber-700 border border-amber-200'
                                   : 'bg-green-100 text-green-700'
                                 }`}>
-                                  {isBreached ? '⚠ BREACHED' : isPaused ? '⏸ PAUSED' : '● RUNNING'}
+                                  {isBreached ? '⚠ BREACHED' : isCompleted ? '✓ RESOLVED' : isPaused ? '⏸ PAUSED' : '● RUNNING'}
                                 </span>
                               </div>
                             </div>
 
-                            {/* Row 2: countdown / paused / overdue time */}
-                            <div className={`text-[17px] font-bold tabular-nums mb-2 ${isBreached ? 'text-red-600' : isPaused ? 'text-amber-600' : 'text-gray-900'}`}>
-                              {isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
+                            {/* Row 2: countdown / paused / overdue / resolved time — a
+                                resolved ticket must stop counting down, not keep ticking
+                                toward (or past) its due time forever. */}
+                            <div className={`text-[17px] font-bold tabular-nums mb-2 ${isBreached ? 'text-red-600' : isCompleted ? 'text-emerald-600' : isPaused ? 'text-amber-600' : 'text-gray-900'}`}>
+                              {isCompleted ? 'Resolved' : isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
                             </div>
 
                             {/* Row 3: progress bar */}
                             {goalMs > 0 && (
                               <div className="w-full h-1.5 rounded-full bg-gray-200 overflow-hidden mb-3">
                                 <div
-                                  className={`h-1.5 rounded-full transition-none ${isBreached ? 'bg-red-500' : isPaused ? 'bg-amber-400' : pct > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
+                                  className={`h-1.5 rounded-full transition-none ${isBreached ? 'bg-red-500' : isCompleted ? 'bg-emerald-500' : isPaused ? 'bg-amber-400' : pct > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
                                   style={{ width: `${Math.min(pct, 100)}%` }}
                                 />
                               </div>
