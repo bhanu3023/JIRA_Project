@@ -71,6 +71,17 @@ export default function RichTextEditor({
   const formatSize = (bytes: number) =>
     bytes >= 1024 * 1024 * 1024 ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB` : `${(bytes / 1024 / 1024).toFixed(1)}MB`;
   const [warning, setWarning] = useState<string | null>(null);
+  // Images embed small (see insertImage/[&_img] sizing below) so a screenshot
+  // doesn't dominate the description box — clicking one opens it full-size
+  // in an overlay instead, rather than at its cramped inline thumbnail size.
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'IMG') {
+      e.preventDefault();
+      setLightboxSrc((target as HTMLImageElement).src);
+    }
+  };
   const warnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warn = (msg: string) => {
     setWarning(msg);
@@ -321,7 +332,7 @@ export default function RichTextEditor({
           imgEl.src = result.url;
           imgEl.alt = file.name;
           imgEl.title = file.name;
-          imgEl.style.cssText = 'max-width:100%;border-radius:6px;margin:6px 0;display:block;';
+          imgEl.style.cssText = 'max-width:220px;max-height:160px;width:auto;height:auto;border-radius:6px;margin:6px 0;display:block;cursor:pointer;object-fit:contain;';
           el?.replaceWith(imgEl);
           emit();
           endUpload();
@@ -635,6 +646,7 @@ export default function RichTextEditor({
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         onDrop={handleDrop}
+        onClick={handleEditorClick}
         onDragOver={e => e.preventDefault()}
         data-placeholder={placeholder}
         className={`
@@ -650,7 +662,7 @@ export default function RichTextEditor({
           [&_pre]:bg-slate-800 [&_pre]:text-slate-200 [&_pre]:rounded-md [&_pre]:p-3 [&_pre]:my-2 [&_pre]:font-mono [&_pre]:text-[13px] [&_pre]:overflow-x-auto
           [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0
           [&_a]:text-blue-600 [&_a]:underline
-          [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1
+          [&_img]:max-w-[220px] [&_img]:max-h-[160px] [&_img]:w-auto [&_img]:h-auto [&_img]:object-contain [&_img]:rounded-md [&_img]:my-1 [&_img]:cursor-pointer
           empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400
           empty:before:pointer-events-none
         `}
@@ -750,6 +762,28 @@ export default function RichTextEditor({
       {/* webkitdirectory isn't in React's DOM typings — spread it in untyped so
           the folder picker (not just multi-file select) actually opens. */}
       <input ref={folderRef} type="file" multiple hidden onChange={handleFileInput} {...({ webkitdirectory: '' } as any)} />
+
+      {/* Image lightbox — opens over this same screen, not a new tab/page */}
+      {lightboxSrc && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 p-6"
+          onClick={() => setLightboxSrc(null)}
+        >
+          <img
+            src={lightboxSrc}
+            alt=""
+            className="max-h-full max-w-full rounded-md shadow-2xl object-contain"
+            onClick={e => e.stopPropagation()}
+          />
+          <button
+            onClick={() => setLightboxSrc(null)}
+            className="absolute top-4 right-4 flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors text-xl leading-none"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }
