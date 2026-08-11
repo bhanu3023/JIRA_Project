@@ -73,13 +73,6 @@ export default function IssueDetailPage() {
   const [isUploadingComment, setIsUploadingComment] = useState(false);
   const [isUploadingDescription, setIsUploadingDescription] = useState(false);
   const [isUploadingEditComment, setIsUploadingEditComment] = useState(false);
-  // Sent/Watching lets other departments monitor a ticket after it moves on —
-  // but that's viewing, not managing. True once we've confirmed (via the
-  // ticket's current-department queue membership) that this viewer can edit
-  // it; defaults to true so nothing flickers disabled before that resolves,
-  // matching the backend's fail-open behavior for tickets outside the
-  // department-routing model.
-  const [canEditTicket, setCanEditTicket] = useState(true);
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
@@ -419,13 +412,6 @@ export default function IssueDetailPage() {
                 const others = existing.filter((q: any) => q.id !== matchedQueue.id);
                 localStorage.setItem(`custom_queues_${spKey}`, JSON.stringify([...others, matchedQueue]));
               } catch {}
-              // Editing is gated to this queue's own members (admins bypass this
-              // separately wherever it's checked) — a dept just monitoring via
-              // Sent/Watching shouldn't see edit affordances for a ticket it no
-              // longer manages.
-              const memberIds: string[] = matchedQueue.memberIds || [];
-              const suspendedIds: string[] = matchedQueue.suspendedIds || [];
-              setCanEditTicket(memberIds.includes(user?.id || '') && !suspendedIds.includes(user?.id || ''));
               const qSt = matchedQueue.queueStatuses;
               const qTr = matchedQueue.queueTransitions;
               if (qSt?.length) {
@@ -446,13 +432,9 @@ export default function IssueDetailPage() {
               return;
             }
           } catch {}
-          // Nothing found anywhere — dept doesn't map to a configured queue, so
-          // don't restrict (matches the backend's fail-open behavior)
-          setCanEditTicket(true);
           if (!resolvedFromCache) loadStatusesForSpace(currentIssue.spaceKey);
         })();
       } else {
-        setCanEditTicket(true);
         loadStatusesForSpace(currentIssue.spaceKey);
       }
     }
@@ -991,9 +973,10 @@ export default function IssueDetailPage() {
     return role === 'admin' || role === 'administrator' || role === 'owner';
   }, [user, spaceMembers]);
 
-  // Admins always can; everyone else only if they're a member of the queue
-  // this ticket currently sits in (computed above from current_department).
-  const canEdit = isSpaceAdmin || canEditTicket;
+  // Previously gated to admins / the current queue's own members once a ticket
+  // moved to another department — anyone can edit a ticket regardless of which
+  // queue currently owns it now, matching the backend PATCH endpoint.
+  const canEdit = true;
 
   // Resolve the correct per-queue workflow URL for a ticket with current_department.
   // Checks the issue's own space first, then all loaded spaces — no type filter needed.
