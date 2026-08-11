@@ -4290,7 +4290,20 @@ async function _handleJiraPgApi(
     let handoffTargetDept = '';
     let handoffOldDept = '';
     if (body.statusId !== undefined && issue.statusId !== data.statusId) {
-      const newStForHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === data.statusId) as any;
+      // A department's "Waiting for X" status can be defined under a different
+      // workflow space than the ticket's own (the status dropdown itself loads
+      // options from matchedQueue.workflowSpaceKey, not necessarily issue.spaceKey
+      // — see loadStatusesForSpace on the issue detail page). Searching only
+      // issue.space.statuses missed it whenever the two differed: the status
+      // itself still got applied (statusId is a plain column, not space-scoped),
+      // but the handoff that's supposed to move current_department right along
+      // with it never ran, leaving the ticket showing e.g. "Waiting for
+      // Migration" while current_department stayed on the OLD department.
+      // Status ids are globally unique, so look this one up directly instead
+      // of assuming it lives in the ticket's own space.
+      const newStForHandoff = data.statusId
+        ? await db.status.findUnique({ where: { id: String(data.statusId) } })
+        : null;
       const newStatusNameForHandoff = (newStForHandoff?.name || '').trim();
       const waitMatchHandoff = newStatusNameForHandoff.match(/^waiting\s+for\s+(.+)$/i);
       if (waitMatchHandoff) {
