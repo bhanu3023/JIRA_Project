@@ -2057,6 +2057,8 @@ export default function IssueDetailPage() {
                                 <span className="text-gray-500">added a comment</span>
                               ) : a.field === 'created' ? (
                                 <span className="text-gray-500">created this issue</span>
+                              ) : a.field === 'sla' ? (
+                                <span className="text-gray-500">SLA update</span>
                               ) : (
                                 <>
                                   <span className="text-gray-500">changed</span>
@@ -2065,8 +2067,8 @@ export default function IssueDetailPage() {
                               )}
                               <span className="text-gray-400 text-[11px] ml-1">{timeAgo(a.createdAt)}</span>
                             </div>
-                            {/* Old → New value (skip for comments and created events) */}
-                            {a.field !== 'comment' && a.field !== 'created' && (
+                            {/* Old → New value (skip for comments, created, and SLA events) */}
+                            {a.field !== 'comment' && a.field !== 'created' && a.field !== 'sla' && (
                               <div className="flex items-center gap-2 text-[12px]">
                                 {a.oldValue ? (
                                   <span className="bg-red-50 text-red-600 px-2 py-0.5 rounded line-through max-w-[200px] truncate" title={a.oldValue}>{a.oldValue}</span>
@@ -2088,6 +2090,18 @@ export default function IssueDetailPage() {
                                 <div className="text-[12px] text-gray-500 italic truncate max-w-sm">"{plain.slice(0, 120)}{plain.length > 120 ? '…' : ''}"</div>
                               );
                             })()}
+                            {/* SLA lifecycle event (started/resumed/paused/resolved/breached) */}
+                            {a.field === 'sla' && a.newValue && (
+                              <div className={`inline-flex items-center gap-1 text-[11.5px] font-medium px-2 py-0.5 rounded-full ${
+                                a.newValue.startsWith('SLA breached') ? 'bg-red-50 text-red-600'
+                                : a.newValue.startsWith('SLA resolved') ? 'bg-emerald-50 text-emerald-600'
+                                : a.newValue.startsWith('SLA paused') ? 'bg-amber-50 text-amber-600'
+                                : 'bg-blue-50 text-blue-600'
+                              }`}>
+                                <Clock size={11} />
+                                {a.newValue}
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}

@@ -300,6 +300,11 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
     }
 
     const candidates: Array<{ row: any; policy: any; minsLeft: number }> = [];
+    // Breach itself is a live/computed state (checked fresh on every read), not a
+    // discrete stored event -- so History never showed the moment a ticket actually
+    // crossed its due time, only the pre-breach warning notification. Collect that
+    // moment here too, logged once per issue per department visit (guarded below).
+    const justBreached: Array<{ row: any; policy: any }> = [];
     for (const row of rows) {
       const policies = policiesBySpace[row.spaceId] || [];
       if (!policies.length) continue;
@@ -327,7 +332,22 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
         const timeToBreachMs = dueAt - Date.now();
         if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
           candidates.push({ row, policy, minsLeft: Math.ceil(timeToBreachMs / 60_000) });
+        } else if (timeToBreachMs <= 0) {
+          justBreached.push({ row, policy });
         }
+      }
+    }
+
+    if (justBreached.length) {
+      const byIssue = new Map<string, { row: any; policy: any }>();
+      for (const c of justBreached) { if (!byIssue.has(c.row.id)) byIssue.set(c.row.id, c); }
+      for (const { row, policy } of byIssue.values()) {
+        const label = `SLA breached — ${row.current_department || ''}`.trim();
+        try {
+          const already = await (db as any).issueHistory.findFirst({ where: { issueId: row.id, field: 'sla', newValue: label } });
+          if (already) continue;
+          await logSlaHistory(null, row.id, label);
+        } catch { /* non-fatal */ }
       }
     }
 
@@ -681,11 +701,29 @@ function formatSpace(sp: any) {
   };
 }
 
+// SLA lifecycle events (started/resumed/paused/resolved/breached) previously
+// left no trace in an issue's History tab at all — only the side-effect they
+// were attached to (a department change, a status change) showed up, with
+// nothing calling out that the SLA clock itself had started, paused, or
+// breached. Centralized here so every pauseDeptSLA/startDeptSLA call site
+// (transfer, recall, handoff, close) gets a History entry for free.
+async function logSlaHistory(issueKey: string | null, issueId: string | null, message: string): Promise<void> {
+  try {
+    const targetId = issueId || (issueKey
+      ? (await pool.query(`SELECT id FROM issues WHERE key=$1`, [issueKey])).rows[0]?.id
+      : null);
+    if (!targetId) return;
+    await (db as any).issueHistory.create({
+      data: { id: rid(), issueId: targetId, field: 'sla', oldValue: null, newValue: message, authorName: 'System', createdAt: new Date() },
+    });
+  } catch { /* non-fatal */ }
+}
+
 /**
  * Pause the SLA for `dept` and store elapsed ms in dept_sla_log.
  * Call this just before resetting dept_sla_started_at to NOW().
  */
-async function pauseDeptSLA(issueKey: string | null, issueId: string | null, dept: string): Promise<void> {
+async function pauseDeptSLA(issueKey: string | null, issueId: string | null, dept: string, historyLabel: string = 'SLA paused'): Promise<void> {
   if (!dept) return;
   try {
     const row = await pool.query(
@@ -711,6 +749,7 @@ async function pauseDeptSLA(issueKey: string | null, issueId: string | null, dep
       `UPDATE issues SET dept_sla_log=$1::jsonb WHERE ${issueKey ? 'key=$2' : 'id=$2'}`,
       [JSON.stringify(log), issueKey || issueId]
     );
+    await logSlaHistory(issueKey, issueId, `${historyLabel} — ${dept}`);
   } catch { /* non-fatal */ }
 }
 
@@ -725,6 +764,7 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
       [issueKey || issueId]
     );
     const log: Record<string, any> = row.rows[0]?.dept_sla_log || {};
+    const wasStartedBefore = !!log[dept];
     const nowTs = new Date();
     log[dept] = {
       ...(log[dept] || {}),
@@ -737,6 +777,7 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
       `UPDATE issues SET dept_sla_log=$1::jsonb WHERE ${issueKey ? 'key=$2' : 'id=$2'}`,
       [JSON.stringify(log), issueKey || issueId]
     );
+    await logSlaHistory(issueKey, issueId, `${wasStartedBefore ? 'SLA resumed' : 'SLA started'} — ${dept}`);
   } catch { /* non-fatal */ }
 }
 
@@ -4347,7 +4388,7 @@ async function _handleJiraPgApi(
           const closingDept: string = closeData.rows[0]?.current_department || '';
 
           // Pause current dept SLA so elapsed time is finalized
-          await pauseDeptSLA(null, issue.id, closingDept);
+          await pauseDeptSLA(null, issue.id, closingDept, 'SLA resolved');
 
           // Collect all user→dept pairs to record; use a Map to deduplicate
           const workedOnMap = new Map<string, string>(); // userId → dept
