@@ -4153,23 +4153,6 @@ async function _handleJiraPgApi(
     ]);
     if (!issue) return json({ error: 'Not found' }, 404);
 
-    // Sent/Watching monitoring shouldn't extend to editing — once a ticket has
-    // moved to another department's queue, only that queue's members (or an
-    // admin) can change it, including its per-queue custom status
-    // (queueStatusId is handled further below, but gated by the same check).
-    if (!isAdmin) {
-      try {
-        const deptRow = await pool.query(`SELECT current_department FROM issues WHERE key=$1 LIMIT 1`, [key]);
-        const currentDept: string | null = deptRow.rows[0]?.current_department || null;
-        if (currentDept && issue.space?.key) {
-          const authorized = await isUserAuthorizedForDeptQueue(issue.space.key, currentDept, userId);
-          if (!authorized) {
-            return json({ error: `You can view and comment on this ticket, but it has moved to ${currentDept} — only that queue can edit it.` }, 403);
-          }
-        }
-      } catch { /* fail open on lookup errors */ }
-    }
-
     const data: Record<string, unknown> = {};
     if (body.summary !== undefined) data.summary = String(body.summary);
     if (body.description !== undefined) data.description = body.description === null ? null : String(body.description);
