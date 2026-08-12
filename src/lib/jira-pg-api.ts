@@ -4333,7 +4333,27 @@ async function _handleJiraPgApi(
               deptAssignees[handoffOldDept] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: avatarRef(curAssignee.id, curAssignee.avatarUrl) };
             }
           }
-          deptAssignees[handoffTargetDept] = deptAssignees[handoffTargetDept] ?? null;
+          // Restore whoever was saved for this dept from a previous visit (same
+          // restore-or-round-robin rule the "Change Department" dropdown already
+          // uses) instead of always landing unassigned — this handoff path used
+          // to hardcode assigneeId to NULL unconditionally, ignoring a perfectly
+          // good saved assignee sitting right here in deptAssignees[handoffTargetDept].
+          const savedForHandoffTarget = deptAssignees[handoffTargetDept];
+          let handoffAssigneeId: string | null = null;
+          if (savedForHandoffTarget?.id) {
+            const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedForHandoffTarget.id]);
+            if (stillExists.rows.length) handoffAssigneeId = savedForHandoffTarget.id;
+            else delete deptAssignees[handoffTargetDept];
+          }
+          if (!handoffAssigneeId) {
+            try {
+              const rrAgent = await getNextAgent(issue.spaceId, handoffTargetDept, (issue as any).productType || null);
+              if (rrAgent) {
+                handoffAssigneeId = rrAgent.userId;
+                deptAssignees[handoffTargetDept] = { id: rrAgent.userId, displayName: rrAgent.name };
+              }
+            } catch { /* non-critical — falls through to unassigned */ }
+          }
 
           deptStatuses[handoffOldDept] = { id: '', name: newStatusNameForHandoff, category: 'todo', color: '#F59E0B' };
           const inProgressSt = await db.status.findFirst({ where: { spaceId: issue.spaceId, category: 'in_progress' }, orderBy: { order: 'asc' } })
@@ -4346,8 +4366,8 @@ async function _handleJiraPgApi(
 
           await pauseDeptSLA(null, issue.id, handoffOldDept);
           await pool.query(
-            `UPDATE issues SET current_department=$1, "assigneeId"=NULL, dept_sla_started_at=NOW(), dept_assignees=$2::jsonb, dept_statuses=$3::jsonb, "statusId"=$4, "updatedAt"=NOW() WHERE id=$5`,
-            [handoffTargetDept, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), targetStatusId, issue.id]
+            `UPDATE issues SET current_department=$1, "assigneeId"=$6, dept_sla_started_at=NOW(), dept_assignees=$2::jsonb, dept_statuses=$3::jsonb, "statusId"=$4, "updatedAt"=NOW() WHERE id=$5`,
+            [handoffTargetDept, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), targetStatusId, issue.id, handoffAssigneeId]
           );
           await startDeptSLA(null, issue.id, handoffTargetDept);
 
