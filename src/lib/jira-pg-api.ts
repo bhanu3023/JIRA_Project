@@ -4541,12 +4541,14 @@ async function _handleJiraPgApi(
           // Collect all user→dept pairs to record; use a Map to deduplicate
           const workedOnMap = new Map<string, string>(); // userId → dept
 
-          // 1. Current assignee in closing dept
+          // 1. Current assignee in closing dept -- only fall back to crediting
+          // whoever closed it when there's no real assignee. This used to
+          // credit BOTH unconditionally, so whoever clicked resolve (often
+          // an admin) got added to their own Worked-on list right alongside
+          // the person the ticket was actually assigned to.
           if (issue.assigneeId && closingDept) {
             workedOnMap.set(`${issue.assigneeId}::${closingDept}`, `${issue.assigneeId}|${closingDept}`);
-          }
-          // Also record closing user (whoever is making this status change) if different
-          if (userId && closingDept && userId !== issue.assigneeId) {
+          } else if (userId && closingDept) {
             workedOnMap.set(`${userId}::${closingDept}`, `${userId}|${closingDept}`);
           }
 
@@ -4557,14 +4559,18 @@ async function _handleJiraPgApi(
             }
           }
 
-          // 3. moved_by users from issue_dept_transitions (covers unassigned handoffs)
+          // 3. moved_by users from issue_dept_transitions -- same fallback
+          // rule as above: only credit whoever moved a ticket OUT of a dept
+          // when that dept has no real assignee on record (covers a
+          // genuinely unassigned handoff); otherwise this double-credited
+          // the actual mover for a dept someone else really worked.
           try {
             const transRows = await pool.query(
               `SELECT from_dept, to_dept, moved_by FROM issue_dept_transitions WHERE issue_id=$1 AND moved_by IS NOT NULL`,
               [issue.id]
             );
             for (const t of transRows.rows) {
-              if (t.moved_by && t.from_dept) {
+              if (t.moved_by && t.from_dept && !savedDeptAssignees[t.from_dept]?.id) {
                 workedOnMap.set(`${t.moved_by}::${t.from_dept}`, `${t.moved_by}|${t.from_dept}`);
               }
             }
