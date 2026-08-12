@@ -59,7 +59,16 @@ export default function RichTextEditor({
     pendingUploads.current = Math.max(0, pendingUploads.current - 1);
     if (pendingUploads.current === 0) onUploadingChange?.(false);
   };
-  const skipSync   = useRef(false);
+  // Tracks the last value *this editor* emitted, so the sync effect below can
+  // tell "value changed because we just typed it" apart from "value changed
+  // externally (e.g. cleared after submit)". A plain skip-once boolean broke
+  // here: a no-op format command (Bold with nothing selected) calls emit()
+  // without actually changing innerHTML, so React bails on the state update
+  // and the effect that's supposed to consume/reset the flag never runs —
+  // leaving it stuck true and silently swallowing the *next* real external
+  // change (e.g. the box failing to clear after Save, even though the value
+  // prop did become '').
+  const lastEmitted = useRef<string | null>(null);
 
   // Images/files are uploaded to the server and referenced by URL rather than
   // embedded as base64 inline — that used to make the description payload
@@ -140,14 +149,14 @@ export default function RichTextEditor({
   useEffect(() => {
     const el = editorRef.current;
     if (!el) return;
-    if (skipSync.current) { skipSync.current = false; return; }
+    if (value === lastEmitted.current) return; // this value came from us — DOM already reflects it
     if (el.innerHTML !== (value ?? '')) el.innerHTML = value ?? '';
   }, [value]);
 
   /* ── Emit changes upward ─────────────────────────────────────────── */
   const emit = useCallback(() => {
-    skipSync.current = true;
-    onChange(editorRef.current?.innerHTML ?? '');
+    lastEmitted.current = editorRef.current?.innerHTML ?? '';
+    onChange(lastEmitted.current);
   }, [onChange]);
 
   /* ── execCommand helper ─────────────────────────────────────────── */
