@@ -76,8 +76,6 @@ async function jiraGetWithRetry(path, attempt = 0) {
   }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // ADF -> plain text (same extraction approach as the original migration scripts)
 function extractText(node) {
   if (!node) return '';
@@ -188,14 +186,35 @@ async function backfillIssue(issueId, key) {
   }
 }
 
+// Each ticket is independent (its own issueId, its own dedup checks scoped to
+// that issue) so running several concurrently is safe -- there's no shared
+// state between tickets that a race could corrupt. Most of the per-ticket
+// time is spent waiting on Jira's network round-trip, which is exactly what
+// parallelizes well; a fixed CONCURRENCY cap (rather than firing everything
+// at once) keeps the in-flight request count bounded and predictable so a
+// burst doesn't trip Jira's rate limiter.
+const CONCURRENCY = process.env.BACKFILL_CONCURRENCY ? parseInt(process.env.BACKFILL_CONCURRENCY, 10) : 6;
+
+async function runPool(items, worker, concurrency) {
+  let nextIndex = 0;
+  async function runOne() {
+    for (;;) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      await worker(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runOne));
+}
+
 async function main() {
   const res = await pool.query(
     `SELECT id, key FROM issues WHERE key LIKE 'L2B-%' OR key LIKE 'L3B-%' ORDER BY key`
   );
   const targets = res.rows.slice(0, LIMIT === Infinity ? res.rows.length : LIMIT);
-  console.log(`Found ${res.rows.length} L2B/L3B tickets; processing ${targets.length} this run.`);
+  console.log(`Found ${res.rows.length} L2B/L3B tickets; processing ${targets.length} this run with concurrency=${CONCURRENCY}.`);
 
-  for (const { id, key } of targets) {
+  await runPool(targets, async ({ id, key }) => {
     try {
       await backfillIssue(id, key);
       stats.processed++;
@@ -206,8 +225,7 @@ async function main() {
     if (stats.processed % 25 === 0) {
       console.log(`progress: ${stats.processed}/${targets.length} | +comments=${stats.commentsAdded} +history=${stats.historyAdded} errors=${stats.errors}`);
     }
-    await sleep(150); // stay well under Jira's rate limits
-  }
+  }, CONCURRENCY);
 
   console.log('\nDone.');
   console.log(stats);
