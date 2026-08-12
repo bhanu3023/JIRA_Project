@@ -110,11 +110,17 @@ async function main() {
   const hostname = new URL(creds.base).hostname;
   const authHdr = 'Basic ' + Buffer.from(`${creds.email}:${creds.token}`).toString('base64');
 
+  // ORDER BY i.key sorts lexicographically ("L2B-10" < "L2B-100" < "L2B-1000"
+  // < "L2B-10000"), which clusters the lowest-limit dry runs into whichever
+  // keys happen to sort first as STRINGS -- overwhelmingly old, low-numbered
+  // (and so disproportionately already-resolved) tickets, not a real sample
+  // of the full range. ORDER BY RANDOM() so a limited dry run actually tells
+  // us something about the whole set; harmless extra cost on a full run.
   const res = await pool.query(`
     SELECT i.id, i.key, i."statusId", i.current_department, i.dept_statuses, i."spaceId"
     FROM issues i
     WHERE i.key LIKE 'L2B-%' OR i.key LIKE 'L3B-%'
-    ORDER BY i.key
+    ORDER BY RANDOM()
   `);
   const targets = res.rows.slice(0, LIMIT === Infinity ? res.rows.length : LIMIT);
   console.log(`${DRY_RUN ? '[DRY RUN] ' : ''}Found ${res.rows.length} L2B/L3B tickets; processing ${targets.length} with concurrency=${CONCURRENCY}.`);
