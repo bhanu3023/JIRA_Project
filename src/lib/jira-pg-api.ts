@@ -1045,6 +1045,15 @@ function formatIssue(issue: any) {
     createdAt: issue.createdAt?.toISOString() ?? nowIso(),
     updatedAt: issue.updatedAt?.toISOString() ?? nowIso(),
     sla_breached: issue.sla_breached ?? false,
+    // Historical SLA-breach flag imported from Jira (L2B/L3B migration) --
+    // the local SLA clock is scoped to time spent in THIS app's own
+    // departments and never breaches once a ticket is resolved, so a ticket
+    // that was already breached in Jira before migration would otherwise
+    // show as "not breached" here forever. Null/false for every other
+    // ticket, so this is a no-op everywhere the backfill hasn't run.
+    jira_sla_breached: (issue as any).jira_sla_breached ?? false,
+    jira_sla_due_at: (issue as any).jira_sla_due_at ? new Date((issue as any).jira_sla_due_at).toISOString() : null,
+    jira_sla_start_at: (issue as any).jira_sla_start_at ? new Date((issue as any).jira_sla_start_at).toISOString() : null,
   };
 }
 
@@ -2440,11 +2449,11 @@ async function _handleJiraPgApi(
         const issueKeys = issues.map((i: any) => i.key);
         if (issueKeys.length) {
           const deptRows = await pool.query(
-            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name FROM issues WHERE key = ANY($1::text[])`,
+            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at FROM issues WHERE key = ANY($1::text[])`,
             [issueKeys]
           );
           for (const row of deptRows.rows) {
-            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name };
+            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at };
           }
         }
       } catch { /* ignore */ }
@@ -2973,6 +2982,9 @@ async function _handleJiraPgApi(
           dept_assignees: row.dept_assignees || {},
           dept_sla_started_at: row.dept_sla_started_at,
           dept_sla_log: row.dept_sla_log,
+          jira_sla_breached: row.jira_sla_breached,
+          jira_sla_due_at: row.jira_sla_due_at,
+          jira_sla_start_at: row.jira_sla_start_at,
           status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
           assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null,
           reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) } : null,
@@ -3005,8 +3017,14 @@ async function _handleJiraPgApi(
       const nowMs = Date.now();
       enrichedIssues = enrichedIssues.map((i: any) => {
         const isResolved = i.status?.category === 'done';
-        let breached = false;
-        if (!isResolved) {
+        // Historical breach imported from Jira (L2B/L3B) always counts, even
+        // for a ticket that's since been resolved here -- the checks below
+        // all force `breached` back to false once resolved, which is right
+        // for this app's OWN SLA clock (no point alarming on a stopped
+        // clock), but would erase the fact that Jira already recorded a
+        // real breach before the ticket ever got resolved.
+        let breached = !!i.jira_sla_breached;
+        if (!breached && !isResolved) {
           if (i.dueDate && new Date(i.dueDate).getTime() < nowMs) breached = true;
           // Same fallback as computeIssueSLAsFromDb: tickets never routed through a
           // department transfer have no dept_sla_started_at, so measure from creation.

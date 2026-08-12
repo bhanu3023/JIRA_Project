@@ -74,6 +74,13 @@ docker exec -i jira_postgres psql -U jirauser -d jiradb -c "
   -- issues table without these.
   CREATE INDEX IF NOT EXISTS idx_issues_cf_key ON issues (cf_key);
   CREATE INDEX IF NOT EXISTS issues_partner_key_idx ON issues (\"partnerKey\");
+  -- Historical SLA-breach data imported from Jira for L2B/L3B tickets --
+  -- this app's own SLA clock never reports a breach once a ticket is
+  -- resolved, which erases the fact that a ticket was already breached in
+  -- Jira before it ever got resolved here. Raw columns, same as cf_key.
+  ALTER TABLE issues ADD COLUMN IF NOT EXISTS jira_sla_breached BOOLEAN DEFAULT FALSE;
+  ALTER TABLE issues ADD COLUMN IF NOT EXISTS jira_sla_due_at TIMESTAMPTZ;
+  ALTER TABLE issues ADD COLUMN IF NOT EXISTS jira_sla_start_at TIMESTAMPTZ;
 " 2>&1 | grep -v NOTICE || true
 
 DATABASE_URL="postgresql://jirauser:Neutara%402024@localhost:5434/jiradb" node /root/Jira-v2.0/seed-queues.mjs 2>/dev/null || true
