@@ -48,20 +48,26 @@ const NATIVE_SLA_FIELD = 'customfield_10043';    // "Time to resolution" -- Jira
                                                   // breach data (ongoingCycle/completedCycles) for many
                                                   // tickets where the select field above is empty.
 
-// Pulls {breached, dueAt, startAt} out of Jira's native SLA metric field,
-// preferring the still-running cycle (a ticket whose SLA clock was never
-// formally closed in Jira) and falling back to the most recent completed
-// one. Returns null if there's no usable cycle at all.
+// Pulls {breached, dueAt, startAt} out of Jira's native SLA metric field. A
+// reopened ticket can have MULTIPLE completed cycles (SLA restarts each
+// time) plus a current ongoing one -- checking only the last/ongoing cycle
+// would report "not breached" for a ticket that breached on an earlier
+// cycle and later got a clean one, which is still a real historical breach.
+// Treat it as breached if ANY cycle was, reporting that breached cycle's
+// own due/start time; only when nothing ever breached do we fall back to
+// the latest cycle's time for a clean "not breached" record.
 function extractNativeSla(fields) {
   const native = fields[NATIVE_SLA_FIELD];
   if (!native || typeof native !== 'object') return null;
-  const cycle = native.ongoingCycle
-    || (Array.isArray(native.completedCycles) && native.completedCycles.length
-      ? native.completedCycles[native.completedCycles.length - 1]
-      : null);
-  if (!cycle) return null;
+  const cycles = [
+    ...(Array.isArray(native.completedCycles) ? native.completedCycles : []),
+    ...(native.ongoingCycle ? [native.ongoingCycle] : []),
+  ];
+  if (!cycles.length) return null;
+  const breachedCycle = cycles.find((c) => c.breached);
+  const cycle = breachedCycle || cycles[cycles.length - 1];
   return {
-    breached: !!cycle.breached,
+    breached: !!breachedCycle,
     dueAt: cycle.breachTime?.epochMillis ? new Date(cycle.breachTime.epochMillis) : null,
     startAt: cycle.startTime?.epochMillis ? new Date(cycle.startTime.epochMillis) : null,
   };
