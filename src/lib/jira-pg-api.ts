@@ -2509,6 +2509,21 @@ async function _handleJiraPgApi(
           const sentExtraClauses: string[] = [];
           const sentExtraParams: any[] = [];
           let sentParamIdx = 3;
+          // Free-text search (ticket key, CF key, summary, description) -- this
+          // branch builds its own raw SQL instead of going through the shared
+          // Prisma `where` above, so the `q` param (typing a ticket number into
+          // the search box) was silently dropped no matter what was typed,
+          // unlike every other queue view.
+          if (searchQ) {
+            sentExtraClauses.push(`(
+              i.key ILIKE $${sentParamIdx}
+              OR i.cf_key ILIKE $${sentParamIdx}
+              OR i.summary ILIKE $${sentParamIdx}
+              OR i.description ILIKE $${sentParamIdx}
+            )`);
+            sentExtraParams.push(`%${searchQ}%`);
+            sentParamIdx++;
+          }
           if (assignees) {
             const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
             const resolvedIds = await resolveUserIds(ids);
