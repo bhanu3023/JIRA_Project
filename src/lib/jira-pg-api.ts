@@ -3614,20 +3614,21 @@ async function _handleJiraPgApi(
           `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept, moved_by) VALUES ($1, $2, $3, $4, $5)`,
           [issue.id, issue.spaceId, oldDept || '', newDept, userId || null]
         );
-        // Record worked-on for whoever handled this ticket in oldDept — the formal
-        // assignee, but also whoever actually performed this transfer, since a
-        // ticket worked without ever being formally "assigned" (a common pattern —
-        // people just change its status) got no record at all here otherwise, and
-        // had to wait for the ticket to eventually close before the moved_by
-        // fallback could credit it. Moving several such tickets in a row showed
-        // only the ones that happened to have an assignee, not all of them.
+        // Record worked-on for whoever handled this ticket in oldDept — the
+        // formal assignee if there is one. This used to ALSO credit whoever
+        // performed the transfer even when a real assignee already existed
+        // (only meant as a fallback for the rare unassigned-ticket case, but
+        // written unconditionally) -- an admin doing routine department
+        // management, or anyone else moving a ticket that was never really
+        // theirs, got it added to their own personal "Worked on" list next
+        // to tickets they had nothing to do with. Only fall back to
+        // crediting the mover when there's no assignee to credit instead.
         if (oldDept && issue.assigneeId) {
           pool.query(
             `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
             [issue.assigneeId, issue.id, oldDept]
           ).catch(() => {});
-        }
-        if (oldDept && userId && userId !== issue.assigneeId) {
+        } else if (oldDept && userId) {
           pool.query(
             `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
             [userId, issue.id, oldDept]
@@ -4499,17 +4500,17 @@ async function _handleJiraPgApi(
               [issue.id, issue.spaceId, handoffOldDept, handoffTargetDept, userId]
             ).catch(() => {});
           }
-          // Record worked-on for the assignee in the old dept — and, same as the
-          // other transfer path, also whoever actually performed the handoff, so
-          // an unassigned ticket still gets credited immediately instead of only
-          // if/when it's later closed.
+          // Record worked-on for the assignee in the old dept -- same fix as
+          // the other transfer path: only fall back to crediting whoever
+          // performed the handoff when there's no real assignee to credit
+          // instead, so this list stays personal and doesn't fill up with
+          // tickets someone merely routed through the status dropdown.
           if (handoffOldDept && curAssigneeId) {
             pool.query(
               `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
               [curAssigneeId, issue.id, handoffOldDept]
             ).catch(() => {});
-          }
-          if (handoffOldDept && userId && userId !== curAssigneeId) {
+          } else if (handoffOldDept && userId) {
             pool.query(
               `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
               [userId, issue.id, handoffOldDept]
