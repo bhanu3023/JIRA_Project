@@ -1181,6 +1181,25 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                             <ClipboardList size={11} className={(queueParam === 'sent-watching' && deptParam === q.name) ? 'text-blue-500' : 'text-gray-400'} />
                             <span className="flex-1 truncate">Sent / Watching</span>
                           </Link>}
+                          {/* Summary — scoped to this queue's own tickets. Only
+                              reachable by this queue's own members (or an
+                              admin/manager) since it's nested under a queue
+                              block that's only rendered for visibleQueues in
+                              the first place, and the backend applies the
+                              same membership check as every other dept-scoped
+                              sub-item here. */}
+                          <Link
+                            href={`/spaces/${spaceKey}?queue=summary&dept=${encodeURIComponent(q.name)}`}
+                            className={cn(
+                              'flex items-center gap-2 rounded-md px-2 py-1.5 text-[11.5px] transition-colors',
+                              (queueParam === 'summary' && deptParam === q.name)
+                                ? 'bg-blue-100 text-blue-700'
+                                : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900',
+                            )}
+                          >
+                            <BarChart2 size={11} className={(queueParam === 'summary' && deptParam === q.name) ? 'text-blue-500' : 'text-gray-400'} />
+                            <span className="flex-1 truncate">Summary</span>
+                          </Link>
                         </div>
                       )}
                     </div>
