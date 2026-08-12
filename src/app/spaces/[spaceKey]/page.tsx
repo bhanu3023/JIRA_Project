@@ -1131,14 +1131,13 @@ function SpaceDetailContent() {
           if (issueDept !== deptParam.toLowerCase()) return false;
         }
       } else if (queueFilter === 'dept_assigned') {
-        const cat = (issue.status?.category || '').toLowerCase();
-        const stName = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || stName.includes('done') || stName.includes('resolved') || stName.includes('closed')) return false;
-        if (!user || issue.assignee?.id !== user.id) return false;
-        if (deptParam) {
-          const issueDept = ((issue as any).current_department || '').toLowerCase();
-          if (issueDept !== deptParam.toLowerCase()) return false;
-        }
+        // Server already does all the scoping (assignee, dept, excludeDone) via
+        // includeHistory — re-applying "still open, still in this dept, still
+        // assigned to me" here undid that: a resolved or moved-on ticket the
+        // server correctly kept (with its real current status/department) got
+        // silently stripped right back out, so the list shrank below the
+        // "Open" pill's server-reported total. No client-side filter needed;
+        // just pass through what the server returned, same as custom queues.
       } else if (queueFilter.startsWith('cq_')) {
         // Custom queue — server already filters by current_department (dept param sent to API)
         // No client-side dept filter needed; just pass through all server-returned issues
