@@ -2887,6 +2887,13 @@ async function _handleJiraPgApi(
         const limitIdx = rowParams.length + 1;
         const offsetIdx = rowParams.length + 2;
         rowParams.push(limit, (page - 1) * limit);
+        // Sorting by updatedAt made an old ticket jump to page 1 the moment anyone
+        // so much as commented on it, potentially bumping a genuinely new ticket
+        // off the page -- pagination should be a stable "50 newest by creation
+        // date" list, not one that reshuffles on unrelated activity. The general
+        // (non-dept) branch above already orders by createdAt only; this dept-
+        // scoped branch (used by every department queue view: All Tickets,
+        // Unassigned, Assigned to me) was the one still sorting by updatedAt first.
         const rows = await pool.query(
           `SELECT i.*, sp.key AS space_key,
                   s.name AS status_name, s.category AS status_category, s.color AS status_color,
@@ -2902,7 +2909,7 @@ async function _handleJiraPgApi(
              AND ${deptDeptMatchSql}
            ${deptSearchClause}
            ${deptExtraSql}
-           ORDER BY i."updatedAt" DESC, i."createdAt" DESC
+           ORDER BY i."createdAt" DESC
            LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
           rowParams
         );
