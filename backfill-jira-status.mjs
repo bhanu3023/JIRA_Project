@@ -128,6 +128,15 @@ async function main() {
   const stats = { processed: 0, changed: 0, unchanged: 0, notFound: 0, errors: 0 };
   const unmatched = [];
   const sample = []; // first 20 changes, for review
+  // Tallies what Jira's real status actually is across every ticket checked
+  // (not just the ones that changed) -- the only way to tell "most tickets
+  // are genuinely Resolved in Jira too" apart from "the matching logic is
+  // silently defaulting to Resolved regardless of the real status".
+  const jiraStatusCounts = {};
+  // Of the ones that changed, whether it was a real status VALUE flip
+  // (global statusId actually differs from Jira) vs just backfilling the
+  // previously-empty dept_statuses snapshot with the same status.
+  const changeKinds = { valueChanged: 0, snapshotBackfillOnly: 0 };
 
   await runPool(targets, async (row) => {
     try {
@@ -140,6 +149,7 @@ async function main() {
       }
       const jiraStatusName = data.fields?.status?.name;
       if (!jiraStatusName) { unmatched.push({ key: row.key, reason: 'no status field in Jira response' }); return; }
+      jiraStatusCounts[jiraStatusName] = (jiraStatusCounts[jiraStatusName] || 0) + 1;
 
       const matched = statusByName.get(jiraStatusName.toLowerCase());
       if (!matched) { unmatched.push({ key: row.key, jiraStatus: jiraStatusName }); return; }
@@ -150,8 +160,9 @@ async function main() {
       const globalAlreadyCorrect = row.statusId === matched.id;
       if (globalAlreadyCorrect && deptAlreadyCorrect) { stats.unchanged++; return; }
 
+      if (globalAlreadyCorrect) changeKinds.snapshotBackfillOnly++; else changeKinds.valueChanged++;
       if (sample.length < 20) {
-        sample.push({ key: row.key, dept, from: row.statusId, to: matched.name });
+        sample.push({ key: row.key, dept, from: row.statusId, jiraStatus: jiraStatusName, to: matched.name });
       }
       if (!DRY_RUN) {
         const newDeptStatuses = { ...deptStatuses };
@@ -174,6 +185,11 @@ async function main() {
 
   console.log(`\n${DRY_RUN ? '[DRY RUN] ' : ''}Done.`);
   console.log(stats);
+  console.log('\nOf the changed tickets: real status value changed vs just backfilling the empty dept_statuses snapshot:');
+  console.log(changeKinds);
+
+  console.log('\nDistribution of tickets\' REAL current status in Jira (across everything checked, not just changes):');
+  console.log(Object.fromEntries(Object.entries(jiraStatusCounts).sort((a, b) => b[1] - a[1])));
 
   console.log(`\nSample of ${sample.length > 0 ? 'up to 20 ' : ''}changes${DRY_RUN ? ' (would apply)' : ' applied'}:`);
   console.log(sample);
