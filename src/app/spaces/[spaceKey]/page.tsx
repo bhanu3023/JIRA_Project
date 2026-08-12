@@ -541,6 +541,17 @@ function SpaceDetailContent() {
             if (!cancelled) await fetchClosedIssues(spaceKey, deptParam);
             return; // skip normal loadIssues for closed view
           }
+          // Summary opened from inside a specific queue (sidebar's per-queue
+          // "Summary" link) — scope to that queue's own tickets instead of
+          // the whole space's. Same dept param as every other dept-scoped
+          // view here, so it goes through the identical backend membership
+          // check (isUserAuthorizedForDeptQueue) that already gates dept_all
+          // etc. -- a queue's Summary is only reachable by that queue's own
+          // members (or an admin/manager), same as the rest of its sub-items.
+          if (queueFilter === 'summary' && deptParam) {
+            params.dept = deptParam;
+            params.limit = '200';
+          }
         }
         // Pass active filters to the API so server handles them (large boards like L2B)
         if (filters.status)   params.status   = filters.status;
@@ -1443,6 +1454,18 @@ function SpaceDetailContent() {
 
         return (
           <div className="flex-1 overflow-auto px-6 py-6 bg-gray-50">
+            {/* Now reachable per-queue (sidebar's own "Summary" link under each
+                queue) as well as space-wide -- this heading is the only thing
+                telling those two apart, since the charts below look identical
+                either way. */}
+            <div className="mb-5">
+              <h2 className="text-[15px] font-semibold text-gray-800">
+                {deptParam ? `Summary — ${deptParam}` : 'Summary'}
+              </h2>
+              <p className="text-[12px] text-gray-400 mt-0.5">
+                {deptParam ? `Computed from tickets currently in the ${deptParam} queue.` : `Computed from all issues in ${currentSpace?.name || spaceKey}.`}
+              </p>
+            </div>
             <div className="flex gap-6">
               {/* Status Distribution */}
               <div className={chartCard}>
