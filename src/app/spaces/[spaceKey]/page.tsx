@@ -129,6 +129,12 @@ function SpaceDetailContent() {
       bumpIssuesVersion: s.bumpIssuesVersion,
     })),
   );
+  // Declared this early (rather than down near the access-check block) because
+  // an effect above the early-return spinner closes over it -- if it stayed
+  // below those early returns, a render that bails out early would never run
+  // its own initializer, and the deferred effect callback from that render
+  // would hit the TDZ ("Cannot access 'isAdmin' before initialization").
+  const isAdmin = user?.role === 'admin';
   // Static column definitions (always available)
   const STATIC_COLUMNS = [
     { id: 'reporter',       label: 'Reporter',            width: '150px' },
@@ -183,6 +189,39 @@ function SpaceDetailContent() {
       }
     } catch { /* non-fatal */ }
   }, []);
+  // Per-queue Summary (admin-only) -- range-aware status/priority/SLA
+  // breakdown plus a per-user "tickets worked" table, computed server-side
+  // rather than client-side from whatever's in `issues` (which is capped at
+  // 200 and not range-aware), since this needs to be accurate for a whole
+  // team, not just whatever happens to already be loaded.
+  const [summaryRange, setSummaryRange] = useState<string>('all');
+  const [deptSummaryData, setDeptSummaryData] = useState<any>(null);
+  const [deptSummaryLoading, setDeptSummaryLoading] = useState(false);
+  const [deptSummaryError, setDeptSummaryError] = useState<string | null>(null);
+  useEffect(() => {
+    if (queueFilter !== 'summary' || !deptParam || !spaceKey || !isAdmin) { setDeptSummaryData(null); return; }
+    let cancelled = false;
+    setDeptSummaryLoading(true);
+    setDeptSummaryError(null);
+    (async () => {
+      try {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
+        const res = await fetch(
+          `/api/spaces/${spaceKey}/dept-queue/summary?dept=${encodeURIComponent(deptParam)}&range=${encodeURIComponent(summaryRange)}`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+        );
+        if (cancelled) return;
+        const data = await res.json();
+        if (!res.ok) { setDeptSummaryError(data.error || 'Failed to load summary'); setDeptSummaryData(null); return; }
+        setDeptSummaryData(data);
+      } catch {
+        if (!cancelled) setDeptSummaryError('Failed to load summary');
+      } finally {
+        if (!cancelled) setDeptSummaryLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [queueFilter, deptParam, spaceKey, summaryRange, isAdmin]);
   const [deptFilter, setDeptFilter] = useState<string>(''); // '' = all departments
   const [allCustomQueues, setAllCustomQueues] = useState<{ id: string; name: string; memberIds: string[] }[]>([]);
   // Track which spaceKey the queues were loaded for — avoids stale-spaceKey race condition
@@ -542,14 +581,11 @@ function SpaceDetailContent() {
             return; // skip normal loadIssues for closed view
           }
           // Summary opened from inside a specific queue (sidebar's per-queue
-          // "Summary" link) — admin-only, so a regular member typing the URL
-          // directly with the sidebar link hidden doesn't still pull the
-          // whole queue's aggregate data. Skip the fetch entirely for
-          // anyone else; the render below shows an access-denied message.
+          // "Summary" link) has its own dedicated, range-aware endpoint and
+          // effect (deptSummaryData) instead of this generic issue list --
+          // skip the fetch here entirely either way.
           if (queueFilter === 'summary' && deptParam) {
-            if (!isAdmin) return;
-            params.dept = deptParam;
-            params.limit = '200';
+            return;
           }
         }
         // Pass active filters to the API so server handles them (large boards like L2B)
@@ -1009,7 +1045,6 @@ function SpaceDetailContent() {
   if (!currentSpace) return null;
 
   // Access check — admins always pass; others must be a member of this space
-  const isAdmin = user?.role === 'admin';
   const isMember = isAdmin || (currentSpace.members || []).some(
     (m: any) => (m.email || m.user?.email || '').toLowerCase() === (user?.email || '').toLowerCase()
   );
@@ -1426,7 +1461,170 @@ function SpaceDetailContent() {
           </div>
         </div>
       )}
-      {queueFilter === 'summary' && (!deptParam || isAdmin) && (() => {
+      {/* Per-queue summary (admin-only) — range-aware, server-computed, with
+          a per-user "tickets worked" breakdown. Separate branch from the
+          space-wide one below since it has its own data source entirely. */}
+      {queueFilter === 'summary' && deptParam && isAdmin && (() => {
+        const RANGE_OPTIONS = [
+          { id: 'all', label: 'All time' },
+          { id: 'today', label: 'Today' },
+          { id: '7d', label: 'Last 7 days' },
+          { id: '30d', label: 'Last 30 days' },
+          { id: '90d', label: 'Last 90 days' },
+        ];
+        const CAT_ORDER: Record<string, number> = { todo: 0, in_progress: 1, done: 2 };
+        const statusData: [string, { count: number; color: string; category: string }][] =
+          (deptSummaryData?.statusBreakdown || [])
+            .map((s: any) => [s.name, { count: s.count, color: s.color, category: s.category }] as [string, any])
+            .sort((a: any, b: any) => {
+              const catDiff = (CAT_ORDER[a[1].category] ?? 1) - (CAT_ORDER[b[1].category] ?? 1);
+              return catDiff !== 0 ? catDiff : b[1].count - a[1].count;
+            });
+        const maxStatus = Math.max(...statusData.map(([, v]) => v.count), 1);
+
+        const PRIORITY_COLORS: Record<string, string> = { highest: '#EF4444', high: '#F97316', medium: '#F59E0B', low: '#64748B', lowest: '#94A3B8' };
+        const priorityData = (deptSummaryData?.priorityBreakdown || []).map((p: any) => ({
+          id: p.priority, label: p.priority.charAt(0).toUpperCase() + p.priority.slice(1), count: p.count, color: PRIORITY_COLORS[p.priority] || '#94A3B8',
+        }));
+        const maxPriority = Math.max(...priorityData.map((d: any) => d.count), 1);
+
+        const BAR_H = 180;
+        const chartCard = 'bg-white border border-gray-200 rounded-xl p-6 flex-1 min-w-0';
+        const perUser: any[] = deptSummaryData?.perUser || [];
+
+        return (
+          <div className="flex-1 overflow-auto px-6 py-6 bg-gray-50">
+            <div className="flex items-start justify-between mb-5 gap-4">
+              <div>
+                <h2 className="text-[15px] font-semibold text-gray-800">Summary — {deptParam}</h2>
+                <p className="text-[12px] text-gray-400 mt-0.5">Computed from tickets in the {deptParam} queue.</p>
+              </div>
+              <select value={summaryRange} onChange={(e) => setSummaryRange(e.target.value)}
+                className="text-[12.5px] border border-gray-300 rounded-md px-2.5 py-1.5 bg-white text-gray-700 outline-none focus:ring-1 focus:ring-blue-500">
+                {RANGE_OPTIONS.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+              </select>
+            </div>
+
+            {deptSummaryLoading && (
+              <div className="py-16 flex items-center justify-center"><DotLoader /></div>
+            )}
+            {deptSummaryError && !deptSummaryLoading && (
+              <p className="text-[13px] text-red-500 py-8 text-center">{deptSummaryError}</p>
+            )}
+
+            {!deptSummaryLoading && !deptSummaryError && deptSummaryData && (
+              <>
+                <div className="flex gap-6">
+                  {/* Status Distribution */}
+                  <div className={chartCard}>
+                    <h3 className="text-[14px] font-semibold text-gray-800 mb-5">Status Distribution</h3>
+                    <div className="flex items-end gap-4" style={{ height: BAR_H + 40 }}>
+                      {statusData.map(([name, v]) => {
+                        const barH = Math.max(4, Math.round((v.count / maxStatus) * BAR_H));
+                        return (
+                          <div key={name} className="flex flex-col items-center gap-1 flex-1 min-w-[48px]">
+                            <span className="text-[11px] font-medium text-gray-500">{v.count}</span>
+                            <div className="w-full rounded-t-md transition-all" style={{ height: barH, background: v.color }} />
+                            <span className="text-[11px] text-gray-500 text-center leading-tight">{name}</span>
+                          </div>
+                        );
+                      })}
+                      {statusData.length === 0 && <p className="text-[12.5px] text-gray-400">No tickets in this range.</p>}
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-4">
+                      {statusData.map(([name, v]) => (
+                        <span key={name} className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                          <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: v.color }} />
+                          {name} · {v.count}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Priority Distribution */}
+                  <div className={chartCard}>
+                    <h3 className="text-[14px] font-semibold text-gray-800 mb-5">Priority Distribution</h3>
+                    <div className="flex items-end gap-4" style={{ height: BAR_H + 40 }}>
+                      {priorityData.map((d: any) => {
+                        const barH = Math.max(d.count > 0 ? 4 : 2, Math.round((d.count / maxPriority) * BAR_H));
+                        return (
+                          <div key={d.id} className="flex flex-col items-center gap-1 flex-1 min-w-[48px]">
+                            <span className="text-[11px] font-medium text-gray-500">{d.count}</span>
+                            <div className="w-full rounded-t-md transition-all" style={{ height: barH, background: d.count > 0 ? d.color : '#E5E7EB' }} />
+                            <span className="text-[11px] text-gray-500 text-center">{d.label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-4">
+                      {priorityData.map((d: any) => (
+                        <span key={d.id} className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                          <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: d.count > 0 ? d.color : '#E5E7EB' }} />
+                          {d.label} · {d.count}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Totals row */}
+                <div className="flex gap-4 mt-6">
+                  {[
+                    { label: 'Total Issues', value: deptSummaryData.totalIssues ?? 0, color: 'text-gray-700', bg: 'bg-white' },
+                    { label: 'To Do', value: statusData.filter(([, v]) => v.category === 'todo').reduce((s, [, v]) => s + v.count, 0), color: 'text-slate-600', bg: 'bg-slate-50' },
+                    { label: 'In Progress', value: statusData.filter(([, v]) => v.category === 'in_progress').reduce((s, [, v]) => s + v.count, 0), color: 'text-blue-600', bg: 'bg-blue-50' },
+                    { label: 'Done', value: statusData.filter(([, v]) => v.category === 'done').reduce((s, [, v]) => s + v.count, 0), color: 'text-green-600', bg: 'bg-green-50' },
+                    { label: 'SLA Breached', value: deptSummaryData.slaBreachedCount ?? 0, color: 'text-red-600', bg: 'bg-red-50' },
+                  ].map((s) => (
+                    <div key={s.label} className={`flex-1 ${s.bg} border border-gray-200 rounded-xl px-5 py-4`}>
+                      <p className="text-[11.5px] text-gray-400 mb-1">{s.label}</p>
+                      <p className={`text-[26px] font-bold ${s.color}`}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Per-user breakdown */}
+                <div className="bg-white border border-gray-200 rounded-xl mt-6 overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100">
+                    <h3 className="text-[14px] font-semibold text-gray-800">Per user</h3>
+                    <p className="text-[11.5px] text-gray-400 mt-0.5">Tickets each team member worked in this queue, in the selected range.</p>
+                  </div>
+                  {perUser.length === 0 ? (
+                    <p className="text-[12.5px] text-gray-400 py-8 text-center">No queue members found, or no activity in this range.</p>
+                  ) : (
+                    <table className="w-full text-[12.5px]">
+                      <thead>
+                        <tr className="text-left text-[10.5px] font-semibold text-gray-400 uppercase tracking-wide">
+                          <th className="px-5 py-2">User</th>
+                          <th className="px-5 py-2 text-right">Tickets Worked</th>
+                          <th className="px-5 py-2 text-right">SLA Breached</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {perUser.map((u: any) => (
+                          <tr key={u.userId} className="border-t border-gray-50">
+                            <td className="px-5 py-2.5 flex items-center gap-2">
+                              <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
+                                {getInitials(u.firstName, u.lastName)}
+                              </div>
+                              <span className="text-gray-700">{u.firstName} {u.lastName}</span>
+                            </td>
+                            <td className="px-5 py-2.5 text-right font-medium text-gray-700">{u.ticketsWorked}</td>
+                            <td className={`px-5 py-2.5 text-right font-medium ${u.slaBreached > 0 ? 'text-red-600' : 'text-gray-400'}`}>{u.slaBreached}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── Space-wide Summary view ── */}
+      {queueFilter === 'summary' && !deptParam && (() => {
         const allIssues = issues;
         // Status distribution
         const statusMap: Record<string, { count: number; color: string; category: string }> = {};
@@ -1461,17 +1659,9 @@ function SpaceDetailContent() {
 
         return (
           <div className="flex-1 overflow-auto px-6 py-6 bg-gray-50">
-            {/* Now reachable per-queue (sidebar's own "Summary" link under each
-                queue) as well as space-wide -- this heading is the only thing
-                telling those two apart, since the charts below look identical
-                either way. */}
             <div className="mb-5">
-              <h2 className="text-[15px] font-semibold text-gray-800">
-                {deptParam ? `Summary — ${deptParam}` : 'Summary'}
-              </h2>
-              <p className="text-[12px] text-gray-400 mt-0.5">
-                {deptParam ? `Computed from tickets currently in the ${deptParam} queue.` : `Computed from all issues in ${currentSpace?.name || spaceKey}.`}
-              </p>
+              <h2 className="text-[15px] font-semibold text-gray-800">Summary</h2>
+              <p className="text-[12px] text-gray-400 mt-0.5">Computed from all issues in {currentSpace?.name || spaceKey}.</p>
             </div>
             <div className="flex gap-6">
               {/* Status Distribution */}

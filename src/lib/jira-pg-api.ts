@@ -2215,6 +2215,125 @@ async function _handleJiraPgApi(
     }
   }
 
+  // ── Dept-Queue Summary (per-queue "Summary" sidebar link) ──
+  // Admin-only, same restriction as the sidebar link and the page that calls
+  // this -- this is aggregate data about a whole queue's team, not something
+  // a regular agent should see just because they're a member of that queue.
+  const deptQueueSummaryMatch = path.match(/^spaces\/([^/]+)\/dept-queue\/summary$/);
+  if (deptQueueSummaryMatch && method === 'GET') {
+    if (!isAdmin) return json({ error: 'You do not have access to this queue.' }, 403);
+    const spaceKeyParam = deptQueueSummaryMatch[1].toUpperCase();
+    const dept = url.searchParams.get('dept') || '';
+    const rangeParam = url.searchParams.get('range') || 'all';
+    const { from, to } = parseDateRange(rangeParam === 'all' ? '__all__' : rangeParam);
+
+    const spaceRes = await pool.query(`SELECT id FROM spaces WHERE key = $1`, [spaceKeyParam]);
+    if (!spaceRes.rows[0]) return json({ error: 'Space not found' }, 404);
+    const spaceId = spaceRes.rows[0].id;
+
+    try {
+      // Status/priority breakdown + total, scoped to this dept and the
+      // selected range (by creation date) -- same shape the existing charts
+      // already render, just now range-aware instead of always "all time".
+      const deptIssuesRes = await pool.query(
+        `SELECT i.id, i.priority, i."createdAt", i.jira_sla_breached, i."dueDate",
+                s.name AS status_name, s.color AS status_color, s.category AS status_category
+         FROM issues i
+         LEFT JOIN statuses s ON i."statusId" = s.id
+         WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)
+           AND i."createdAt" >= $3 AND i."createdAt" <= $4`,
+        [spaceId, dept, from, to]
+      );
+      const statusMap: Record<string, { count: number; color: string; category: string }> = {};
+      const priorityMap: Record<string, number> = { highest: 0, high: 0, medium: 0, low: 0, lowest: 0 };
+      let slaBreachedCount = 0;
+      for (const row of deptIssuesRes.rows) {
+        const name = row.status_name || 'Unknown';
+        if (!statusMap[name]) statusMap[name] = { count: 0, color: row.status_color || '#64748B', category: row.status_category || 'todo' };
+        statusMap[name].count++;
+        const p = (row.priority || 'medium').toLowerCase();
+        if (p in priorityMap) priorityMap[p]++;
+        // Same "prefer the imported historical flag, else a simple due-date
+        // check" rule as the general issue list -- not the full per-policy
+        // computation (that needs each ticket's own SLA policy/goal duration
+        // and pause state), just a practical approximation for a team-wide
+        // count. Good enough to spot a trend, not a substitute for the
+        // per-ticket SLA panel's exact figure.
+        const isDone = row.status_category === 'done';
+        const dueBreach = !isDone && row.dueDate && new Date(row.dueDate).getTime() < Date.now();
+        if (row.jira_sla_breached || dueBreach) slaBreachedCount++;
+      }
+
+      // Per-user breakdown -- every member of this queue, how many tickets
+      // they worked in it (from user_worked_on_tickets, same source the
+      // "Worked on" tab already uses) within the selected range, and how
+      // many of those are breached by the same rule as above.
+      let memberIds: string[] = [];
+      try {
+        const queueRows = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKeyParam]);
+        for (const row of queueRows.rows) {
+          const q = (row.queues || []).find((qq: any) => (qq.name || '').toLowerCase() === dept.toLowerCase());
+          if (q?.memberIds?.length) { memberIds = q.memberIds; break; }
+        }
+      } catch { /* no custom queue config */ }
+
+      let perUser: any[] = [];
+      if (memberIds.length) {
+        const workedRes = await pool.query(
+          `SELECT w.user_id, i.id AS issue_id, i.jira_sla_breached, i."dueDate", s.category AS status_category,
+                  u."firstName", u."lastName", u.email, u."avatarUrl"
+           FROM user_worked_on_tickets w
+           JOIN issues i ON i.id = w.issue_id
+           LEFT JOIN statuses s ON i."statusId" = s.id
+           LEFT JOIN users u ON u.id = w.user_id
+           WHERE w.user_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2)
+             AND w.worked_at >= $3 AND w.worked_at <= $4`,
+          [memberIds, dept, from, to]
+        );
+        const byUser: Record<string, any> = {};
+        for (const r of workedRes.rows) {
+          if (!byUser[r.user_id]) {
+            byUser[r.user_id] = {
+              userId: r.user_id, firstName: r.firstName, lastName: r.lastName, email: r.email,
+              avatarUrl: avatarRef(r.user_id, r.avatarUrl), ticketIds: new Set<string>(), slaBreachedIds: new Set<string>(),
+            };
+          }
+          byUser[r.user_id].ticketIds.add(r.issue_id);
+          const isDone = r.status_category === 'done';
+          const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
+          if (r.jira_sla_breached || dueBreach) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
+        }
+        // Include every queue member even with zero worked tickets in this
+        // range, not just the ones with activity -- otherwise a member who
+        // simply hasn't touched anything in the selected range silently
+        // vanishes from the list instead of showing as 0.
+        for (const uid of memberIds) {
+          if (!byUser[uid]) {
+            const u = await pool.query(`SELECT "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = $1`, [uid]);
+            if (!u.rows[0]) continue;
+            byUser[uid] = { userId: uid, firstName: u.rows[0].firstName, lastName: u.rows[0].lastName, email: u.rows[0].email, avatarUrl: avatarRef(uid, u.rows[0].avatarUrl), ticketIds: new Set(), slaBreachedIds: new Set() };
+          }
+        }
+        perUser = Object.values(byUser).map((u: any) => ({
+          userId: u.userId, firstName: u.firstName, lastName: u.lastName, email: u.email, avatarUrl: u.avatarUrl,
+          ticketsWorked: u.ticketIds.size, slaBreached: u.slaBreachedIds.size,
+        })).sort((a: any, b: any) => b.ticketsWorked - a.ticketsWorked);
+      }
+
+      return json({
+        range: { from: from.toISOString(), to: to.toISOString() },
+        totalIssues: deptIssuesRes.rows.length,
+        slaBreachedCount,
+        statusBreakdown: Object.entries(statusMap).map(([name, v]) => ({ name, ...v })),
+        priorityBreakdown: Object.entries(priorityMap).map(([priority, count]) => ({ priority, count })),
+        perUser,
+      });
+    } catch (e: any) {
+      console.error('[dept-queue summary ERROR]', e?.message || e);
+      return json({ error: 'Failed to load summary' }, 500);
+    }
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ Issues Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'issues' && method === 'GET') {
