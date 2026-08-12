@@ -53,7 +53,7 @@ const COMBINATION_OPTIONS = [
   'Egnyte - OneDrive', 'Egnyte - SharePoint', 'Egnyte - MyDrive',
   'Egnyte - Shared Drive', 'Egnyte - Azure',
   'SharePoint - ShareDrive', 'SharePoint - MyDrive', 'SharePoint - SharePoint',
-  'SharePoint - Amazon S3', 'SharePoint - Azure',
+  'SharePoint - Amazon S3', 'SharePoint - Azure', 'SharePoint - Egnyte',
   'NFS - OneDrive', 'NFS - SharePoint', 'NFS - MyDrive', 'NFS - SharedDrive',
   'OneDrive - Amazon S3', 'OneDrive - OneDrive', 'OneDrive - MyDrive',
   'Sharefile - Amazon S3', 'Sharefile - Azure',
