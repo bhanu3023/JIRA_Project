@@ -542,13 +542,12 @@ function SpaceDetailContent() {
             return; // skip normal loadIssues for closed view
           }
           // Summary opened from inside a specific queue (sidebar's per-queue
-          // "Summary" link) — scope to that queue's own tickets instead of
-          // the whole space's. Same dept param as every other dept-scoped
-          // view here, so it goes through the identical backend membership
-          // check (isUserAuthorizedForDeptQueue) that already gates dept_all
-          // etc. -- a queue's Summary is only reachable by that queue's own
-          // members (or an admin/manager), same as the rest of its sub-items.
+          // "Summary" link) — admin-only, so a regular member typing the URL
+          // directly with the sidebar link hidden doesn't still pull the
+          // whole queue's aggregate data. Skip the fetch entirely for
+          // anyone else; the render below shows an access-denied message.
           if (queueFilter === 'summary' && deptParam) {
+            if (!isAdmin) return;
             params.dept = deptParam;
             params.limit = '200';
           }
@@ -1419,7 +1418,15 @@ function SpaceDetailContent() {
       })()}
 
       {/* ── Summary view ── */}
-      {queueFilter === 'summary' && (() => {
+      {queueFilter === 'summary' && deptParam && !isAdmin && (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center max-w-sm">
+            <p className="text-[14px] font-semibold text-gray-700 mb-1">Admins only</p>
+            <p className="text-[12.5px] text-gray-400">Only an admin can view a queue's summary.</p>
+          </div>
+        </div>
+      )}
+      {queueFilter === 'summary' && (!deptParam || isAdmin) && (() => {
         const allIssues = issues;
         // Status distribution
         const statusMap: Record<string, { count: number; color: string; category: string }> = {};
