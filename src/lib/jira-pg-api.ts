@@ -1213,9 +1213,19 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
     const creds = await getJiraCredentials();
     const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,${JIRA_CUSTOM_FIELDS}`;
     const url = `${creds.base}/rest/api/3/issue/${jiraKey}?fields=${fields}&expand=changelog`;
+    // This fetch had no timeout, so whenever an issue (very often a stale or
+    // broken linked-ticket key) isn't found locally, GET /issues/:key would
+    // fall in here and hang forever if Jira is slow, unreachable, or blocked
+    // by a proxy -- the whole issue page spins on "Loading issue..." with no
+    // way to resolve. Abort and fall through to a normal 404 instead.
     const res = await fetch(url, {
       headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    }).catch((e) => {
+      console.error(`[importIssueFromJira] Fetch failed for ${jiraKey}:`, e?.message || e);
+      return null;
     });
+    if (!res) return null;
     console.log(`[importIssueFromJira] Fetching ${jiraKey} from Jira, status: ${res.status}`);
     if (!res.ok) return null;
     const ji: any = await res.json();
@@ -4198,8 +4208,17 @@ async function _handleJiraPgApi(
       data.assigneeId = resolvedAssigneePatch.id;
     }
 
-    // Reporter -- pre-resolved above in parallel
-    if (resolvedReporterPatch) data.reporterId = resolvedReporterPatch.id;
+    // Reporter -- accept reporterId, reporter object, or reporterEmail
+    // (email pre-resolved above in parallel). reporterId lets the UI set a
+    // reporter directly from the space member list, same as assigneeId --
+    // needed for tickets migrated or created without one ever being picked.
+    if (body.reporterId !== undefined) {
+      data.reporterId = body.reporterId === null ? null : String(body.reporterId);
+    } else if (body.reporter === null) {
+      data.reporterId = null;
+    } else if (resolvedReporterPatch) {
+      data.reporterId = resolvedReporterPatch.id;
+    }
     // Custom queue status (qst_...) — stored in dept_statuses, not a real row in
     // the statuses table, so it can't be written to issue.statusId directly.
     // When it represents "done" (the dept is closing/resolving the ticket),
