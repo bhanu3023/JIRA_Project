@@ -2165,7 +2165,7 @@ async function _handleJiraPgApi(
         `SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
                 i."createdAt", i."updatedAt", qct.closed_at, qct.dept_name,
                 s.name AS status_name, s.color AS status_color, s.category AS status_category,
-                i.dept_sla_log,
+                i.dept_sla_log, i.dept_assignees,
                 CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
                 a.id AS assignee_id
          FROM queue_closed_tickets qct
@@ -2184,7 +2184,23 @@ async function _handleJiraPgApi(
          WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $3`,
         [spaceId, dept, userId]
       );
-      return json({ issues: rows.rows, total: parseInt(countRes.rows[0].count) });
+      // "Worked on — Dev" showed the ticket's CURRENT global assignee, which is
+      // whoever holds it now (possibly in a different dept after further
+      // transfers) — not who was actually assigned while it sat in THIS dept.
+      // A ticket someone worked in Dev before it moved on and got reassigned
+      // elsewhere showed the new owner's name here instead of theirs. Prefer
+      // the per-dept snapshot taken when the ticket left this dept.
+      const issues = rows.rows.map((r: any) => {
+        const deptAssignees: Record<string, any> = r.dept_assignees || {};
+        const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
+        const snap = snapKey ? deptAssignees[snapKey] : null;
+        const { dept_assignees, ...rest } = r;
+        if (snap && snap.id) {
+          return { ...rest, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
+        }
+        return rest;
+      });
+      return json({ issues, total: parseInt(countRes.rows[0].count) });
     } catch (e: any) {
       return json({ issues: [], total: 0 });
     }
