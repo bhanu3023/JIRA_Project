@@ -133,7 +133,7 @@ const convertedIssues = jiraIssues.map((ji) => {
   const reporter = resolvePerson(f.reporter);
 
   // comments
-  const comments = (f.comment?.comments || []).slice(0, 10).map((c) => {
+  const comments = (f.comment?.comments || []).map((c) => {
     const author = resolvePerson(c.author);
     const bodyText = extractText(c.body);
     return {

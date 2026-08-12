@@ -152,7 +152,7 @@ const convertedIssues = jiraIssues.map((ji) => {
   const assignee = resolvePerson(f.assignee);
   const reporter = resolvePerson(f.reporter);
 
-  const comments = (f.comment?.comments || []).slice(0, 10).map((c) => {
+  const comments = (f.comment?.comments || []).map((c) => {
     const author = resolvePerson(c.author);
     return {
       id: rid(),
