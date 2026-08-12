@@ -107,6 +107,11 @@ function SpaceDetailContent() {
   const router = useRouter();
   const queueFilter = searchParams?.get('queue') || 'queues';
   const deptParam = searchParams?.get('dept') || '';
+  // Set when an admin clicks a name in the per-queue Summary's "Per user"
+  // table -- points the "Worked on" (dept_closed) view at that person's
+  // tickets instead of the viewer's own.
+  const viewUserParam = searchParams?.get('viewUser') || '';
+  const viewUserNameParam = searchParams?.get('viewUserName') || '';
   const rawKey = params?.spaceKey;
   const spaceKey =
     typeof rawKey === 'string'
@@ -175,12 +180,12 @@ function SpaceDetailContent() {
     return () => clearTimeout(t);
   }, [search]);
   const [closedIssues, setClosedIssues] = useState<any[]>([]);
-  const fetchClosedIssues = useCallback(async (sk: string, dept: string) => {
+  const fetchClosedIssues = useCallback(async (sk: string, dept: string, viewUser?: string) => {
     if (!sk || !dept) return;
     try {
       const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
       const res = await fetch(
-        `/api/spaces/${sk}/dept-queue/closed?dept=${encodeURIComponent(dept)}&page=1`,
+        `/api/spaces/${sk}/dept-queue/closed?dept=${encodeURIComponent(dept)}&page=1${viewUser ? `&viewUser=${encodeURIComponent(viewUser)}` : ''}`,
         { headers: token ? { Authorization: `Bearer ${token}` } : {} }
       );
       if (res.ok) {
@@ -577,7 +582,7 @@ function SpaceDetailContent() {
           }
           // Dept sub-queue: closed tickets — fetched separately, auto-refreshed every 30s
           if (queueFilter === 'dept_closed') {
-            if (!cancelled) await fetchClosedIssues(spaceKey, deptParam);
+            if (!cancelled) await fetchClosedIssues(spaceKey, deptParam, viewUserParam);
             return; // skip normal loadIssues for closed view
           }
           // Summary opened from inside a specific queue (sidebar's per-queue
@@ -636,7 +641,7 @@ function SpaceDetailContent() {
       }
     })();
     return () => { cancelled = true; setIsFetching(false); };
-  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id, issuesVersion]);
+  }, [spaceKey, currentPage, queueFilter, deptParam, viewUserParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id, issuesVersion]);
 
   // Auto-refresh Sent/Watching every 15s — silent background refresh, never clears display
   useEffect(() => {
@@ -694,10 +699,10 @@ function SpaceDetailContent() {
   useEffect(() => {
     if (queueFilter !== 'dept_closed' || !spaceKey || !deptParam) return;
     const id = setInterval(() => {
-      fetchClosedIssues(spaceKey, deptParam);
+      fetchClosedIssues(spaceKey, deptParam, viewUserParam);
     }, 30_000);
     return () => clearInterval(id);
-  }, [queueFilter, spaceKey, deptParam, fetchClosedIssues]);
+  }, [queueFilter, spaceKey, deptParam, viewUserParam, fetchClosedIssues]);
 
   // Auto-refresh every 30s for regular (non-dept-queue) spaces — silent background refresh, never clears display
   useEffect(() => {
@@ -1092,7 +1097,9 @@ function SpaceDetailContent() {
     'dept_all':        deptParam ? `All Tickets — ${deptParam}` : 'All Tickets',
     'dept_unassigned': deptParam ? `Unassigned — ${deptParam}` : 'Unassigned',
     'dept_assigned':   deptParam ? `Assigned to me — ${deptParam}` : 'Assigned to me',
-    'dept_closed':     deptParam ? `Closed Tickets — ${deptParam}` : 'Closed Tickets',
+    'dept_closed':     deptParam
+      ? `Worked on — ${deptParam}${viewUserNameParam ? ` — ${viewUserNameParam}` : ''}`
+      : 'Worked on',
   };
   const queueLabel = (activeCustomQueue?.name) || QUEUE_LABELS[queueFilter] || 'Queues';
   const isQueueView = ['all-open', 'assigned', 'unassigned', 'all-requests', 'closed', 'my-dept', 'my-queue', 'sent-watching', 'dept_all', 'dept_unassigned', 'dept_assigned', 'dept_closed'].includes(queueFilter) || queueFilter.startsWith('cq_');
@@ -1630,19 +1637,26 @@ function SpaceDetailContent() {
                           </tr>
                         </thead>
                         <tbody>
-                          {perUser.map((u: any) => (
-                            <tr key={u.userId} className="border-t border-gray-50">
-                              <td className="px-5 py-2.5 flex items-center gap-2">
-                                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: pieColorByUser[u.userId] || '#D1D5DB' }} />
-                                <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
-                                  {getInitials(u.firstName, u.lastName)}
-                                </div>
-                                <span className="text-gray-700">{u.firstName} {u.lastName}</span>
-                              </td>
-                              <td className="px-5 py-2.5 text-right font-medium text-gray-700">{u.ticketsWorked}</td>
-                              <td className={`px-5 py-2.5 text-right font-medium ${u.slaBreached > 0 ? 'text-red-600' : 'text-gray-400'}`}>{u.slaBreached}</td>
-                            </tr>
-                          ))}
+                          {perUser.map((u: any) => {
+                            const displayName = `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || 'Unknown';
+                            const goToWorkedOn = () => router.push(
+                              `/spaces/${spaceKey}?queue=dept_closed&dept=${encodeURIComponent(deptParam)}&viewUser=${encodeURIComponent(u.userId)}&viewUserName=${encodeURIComponent(displayName)}`
+                            );
+                            return (
+                              <tr key={u.userId} onClick={goToWorkedOn}
+                                className="border-t border-gray-50 cursor-pointer hover:bg-gray-50">
+                                <td className="px-5 py-2.5 flex items-center gap-2">
+                                  <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: pieColorByUser[u.userId] || '#D1D5DB' }} />
+                                  <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
+                                    {getInitials(u.firstName, u.lastName)}
+                                  </div>
+                                  <span className="text-gray-700 hover:text-blue-600 hover:underline">{displayName}</span>
+                                </td>
+                                <td className="px-5 py-2.5 text-right font-medium text-gray-700">{u.ticketsWorked}</td>
+                                <td className={`px-5 py-2.5 text-right font-medium ${u.slaBreached > 0 ? 'text-red-600' : 'text-gray-400'}`}>{u.slaBreached}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>

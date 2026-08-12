@@ -2158,6 +2158,11 @@ async function _handleJiraPgApi(
     const dept = url.searchParams.get('dept') || '';
     const page = parseInt(url.searchParams.get('page') || '1');
     const limit = 50;
+    // Admins can view another team member's worked-on list from the per-queue
+    // Summary's "Per user" table (clicking a name there) -- everyone else only
+    // ever sees their own, same as before.
+    const viewUserParam = url.searchParams.get('viewUser');
+    const targetUserId = (viewUserParam && isAdmin) ? viewUserParam : userId;
 
     const spaceRes = await pool.query(`SELECT id FROM spaces WHERE key = $1`, [spaceKeyParam]);
     if (!spaceRes.rows[0]) return json({ error: 'Space not found' }, 404);
@@ -2184,14 +2189,14 @@ async function _handleJiraPgApi(
          LEFT JOIN users a ON i."assigneeId" = a.id
          WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $5
          ORDER BY COALESCE(i."updatedAt", qct.closed_at) DESC LIMIT $3 OFFSET $4`,
-        [spaceId, dept, limit, (page - 1) * limit, userId]
+        [spaceId, dept, limit, (page - 1) * limit, targetUserId]
       );
       const countRes = await pool.query(
         `SELECT COUNT(DISTINCT qct.issue_id) FROM queue_closed_tickets qct
          JOIN issues i ON i.id = qct.issue_id
          JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
          WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $3`,
-        [spaceId, dept, userId]
+        [spaceId, dept, targetUserId]
       );
       // "Worked on — Dev" showed the ticket's CURRENT global assignee, which is
       // whoever holds it now (possibly in a different dept after further
