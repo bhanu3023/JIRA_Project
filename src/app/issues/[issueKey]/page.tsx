@@ -123,6 +123,8 @@ export default function IssueDetailPage() {
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
+  const [showReporterDropdown, setShowReporterDropdown] = useState(false);
+  const [reporterSearch, setReporterSearch] = useState('');
   const [showTypeDropdown, setShowTypeDropdown] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [spaceStatuses, setSpaceStatuses] = useState<any[]>([]);
@@ -947,6 +949,18 @@ export default function IssueDetailPage() {
     const member = assigneeId ? spaceMembers.find(m => m.id === assigneeId) : null;
     await handleUpdate('assigneeId', assigneeId, {
       assignee: member ? { id: member.id, firstName: member.firstName, lastName: member.lastName, email: (member as any).email, avatarUrl: (member as any).avatarUrl ?? null } : null,
+    });
+  };
+
+  // Tickets migrated from Jira, or created without a reporter being picked,
+  // can end up with no reporter at all — previously there was no way to set
+  // one afterward since this field had no edit UI, unlike every other
+  // property. Mirrors handleAssigneeChange.
+  const handleReporterChange = async (reporterId: string | null) => {
+    setShowReporterDropdown(false);
+    const member = reporterId ? spaceMembers.find(m => m.id === reporterId) : null;
+    await handleUpdate('reporterId', reporterId, {
+      reporter: member ? { id: member.id, firstName: member.firstName, lastName: member.lastName, email: (member as any).email, avatarUrl: (member as any).avatarUrl ?? null } : null,
     });
   };
 
@@ -2381,14 +2395,71 @@ export default function IssueDetailPage() {
             )}
             {pinnedFields.includes('reporter') && (
               <PropRow label="Reporter" pinned onPin={() => togglePin('reporter')}>
-                {issue.reporter ? (
-                  <div className="flex items-center gap-2 px-1.5 py-1">
-                    <div className="w-6 h-6 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
-                      {getInitials(issue.reporter.firstName, issue.reporter.lastName)}
-                    </div>
-                    <span className="text-[13px] text-gray-800 font-medium">{issue.reporter.firstName} {issue.reporter.lastName}</span>
-                  </div>
-                ) : <span className="text-[13px] text-gray-400 px-1.5 py-1">None</span>}
+                <div className="relative">
+                  <button onClick={() => setShowReporterDropdown(!showReporterDropdown)}
+                    className="flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full">
+                    {issue.reporter ? (
+                      <>
+                        <div className="w-6 h-6 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
+                          {getInitials(issue.reporter.firstName, issue.reporter.lastName)}
+                        </div>
+                        <span className="text-[13px] text-gray-800 font-medium truncate">{issue.reporter.firstName} {issue.reporter.lastName}</span>
+                      </>
+                    ) : (
+                      <>
+                        <div className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center flex-shrink-0">
+                          <User size={11} className="text-gray-400" />
+                        </div>
+                        <span className="text-[13px] text-gray-400">None</span>
+                      </>
+                    )}
+                    <ChevronDown size={10} className="text-gray-300 ml-auto flex-shrink-0" />
+                  </button>
+                  {showReporterDropdown && (
+                    <Dropdown onClose={() => { setShowReporterDropdown(false); setReporterSearch(''); }} width="w-72" align="left-0">
+                      <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Reported by</div>
+                      <div className="px-2 py-2 border-b border-gray-100">
+                        <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
+                          <Search size={12} className="text-gray-400 flex-shrink-0" />
+                          <input autoFocus value={reporterSearch} onChange={(e) => setReporterSearch(e.target.value)}
+                            placeholder="Search reporter…"
+                            className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400" />
+                          {reporterSearch && <button onClick={() => setReporterSearch('')}><X size={11} className="text-gray-400" /></button>}
+                        </div>
+                      </div>
+                      <div className="max-h-52 overflow-y-auto py-1">
+                        {!reporterSearch && (
+                          <button onClick={() => { handleReporterChange(null); setReporterSearch(''); }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 text-gray-500">
+                            <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center"><User size={10} className="text-gray-400" /></div>
+                            None {!issue.reporter && <Check size={11} className="ml-auto text-blue-600" />}
+                          </button>
+                        )}
+                        {spaceMembers
+                          .filter(m => {
+                            const mb = (m as any).user || m;
+                            const name = `${mb.firstName || ''} ${mb.lastName || ''}`.toLowerCase();
+                            return name.includes(reporterSearch.toLowerCase());
+                          })
+                          .map(m => {
+                            const mb = (m as any).user || m;
+                            const isSel = issue.reporter?.id === mb.id;
+                            return (
+                              <button key={mb.id} onClick={() => { handleReporterChange(mb.id); setReporterSearch(''); }}
+                                className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 ${isSel ? 'text-blue-600 font-medium' : 'text-gray-700'}`}>
+                                <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[8px] font-bold">{getInitials(mb.firstName, mb.lastName)}</div>
+                                <span className="flex-1 text-left truncate">{mb.firstName} {mb.lastName}</span>
+                                {isSel && <Check size={11} className="ml-auto text-blue-600" />}
+                              </button>
+                            );
+                          })}
+                        {reporterSearch && spaceMembers.filter(m => { const mb = (m as any).user || m; return `${mb.firstName || ''} ${mb.lastName || ''}`.toLowerCase().includes(reporterSearch.toLowerCase()); }).length === 0 && (
+                          <p className="px-3 py-3 text-[12px] text-gray-400 text-center">No members found</p>
+                        )}
+                      </div>
+                    </Dropdown>
+                  )}
+                </div>
               </PropRow>
             )}
             {pinnedFields.includes('priority') && (
@@ -2588,14 +2659,71 @@ export default function IssueDetailPage() {
 
             {/* Reporter */}
             {!pinnedFields.includes('reporter') && <PropRow label="Reporter" onPin={() => togglePin('reporter')}>
-              {issue.reporter ? (
-                <div className="flex items-center gap-2 px-1.5 py-1">
-                  <div className="w-6 h-6 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
-                    {getInitials(issue.reporter.firstName, issue.reporter.lastName)}
-                  </div>
-                  <span className="text-[13px] text-gray-800 font-medium">{issue.reporter.firstName} {issue.reporter.lastName}</span>
-                </div>
-              ) : <span className="text-[13px] text-gray-400 px-1.5 py-1">None</span>}
+              <div className="relative">
+                <button onClick={() => setShowReporterDropdown(!showReporterDropdown)}
+                  className="flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full">
+                  {issue.reporter ? (
+                    <>
+                      <div className="w-6 h-6 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
+                        {getInitials(issue.reporter.firstName, issue.reporter.lastName)}
+                      </div>
+                      <span className="text-[13px] text-gray-800 font-medium truncate">{issue.reporter.firstName} {issue.reporter.lastName}</span>
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center flex-shrink-0">
+                        <User size={11} className="text-gray-400" />
+                      </div>
+                      <span className="text-[13px] text-gray-400">None</span>
+                    </>
+                  )}
+                  <ChevronDown size={10} className="text-gray-300 ml-auto flex-shrink-0" />
+                </button>
+                {showReporterDropdown && (
+                  <Dropdown onClose={() => { setShowReporterDropdown(false); setReporterSearch(''); }} width="w-72" align="left-0">
+                    <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Reported by</div>
+                    <div className="px-2 py-2 border-b border-gray-100">
+                      <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
+                        <Search size={12} className="text-gray-400 flex-shrink-0" />
+                        <input autoFocus value={reporterSearch} onChange={(e) => setReporterSearch(e.target.value)}
+                          placeholder="Search reporter…"
+                          className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400" />
+                        {reporterSearch && <button onClick={() => setReporterSearch('')}><X size={11} className="text-gray-400" /></button>}
+                      </div>
+                    </div>
+                    <div className="max-h-52 overflow-y-auto py-1">
+                      {!reporterSearch && (
+                        <button onClick={() => { handleReporterChange(null); setReporterSearch(''); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 text-gray-500">
+                          <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center"><User size={10} className="text-gray-400" /></div>
+                          None {!issue.reporter && <Check size={11} className="ml-auto text-blue-600" />}
+                        </button>
+                      )}
+                      {spaceMembers
+                        .filter(m => {
+                          const mb = (m as any).user || m;
+                          const name = `${mb.firstName || ''} ${mb.lastName || ''}`.toLowerCase();
+                          return name.includes(reporterSearch.toLowerCase());
+                        })
+                        .map(m => {
+                          const mb = (m as any).user || m;
+                          const isSel = issue.reporter?.id === mb.id;
+                          return (
+                            <button key={mb.id} onClick={() => { handleReporterChange(mb.id); setReporterSearch(''); }}
+                              className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 ${isSel ? 'text-blue-600 font-medium' : 'text-gray-700'}`}>
+                              <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[8px] font-bold">{getInitials(mb.firstName, mb.lastName)}</div>
+                              <span className="flex-1 text-left truncate">{mb.firstName} {mb.lastName}</span>
+                              {isSel && <Check size={11} className="ml-auto text-blue-600" />}
+                            </button>
+                          );
+                        })}
+                      {reporterSearch && spaceMembers.filter(m => { const mb = (m as any).user || m; return `${mb.firstName || ''} ${mb.lastName || ''}`.toLowerCase().includes(reporterSearch.toLowerCase()); }).length === 0 && (
+                        <p className="px-3 py-3 text-[12px] text-gray-400 text-center">No members found</p>
+                      )}
+                    </div>
+                  </Dropdown>
+                )}
+              </div>
             </PropRow>}
 
             {/* Department — only shown when the field is assigned to this space */}

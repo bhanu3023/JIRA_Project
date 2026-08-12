@@ -4208,8 +4208,17 @@ async function _handleJiraPgApi(
       data.assigneeId = resolvedAssigneePatch.id;
     }
 
-    // Reporter -- pre-resolved above in parallel
-    if (resolvedReporterPatch) data.reporterId = resolvedReporterPatch.id;
+    // Reporter -- accept reporterId, reporter object, or reporterEmail
+    // (email pre-resolved above in parallel). reporterId lets the UI set a
+    // reporter directly from the space member list, same as assigneeId --
+    // needed for tickets migrated or created without one ever being picked.
+    if (body.reporterId !== undefined) {
+      data.reporterId = body.reporterId === null ? null : String(body.reporterId);
+    } else if (body.reporter === null) {
+      data.reporterId = null;
+    } else if (resolvedReporterPatch) {
+      data.reporterId = resolvedReporterPatch.id;
+    }
     // Custom queue status (qst_...) — stored in dept_statuses, not a real row in
     // the statuses table, so it can't be written to issue.statusId directly.
     // When it represents "done" (the dept is closing/resolving the ticket),
