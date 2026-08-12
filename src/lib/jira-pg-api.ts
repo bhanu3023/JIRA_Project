@@ -4357,6 +4357,17 @@ async function _handleJiraPgApi(
             // handoff the reporter needs to know about.
             if (refreshed) {
               const changer = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+              // This path returns right after updating dept_statuses, before
+              // ever reaching the "Auto-record history for every changed
+              // field" block further below -- a queue-scoped status change
+              // (picking anything from a queue's own status dropdown that
+              // isn't a done-category status) updated what's visibly shown
+              // but left no trace at all in the History tab, no matter who
+              // changed it or when.
+              pool.query(
+                `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+                [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), changer ? `${changer.firstName} ${changer.lastName}`.trim() : 'Unknown', changer?.email || null]
+              ).catch(() => {});
               notifyStatusChanged({
                 key: refreshed.key, summary: refreshed.summary, priority: refreshed.priority,
                 spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
