@@ -178,7 +178,18 @@ export default function Header() {
   return (
     <>
 
-      <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-blue-900/30 bg-[#0129AC] px-5 shadow-md">
+      {/*
+        z-40, not z-30 -- z-index on a child (the notification/user-menu
+        dropdowns below, at z-50) only ranks it within ITS OWN ancestor's
+        stacking context, it doesn't escape it. The Filters page has its own
+        `sticky top-0 z-30` toolbar; tied with this header's old z-30, the
+        later one in DOM order (the page's toolbar) won the tie-break and
+        painted over the whole header layer, dropdowns included, no matter
+        their own z-index. z-40 sits safely above any same-page z-30 sticky
+        bar while staying below real modals (Create Task's z-50 backdrop,
+        the z-[9999] dropdowns elsewhere), so ordering there is unaffected.
+      */}
+      <header className="sticky top-0 z-40 flex h-14 items-center gap-3 border-b border-blue-900/30 bg-[#0129AC] px-5 shadow-md">
         {/* Live search bar */}
         <div ref={searchRef} className="relative flex-1 max-w-xs">
           <div className={`flex items-center gap-2 rounded border px-3 py-2 transition-all ${searchFocused ? 'border-white/40 bg-white/15' : 'border-white/10 bg-white/5'}`}>
