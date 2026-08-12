@@ -41,9 +41,31 @@ const DRY_RUN = process.env.DRY_RUN !== 'false';
 const LIMIT = process.env.BACKFILL_LIMIT ? parseInt(process.env.BACKFILL_LIMIT, 10) : Infinity;
 const CONCURRENCY = process.env.BACKFILL_CONCURRENCY ? parseInt(process.env.BACKFILL_CONCURRENCY, 10) : 6;
 
-const SLA_BREACHED_FIELD = 'customfield_10917';
-const SLA_DUE_FIELD = 'customfield_10306';
-const SLA_START_FIELD = 'customfield_10309';
+const SLA_BREACHED_FIELD = 'customfield_10917'; // "SLA Breached" select field -- Yes/No, but only set on a subset of tickets
+const SLA_DUE_FIELD = 'customfield_10306';       // "SLA Due Time"
+const SLA_START_FIELD = 'customfield_10309';     // "SLA Start Time"
+const NATIVE_SLA_FIELD = 'customfield_10043';    // "Time to resolution" -- Jira's own SLA metric, has real
+                                                  // breach data (ongoingCycle/completedCycles) for many
+                                                  // tickets where the select field above is empty.
+
+// Pulls {breached, dueAt, startAt} out of Jira's native SLA metric field,
+// preferring the still-running cycle (a ticket whose SLA clock was never
+// formally closed in Jira) and falling back to the most recent completed
+// one. Returns null if there's no usable cycle at all.
+function extractNativeSla(fields) {
+  const native = fields[NATIVE_SLA_FIELD];
+  if (!native || typeof native !== 'object') return null;
+  const cycle = native.ongoingCycle
+    || (Array.isArray(native.completedCycles) && native.completedCycles.length
+      ? native.completedCycles[native.completedCycles.length - 1]
+      : null);
+  if (!cycle) return null;
+  return {
+    breached: !!cycle.breached,
+    dueAt: cycle.breachTime?.epochMillis ? new Date(cycle.breachTime.epochMillis) : null,
+    startAt: cycle.startTime?.epochMillis ? new Date(cycle.startTime.epochMillis) : null,
+  };
+}
 
 async function getJiraCredentials() {
   try {
@@ -129,31 +151,55 @@ async function main() {
   const targets = res.rows.slice(0, LIMIT === Infinity ? res.rows.length : LIMIT);
   console.log(`${DRY_RUN ? '[DRY RUN] ' : ''}Found ${res.rows.length} L2B/L3B tickets; processing ${targets.length} with concurrency=${CONCURRENCY}.`);
 
-  const stats = { processed: 0, changed: 0, unchanged: 0, notFound: 0, errors: 0, breachedYes: 0, breachedNo: 0, noSlaData: 0 };
+  const stats = { processed: 0, changed: 0, unchanged: 0, notFound: 0, errors: 0, breachedYes: 0, breachedNo: 0, noSlaData: 0, fromSelectField: 0, fromNativeField: 0 };
   const sample = [];
 
   await runPool(targets, async (row) => {
+    // Every early `return` below (notFound/noSlaData/unchanged) used to skip
+    // stats.processed++ entirely, since it only ran at the end of the
+    // function body -- the printed "X/15578" progress badly undercounted
+    // how many tickets had actually been checked against Jira, reading as
+    // "barely started" when the real total examined (changed + unchanged +
+    // noSlaData + notFound) was already most of the way through. finally
+    // guarantees it runs on every exit path, early return included.
     try {
       let data;
       try {
         data = await jiraGetWithRetry(
           hostname, authHdr,
-          `/rest/api/3/issue/${row.key}?fields=${SLA_BREACHED_FIELD},${SLA_DUE_FIELD},${SLA_START_FIELD}`
+          `/rest/api/3/issue/${row.key}?fields=${SLA_BREACHED_FIELD},${SLA_DUE_FIELD},${SLA_START_FIELD},${NATIVE_SLA_FIELD}`
         );
       } catch (e) {
         if (e?.notFound) { stats.notFound++; return; }
         throw e;
       }
       const f = data.fields || {};
-      // Jira returns this select field as an ARRAY (e.g. [{value:"Yes",...}]),
+      // Jira returns the select field as an ARRAY (e.g. [{value:"Yes",...}]),
       // not a plain object -- .value on the array itself is always undefined.
       const rawOption = f[SLA_BREACHED_FIELD];
       const breachedOption = Array.isArray(rawOption) ? rawOption[0] : rawOption;
-      if (!breachedOption) { stats.noSlaData++; return; } // ticket has no SLA breach field set at all -- leave untouched
 
-      const breached = String(breachedOption.value || '').toLowerCase() === 'yes';
-      const dueAt = f[SLA_DUE_FIELD] ? new Date(f[SLA_DUE_FIELD]) : null;
-      const startAt = f[SLA_START_FIELD] ? new Date(f[SLA_START_FIELD]) : null;
+      let breached, dueAt, startAt, source;
+      if (breachedOption) {
+        breached = String(breachedOption.value || '').toLowerCase() === 'yes';
+        dueAt = f[SLA_DUE_FIELD] ? new Date(f[SLA_DUE_FIELD]) : null;
+        startAt = f[SLA_START_FIELD] ? new Date(f[SLA_START_FIELD]) : null;
+        source = 'selectField';
+      } else {
+        // The select field is only set on a subset of tickets -- many others
+        // carry real breach data in Jira's own native SLA metric instead
+        // (its clock never got formally closed, often because the ticket's
+        // status changed without the SLA cycle ever completing). Missing
+        // this meant a genuinely-breached ticket got reported as having no
+        // SLA data at all just because this one field was empty.
+        const native = extractNativeSla(f);
+        if (!native) { stats.noSlaData++; return; }
+        breached = native.breached;
+        dueAt = native.dueAt;
+        startAt = native.startAt;
+        source = 'nativeField';
+      }
+      if (source === 'selectField') stats.fromSelectField++; else stats.fromNativeField++;
       if (breached) stats.breachedYes++; else stats.breachedNo++;
 
       const alreadyCorrect = row.jira_sla_breached === breached
@@ -162,7 +208,7 @@ async function main() {
       if (alreadyCorrect) { stats.unchanged++; return; }
 
       if (sample.length < 20 && breached) {
-        sample.push({ key: row.key, breached, dueAt: dueAt?.toISOString(), startAt: startAt?.toISOString() });
+        sample.push({ key: row.key, breached, source, dueAt: dueAt?.toISOString(), startAt: startAt?.toISOString() });
       }
       if (!DRY_RUN) {
         await pool.query(
@@ -174,10 +220,11 @@ async function main() {
     } catch (e) {
       stats.errors++;
       console.error(`[ERROR] ${row.key}:`, e?.message || e);
-    }
-    stats.processed++;
-    if (stats.processed % 200 === 0) {
-      console.log(`progress: ${stats.processed}/${targets.length} | changed=${stats.changed} unchanged=${stats.unchanged} breachedYes=${stats.breachedYes} noSlaData=${stats.noSlaData} notFound=${stats.notFound} errors=${stats.errors}`);
+    } finally {
+      stats.processed++;
+      if (stats.processed % 200 === 0) {
+        console.log(`progress: ${stats.processed}/${targets.length} | changed=${stats.changed} unchanged=${stats.unchanged} breachedYes=${stats.breachedYes} fromSelectField=${stats.fromSelectField} fromNativeField=${stats.fromNativeField} noSlaData=${stats.noSlaData} notFound=${stats.notFound} errors=${stats.errors}`);
+      }
     }
   }, CONCURRENCY);
 
