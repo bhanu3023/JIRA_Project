@@ -40,6 +40,7 @@ const DRY_RUN = process.env.DRY_RUN !== 'false';
 async function main() {
   const rows = await pool.query(`
     SELECT i.id, i.key, i."assigneeId", i.current_department,
+           COALESCE(i."updatedAt", i."createdAt") AS worked_at,
            u."firstName", u."lastName", u.email
     FROM issues i
     JOIN statuses s ON s.id = i."statusId"
@@ -59,9 +60,11 @@ async function main() {
     const who = `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email || r.assigneeId;
     byUser[who] = (byUser[who] || 0) + 1;
     if (!DRY_RUN) {
+      // worked_at backdated to the ticket's own updated/created date -- not
+      // NOW(), which would wrongly claim this historical work just happened.
       await pool.query(
-        `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'closed') ON CONFLICT (user_id, issue_id, dept) DO NOTHING`,
-        [r.assigneeId, r.id, r.current_department]
+        `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason, worked_at) VALUES ($1, $2, $3, 'closed', $4) ON CONFLICT (user_id, issue_id, dept) DO NOTHING`,
+        [r.assigneeId, r.id, r.current_department, r.worked_at]
       );
     }
   }
