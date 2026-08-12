@@ -1213,9 +1213,19 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
     const creds = await getJiraCredentials();
     const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,${JIRA_CUSTOM_FIELDS}`;
     const url = `${creds.base}/rest/api/3/issue/${jiraKey}?fields=${fields}&expand=changelog`;
+    // This fetch had no timeout, so whenever an issue (very often a stale or
+    // broken linked-ticket key) isn't found locally, GET /issues/:key would
+    // fall in here and hang forever if Jira is slow, unreachable, or blocked
+    // by a proxy -- the whole issue page spins on "Loading issue..." with no
+    // way to resolve. Abort and fall through to a normal 404 instead.
     const res = await fetch(url, {
       headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    }).catch((e) => {
+      console.error(`[importIssueFromJira] Fetch failed for ${jiraKey}:`, e?.message || e);
+      return null;
     });
+    if (!res) return null;
     console.log(`[importIssueFromJira] Fetching ${jiraKey} from Jira, status: ${res.status}`);
     if (!res.ok) return null;
     const ji: any = await res.json();
