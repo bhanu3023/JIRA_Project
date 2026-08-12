@@ -17,7 +17,7 @@ import {
   LayoutGrid, Settings, ChevronDown, Check, User,
   Search, CheckCircle2, ClipboardList, X, Tag, Calendar, UserCheck,
   Briefcase, Package, Layers, Monitor, Clock, AlertCircle, Building2, SlidersHorizontal, RefreshCw, BarChart2,
-  ChevronRight, Inbox as InboxIcon
+  ChevronRight, Inbox as InboxIcon, AlertTriangle, Trophy
 } from 'lucide-react';
 
 // ── Addable filter field definitions ─────────────────────────────────────────
@@ -107,6 +107,11 @@ function SpaceDetailContent() {
   const router = useRouter();
   const queueFilter = searchParams?.get('queue') || 'queues';
   const deptParam = searchParams?.get('dept') || '';
+  // Set when an admin clicks a name in the per-queue Summary's "Per user"
+  // table -- points the "Worked on" (dept_closed) view at that person's
+  // tickets instead of the viewer's own.
+  const viewUserParam = searchParams?.get('viewUser') || '';
+  const viewUserNameParam = searchParams?.get('viewUserName') || '';
   const rawKey = params?.spaceKey;
   const spaceKey =
     typeof rawKey === 'string'
@@ -175,12 +180,12 @@ function SpaceDetailContent() {
     return () => clearTimeout(t);
   }, [search]);
   const [closedIssues, setClosedIssues] = useState<any[]>([]);
-  const fetchClosedIssues = useCallback(async (sk: string, dept: string) => {
+  const fetchClosedIssues = useCallback(async (sk: string, dept: string, viewUser?: string) => {
     if (!sk || !dept) return;
     try {
       const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
       const res = await fetch(
-        `/api/spaces/${sk}/dept-queue/closed?dept=${encodeURIComponent(dept)}&page=1`,
+        `/api/spaces/${sk}/dept-queue/closed?dept=${encodeURIComponent(dept)}&page=1${viewUser ? `&viewUser=${encodeURIComponent(viewUser)}` : ''}`,
         { headers: token ? { Authorization: `Bearer ${token}` } : {} }
       );
       if (res.ok) {
@@ -577,7 +582,7 @@ function SpaceDetailContent() {
           }
           // Dept sub-queue: closed tickets — fetched separately, auto-refreshed every 30s
           if (queueFilter === 'dept_closed') {
-            if (!cancelled) await fetchClosedIssues(spaceKey, deptParam);
+            if (!cancelled) await fetchClosedIssues(spaceKey, deptParam, viewUserParam);
             return; // skip normal loadIssues for closed view
           }
           // Summary opened from inside a specific queue (sidebar's per-queue
@@ -636,7 +641,7 @@ function SpaceDetailContent() {
       }
     })();
     return () => { cancelled = true; setIsFetching(false); };
-  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id, issuesVersion]);
+  }, [spaceKey, currentPage, queueFilter, deptParam, viewUserParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id, issuesVersion]);
 
   // Auto-refresh Sent/Watching every 15s — silent background refresh, never clears display
   useEffect(() => {
@@ -694,10 +699,10 @@ function SpaceDetailContent() {
   useEffect(() => {
     if (queueFilter !== 'dept_closed' || !spaceKey || !deptParam) return;
     const id = setInterval(() => {
-      fetchClosedIssues(spaceKey, deptParam);
+      fetchClosedIssues(spaceKey, deptParam, viewUserParam);
     }, 30_000);
     return () => clearInterval(id);
-  }, [queueFilter, spaceKey, deptParam, fetchClosedIssues]);
+  }, [queueFilter, spaceKey, deptParam, viewUserParam, fetchClosedIssues]);
 
   // Auto-refresh every 30s for regular (non-dept-queue) spaces — silent background refresh, never clears display
   useEffect(() => {
@@ -1092,7 +1097,9 @@ function SpaceDetailContent() {
     'dept_all':        deptParam ? `All Tickets — ${deptParam}` : 'All Tickets',
     'dept_unassigned': deptParam ? `Unassigned — ${deptParam}` : 'Unassigned',
     'dept_assigned':   deptParam ? `Assigned to me — ${deptParam}` : 'Assigned to me',
-    'dept_closed':     deptParam ? `Closed Tickets — ${deptParam}` : 'Closed Tickets',
+    'dept_closed':     deptParam
+      ? `Worked on — ${deptParam}${viewUserNameParam ? ` — ${viewUserNameParam}` : ''}`
+      : 'Worked on',
   };
   const queueLabel = (activeCustomQueue?.name) || QUEUE_LABELS[queueFilter] || 'Queues';
   const isQueueView = ['all-open', 'assigned', 'unassigned', 'all-requests', 'closed', 'my-dept', 'my-queue', 'sent-watching', 'dept_all', 'dept_unassigned', 'dept_assigned', 'dept_closed'].includes(queueFilter) || queueFilter.startsWith('cq_');
@@ -1489,7 +1496,6 @@ function SpaceDetailContent() {
         const maxPriority = Math.max(...priorityData.map((d: any) => d.count), 1);
 
         const BAR_H = 180;
-        const chartCard = 'bg-white border border-gray-200 rounded-xl p-6 flex-1 min-w-0';
         const perUser: any[] = deptSummaryData?.perUser || [];
 
         // Pie slices for "tickets worked" share per user -- indexed by each
@@ -1513,17 +1519,45 @@ function SpaceDetailContent() {
           ? `conic-gradient(${pieSlices.map((s: any) => `${s.color} ${s.start}% ${s.end}%`).join(', ')})`
           : undefined;
 
+        const STAT_CARDS = [
+          { label: 'Total Issues', value: deptSummaryData?.totalIssues ?? 0, icon: ClipboardList,
+            ring: 'ring-indigo-100', iconWrap: 'bg-gradient-to-br from-indigo-500 to-violet-600', text: 'text-gray-800' },
+          { label: 'To Do', value: statusData.filter(([, v]) => v.category === 'todo').reduce((s, [, v]) => s + v.count, 0), icon: Clock,
+            ring: 'ring-slate-100', iconWrap: 'bg-gradient-to-br from-slate-400 to-slate-600', text: 'text-slate-700' },
+          { label: 'In Progress', value: statusData.filter(([, v]) => v.category === 'in_progress').reduce((s, [, v]) => s + v.count, 0), icon: RefreshCw,
+            ring: 'ring-blue-100', iconWrap: 'bg-gradient-to-br from-blue-500 to-cyan-500', text: 'text-blue-700' },
+          { label: 'Done', value: statusData.filter(([, v]) => v.category === 'done').reduce((s, [, v]) => s + v.count, 0), icon: CheckCircle2,
+            ring: 'ring-emerald-100', iconWrap: 'bg-gradient-to-br from-emerald-500 to-teal-500', text: 'text-emerald-700' },
+          { label: 'SLA Breached', value: deptSummaryData?.slaBreachedCount ?? 0, icon: AlertTriangle,
+            ring: 'ring-rose-100', iconWrap: 'bg-gradient-to-br from-rose-500 to-red-600', text: 'text-rose-700' },
+        ];
+        const RANK_COLORS = ['text-amber-500', 'text-slate-400', 'text-orange-700'];
+
         return (
-          <div className="flex-1 overflow-auto px-6 py-6 bg-gray-50">
-            <div className="flex items-start justify-between mb-5 gap-4">
-              <div>
-                <h2 className="text-[15px] font-semibold text-gray-800">Summary — {deptParam}</h2>
-                <p className="text-[12px] text-gray-400 mt-0.5">Computed from tickets in the {deptParam} queue.</p>
+          <div className="flex-1 overflow-auto px-8 py-7 bg-gradient-to-b from-slate-50 via-white to-slate-50">
+            <div className="flex items-start justify-between mb-6 gap-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-600 to-purple-700 shadow-lg shadow-indigo-200 flex items-center justify-center flex-shrink-0">
+                  <BarChart2 size={19} className="text-white" />
+                </div>
+                <div>
+                  <h2 className="text-[17px] font-bold text-gray-900 tracking-tight">Summary <span className="text-gray-300 mx-1">·</span> {deptParam}</h2>
+                  <p className="text-[12px] text-gray-400 mt-0.5">Computed from tickets in the {deptParam} queue.</p>
+                </div>
               </div>
-              <select value={summaryRange} onChange={(e) => setSummaryRange(e.target.value)}
-                className="text-[12.5px] border border-gray-300 rounded-md px-2.5 py-1.5 bg-white text-gray-700 outline-none focus:ring-1 focus:ring-blue-500">
-                {RANGE_OPTIONS.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
-              </select>
+              {/* Segmented range control */}
+              <div className="flex items-center gap-0.5 bg-white border border-gray-200/80 rounded-full p-1 shadow-sm flex-shrink-0">
+                {RANGE_OPTIONS.map((r) => (
+                  <button key={r.id} onClick={() => setSummaryRange(r.id)}
+                    className={`text-[12px] font-medium px-3 py-1.5 rounded-full transition-all whitespace-nowrap ${
+                      summaryRange === r.id
+                        ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-md shadow-indigo-200'
+                        : 'text-gray-500 hover:text-gray-800 hover:bg-gray-50'
+                    }`}>
+                    {r.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {deptSummaryLoading && (
@@ -1535,88 +1569,103 @@ function SpaceDetailContent() {
 
             {!deptSummaryLoading && !deptSummaryError && deptSummaryData && (
               <>
-                <div className="flex gap-6">
+                {/* Stat cards */}
+                <div className="grid grid-cols-5 gap-4 mb-6">
+                  {STAT_CARDS.map((s) => (
+                    <div key={s.label} className={`group relative bg-white rounded-2xl px-5 py-4 ring-1 ${s.ring} shadow-sm hover:shadow-lg transition-shadow overflow-hidden`}>
+                      <div className={`absolute -right-4 -top-4 w-20 h-20 rounded-full ${s.iconWrap} opacity-[0.07] group-hover:opacity-[0.12] transition-opacity`} />
+                      <div className={`w-9 h-9 rounded-xl ${s.iconWrap} shadow-sm flex items-center justify-center mb-3`}>
+                        <s.icon size={16} className="text-white" />
+                      </div>
+                      <p className="text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1">{s.label}</p>
+                      <p className={`text-[24px] font-extrabold tracking-tight ${s.text}`}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex gap-5">
                   {/* Status Distribution */}
-                  <div className={chartCard}>
-                    <h3 className="text-[14px] font-semibold text-gray-800 mb-5">Status Distribution</h3>
+                  <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm p-6 flex-1 min-w-0">
+                    <h3 className="text-[13.5px] font-bold text-gray-800 mb-5 flex items-center gap-2">
+                      <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-indigo-500 to-violet-600" />
+                      Status Distribution
+                    </h3>
                     <div className="flex items-end gap-4" style={{ height: BAR_H + 40 }}>
                       {statusData.map(([name, v]) => {
                         const barH = Math.max(4, Math.round((v.count / maxStatus) * BAR_H));
                         return (
-                          <div key={name} className="flex flex-col items-center gap-1 flex-1 min-w-[48px]">
-                            <span className="text-[11px] font-medium text-gray-500">{v.count}</span>
-                            <div className="w-full rounded-t-md transition-all" style={{ height: barH, background: v.color }} />
+                          <div key={name} className="flex flex-col items-center gap-1.5 flex-1 min-w-[48px] group">
+                            <span className="text-[11px] font-semibold text-gray-600">{v.count}</span>
+                            <div className="w-full rounded-t-lg transition-all shadow-sm group-hover:brightness-110"
+                              style={{ height: barH, background: `linear-gradient(180deg, ${v.color}, ${v.color}cc)` }} />
                             <span className="text-[11px] text-gray-500 text-center leading-tight">{name}</span>
                           </div>
                         );
                       })}
                       {statusData.length === 0 && <p className="text-[12.5px] text-gray-400">No tickets in this range.</p>}
                     </div>
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-4">
+                    <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-5 pt-4 border-t border-gray-50">
                       {statusData.map(([name, v]) => (
                         <span key={name} className="flex items-center gap-1.5 text-[11px] text-gray-500">
-                          <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: v.color }} />
-                          {name} · {v.count}
+                          <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 ring-2 ring-white shadow-sm" style={{ background: v.color }} />
+                          {name} <span className="text-gray-300">·</span> <span className="font-medium text-gray-600">{v.count}</span>
                         </span>
                       ))}
                     </div>
                   </div>
 
                   {/* Priority Distribution */}
-                  <div className={chartCard}>
-                    <h3 className="text-[14px] font-semibold text-gray-800 mb-5">Priority Distribution</h3>
+                  <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm p-6 flex-1 min-w-0">
+                    <h3 className="text-[13.5px] font-bold text-gray-800 mb-5 flex items-center gap-2">
+                      <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-amber-500 to-rose-600" />
+                      Priority Distribution
+                    </h3>
                     <div className="flex items-end gap-4" style={{ height: BAR_H + 40 }}>
                       {priorityData.map((d: any) => {
                         const barH = Math.max(d.count > 0 ? 4 : 2, Math.round((d.count / maxPriority) * BAR_H));
                         return (
-                          <div key={d.id} className="flex flex-col items-center gap-1 flex-1 min-w-[48px]">
-                            <span className="text-[11px] font-medium text-gray-500">{d.count}</span>
-                            <div className="w-full rounded-t-md transition-all" style={{ height: barH, background: d.count > 0 ? d.color : '#E5E7EB' }} />
+                          <div key={d.id} className="flex flex-col items-center gap-1.5 flex-1 min-w-[48px] group">
+                            <span className="text-[11px] font-semibold text-gray-600">{d.count}</span>
+                            <div className="w-full rounded-t-lg transition-all shadow-sm group-hover:brightness-110"
+                              style={{ height: barH, background: d.count > 0 ? `linear-gradient(180deg, ${d.color}, ${d.color}cc)` : '#E5E7EB' }} />
                             <span className="text-[11px] text-gray-500 text-center">{d.label}</span>
                           </div>
                         );
                       })}
                     </div>
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-4">
+                    <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-5 pt-4 border-t border-gray-50">
                       {priorityData.map((d: any) => (
                         <span key={d.id} className="flex items-center gap-1.5 text-[11px] text-gray-500">
-                          <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: d.count > 0 ? d.color : '#E5E7EB' }} />
-                          {d.label} · {d.count}
+                          <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 ring-2 ring-white shadow-sm" style={{ background: d.count > 0 ? d.color : '#E5E7EB' }} />
+                          {d.label} <span className="text-gray-300">·</span> <span className="font-medium text-gray-600">{d.count}</span>
                         </span>
                       ))}
                     </div>
                   </div>
                 </div>
 
-                {/* Totals row */}
-                <div className="flex gap-4 mt-6">
-                  {[
-                    { label: 'Total Issues', value: deptSummaryData.totalIssues ?? 0, color: 'text-gray-700', bg: 'bg-white' },
-                    { label: 'To Do', value: statusData.filter(([, v]) => v.category === 'todo').reduce((s, [, v]) => s + v.count, 0), color: 'text-slate-600', bg: 'bg-slate-50' },
-                    { label: 'In Progress', value: statusData.filter(([, v]) => v.category === 'in_progress').reduce((s, [, v]) => s + v.count, 0), color: 'text-blue-600', bg: 'bg-blue-50' },
-                    { label: 'Done', value: statusData.filter(([, v]) => v.category === 'done').reduce((s, [, v]) => s + v.count, 0), color: 'text-green-600', bg: 'bg-green-50' },
-                    { label: 'SLA Breached', value: deptSummaryData.slaBreachedCount ?? 0, color: 'text-red-600', bg: 'bg-red-50' },
-                  ].map((s) => (
-                    <div key={s.label} className={`flex-1 ${s.bg} border border-gray-200 rounded-xl px-5 py-4`}>
-                      <p className="text-[11.5px] text-gray-400 mb-1">{s.label}</p>
-                      <p className={`text-[26px] font-bold ${s.color}`}>{s.value}</p>
-                    </div>
-                  ))}
-                </div>
-
                 {/* Per-user breakdown */}
-                <div className="bg-white border border-gray-200 rounded-xl mt-6 overflow-hidden">
-                  <div className="px-5 py-3.5 border-b border-gray-100">
-                    <h3 className="text-[14px] font-semibold text-gray-800">Per user</h3>
-                    <p className="text-[11.5px] text-gray-400 mt-0.5">Tickets each team member worked in this queue, in the selected range.</p>
+                <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm mt-5 overflow-hidden">
+                  <div className="px-6 py-4 border-b border-gray-50 flex items-center gap-2">
+                    <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-emerald-500 to-teal-600" />
+                    <div>
+                      <h3 className="text-[13.5px] font-bold text-gray-800">Per user</h3>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">Tickets each team member worked in this queue, in the selected range.</p>
+                    </div>
                   </div>
                   {perUser.length === 0 ? (
                     <p className="text-[12.5px] text-gray-400 py-8 text-center">No queue members found, or no activity in this range.</p>
                   ) : (
-                    <div className="flex gap-6 p-5">
-                      {/* Pie chart -- share of tickets worked per user in this range */}
-                      <div className="flex flex-col items-center gap-3 flex-shrink-0" style={{ width: 160 }}>
-                        <div className="rounded-full flex-shrink-0" style={{ width: 140, height: 140, background: pieGradient || '#E5E7EB' }} />
+                    <div className="flex gap-8 p-6">
+                      {/* Donut chart -- share of tickets worked per user in this range */}
+                      <div className="flex flex-col items-center gap-3 flex-shrink-0" style={{ width: 168 }}>
+                        <div className="relative rounded-full flex items-center justify-center shadow-inner ring-1 ring-black/5"
+                          style={{ width: 152, height: 152, background: pieGradient || '#EEF0F3' }}>
+                          <div className="rounded-full bg-white flex flex-col items-center justify-center shadow-md" style={{ width: 96, height: 96 }}>
+                            <span className="text-[20px] font-extrabold text-gray-800 leading-none">{totalWorked}</span>
+                            <span className="text-[9.5px] font-medium text-gray-400 uppercase tracking-wide mt-0.5">Tickets</span>
+                          </div>
+                        </div>
                         {totalWorked === 0 && (
                           <p className="text-[11px] text-gray-400 text-center">No activity in this range.</p>
                         )}
@@ -1624,25 +1673,44 @@ function SpaceDetailContent() {
                       <table className="w-full text-[12.5px]">
                         <thead>
                           <tr className="text-left text-[10.5px] font-semibold text-gray-400 uppercase tracking-wide">
-                            <th className="px-5 py-2">User</th>
-                            <th className="px-5 py-2 text-right">Tickets Worked</th>
-                            <th className="px-5 py-2 text-right">SLA Breached</th>
+                            <th className="pb-2.5">User</th>
+                            <th className="pb-2.5 text-right">Tickets Worked</th>
+                            <th className="pb-2.5 text-right">SLA Breached</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {perUser.map((u: any) => (
-                            <tr key={u.userId} className="border-t border-gray-50">
-                              <td className="px-5 py-2.5 flex items-center gap-2">
-                                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: pieColorByUser[u.userId] || '#D1D5DB' }} />
-                                <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
-                                  {getInitials(u.firstName, u.lastName)}
-                                </div>
-                                <span className="text-gray-700">{u.firstName} {u.lastName}</span>
-                              </td>
-                              <td className="px-5 py-2.5 text-right font-medium text-gray-700">{u.ticketsWorked}</td>
-                              <td className={`px-5 py-2.5 text-right font-medium ${u.slaBreached > 0 ? 'text-red-600' : 'text-gray-400'}`}>{u.slaBreached}</td>
-                            </tr>
-                          ))}
+                          {perUser.map((u: any, idx: number) => {
+                            const displayName = `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || 'Unknown';
+                            const goToWorkedOn = () => router.push(
+                              `/spaces/${spaceKey}?queue=dept_closed&dept=${encodeURIComponent(deptParam)}&viewUser=${encodeURIComponent(u.userId)}&viewUserName=${encodeURIComponent(displayName)}`
+                            );
+                            const ringColor = pieColorByUser[u.userId] || '#D1D5DB';
+                            return (
+                              <tr key={u.userId} onClick={goToWorkedOn}
+                                className="border-t border-gray-50 cursor-pointer hover:bg-indigo-50/40 transition-colors">
+                                <td className="py-2.5 flex items-center gap-2.5">
+                                  <span className="w-4 text-center flex-shrink-0">
+                                    {idx < 3 && u.ticketsWorked > 0
+                                      ? <Trophy size={13} className={RANK_COLORS[idx]} />
+                                      : <span className="text-[10.5px] text-gray-300 font-medium">{idx + 1}</span>}
+                                  </span>
+                                  <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-[9.5px] font-bold flex-shrink-0 ring-2"
+                                    style={{ boxShadow: `0 0 0 2px white, 0 0 0 3.5px ${ringColor}` }}>
+                                    {getInitials(u.firstName, u.lastName)}
+                                  </div>
+                                  <span className="text-gray-700 font-medium group-hover:text-indigo-600">{displayName}</span>
+                                </td>
+                                <td className="py-2.5 text-right">
+                                  <span className="font-bold text-gray-800">{u.ticketsWorked}</span>
+                                </td>
+                                <td className="py-2.5 text-right">
+                                  <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${u.slaBreached > 0 ? 'bg-rose-50 text-rose-600' : 'bg-gray-50 text-gray-400'}`}>
+                                    {u.slaBreached}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
