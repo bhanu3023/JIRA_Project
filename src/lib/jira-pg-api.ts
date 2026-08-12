@@ -3446,17 +3446,21 @@ async function _handleJiraPgApi(
 
     //Ã¢â€â‚¬Ã¢â€â‚¬ Single-board mode: no targetBoard or same board as source Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (!targetBoardKey || targetBoardKey === issue.space?.key?.toUpperCase()) {
-      // Old dept status: "Waiting for <newDept>" (or create a virtual one)
-      const waitingForNew = await db.status.findFirst({
-        where: { spaceId: issue.spaceId, name: { equals: `Waiting for ${newDept}`, mode: 'insensitive' } },
-        orderBy: { order: 'asc' },
-      });
-      const oldDeptStatusObj = waitingForNew
-        ? { id: waitingForNew.id, name: waitingForNew.name, category: waitingForNew.category, color: waitingForNew.color }
-        : { id: '', name: `Waiting for ${newDept}`, category: 'todo', color: '#F59E0B' };
-
-      // Keep statusId as waitingForNew (real DB status) or current statusId — don't reset to generic "Open"
-      const newStatusId = waitingForNew?.id || issue.statusId;
+      // This used to unconditionally force BOTH the global statusId and the
+      // arriving dept's status to "Waiting for <newDept>" (creating a virtual
+      // one if no real status of that name existed) -- regardless of what the
+      // ticket's actual status was. A ticket that had just been marked
+      // Resolved and was then handed off to another dept for final review
+      // got its status silently flipped back to "Waiting for Migration" (or
+      // "Open"/"To Do" for a first arrival), making finished work look
+      // unfinished again in every view that reads the real status. A
+      // Resolved/Closed ticket keeps its exact status across a transfer now;
+      // only a still-open ticket gets the normal Open/In-Progress treatment
+      // dept_statuses below already computes.
+      const isDoneNow = issue.status?.category === 'done';
+      const oldDeptStatusObj = issue.status
+        ? { id: issue.status.id, name: issue.status.name, category: issue.status.category, color: issue.status.color }
+        : { id: '', name: 'Unknown', category: 'todo', color: '#6B7280' };
 
       // Build per-dept assignee map: save current assignee under old dept, clear new dept
       // Fetch current_department from raw SQL Ã¢â‚¬â€ Prisma doesn't return raw ALTER TABLE columns
@@ -3509,7 +3513,12 @@ async function _handleJiraPgApi(
       } catch {}
 
       let newDeptStatusObj: any;
-      if (isReturningToDept) {
+      if (isDoneNow) {
+        // Already Resolved/Closed -- being routed on for review or final
+        // closure isn't "new work arriving," so don't reopen it by resetting
+        // to Open/In-Progress. Same done status carries straight through.
+        newDeptStatusObj = oldDeptStatusObj;
+      } else if (isReturningToDept) {
         const inProgressSt = newDeptQueueStatuses.find((s: any) => s.category === 'in_progress')
           || newDeptQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'))
           || newDeptQueueStatuses.find((s: any) => s.category === 'todo')
@@ -3521,6 +3530,25 @@ async function _handleJiraPgApi(
         // shown while the ticket is in transit, not once it has actually landed).
         const firstTodoSt = newDeptQueueStatuses.find((s: any) => s.category === 'todo') || newDeptQueueStatuses[0];
         newDeptStatusObj = firstTodoSt || { id: '', name: 'Open', category: 'todo', color: '#6366F1' };
+      }
+
+      // newDeptStatusObj can carry a queue-scoped virtual id (qst_...) that
+      // isn't a real row in the statuses table, so it can't be written to
+      // issues.statusId directly (that's a real foreign key) -- same
+      // constraint the queueStatusId PATCH path above already works around.
+      // Resolve the equivalent REAL status by name for the global column;
+      // if none exists, leave statusId exactly as it was rather than writing
+      // something invalid or defaulting to a status that doesn't match what
+      // dept_statuses now shows.
+      let newStatusId = issue.statusId;
+      if (isDoneNow) {
+        newStatusId = issue.statusId;
+      } else {
+        const realMatch = await db.status.findFirst({
+          where: { spaceId: issue.spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } },
+          orderBy: { order: 'asc' },
+        });
+        if (realMatch) newStatusId = realMatch.id;
       }
 
       // Record the OLD dept's status exactly as it was right before the transfer —
@@ -4283,6 +4311,7 @@ async function _handleJiraPgApi(
         const dept: string = qRow.rows[0]?.current_department;
         if (dept) {
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
+          const oldQueueStatusName = deptStatuses[dept]?.name || 'Unknown';
           deptStatuses[dept] = {
             id: String(body.queueStatusId),
             name: String(body.queueStatusName || ''),
@@ -4319,7 +4348,24 @@ async function _handleJiraPgApi(
 
           if (!queueStatusSyncedDone) {
             const refreshed = await db.issue.findUnique({ where: { key }, include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } } } });
-            if (refreshed) return json(formatIssue(refreshed));
+            // This path returns early right after updating dept_statuses, so
+            // it never reached the "Status changed?" notification block
+            // further below (that only fires for a real global statusId
+            // change) -- a queue-scoped status like "Waiting for Migration"
+            // sent no email to anyone, even though it's exactly the kind of
+            // handoff the reporter needs to know about.
+            if (refreshed) {
+              const changer = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+              notifyStatusChanged({
+                key: refreshed.key, summary: refreshed.summary, priority: refreshed.priority,
+                spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
+                oldStatus: { name: oldQueueStatusName, category: 'todo' },
+                newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
+                assignee: refreshed.assignee, reporter: refreshed.reporter,
+                changedBy: changer,
+              }).catch(() => {});
+              return json(formatIssue(refreshed));
+            }
           }
           // else: fall through into the normal statusId update path below, so
           // the usual close-time side effects (worked-on recording,
