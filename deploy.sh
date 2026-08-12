@@ -5,7 +5,12 @@
 set -e
 
 echo "==> Pulling latest code..."
-git pull origin fresh-start
+# This server's shell env sets https_proxy to a local proxy that can't reach
+# GitHub ("Proxy CONNECT aborted"), which killed every deploy right here
+# under `set -e` before the actual rebuild ever ran. Bypass it for this one
+# git invocation instead of relying on whoever runs deploy.sh to remember to
+# unset it first.
+git -c http.proxy= -c https.proxy= pull origin fresh-start
 
 echo "==> Rebuilding and restarting only what changed..."
 # Previously: `docker compose down` + `up -d --build`, which unconditionally
