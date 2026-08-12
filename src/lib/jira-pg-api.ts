@@ -2145,6 +2145,12 @@ async function _handleJiraPgApi(
     const spaceId = spaceRes.rows[0].id;
 
     try {
+      // "Worked on" is meant to be personal (tickets THIS viewer worked on in this
+      // dept), but this previously showed every ticket ever closed in the dept for
+      // every user — queue_closed_tickets only tracks the queue, not who worked it.
+      // Join against user_worked_on_tickets (populated on transfer/close/handoff,
+      // covering unassigned handoffs too) filtered to the authenticated viewer so
+      // each person only sees their own worked-on tickets, not the whole team's.
       const rows = await pool.query(
         `SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
                 i."createdAt", i."updatedAt", qct.closed_at, qct.dept_name,
@@ -2154,15 +2160,19 @@ async function _handleJiraPgApi(
                 a.id AS assignee_id
          FROM queue_closed_tickets qct
          JOIN issues i ON i.id = qct.issue_id
+         JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
          LEFT JOIN statuses s ON i."statusId" = s.id
          LEFT JOIN users a ON i."assigneeId" = a.id
-         WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2)
+         WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $5
          ORDER BY COALESCE(i."updatedAt", qct.closed_at) DESC LIMIT $3 OFFSET $4`,
-        [spaceId, dept, limit, (page - 1) * limit]
+        [spaceId, dept, limit, (page - 1) * limit, userId]
       );
       const countRes = await pool.query(
-        `SELECT COUNT(*) FROM queue_closed_tickets WHERE space_id = $1 AND LOWER(dept_name) = LOWER($2)`,
-        [spaceId, dept]
+        `SELECT COUNT(DISTINCT qct.issue_id) FROM queue_closed_tickets qct
+         JOIN issues i ON i.id = qct.issue_id
+         JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
+         WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $3`,
+        [spaceId, dept, userId]
       );
       return json({ issues: rows.rows, total: parseInt(countRes.rows[0].count) });
     } catch (e: any) {
