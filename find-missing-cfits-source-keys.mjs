@@ -96,31 +96,45 @@ function jqlEscape(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-function fmtDate(d) {
-  return d.toISOString().slice(0, 10);
-}
-
 const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
 async function findMatch(row) {
-  const created = new Date(row.createdAt);
-  const from = new Date(created.getTime() - 24 * 3600 * 1000);
-  const to = new Date(created.getTime() + 24 * 3600 * 1000);
   const summaryPhrase = jqlEscape(row.summary || '');
   if (!summaryPhrase.trim()) return { reason: 'empty summary -- nothing to match on' };
 
-  const jql = `project = CFITS AND created >= "${fmtDate(from)}" AND created <= "${fmtDate(to)}" AND summary ~ "\\"${summaryPhrase}\\""`;
+  // No date filter in the query itself -- the local createdAt on these
+  // tickets is whatever the ORIGINAL migration stamped, which for this
+  // specific broken batch may not be the real Jira creation date at all
+  // (that's plausibly why they lost their jira_source_key in the first
+  // place). A hard date range risked silently excluding the real match
+  // before the summary filter ever got a chance to find it. Date is only
+  // used below, as a tiebreaker if the summary match is ambiguous.
+  const jql = `project = CFITS AND summary ~ "\\"${summaryPhrase}\\""`;
   let result;
   try {
-    result = await jiraPostWithRetry('/rest/api/3/search/jql', { jql, fields: ['summary'], maxResults: 25 });
+    result = await jiraPostWithRetry('/rest/api/3/search/jql', { jql, fields: ['summary', 'created'], maxResults: 25 });
   } catch (e) {
     return { reason: `Jira search failed: ${e?.message || e}` };
   }
   const issues = result.issues || [];
   const exact = issues.filter((i) => norm(i.fields?.summary) === norm(row.summary));
   if (exact.length === 1) return { matchKey: exact[0].key };
-  if (exact.length === 0) return { reason: issues.length ? `${issues.length} candidate(s) found, none an exact summary match` : 'no candidates found' };
-  return { reason: `${exact.length} exact-summary candidates (ambiguous): ${exact.map((i) => i.key).join(', ')}` };
+  if (exact.length === 0) {
+    return { reason: issues.length ? `${issues.length} candidate(s) found, none an exact summary match` : 'no candidates found' };
+  }
+  // Ambiguous on summary alone -- break the tie by closest creation date,
+  // but only auto-accept if one candidate is clearly closest (>= 1 day
+  // nearer than the next-best) rather than picking arbitrarily.
+  const localCreated = new Date(row.createdAt).getTime();
+  const byDateDelta = exact
+    .map((i) => ({ key: i.key, deltaMs: Math.abs(new Date(i.fields.created).getTime() - localCreated) }))
+    .sort((a, b) => a.deltaMs - b.deltaMs);
+  const [best, secondBest] = byDateDelta;
+  const ONE_DAY = 24 * 3600 * 1000;
+  if (secondBest && (secondBest.deltaMs - best.deltaMs) >= ONE_DAY) {
+    return { matchKey: best.key, note: `disambiguated by creation date among ${exact.length} exact-summary candidates` };
+  }
+  return { reason: `${exact.length} exact-summary candidates, creation dates too close to disambiguate safely: ${exact.map((i) => i.key).join(', ')}` };
 }
 
 async function main() {
@@ -143,7 +157,7 @@ async function main() {
     try {
       const result = await findMatch(row);
       if (result.matchKey) {
-        matches.push({ key: row.key, cfKey: row.cf_key, summary: row.summary, matchedTo: result.matchKey });
+        matches.push({ key: row.key, cfKey: row.cf_key, summary: row.summary, matchedTo: result.matchKey, note: result.note });
         stats.matched++;
         if (!DRY_RUN) {
           await pool.query(`UPDATE issues SET jira_source_key = $1 WHERE id = $2`, [result.matchKey, row.id]);
