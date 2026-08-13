@@ -433,6 +433,7 @@ export async function notifyStatusChanged(issue: {
 
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
   const isResolved = ['done'].includes(issue.newStatus.category);
+  const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const html = buildEmailHtml({
@@ -445,6 +446,7 @@ export async function notifyStatusChanged(issue: {
     eventColor:   isResolved ? '#10B981' : '#FF991F',
     fields: [
       { label: 'Status',      value: `${issue.oldStatus.name}  →  ${issue.newStatus.name}`, color: STATUS_COLOR[issue.newStatus.category] },
+      { label: 'Assigned to', value: assigneeName, color: '#0052CC' },
       { label: 'Changed by',  value: changedByName },
       { label: 'Priority',    value: issue.priority, color: PRIORITY_COLOR[issue.priority.toLowerCase()] },
     ],
