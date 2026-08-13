@@ -782,6 +782,101 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
 }
 
 /**
+ * Moves an issue to targetDept, exactly like the "Change Department" dropdown
+ * does: saves the current assignee under the old dept, restores (or
+ * round-robins) an assignee for the new dept, flips dept_statuses for both
+ * sides, pauses/resumes the SLA clock, and records the transition + a
+ * worked-on credit. Shared by both places a "Waiting for X" status is
+ * meant to trigger an actual handoff, not just relabel the ticket: a real
+ * global status of that name, and a queue-scoped one (picked from a
+ * custom queue's own status list, which never has a real row in the
+ * statuses table and so is sent as queueStatusId, not statusId).
+ * Returns the dept the ticket was in before the move (may be '').
+ * Throws on failure -- callers already wrap this in their own try/catch.
+ */
+async function performDeptHandoff(
+  issueId: string,
+  spaceId: string,
+  productType: string | null,
+  targetDept: string,
+  waitingStatusLabel: string,
+  fallbackStatusId: string | null,
+  userId: string | null,
+): Promise<string> {
+  const existingMap = await pool.query(
+    `SELECT dept_assignees, "assigneeId", current_department, dept_statuses FROM issues WHERE id=$1`, [issueId]
+  );
+  const oldDept: string = existingMap.rows[0]?.current_department || '';
+  const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
+  const deptStatuses: Record<string, any>  = existingMap.rows[0]?.dept_statuses  || {};
+  const curAssigneeId = existingMap.rows[0]?.assigneeId;
+
+  if (oldDept && curAssigneeId) {
+    const curAssignee = await db.user.findUnique({ where: { id: curAssigneeId }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
+    if (curAssignee) {
+      deptAssignees[oldDept] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: avatarRef(curAssignee.id, curAssignee.avatarUrl) };
+    }
+  }
+  // Restore whoever was saved for this dept from a previous visit (same
+  // restore-or-round-robin rule the "Change Department" dropdown already
+  // uses) instead of always landing unassigned.
+  const savedForTarget = deptAssignees[targetDept];
+  let handoffAssigneeId: string | null = null;
+  if (savedForTarget?.id) {
+    const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedForTarget.id]);
+    if (stillExists.rows.length) handoffAssigneeId = savedForTarget.id;
+    else delete deptAssignees[targetDept];
+  }
+  if (!handoffAssigneeId) {
+    try {
+      const rrAgent = await getNextAgent(spaceId, targetDept, productType);
+      if (rrAgent) {
+        handoffAssigneeId = rrAgent.userId;
+        deptAssignees[targetDept] = { id: rrAgent.userId, displayName: rrAgent.name };
+      }
+    } catch { /* non-critical — falls through to unassigned */ }
+  }
+
+  deptStatuses[oldDept] = { id: '', name: waitingStatusLabel, category: 'todo', color: '#F59E0B' };
+  const inProgressSt = await db.status.findFirst({ where: { spaceId, category: 'in_progress' }, orderBy: { order: 'asc' } })
+    || await db.status.findFirst({ where: { spaceId, name: { contains: 'progress', mode: 'insensitive' } }, orderBy: { order: 'asc' } });
+  const inProgressStatusObj = inProgressSt
+    ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
+    : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+  deptStatuses[targetDept] = inProgressStatusObj;
+  const targetStatusId = inProgressSt?.id || fallbackStatusId;
+
+  await pauseDeptSLA(null, issueId, oldDept);
+  await pool.query(
+    `UPDATE issues SET current_department=$1, "assigneeId"=$6, dept_sla_started_at=NOW(), dept_assignees=$2::jsonb, dept_statuses=$3::jsonb, "statusId"=$4, "updatedAt"=NOW() WHERE id=$5`,
+    [targetDept, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), targetStatusId, issueId, handoffAssigneeId]
+  );
+  await startDeptSLA(null, issueId, targetDept);
+
+  if (oldDept) {
+    pool.query(
+      `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept, moved_by, moved_at) VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT DO NOTHING`,
+      [issueId, spaceId, oldDept, targetDept, userId]
+    ).catch(() => {});
+  }
+  // Only fall back to crediting whoever performed the handoff when there's no
+  // real assignee to credit instead, so this list stays personal and doesn't
+  // fill up with tickets someone merely routed through the status dropdown.
+  if (oldDept && curAssigneeId) {
+    pool.query(
+      `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+      [curAssigneeId, issueId, oldDept]
+    ).catch(() => {});
+  } else if (oldDept && userId) {
+    pool.query(
+      `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+      [userId, issueId, oldDept]
+    ).catch(() => {});
+  }
+  return oldDept;
+}
+
+/**
  * Compute paused SLA state for a dept (used in Sent/Watching).
  * Returns elapsed_ms, goalDurationMs, isBreached, remainingMs, policyName.
  */
@@ -4472,6 +4567,33 @@ async function _handleJiraPgApi(
           }
 
           if (!queueStatusSyncedDone) {
+            // A queue-scoped "Waiting for X" status (e.g. picked from this
+            // dept's own custom-queue status list) means the same thing as a
+            // real global status of that name: hand the ticket to dept X, not
+            // just relabel it. Without this, picking "Waiting for Dev" from a
+            // queue's own dropdown updated the visible status text but left
+            // current_department untouched -- the ticket never actually moved.
+            let queueHandoffOldDept = '';
+            let queueHandoffTargetDept = '';
+            let queueHandoffDone = false;
+            const waitMatchQueue = String(body.queueStatusName || '').match(/^waiting\s+for\s+(.+)$/i);
+            if (waitMatchQueue) {
+              queueHandoffTargetDept = waitMatchQueue[1].trim();
+              try {
+                queueHandoffOldDept = await performDeptHandoff(
+                  issue.id, issue.spaceId, (issue as any).productType || null,
+                  queueHandoffTargetDept, String(body.queueStatusName || ''), null, userId,
+                );
+                queueHandoffDone = true;
+                console.log(`[DeptHandoff] ${issue.key}: ${queueHandoffOldDept} → ${queueHandoffTargetDept} (via queue status)`);
+              } catch (handoffErr: any) {
+                console.error(`[DeptHandoff ERROR - queueStatus] ${issue.key}:`, handoffErr?.message || handoffErr);
+              }
+            }
+
+            // Re-fetch AFTER the handoff (if any) so the response and the
+            // notification below reflect the corrected department/status,
+            // not the queue-scoped label that was just superseded.
             const refreshed = await db.issue.findUnique({ where: { key }, include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } } } });
             // This path returns early right after updating dept_statuses, so
             // it never reached the "Status changed?" notification block
@@ -4492,6 +4614,12 @@ async function _handleJiraPgApi(
                 `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
                 [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), changer ? `${changer.firstName} ${changer.lastName}`.trim() : 'Unknown', changer?.email || null]
               ).catch(() => {});
+              if (queueHandoffDone) {
+                pool.query(
+                  `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+                  [rid(), issue.id, 'department', queueHandoffOldDept || 'None', `Handed to ${queueHandoffTargetDept} — SLA started`, changer ? `${changer.firstName} ${changer.lastName}`.trim() : 'Unknown', changer?.email || null]
+                ).catch(() => {});
+              }
               notifyStatusChanged({
                 key: refreshed.key, summary: refreshed.summary, priority: refreshed.priority,
                 spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
@@ -4500,7 +4628,17 @@ async function _handleJiraPgApi(
                 assignee: refreshed.assignee, reporter: refreshed.reporter,
                 changedBy: changer,
               }).catch(() => {});
-              return json(formatIssue(refreshed));
+              // current_department/dept_statuses/etc. are raw-SQL columns, not
+              // part of the Prisma schema -- db.issue.findUnique above never
+              // returns them, so without this merge the response would still
+              // show the OLD department even though the handoff already
+              // committed it (same merge the "Change Department" endpoint uses).
+              let queueExtraCols: any = {};
+              try {
+                const r = await pool.query(`SELECT current_department, dept_assignees, dept_sla_started_at, dept_statuses, dept_sla_log, cf_key FROM issues WHERE key=$1 LIMIT 1`, [key]);
+                if (r.rows[0]) queueExtraCols = r.rows[0];
+              } catch {}
+              return json(formatIssue({ ...refreshed, ...queueExtraCols }));
             }
           }
           // else: fall through into the normal statusId update path below, so
@@ -4576,81 +4714,10 @@ async function _handleJiraPgApi(
       if (waitMatchHandoff) {
         handoffTargetDept = waitMatchHandoff[1].trim();
         try {
-          const existingMap = await pool.query(
-            `SELECT dept_assignees, "assigneeId", current_department, dept_statuses FROM issues WHERE id=$1`, [issue.id]
+          handoffOldDept = await performDeptHandoff(
+            issue.id, issue.spaceId, (issue as any).productType || null,
+            handoffTargetDept, newStatusNameForHandoff, data.statusId as string | null, userId,
           );
-          handoffOldDept = existingMap.rows[0]?.current_department || '';
-          const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
-          const deptStatuses: Record<string, any>  = existingMap.rows[0]?.dept_statuses  || {};
-          const curAssigneeId = existingMap.rows[0]?.assigneeId;
-
-          if (handoffOldDept && curAssigneeId) {
-            const curAssignee = await db.user.findUnique({ where: { id: curAssigneeId }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
-            if (curAssignee) {
-              deptAssignees[handoffOldDept] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: avatarRef(curAssignee.id, curAssignee.avatarUrl) };
-            }
-          }
-          // Restore whoever was saved for this dept from a previous visit (same
-          // restore-or-round-robin rule the "Change Department" dropdown already
-          // uses) instead of always landing unassigned — this handoff path used
-          // to hardcode assigneeId to NULL unconditionally, ignoring a perfectly
-          // good saved assignee sitting right here in deptAssignees[handoffTargetDept].
-          const savedForHandoffTarget = deptAssignees[handoffTargetDept];
-          let handoffAssigneeId: string | null = null;
-          if (savedForHandoffTarget?.id) {
-            const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedForHandoffTarget.id]);
-            if (stillExists.rows.length) handoffAssigneeId = savedForHandoffTarget.id;
-            else delete deptAssignees[handoffTargetDept];
-          }
-          if (!handoffAssigneeId) {
-            try {
-              const rrAgent = await getNextAgent(issue.spaceId, handoffTargetDept, (issue as any).productType || null);
-              if (rrAgent) {
-                handoffAssigneeId = rrAgent.userId;
-                deptAssignees[handoffTargetDept] = { id: rrAgent.userId, displayName: rrAgent.name };
-              }
-            } catch { /* non-critical — falls through to unassigned */ }
-          }
-
-          deptStatuses[handoffOldDept] = { id: '', name: newStatusNameForHandoff, category: 'todo', color: '#F59E0B' };
-          const inProgressSt = await db.status.findFirst({ where: { spaceId: issue.spaceId, category: 'in_progress' }, orderBy: { order: 'asc' } })
-            || await db.status.findFirst({ where: { spaceId: issue.spaceId, name: { contains: 'progress', mode: 'insensitive' } }, orderBy: { order: 'asc' } });
-          const inProgressStatusObj = inProgressSt
-            ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
-            : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
-          deptStatuses[handoffTargetDept] = inProgressStatusObj;
-          const targetStatusId = inProgressSt?.id || data.statusId;
-
-          await pauseDeptSLA(null, issue.id, handoffOldDept);
-          await pool.query(
-            `UPDATE issues SET current_department=$1, "assigneeId"=$6, dept_sla_started_at=NOW(), dept_assignees=$2::jsonb, dept_statuses=$3::jsonb, "statusId"=$4, "updatedAt"=NOW() WHERE id=$5`,
-            [handoffTargetDept, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), targetStatusId, issue.id, handoffAssigneeId]
-          );
-          await startDeptSLA(null, issue.id, handoffTargetDept);
-
-          // Record dept transition so Sent/Watching and history queries work
-          if (handoffOldDept && issue.spaceId) {
-            pool.query(
-              `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept, moved_by, moved_at) VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT DO NOTHING`,
-              [issue.id, issue.spaceId, handoffOldDept, handoffTargetDept, userId]
-            ).catch(() => {});
-          }
-          // Record worked-on for the assignee in the old dept -- same fix as
-          // the other transfer path: only fall back to crediting whoever
-          // performed the handoff when there's no real assignee to credit
-          // instead, so this list stays personal and doesn't fill up with
-          // tickets someone merely routed through the status dropdown.
-          if (handoffOldDept && curAssigneeId) {
-            pool.query(
-              `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
-              [curAssigneeId, issue.id, handoffOldDept]
-            ).catch(() => {});
-          } else if (handoffOldDept && userId) {
-            pool.query(
-              `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
-              [userId, issue.id, handoffOldDept]
-            ).catch(() => {});
-          }
           deptHandoffDone = true;
           console.log(`[DeptHandoff] ${issue.key}: ${handoffOldDept} → ${handoffTargetDept}`);
         } catch (handoffErr: any) {
