@@ -580,14 +580,16 @@ function SpaceDetailContent() {
             params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
-          // Dept sub-queue: assigned to me in dept — includeHistory keeps a
-          // ticket showing here (with its real current status/department)
-          // after it's resolved or handed to another department, instead of
-          // it just disappearing once it's no longer open-and-assigned-to-me.
+          // Dept sub-queue: assigned to me in dept — strictly current and
+          // still-open. A ticket leaves this list the moment it's resolved
+          // (it belongs in "Worked on" instead, see dept_closed) or handed
+          // to another department (it belongs in "Sent / Watching" instead).
+          // Used to also pass includeHistory to keep resolved/moved tickets
+          // showing here too — dropped since that meant a resolved ticket
+          // could show under BOTH "Assigned to me" and "Worked on" at once.
           if (queueFilter === 'dept_assigned') {
             if (user?.id) params.assignee = user.id;
             params.excludeDone = 'true';
-            params.includeHistory = 'true';
             params.page = String(currentPage);
             params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;

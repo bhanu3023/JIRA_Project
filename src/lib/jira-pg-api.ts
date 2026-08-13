@@ -2299,27 +2299,46 @@ async function _handleJiraPgApi(
       // Join against user_worked_on_tickets (populated on transfer/close/handoff,
       // covering unassigned handoffs too) filtered to the authenticated viewer so
       // each person only sees their own worked-on tickets, not the whole team's.
+      //
+      // That event log is ONLY written by in-app pass/return/close actions though
+      // -- a ticket resolved via the old Jira migration (its status set by a raw
+      // backfill, never through the app's own "close" flow) has no such row, so
+      // it never showed up here even though it's clearly done and clearly this
+      // person's. UNION in a second source: any ticket currently resolved/closed
+      // in this dept that this person currently owns, live off `issues` directly,
+      // no event history required. Dedup by issue id since a ticket can match
+      // both sources.
+      const mergedSourceSql = `
+        SELECT qct.issue_id, qct.closed_at, qct.dept_name
+        FROM queue_closed_tickets qct
+        JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
+        WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $3
+        UNION ALL
+        SELECT i.id AS issue_id, i."updatedAt" AS closed_at, i.current_department AS dept_name
+        FROM issues i
+        LEFT JOIN statuses s ON s.id = i."statusId"
+        WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)
+          AND s.category = 'done'
+          AND COALESCE(i.department_assignee_id, i."assigneeId") = $3
+      `;
       const rows = await pool.query(
-        `SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
-                i."createdAt", i."updatedAt", qct.closed_at, qct.dept_name,
+        `WITH merged AS (${mergedSourceSql}),
+         dedup AS (SELECT issue_id, MAX(closed_at) AS closed_at, MAX(dept_name) AS dept_name FROM merged GROUP BY issue_id)
+         SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
+                i."createdAt", i."updatedAt", d.closed_at, d.dept_name,
                 s.name AS status_name, s.color AS status_color, s.category AS status_category,
                 i.dept_sla_log, i.dept_assignees,
                 CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
                 a.id AS assignee_id
-         FROM queue_closed_tickets qct
-         JOIN issues i ON i.id = qct.issue_id
-         JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
+         FROM dedup d
+         JOIN issues i ON i.id = d.issue_id
          LEFT JOIN statuses s ON i."statusId" = s.id
          LEFT JOIN users a ON i."assigneeId" = a.id
-         WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $5
-         ORDER BY COALESCE(i."updatedAt", qct.closed_at) DESC LIMIT $3 OFFSET $4`,
-        [spaceId, dept, limit, (page - 1) * limit, targetUserId]
+         ORDER BY COALESCE(i."updatedAt", d.closed_at) DESC LIMIT $4 OFFSET $5`,
+        [spaceId, dept, targetUserId, limit, (page - 1) * limit]
       );
       const countRes = await pool.query(
-        `SELECT COUNT(DISTINCT qct.issue_id) FROM queue_closed_tickets qct
-         JOIN issues i ON i.id = qct.issue_id
-         JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
-         WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $3`,
+        `WITH merged AS (${mergedSourceSql}) SELECT COUNT(DISTINCT issue_id) FROM merged`,
         [spaceId, dept, targetUserId]
       );
       // "Worked on — Dev" showed the ticket's CURRENT global assignee, which is
