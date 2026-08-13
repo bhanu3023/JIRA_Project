@@ -975,8 +975,10 @@ function SpaceDetailContent() {
       const params: Record<string, string> = { spaceKey, page: '1', limit: '100' };
       if (queueFilter === 'sent-watching') {
         if (deptParam) params.sentDept = deptParam;
-      } else if (queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
+      } else if (queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
         params.excludeDone = 'true';
+        if (deptParam) params.dept = deptParam;
+      } else if (queueFilter === 'dept_all') {
         if (deptParam) params.dept = deptParam;
       } else if (queueFilter === 'assigned' || queueFilter === 'unassigned') {
         params.excludeDone = 'true';
@@ -1179,10 +1181,13 @@ function SpaceDetailContent() {
         // Exclude tickets still in this dept (they haven't been sent anywhere)
         if (deptParam && issueDept === deptParam.toLowerCase()) return false;
       } else if (queueFilter === 'dept_all') {
-        // All open tickets in this dept regardless of assignee
-        const cat = (issue.status?.category || '').toLowerCase();
-        const stName = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || stName.includes('done') || stName.includes('resolved') || stName.includes('closed')) return false;
+        // Every ticket in this dept, regardless of assignee OR status — the
+        // server no longer excludes done tickets here (see the fetch effect),
+        // so re-applying a done/name-substring exclusion client-side used to
+        // silently throw away most of each page it returned (a page mostly
+        // full of already-resolved migrated tickets would come back from the
+        // server correctly, then get filtered down to a handful in the
+        // browser, with the "Total" pill and the visible rows disagreeing).
         if (deptParam) {
           const issueDept = ((issue as any).current_department || '').toLowerCase();
           if (issueDept !== deptParam.toLowerCase()) return false;
