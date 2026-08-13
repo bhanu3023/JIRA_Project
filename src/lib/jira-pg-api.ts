@@ -4466,19 +4466,20 @@ async function _handleJiraPgApi(
     }
     const body = await readJson(req);
 
-    // Handle recall Ã¢â‚¬â€ return ticket to Migration dept
+    // Handle recall — return ticket to its origin dept (whichever queue it started in)
     if (body.recall === true) {
       try {
       // Fetch full state BEFORE modifying anything
       const recallRow = await pool.query(
-        `SELECT i.current_department, i.dept_assignees, i."reporterId", i.summary, i."assigneeId"
+        `SELECT i.current_department, i.original_dept, i.dept_assignees, i."reporterId", i.summary, i."assigneeId"
          FROM issues i WHERE i.key=$1 LIMIT 1`, [key]
       );
       if (!recallRow.rows[0]) return json({ error: 'Ticket not found' }, 404);
       const recallDept: string = recallRow.rows[0]?.current_department || '';
+      const homeDept: string = recallRow.rows[0]?.original_dept || 'Migration';
       const savedDeptAssignees: Record<string, any> = recallRow.rows[0]?.dept_assignees || {};
-      const savedMigrationAssignee = savedDeptAssignees['Migration'];
-      let restoreAssigneeId: string | null = savedMigrationAssignee?.id || null;
+      const savedHomeAssignee = savedDeptAssignees[homeDept];
+      let restoreAssigneeId: string | null = savedHomeAssignee?.id || null;
       // dept_assignees is a point-in-time snapshot that can outlive the user it
       // points to — if that account was since deleted (e.g. an offboarded
       // employee via Settings > User Management, a real hard delete), restoring
@@ -4489,25 +4490,25 @@ async function _handleJiraPgApi(
         const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [restoreAssigneeId]);
         if (!stillExists.rows.length) {
           restoreAssigneeId = null;
-          delete savedDeptAssignees['Migration'];
+          delete savedDeptAssignees[homeDept];
         }
       }
 
       await pauseDeptSLA(key, null, recallDept);
-      // Restore the saved Migration assignee if available
+      // Restore the saved origin-dept assignee if available
       await pool.query(
-        `UPDATE issues SET current_department='Migration', "assigneeId"=$2, dept_sla_started_at=NOW(), dept_assignees=$3::jsonb, "updatedAt"=NOW() WHERE key=$1`,
-        [key, restoreAssigneeId, JSON.stringify(savedDeptAssignees)]
+        `UPDATE issues SET current_department=$2, "assigneeId"=$3, dept_sla_started_at=NOW(), dept_assignees=$4::jsonb, "updatedAt"=NOW() WHERE key=$1`,
+        [key, homeDept, restoreAssigneeId, JSON.stringify(savedDeptAssignees)]
       );
-      await startDeptSLA(key, null, 'Migration');
+      await startDeptSLA(key, null, homeDept);
 
-      // Ticket returned to Migration -- remove 'passed' worked-on entries since work continues
+      // Ticket returned home -- remove 'passed' worked-on entries since work continues
       pool.query(
         `DELETE FROM user_worked_on_tickets WHERE issue_id=(SELECT id FROM issues WHERE key=$1) AND reason='passed'`,
         [key]
       ).catch(() => {});
 
-      // Notify: restored Migration assignee + reporter
+      // Notify: restored origin-dept assignee + reporter
       try {
         const recallIssue = await db.issue.findUnique({ where: { key }, select: { reporterId: true, summary: true } });
         const summary = recallIssue?.summary || key;
@@ -4515,27 +4516,27 @@ async function _handleJiraPgApi(
         if (notifyIds.length) {
           await notifyUsers(notifyIds, userId, {
             type: 'DEPT_CHANGE',
-            title: `Ticket ${key} returned to Migration`,
-            message: `Ticket "${summary}" has been returned to the Migration queue. SLA has resumed.`,
+            title: `Ticket ${key} returned to ${homeDept}`,
+            message: `Ticket "${summary}" has been returned to the ${homeDept} queue. SLA has resumed.`,
             issueKey: key
           });
         }
-        // Also notify all Migration dept members
+        // Also notify all origin-dept members
         const spMembers = await db.spaceMember.findMany({ where: { spaceId: (await db.issue.findUnique({ where: { key }, select: { spaceId: true } }))?.spaceId }, include: { user: { select: { id: true } } } });
-        const migrationMemberIds = spMembers
-          .filter((m: any) => (m as any).department?.toLowerCase() === 'migration')
+        const homeMemberIds = spMembers
+          .filter((m: any) => (m as any).department?.toLowerCase() === homeDept.toLowerCase())
           .map((m: any) => m.user?.id)
           .filter((id: any) => id && !notifyIds.includes(id));
-        if (migrationMemberIds.length > 0) {
-          await notifyUsers(migrationMemberIds, userId, {
+        if (homeMemberIds.length > 0) {
+          await notifyUsers(homeMemberIds, userId, {
             type: 'DEPT_ASSIGNED',
-            title: `Ticket ${key} back in Migration`,
-            message: `Ticket "${summary}" has returned to Migration queue. SLA is running.`,
+            title: `Ticket ${key} back in ${homeDept}`,
+            message: `Ticket "${summary}" has returned to ${homeDept} queue. SLA is running.`,
             issueKey: key
           });
         }
       } catch { /* non-critical */ }
-      return NextResponse.json({ success: true, recalled: true, key });
+      return NextResponse.json({ success: true, recalled: true, key, department: homeDept });
       } catch (recallErr: any) {
         console.error('[Recall ERROR]', recallErr?.message || recallErr);
         return json({ error: recallErr?.message || 'Recall failed' }, 500);
@@ -5060,6 +5061,67 @@ async function _handleJiraPgApi(
           `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'closed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='closed', worked_at=NOW()`,
           [updated.assigneeId, issue.id, null]
         ).catch(() => {});
+      }
+
+      // Resolved/closed in a dept other than where the ticket originated — drop a
+      // "Worked on" copy for the resolving dept, then send the ticket back to its
+      // origin queue so it doesn't stay stranded away from home.
+      if (newStRec?.category === 'done') {
+        try {
+          const deptRow = await pool.query(
+            `SELECT current_department, original_dept, dept_assignees FROM issues WHERE id=$1`,
+            [issue.id]
+          );
+          const resolvingDept: string = deptRow.rows[0]?.current_department || '';
+          const homeDept: string = deptRow.rows[0]?.original_dept || '';
+          if (resolvingDept && homeDept && resolvingDept.toLowerCase() !== homeDept.toLowerCase()) {
+            // Copy into the resolving dept's "Worked on" list
+            await pool.query(
+              `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+              [issue.spaceId, resolvingDept, issue.id]
+            );
+            if (updated.assigneeId) {
+              await pool.query(
+                `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'closed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='closed', worked_at=NOW()`,
+                [updated.assigneeId, issue.id, resolvingDept]
+              );
+            }
+            await pauseDeptSLA(key, null, resolvingDept);
+
+            // Move the ticket back to its origin dept, restoring whoever was
+            // handling it there before it was passed along.
+            const deptAssignees: Record<string, any> = deptRow.rows[0]?.dept_assignees || {};
+            const homeAssignee = deptAssignees[homeDept];
+            const restoreAssigneeId: string | null = homeAssignee?.id || null;
+            await pool.query(
+              `UPDATE issues SET current_department=$1, "assigneeId"=$2, "updatedAt"=NOW() WHERE id=$3`,
+              [homeDept, restoreAssigneeId, issue.id]
+            );
+            await pool.query(
+              `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept) VALUES ($1, $2, $3, $4)`,
+              [issue.id, issue.spaceId, resolvingDept, homeDept]
+            );
+            await (db as any).issueHistory.create({
+              data: {
+                id: rid(), issueId: issue.id, field: 'department',
+                oldValue: resolvingDept,
+                newValue: `Resolved in ${resolvingDept} — returned to ${homeDept}`,
+                authorName: currentUser ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email) : 'System',
+                createdAt: new Date(),
+              },
+            });
+            // Notify whoever now owns it back home, plus the reporter
+            const notifyIds = [restoreAssigneeId, updated.reporterId].filter(Boolean) as string[];
+            if (notifyIds.length) {
+              await notifyUsers(notifyIds, userId, {
+                type: 'DEPT_CHANGE',
+                title: `Ticket ${updated.key} back in ${homeDept}`,
+                message: `Ticket "${updated.summary}" was resolved in ${resolvingDept} and has returned to ${homeDept}.`,
+                issueKey: updated.key,
+              });
+            }
+          }
+        } catch { /* non-critical */ }
       }
 
       const oldStatusRec = issue.space?.statuses?.find((s: any) => s.id === issue.statusId);
