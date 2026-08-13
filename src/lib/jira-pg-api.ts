@@ -3822,11 +3822,23 @@ async function _handleJiraPgApi(
         }
       } catch {}
 
+      // Already Resolved/Closed AND landing in a dept that's never seen this
+      // ticket before (being routed on for review, or a final closure hop) --
+      // that's not "new work arriving," so carry the done status straight
+      // through rather than reopening it. But a dept this ticket has ALREADY
+      // visited is different: that dept has its own dept_statuses snapshot of
+      // what the ticket looked like on ITS side right before it left (e.g.
+      // Migration's "In Progress" before handing off to Dev) -- restore THAT
+      // instead. Otherwise a ticket resolved in Dev and handed back to
+      // Migration landed showing Dev's "Resolved" with no way to tell what it
+      // was doing before, and no natural point for Migration to actually
+      // review and close it themselves.
+      const restoringOwnSnapshot = isDoneNow && deptStatuses[newDept] != null;
+
       let newDeptStatusObj: any;
-      if (isDoneNow) {
-        // Already Resolved/Closed -- being routed on for review or final
-        // closure isn't "new work arriving," so don't reopen it by resetting
-        // to Open/In-Progress. Same done status carries straight through.
+      if (restoringOwnSnapshot) {
+        newDeptStatusObj = deptStatuses[newDept];
+      } else if (isDoneNow) {
         newDeptStatusObj = oldDeptStatusObj;
       } else if (isReturningToDept) {
         const inProgressSt = newDeptQueueStatuses.find((s: any) => s.category === 'in_progress')
@@ -3851,7 +3863,7 @@ async function _handleJiraPgApi(
       // something invalid or defaulting to a status that doesn't match what
       // dept_statuses now shows.
       let newStatusId = issue.statusId;
-      if (isDoneNow) {
+      if (isDoneNow && !restoringOwnSnapshot) {
         newStatusId = issue.statusId;
       } else {
         const realMatch = await db.status.findFirst({
