@@ -53,6 +53,7 @@ import {
   UserX,
   User,
   Inbox as InboxIcon,
+  AlertTriangle,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { getRecentItems, groupRecentItems, type RecentItem } from '@/lib/recent-items';
@@ -404,36 +405,23 @@ function SMSidebar({
           }
         />
         <div>
-          <button
-            onClick={() => setQueuesOpen((v) => !v)}
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
-          >
-            <ClipboardList size={15} className="text-gray-500" />
-            <span className="flex-1 text-left font-medium">Queues</span>
-            <ChevronDown
-              size={12}
-              className={cn('text-gray-400 transition-transform', queuesOpen ? '' : '-rotate-90')}
-            />
-          </button>
-          {queuesOpen && (
-            <div className="ml-4 mt-1 space-y-0.5 border-l border-gray-200 pl-3">
-              {SM_QUEUES.map((q) => (
-                <Link
-                  key={q.id}
-                  href={`/spaces/${spaceKey}?queue=${q.id}`}
-                  className={cn(
-                    'flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] transition-colors',
-                    ((searchParams?.get('queue') || 'all-open') === q.id)
-                      ? 'bg-indigo-50 font-semibold text-indigo-700'
-                      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900',
-                  )}
-                >
-                  <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-current" />
-                  {q.label}
-                </Link>
-              ))}
-            </div>
-          )}
+          <div className="ml-4 mt-1 space-y-0.5 border-l border-gray-200 pl-3">
+            {SM_QUEUES.map((q) => (
+              <Link
+                key={q.id}
+                href={`/spaces/${spaceKey}?queue=${q.id}`}
+                className={cn(
+                  'flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] transition-colors',
+                  ((searchParams?.get('queue') || 'all-open') === q.id)
+                    ? 'bg-indigo-50 font-semibold text-indigo-700'
+                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900',
+                )}
+              >
+                <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-current" />
+                {q.label}
+              </Link>
+            ))}
+          </div>
         </div>
         <SideNavItem
           href={`/spaces/${spaceKey}?queue=summary`}
@@ -640,6 +628,7 @@ export default function Sidebar() {
         {[
           { href: '/dashboard', icon: <Home size={16} />, match: pathname === '/dashboard' },
           { href: '/search', icon: <Search size={16} />, match: pathname === '/search' },
+          { href: '/my-dashboard', icon: <LayoutDashboard size={16} />, match: pathname === '/my-dashboard' },
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
         ].map((item, i) => (
           <Link
@@ -672,7 +661,7 @@ export default function Sidebar() {
             />
           </div>
           <span className="truncate text-[14px] font-semibold tracking-tight text-white">
-            Neutara Technologies Ticketing
+            Neutara Ticketing
           </span>
         </Link>
         <button
@@ -691,8 +680,8 @@ export default function Sidebar() {
               label="Home"
               active={pathname === '/dashboard'}
             />
-            <RecentFlyout />
             <GlobalNavItem href="/filters" icon={<List size={15} />} label="Filters" active={pathname === '/filters'} />
+            <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
             {isPrivileged && (
               <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
             )}
@@ -746,7 +735,7 @@ export default function Sidebar() {
                 {/* Inline sub-nav when this space is active and not collapsed */}
                 {isThisSpaceActive && !collapsedSpaces.has(space.key) && (
                   <div className="ml-3 mt-0.5 border-l-2 border-blue-200 pl-3 pb-1">
-                    <SMSpaceSubNav spaceKey={space.key} pathname={pathname} />
+                    <SMSpaceSubNav spaceKey={space.key} pathname={pathname} spaceType={space.type} />
                   </div>
                 )}
 
@@ -828,12 +817,6 @@ export default function Sidebar() {
               </div>
             );
             })}
-            <Link
-              href="/spaces"
-              className="mt-1 flex items-center gap-2 rounded-md px-3 py-2 text-[11.5px] text-blue-600 transition-colors hover:bg-gray-50 hover:text-blue-800"
-            >
-              <ChevronR size={11} /> View all spaces
-            </Link>
           </div>
 
         </nav>
@@ -843,7 +826,17 @@ export default function Sidebar() {
 
 type CustomQueue = { id: string; name: string; memberIds: string[]; suspendedIds?: string[]; sla?: { timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' } };
 
-function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: string }) {
+function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pathname: string; spaceType?: string }) {
+  // treat as dept_queue if explicitly typed OR if it has custom queues (backward compat for pre-existing spaces)
+  // Read localStorage immediately so the correct layout renders on first paint (no flash)
+  const [isDeptQueue, setIsDeptQueue] = useState(() => {
+    if (spaceType === 'dept_queue') return true;
+    try {
+      const stored = typeof window !== 'undefined' ? localStorage.getItem(`custom_queues_${spaceKey}`) : null;
+      if (stored) { const q = JSON.parse(stored); return Array.isArray(q) && q.length > 0; }
+    } catch {}
+    return false;
+  });
   const [queuesOpen, setQueuesOpen] = useState(true);
   const [defaultOpen, setDefaultOpen] = useState(true);
   const [counts, setCounts] = useState({ allOpen: 0, assigned: 0, total: 0, unassigned: 0 });
@@ -859,28 +852,23 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
   const [addMemberSearch, setAddMemberSearch] = useState('');
   const [slaTimeValue, setSlaTimeValue] = useState('');
   const [slaTimeUnit, setSlaTimeUnit] = useState<'minutes' | 'hours' | 'days'>('hours');
-  const _deptQueueParam = useSearchParams()?.get('queue') || '';
-  const _deptParam = useSearchParams()?.get('dept') || '';
-  const [expandedQueueSub, setExpandedQueueSub] = useState<string | null>(null);
   const [rrConfig, setRrConfig] = useState<any>(null);
-  const { user } = useStore(useShallow((s) => ({ user: s.user })));
+  const { user, currentIssue } = useStore(useShallow((s) => ({ user: s.user, currentIssue: s.currentIssue })));
   const searchParams = useSearchParams();
   const router = useRouter();
   const canManageSpace = isManager(user?.role);
   const [spaceMemberRole, setSpaceMemberRole] = useState<string>('');
 
-  // Fetch RR config to determine shift lead status + space member role
+  // Fetch RR config to determine shift lead status + space member role.
+  // Routed through api.request so this coalesces with the page's own identical
+  // rr-config/space fetches for the same spaceKey instead of duplicating them.
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    fetch(`/api/spaces/${spaceKey}/rr-config`, { headers })
-      .then(r => r.ok ? r.json() : null)
+    api.request<any>(`spaces/${spaceKey}/rr-config`)
       .then((cfg: any) => { if (cfg?.config) setRrConfig(cfg.config); })
       .catch(() => {});
     // Load current user's SpaceMember role for this space
     if (user?.id) {
-      fetch(`/api/spaces/${spaceKey}`, { headers })
-        .then(r => r.ok ? r.json() : null)
+      api.request<any>(`spaces/${spaceKey}`)
         .then((sp: any) => {
           const me = (sp?.members || []).find((m: any) => (m.userId || m.user?.id) === user.id);
           if (me?.role) setSpaceMemberRole(me.role);
@@ -896,22 +884,31 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
       d.agents?.some((a: any) => a.userId === userId && a.isShiftLead)
     );
 
-  // Load custom queues from DB (migrate from localStorage if DB is empty)
+  // Load custom queues from DB.
   useEffect(() => {
     if (!spaceKey) return;
     api.request<any[]>(`custom-queues/${spaceKey}`).then((q) => {
       if (Array.isArray(q) && q.length > 0) {
         setCustomQueues(q);
+        setIsDeptQueue(true);
       } else {
-        // DB is empty — check localStorage and migrate
+        // Empty response here isn't necessarily "this space has never had
+        // queues" — the GET filters to only the CALLER's own queues for
+        // non-admins/managers, so a member of zero queues legitimately gets
+        // back []. This used to treat that the same as "DB truly empty" and,
+        // if this browser's localStorage had ANY cached queues from an
+        // earlier visit (even a stale/incorrect snapshot), silently PUT that
+        // stale data back to the server as the new "real" list — permanently
+        // overwriting whatever the actual current data was, from a passive
+        // page load with no explicit user action at all. Only ever display
+        // the cached fallback locally now; never write it back automatically.
         try {
           const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
           if (stored) {
             const local = JSON.parse(stored);
             if (Array.isArray(local) && local.length > 0) {
               setCustomQueues(local);
-              // Push to DB so server has them too
-              api.request(`custom-queues/${spaceKey}`, { method: 'PUT', body: JSON.stringify(local) }).catch(() => {});
+              setIsDeptQueue(true);
             }
           }
         } catch {}
@@ -938,14 +935,33 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
     try { localStorage.setItem(`custom_queues_${spaceKey}`, JSON.stringify(queues)); } catch {}
   };
 
+  // createQueue/deleteQueue used to mutate the CURRENT customQueues React
+  // state directly and PUT the result, which overwrites the server's entire
+  // stored array. customQueues starts as [] and only becomes accurate once
+  // the mount effect's fetch resolves — clicking create/delete before that
+  // (a slow network moment, or just clicking right after the page loads)
+  // saved that empty/partial snapshot as the new full list, silently
+  // deleting every other queue with no error shown anywhere. Re-fetch the
+  // server's actual current list immediately before mutating instead of
+  // trusting local state, so a stale/incomplete snapshot can never become
+  // the new "whole" list.
+  const mutateQueues = async (mutate: (current: CustomQueue[]) => CustomQueue[]) => {
+    let latest = customQueues;
+    try {
+      const fresh = await api.request<any[]>(`custom-queues/${spaceKey}`);
+      if (Array.isArray(fresh)) latest = fresh as CustomQueue[];
+    } catch { /* fall back to local state if the refetch itself fails */ }
+    saveQueues(mutate(latest));
+  };
+
   const createQueue = () => {
     if (!newQueueName.trim()) return;
     const q: CustomQueue = { id: `cq_${Date.now()}`, name: newQueueName.trim(), memberIds: newQueueMembers };
-    saveQueues([...customQueues, q]);
+    mutateQueues(current => [...current, q]);
     setNewQueueName(''); setNewQueueMembers([]); setShowCreateQueue(false);
   };
 
-  const deleteQueue = (id: string) => saveQueues(customQueues.filter(q => q.id !== id));
+  const deleteQueue = (id: string) => mutateQueues(current => current.filter(q => q.id !== id));
 
   useEffect(() => {
     // Fetch exact open count from DB (excludeDone filters at DB level → total is accurate)
@@ -966,7 +982,18 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
     }).catch(() => {});
   }, [spaceKey, user?.id]);
 
-  const queueActive = (q: string) => (searchParams?.get('queue') || 'all-open') === q;
+  const queueActive = (queueId: string) => {
+    if ((searchParams?.get('queue') || 'all-open') === queueId) return true;
+    // When on an issue page, highlight the queue matching the ticket's current_department
+    if (pathname?.startsWith('/issues/')) {
+      const dept = (currentIssue as any)?.current_department;
+      if (dept) {
+        const matchedQueue = customQueues.find(q => q.id === queueId);
+        if (matchedQueue && matchedQueue.name.toLowerCase() === dept.toLowerCase()) return true;
+      }
+    }
+    return false;
+  };
 
   // Queues this user is a member of
   const userQueues = customQueues.filter(q => q.memberIds.includes(user?.id || ''));
@@ -981,52 +1008,83 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
     active ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
   );
 
-  // Admins, leads, and shift leads see all queues; others see only their assigned queues
-  const visibleQueues = (canManageSpace || isSpaceLead || isShiftLead(user?.id || ''))
-    ? customQueues
-    : (isDeptScoped ? userQueues : customQueues);
+  // True admins always see every queue. A "manager"-role user is often scoped
+  // to just their own department's queue (e.g. a queue lead who can manage
+  // their queue's members but isn't a global admin) — canManageSpace alone
+  // (isManager: admin OR manager) was rendering every queue's sidebar link for
+  // any manager regardless of which queue(s) they actually belong to, and each
+  // rendered <Link> gets background-prefetched by Next.js, which is what fired
+  // every queue's API on board load for these users. Only fall back to "see
+  // everything" for a manager with no queue membership at all (e.g. freshly
+  // created, not yet assigned to any queue) — same fallback isDeptScoped
+  // already documents above.
+  const visibleQueues = (user?.role === 'admin' || (canManageSpace && !isDeptScoped)) ? customQueues : userQueues;
 
   return (
     <>
     <div className="space-y-0.5">
-      {/* Queues — expandable */}
+      {/* Queues — service_desk: direct links; dept_queue: expandable with custom queues */}
+      {!isDeptQueue ? (
+        <>
+          <Link href={`/spaces/${spaceKey}?queue=all-open`} className={subCls(queueActive('all-open'))}>
+            <InboxIcon size={13} className={queueActive('all-open') ? 'text-blue-600' : 'text-gray-400'} />
+            <span className="flex-1">All Tickets</span>
+            {counts.total > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-600">{counts.total}</span>}
+          </Link>
+          <Link href={`/spaces/${spaceKey}?queue=unassigned`} className={subCls(queueActive('unassigned'))}>
+            <UserX size={13} className={queueActive('unassigned') ? 'text-blue-600' : 'text-gray-400'} />
+            <span className="flex-1">Unassigned</span>
+            {counts.unassigned > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">{counts.unassigned}</span>}
+          </Link>
+          <Link href={`/spaces/${spaceKey}?queue=assigned`} className={subCls(queueActive('assigned'))}>
+            <UserCheck size={13} className={queueActive('assigned') ? 'text-blue-600' : 'text-gray-400'} />
+            <span className="flex-1">Assigned to me</span>
+            {counts.assigned > 0 && <span className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">{counts.assigned}</span>}
+          </Link>
+          <Link href={`/spaces/${spaceKey}?queue=closed`} className={subCls(queueActive('closed'))}>
+            <Archive size={13} className={queueActive('closed') ? 'text-blue-600' : 'text-gray-400'} />
+            <span className="flex-1">Closed tickets</span>
+          </Link>
+        </>
+      ) : (
       <div>
-        <div className="flex items-center gap-1 rounded-md px-1 py-0.5 hover:bg-gray-100">
-          <button onClick={() => setQueuesOpen(v => !v)} className="flex flex-1 items-center gap-2 px-1 py-1 text-[12px] font-medium text-gray-600 hover:text-gray-900">
-            <ChevronDown size={12} className={cn('text-gray-400 transition-transform flex-shrink-0', !queuesOpen && '-rotate-90')} />
-            <ClipboardList size={13} className="text-gray-400" />
-            <span className="flex-1 text-left">Queues</span>
-          </button>
-        </div>
-
-        {queuesOpen && (
+        {true && (
           <div className="ml-2 mt-0.5 space-y-0.5 border-l border-gray-200 pl-2">
             <div className="ml-2 space-y-0.5">
-                {/* Custom queues — only the ones visible to this user */}
-                {visibleQueues.map(q => {
+                {/* Custom queues — dept_queue only */}
+                {isDeptQueue && visibleQueues.map(q => {
                   const isMenuOpen = queueMenuOpen === q.id;
-                  const isDeptSubActive = ['dept_all','dept_unassigned','dept_assigned','dept_closed','sent-watching'].includes(_deptQueueParam) && _deptParam === q.name;
-                  const isSubExpanded = expandedQueueSub === q.id || (isDeptSubActive && expandedQueueSub === null);
+                  // Sub-items (All Open, Unassigned, Assigned to me, Closed, Sent/Watching) are
+                  // always shown now — no arrow toggle, so they stay reachable from the sidebar.
+                  const isSubExpanded = true;
                   const queueParam = searchParams?.get('queue');
                   const deptParam = searchParams?.get('dept');
                   const subActive = (subQueue: string) =>
                     queueParam === subQueue && deptParam === q.name;
                   return (
                     <div key={q.id}>
+                      {(() => {
+                        // Clicking the queue name itself opens the same "All Tickets"
+                        // view as the sub-item below it, instead of a separate
+                        // cq_ view — one destination for "show me Migration's
+                        // tickets," not two different counts depending on which
+                        // link you happened to click.
+                        const isActive = queueActive(q.id) || (queueParam === 'dept_all' && deptParam === q.name);
+                        return (
                       <div className="group relative flex items-center rounded-md transition-colors hover:bg-gray-100">
-                        <Link href={`/spaces/${spaceKey}?queue=${q.id}`}
+                        <Link href={`/spaces/${spaceKey}?queue=dept_all&dept=${encodeURIComponent(q.name)}`}
                           className={cn('flex flex-1 min-w-0 items-center gap-2 px-2 py-1.5 text-[12px] transition-colors',
-                            queueActive(q.id) ? 'text-blue-700' : 'text-gray-600')}>
-                          <ClipboardList size={12} className={cn('flex-shrink-0', queueActive(q.id) ? 'text-blue-500' : 'text-gray-400')} />
+                            isActive ? 'text-blue-700' : 'text-gray-600')}>
+                          <ClipboardList size={12} className={cn('flex-shrink-0', isActive ? 'text-blue-500' : 'text-gray-400')} />
                           <span className="flex-1 truncate">{q.name}</span>
                         </Link>
-                        {/* Three-dot menu — shown on hover, overlays chevron */}
+                        {/* Three-dot menu — admin/manager only */}
                         <div className="relative flex-shrink-0">
-                          <button
+                          {canManageSpace && <button
                             onClick={e => { e.stopPropagation(); setQueueMenuOpen(isMenuOpen ? null : q.id); setQueuePanelOpen(null); }}
                             className="hidden group-hover:flex w-6 h-6 items-center justify-center rounded text-gray-400 hover:text-gray-700 hover:bg-gray-200">
                             <MoreHorizontal size={13} />
-                          </button>
+                          </button>}
                           {isMenuOpen && (
                             <div className="absolute right-0 top-7 z-50 w-44 bg-white border border-gray-200 rounded-lg shadow-lg py-1"
                               onMouseLeave={() => setQueueMenuOpen(null)}>
@@ -1049,13 +1107,9 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
                             </div>
                           )}
                         </div>
-                        {/* Chevron — always visible, expands sub-items */}
-                        <button
-                          onClick={e => { e.stopPropagation(); setExpandedQueueSub(isSubExpanded ? null : q.id); }}
-                          className="flex w-5 h-5 flex-shrink-0 items-center justify-center rounded text-gray-400 hover:text-gray-700 mr-1">
-                          <ChevronDown size={11} className={cn('transition-transform', isSubExpanded ? '' : '-rotate-90')} />
-                        </button>
                       </div>
+                        );
+                      })()}
 
                       {/* Sub-items */}
                       {isSubExpanded && (
@@ -1114,8 +1168,8 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
                             <Archive size={11} className={subActive('dept_closed') ? 'text-blue-500' : 'text-gray-400'} />
                             <span className="flex-1 truncate">Worked on</span>
                           </Link>
-                          {/* Sent / Watching */}
-                          <Link
+                          {/* Sent / Watching — dept_queue only */}
+                          {isDeptQueue && <Link
                             href={`/spaces/${spaceKey}?queue=sent-watching&dept=${encodeURIComponent(q.name)}`}
                             className={cn(
                               'flex items-center gap-2 rounded-md px-2 py-1.5 text-[11.5px] transition-colors',
@@ -1126,15 +1180,32 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
                           >
                             <ClipboardList size={11} className={(queueParam === 'sent-watching' && deptParam === q.name) ? 'text-blue-500' : 'text-gray-400'} />
                             <span className="flex-1 truncate">Sent / Watching</span>
-                          </Link>
+                          </Link>}
+                          {/* Summary — scoped to this queue's own tickets,
+                              admin-only (regular queue members shouldn't see
+                              aggregate stats for the whole queue). The page
+                              itself also checks this, since a member could
+                              still hit the URL directly with the link hidden. */}
+                          {user?.role === 'admin' && <Link
+                            href={`/spaces/${spaceKey}?queue=summary&dept=${encodeURIComponent(q.name)}`}
+                            className={cn(
+                              'flex items-center gap-2 rounded-md px-2 py-1.5 text-[11.5px] transition-colors',
+                              (queueParam === 'summary' && deptParam === q.name)
+                                ? 'bg-blue-100 text-blue-700'
+                                : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900',
+                            )}
+                          >
+                            <BarChart2 size={11} className={(queueParam === 'summary' && deptParam === q.name) ? 'text-blue-500' : 'text-gray-400'} />
+                            <span className="flex-1 truncate">Summary</span>
+                          </Link>}
                         </div>
                       )}
                     </div>
                   );
                 })}
 
-                {/* New Queue button — managers/admins only */}
-                {canManageSpace && (!showCreateQueue ? (
+                {/* New Queue button — managers/admins only, dept_queue only */}
+                {isDeptQueue && canManageSpace && (!showCreateQueue ? (
                   <button onClick={() => setShowCreateQueue(true)}
                     className="flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-blue-600 hover:bg-blue-50 transition-colors w-full">
                     <Plus size={12} />
@@ -1189,6 +1260,7 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
           </div>
         )}
       </div>
+      )}
 
       {/* Summary */}
       <Link href={`/spaces/${spaceKey}?queue=summary`} className={subCls(queueActive('summary'))}>
@@ -1226,10 +1298,10 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
       const members = spaceMembers.filter(m => { const mb = m.user || m; return q.memberIds.includes(mb.id); });
       const nonMembers = spaceMembers.filter(m => { const mb = m.user || m; return !q.memberIds.includes(mb.id); });
 
-      const removeMember  = (id: string) => saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, memberIds: cq.memberIds.filter(x => x !== id), suspendedIds: (cq.suspendedIds||[]).filter(x => x !== id) } : cq));
-      const suspendMember = (id: string) => saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, suspendedIds: [...(cq.suspendedIds||[]), id] } : cq));
-      const reactivate    = (id: string) => saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, suspendedIds: (cq.suspendedIds||[]).filter(x => x !== id) } : cq));
-      const addMember     = (id: string) => saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, memberIds: [...cq.memberIds, id] } : cq));
+      const removeMember  = (id: string) => mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, memberIds: cq.memberIds.filter(x => x !== id), suspendedIds: (cq.suspendedIds||[]).filter(x => x !== id) } : cq));
+      const suspendMember = (id: string) => mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, suspendedIds: [...(cq.suspendedIds||[]), id] } : cq));
+      const reactivate    = (id: string) => mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, suspendedIds: (cq.suspendedIds||[]).filter(x => x !== id) } : cq));
+      const addMember     = (id: string) => mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, memberIds: [...cq.memberIds, id] } : cq));
 
       return (
         <div className="fixed inset-0 z-[200] flex items-center justify-center" onClick={() => { setQueuePanelOpen(null); setShowAddMember(false); setAddMemberSearch(''); }}>
@@ -1269,10 +1341,9 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
               {/* ── SLA Tab ── */}
               {settingsTab === 'sla' && (() => {
                 const saveSla = () => {
-                  const updated = customQueues.map(cq => cq.id === q.id
+                  mutateQueues(current => current.map(cq => cq.id === q.id
                     ? { ...cq, sla: slaTimeValue.trim() ? { timeValue: slaTimeValue.trim(), timeUnit: slaTimeUnit } : undefined }
-                    : cq);
-                  saveQueues(updated);
+                    : cq));
                 };
                 const currentSla = q.sla;
                 const fmtTarget = currentSla ? `${currentSla.timeValue} ${currentSla.timeUnit}` : 'Not set';
@@ -1331,7 +1402,7 @@ function SMSpaceSubNav({ spaceKey, pathname }: { spaceKey: string; pathname: str
                         Save SLA
                       </button>
                       {currentSla && (
-                        <button onClick={() => { setSlaTimeValue(''); saveQueues(customQueues.map(cq => cq.id === q.id ? { ...cq, sla: undefined } : cq)); }}
+                        <button onClick={() => { setSlaTimeValue(''); mutateQueues(current => current.map(cq => cq.id === q.id ? { ...cq, sla: undefined } : cq)); }}
                           className="px-4 py-2.5 text-[13px] font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
                           Remove
                         </button>

@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback, Suspense } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo, Suspense } from 'react';
 import { useParams, useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime } from '@/lib/utils';
+import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor, getDeptColor } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
@@ -14,10 +14,10 @@ import SpaceIcon from '@/components/ui/SpaceIcon';
 import DotLoader from '@/components/ui/DotLoader';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import {
-  Plus, LayoutGrid, Settings, ChevronDown, Check, User,
+  LayoutGrid, Settings, ChevronDown, Check, User,
   Search, CheckCircle2, ClipboardList, X, Tag, Calendar, UserCheck,
   Briefcase, Package, Layers, Monitor, Clock, AlertCircle, Building2, SlidersHorizontal, RefreshCw, BarChart2,
-  ChevronRight, Inbox as InboxIcon
+  ChevronRight, Inbox as InboxIcon, AlertTriangle, Trophy
 } from 'lucide-react';
 
 // ── Addable filter field definitions ─────────────────────────────────────────
@@ -107,6 +107,11 @@ function SpaceDetailContent() {
   const router = useRouter();
   const queueFilter = searchParams?.get('queue') || 'queues';
   const deptParam = searchParams?.get('dept') || '';
+  // Set when an admin clicks a name in the per-queue Summary's "Per user"
+  // table -- points the "Worked on" (dept_closed) view at that person's
+  // tickets instead of the viewer's own.
+  const viewUserParam = searchParams?.get('viewUser') || '';
+  const viewUserNameParam = searchParams?.get('viewUserName') || '';
   const rawKey = params?.spaceKey;
   const spaceKey =
     typeof rawKey === 'string'
@@ -114,29 +119,40 @@ function SpaceDetailContent() {
       : Array.isArray(rawKey)
         ? (rawKey[0] || '').toUpperCase()
         : '';
-  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, loading, user } = useStore(
+  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion, bumpIssuesVersion } = useStore(
     useShallow((s) => ({
       currentSpace: s.currentSpace,
       loadSpace: s.loadSpace,
       issues: s.issues,
       issueTotal: s.issueTotal,
       loadIssues: s.loadIssues,
+      prefetchIssues: s.prefetchIssues,
+      clearIssuesCache: s.clearIssuesCache,
       loading: s.loading,
       user: s.user,
+      issuesVersion: s.issuesVersion,
+      bumpIssuesVersion: s.bumpIssuesVersion,
     })),
   );
+  // Declared this early (rather than down near the access-check block) because
+  // an effect above the early-return spinner closes over it -- if it stayed
+  // below those early returns, a render that bails out early would never run
+  // its own initializer, and the deferred effect callback from that render
+  // would hit the TDZ ("Cannot access 'isAdmin' before initialization").
+  const isAdmin = user?.role === 'admin';
   // Static column definitions (always available)
   const STATIC_COLUMNS = [
     { id: 'reporter',       label: 'Reporter',            width: '150px' },
     { id: 'assignee',       label: 'Assignee',            width: '150px' },
     { id: 'priority',       label: 'Priority',            width: '120px' },
     { id: 'status',         label: 'Status',              width: '165px' },
-    { id: 'sprint',         label: 'Sprint',              width: '110px' },
     { id: 'created',        label: 'Created',             width: '150px' },
     { id: 'updated',        label: 'Updated',             width: '150px' },
     { id: 'dueDate',        label: 'Due Date',            width: '120px' },
+    { id: 'breached',       label: 'Breached',            width: '90px'  },
     { id: 'labels',         label: 'Labels',              width: '130px' },
     { id: 'storyPoints',    label: 'Story Points',        width: '90px'  },
+    { id: 'type',           label: 'Type',                width: '100px' },
     { id: 'workType',       label: 'Work Type',           width: '130px' },
     { id: 'productType',    label: 'Product Type',        width: '130px' },
     { id: 'combination',    label: 'Combination',         width: '130px' },
@@ -154,6 +170,8 @@ function SpaceDetailContent() {
   const [showCreate, setShowCreate] = useState(false);
   const [createdToast, setCreatedToast] = useState<{ key: string; cfKey: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // Component-local fetch state — never gets stuck because cleanup always resets it
+  const [isFetching, setIsFetching] = useState(false);
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -162,47 +180,133 @@ function SpaceDetailContent() {
     return () => clearTimeout(t);
   }, [search]);
   const [closedIssues, setClosedIssues] = useState<any[]>([]);
+  const fetchClosedIssues = useCallback(async (sk: string, dept: string, viewUser?: string) => {
+    if (!sk || !dept) return;
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
+      const res = await fetch(
+        `/api/spaces/${sk}/dept-queue/closed?dept=${encodeURIComponent(dept)}&page=1${viewUser ? `&viewUser=${encodeURIComponent(viewUser)}` : ''}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setClosedIssues(data.issues || []);
+      }
+    } catch { /* non-fatal */ }
+  }, []);
+  // Per-queue Summary (admin-only) -- range-aware status/priority/SLA
+  // breakdown plus a per-user "tickets worked" table, computed server-side
+  // rather than client-side from whatever's in `issues` (which is capped at
+  // 200 and not range-aware), since this needs to be accurate for a whole
+  // team, not just whatever happens to already be loaded.
+  const [summaryRange, setSummaryRange] = useState<string>('all');
+  const [deptSummaryData, setDeptSummaryData] = useState<any>(null);
+  const [deptSummaryLoading, setDeptSummaryLoading] = useState(false);
+  const [deptSummaryError, setDeptSummaryError] = useState<string | null>(null);
+  useEffect(() => {
+    if (queueFilter !== 'summary' || !deptParam || !spaceKey || !isAdmin) { setDeptSummaryData(null); return; }
+    let cancelled = false;
+    setDeptSummaryLoading(true);
+    setDeptSummaryError(null);
+    (async () => {
+      try {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
+        const res = await fetch(
+          `/api/spaces/${spaceKey}/dept-queue/summary?dept=${encodeURIComponent(deptParam)}&range=${encodeURIComponent(summaryRange)}`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+        );
+        if (cancelled) return;
+        const data = await res.json();
+        if (!res.ok) { setDeptSummaryError(data.error || 'Failed to load summary'); setDeptSummaryData(null); return; }
+        setDeptSummaryData(data);
+      } catch {
+        if (!cancelled) setDeptSummaryError('Failed to load summary');
+      } finally {
+        if (!cancelled) setDeptSummaryLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [queueFilter, deptParam, spaceKey, summaryRange, isAdmin]);
   const [deptFilter, setDeptFilter] = useState<string>(''); // '' = all departments
   const [allCustomQueues, setAllCustomQueues] = useState<{ id: string; name: string; memberIds: string[] }[]>([]);
+  // Track which spaceKey the queues were loaded for — avoids stale-spaceKey race condition
+  const [customQueuesLoadedFor, setCustomQueuesLoadedFor] = useState<string>('');
+  // True while waiting for custom-queue metadata (prevents "No issues found" flash before queues load)
+  const isQueuesLoading = queueFilter.startsWith('cq_') && customQueuesLoadedFor !== spaceKey;
   useEffect(() => {
     if (!spaceKey) return;
+    // Reset loaded marker immediately (synchronous — blocks issues effect until fresh queues arrive)
+    setCustomQueuesLoadedFor('');
+    // Pre-populate from localStorage so the correct queue is known before the API resolves
+    try {
+      const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
+      if (stored) {
+        setAllCustomQueues(JSON.parse(stored));
+        setCustomQueuesLoadedFor(spaceKey); // localStorage is fast enough — mark ready immediately
+      }
+    } catch {}
     api.request<any[]>(`custom-queues/${spaceKey}`).then((q) => {
-      if (Array.isArray(q)) setAllCustomQueues(q);
-    }).catch(() => {
-      try {
-        const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
-        if (stored) setAllCustomQueues(JSON.parse(stored));
-      } catch {}
-    });
+      if (Array.isArray(q)) {
+        setAllCustomQueues(q);
+        try { localStorage.setItem(`custom_queues_${spaceKey}`, JSON.stringify(q)); } catch {}
+      }
+      setCustomQueuesLoadedFor(spaceKey);
+    }).catch(() => { setCustomQueuesLoadedFor(spaceKey); });
   }, [spaceKey]);
 
-  // Active custom queue object (loaded from DB when queueFilter is a custom queue id)
-  const [activeCustomQueue, setActiveCustomQueue] = useState<{ id: string; name: string; memberIds: string[] } | null>(null);
+  // A plain (non-dept_queue) board has no custom queues to pick from, so landing
+  // on the bare board URL (no ?queue=) showed a dead-end "Select a queue... No
+  // queues available" page instead of any tickets — while the sidebar still
+  // highlighted "All Tickets" as active, since it defaults the missing param to
+  // 'all-open', not 'queues'. Once we actually know (custom queues fetched +
+  // space loaded) that this board has none, redirect straight to the tickets
+  // list instead of the queue-picker landing page.
   useEffect(() => {
-    if (!queueFilter.startsWith('cq_')) { setActiveCustomQueue(null); return; }
-    api.request<any[]>(`custom-queues/${spaceKey}`).then((queues) => {
-      if (Array.isArray(queues)) setActiveCustomQueue(queues.find((q: any) => q.id === queueFilter) || null);
-    }).catch(() => {
-      try {
-        const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
-        if (stored) {
-          const queues: { id: string; name: string; memberIds: string[] }[] = JSON.parse(stored);
-          setActiveCustomQueue(queues.find(q => q.id === queueFilter) || null);
-        }
-      } catch { setActiveCustomQueue(null); }
-    });
-  }, [queueFilter, spaceKey]);
+    if (!spaceKey || queueFilter !== 'queues') return;
+    if (currentSpace?.key !== spaceKey) return;
+    // Only dept_queue boards can have custom queues, so a non-dept_queue board
+    // can redirect the moment currentSpace resolves — no need to also wait on
+    // customQueuesLoadedFor first. That extra wait was showing its own "Queues"
+    // spinner in between the initial page spinner and the tickets-list spinner,
+    // i.e. 3 loading states in a row for what's really just one board load.
+    if (currentSpace?.type === 'dept_queue') {
+      if (customQueuesLoadedFor !== spaceKey) return;
+      if (allCustomQueues.length > 0) return;
+    }
+    router.replace(`/spaces/${spaceKey}?queue=all-open`);
+  }, [spaceKey, queueFilter, customQueuesLoadedFor, currentSpace?.key, currentSpace?.type, allCustomQueues.length, router]);
+
+  // Extract stable primitives from the matched queue so activeCustomQueue only gets a new
+  // reference when the queue's id or name actually changes — not every time allCustomQueues
+  // gets a new array reference (e.g. localStorage load → API response with same data).
+  const _rawMatch = queueFilter.startsWith('cq_') ? allCustomQueues.find(q => q.id === queueFilter) : undefined;
+  const _matchId   = _rawMatch?.id   ?? null;
+  const _matchName = _rawMatch?.name ?? null;
+  const _matchMembers = JSON.stringify(_rawMatch?.memberIds ?? null);
+  const activeCustomQueue = useMemo(() => {
+    if (!_matchId) return null;
+    return { id: _matchId, name: _matchName ?? '', memberIds: JSON.parse(_matchMembers) ?? [] };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [_matchId, _matchName, _matchMembers]);
   const [rrDepartments, setRrDepartments] = useState<string[]>([]); // from RR config
 
-  // Load departments from both RR config + Department Routing custom fields
+  // Load departments from both RR config + Department Routing custom fields, and
+  // derive this space's dynamic custom-field columns from the same custom-fields
+  // response — these used to be two separate effects that each independently
+  // fetched the exact same (space-agnostic) GET /custom-fields list, doubling
+  // that call on every board load for no reason since it's the same data either
+  // way. Gated on currentSpace.id too now (not just spaceKey) since the column
+  // computation needs it to filter fields by spaceIds.
   useEffect(() => {
-    if (!spaceKey) return;
-    const headers = { Authorization: `Bearer ${localStorage.getItem('jira_token')}` };
+    if (!spaceKey || !currentSpace?.id) return;
+    const spaceId = currentSpace.id;
     const combined: string[] = [];
 
+    // Routed through api.request so identical concurrent calls (e.g. the sidebar
+    // fetching the same space's rr-config) are coalesced into one network call.
     Promise.allSettled([
-      fetch(`/api/spaces/${spaceKey}/rr-config`, { headers }).then(r => r.ok ? r.json() : null),
-      fetch(`/api/custom-fields`, { headers }).then(r => r.ok ? r.json() : null),
+      api.request<any>(`spaces/${spaceKey}/rr-config`).catch(() => null),
+      api.request<any>(`custom-fields`).catch(() => null),
     ]).then(([rrRes, cfRes]) => {
       // 1. Department Routing custom fields (options: "DeptName|boardKey|employees")
       if (cfRes.status === 'fulfilled' && cfRes.value) {
@@ -216,6 +320,20 @@ function SpaceDetailContent() {
             }
           }
         }
+
+        // Dynamic columns for this space (previously its own effect + fetch)
+        const spaceFields = fields.filter((f: any) =>
+          !f.isDeleted &&
+          f.source !== 'system' &&
+          Array.isArray(f.spaceIds) &&
+          f.spaceIds.includes(spaceId)
+        );
+        setCustomFieldCols(spaceFields.map((f: any) => ({
+          id: `cf_${f.id}`,
+          label: f.name,
+          width: '110px',
+          fieldId: f.id,
+        })));
       }
       // 2. RR config — add any not already in list
       if (rrRes.status === 'fulfilled' && rrRes.value?.config?.departments?.length) {
@@ -226,7 +344,7 @@ function SpaceDetailContent() {
       }
       if (combined.length) setRrDepartments(combined);
     }).catch(() => {});
-  }, [spaceKey]);
+  }, [spaceKey, currentSpace?.id]);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
 
   // Clear selection whenever the issues list reloads (filter/page change)
@@ -244,66 +362,98 @@ function SpaceDetailContent() {
   const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [filterCategory, setFilterCategory] = useState<string>('type');
   const [dropdownSearch, setDropdownSearch] = useState<string>('');
-  // Extra ("added") filter fields – persisted per space in localStorage
   const colsStorageKey    = `visibleCols_${spaceKey}`;
-  const fieldsStorageKey  = `addedFields_${spaceKey}`;
 
-  const [addedFilterIds, setAddedFilterIds] = useState<string[]>([]);
   const [addFilterDropPos, setAddFilterDropPos] = useState<{ top: number; left: number } | null>(null);
   const [visibleCols, setVisibleCols] = useState<string[]>(DEFAULT_COLS);
   const [serverFieldOptions, setServerFieldOptions] = useState<Record<string, string[]>>({});
   const [updating, setUpdating] = useState<string | null>(null);
+  // Safety net: a row dims (opacity-50) while `updating` names its key, cleared
+  // in the `finally` of whatever inline edit set it. If that edit's request
+  // hangs on something outside normal success/failure (a dropped connection,
+  // a browser tab going to sleep mid-request, etc.) the row would stay dimmed
+  // indefinitely with no way to clear itself short of a full page reload.
+  // Force it back to normal a few seconds after any edit starts, regardless.
+  useEffect(() => {
+    if (!updating) return;
+    const t = setTimeout(() => setUpdating(null), 6000);
+    return () => clearTimeout(t);
+  }, [updating]);
+  const [assigneeRequiredModal, setAssigneeRequiredModal] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 50;
-  // Reset to page 1 when queue changes
-  useEffect(() => { setCurrentPage(1); }, [queueFilter]);
+  // Queue types with real pagination (fetch currentPage/PAGE_SIZE and trust the
+  // backend's total) rather than a one-shot fixed-size fetch — a whole
+  // department's open tickets can run into the thousands, same as All Requests
+  // and custom queues.
+  const isPaginatedQueue = queueFilter === 'all-requests' || queueFilter.startsWith('cq_')
+    || queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned';
+  // Reset to page 1 when queue changes (including switching departments within
+  // the same dept_all/dept_unassigned/dept_assigned queue type)
+  useEffect(() => { setCurrentPage(1); }, [queueFilter, deptParam]);
 
-  // Fetch distinct values from server whenever addedFilterIds changes
+  // Immediately clear stale issues when the queue changes so old tickets never
+  // flash while the new fetch is in flight (handles early-return guard cases too)
   useEffect(() => {
-    if (!spaceKey || addedFilterIds.length === 0) return;
+    if (queueFilter && queueFilter !== 'queues') {
+      useStore.setState({ issues: [], issueTotal: 0 });
+    }
+  }, [queueFilter]);
+
+  // Fetch distinct values from server for every field filter. Scoped to the
+  // currently-viewed department when there is one — without this, a filter's options
+  // came from the WHOLE space regardless of which queue you were looking at, so you
+  // could pick e.g. a Product Type value that no ticket in "Dev" has ever had, and
+  // the filter would correctly (but confusingly) always return zero results. Cache
+  // key includes the department so switching queues re-fetches instead of reusing
+  // another department's (or the space-wide) option list.
+  const effectiveDept = queueFilter.startsWith('cq_') ? (activeCustomQueue?.name || '') : deptParam;
+  useEffect(() => {
+    if (!spaceKey) return;
     const textFields = new Set(['workType','productType','combination','testEnvironment','rootCause',
       'fixDescription','customerName','clientName','projectManager','manageClientName','customerPlan']);
-    addedFilterIds.forEach(fieldId => {
-      if (!textFields.has(fieldId) || serverFieldOptions[fieldId]) return; // already loaded
-      fetch(`/api/spaces/${spaceKey}/field-values?field=${fieldId}`, {
+    ADDABLE_FILTER_DEFS.forEach(({ id: fieldId }) => {
+      if (!textFields.has(fieldId)) return;
+      const cacheKey = `${fieldId}::${effectiveDept}`;
+      if (serverFieldOptions[cacheKey]) return; // already loaded
+      const deptQuery = effectiveDept ? `&dept=${encodeURIComponent(effectiveDept)}` : '';
+      fetch(`/api/spaces/${spaceKey}/field-values?field=${fieldId}${deptQuery}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}` },
       })
         .then(r => r.ok ? r.json() : [])
         .then((vals: string[]) => {
-          setServerFieldOptions(prev => ({ ...prev, [fieldId]: vals }));
+          setServerFieldOptions(prev => ({ ...prev, [cacheKey]: vals }));
         })
         .catch(() => {});
     });
-  }, [spaceKey, addedFilterIds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [spaceKey, effectiveDept]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load persisted columns and added field filters once spaceKey is known
+  // Load persisted columns once spaceKey is known
   useEffect(() => {
     if (!spaceKey) return;
     try {
       const savedCols = localStorage.getItem(`visibleCols_${spaceKey}`);
-      if (savedCols) setVisibleCols(JSON.parse(savedCols));
-    } catch {}
-    try {
-      const savedFields = localStorage.getItem(`addedFields_${spaceKey}`);
-      if (savedFields) setAddedFilterIds(JSON.parse(savedFields));
+      if (savedCols) {
+        const parsed = JSON.parse(savedCols) as string[];
+        // One-time migration: previously Reporter was saved before Assignee — swap
+        // only if that old order is still present, so this doesn't re-flip on reload.
+        const ai = parsed.indexOf('assignee');
+        const ri = parsed.indexOf('reporter');
+        if (ai !== -1 && ri !== -1 && ri < ai) [parsed[ai], parsed[ri]] = [parsed[ri], parsed[ai]];
+        setVisibleCols(parsed);
+      }
     } catch {}
   }, [spaceKey]);
 
-  // Persist visible columns and added field filters to localStorage
+  // Persist visible columns to localStorage
   useEffect(() => {
     if (!spaceKey) return;
     try { localStorage.setItem(colsStorageKey, JSON.stringify(visibleCols)); } catch {}
   }, [visibleCols, colsStorageKey, spaceKey]);
 
-  useEffect(() => {
-    if (!spaceKey) return;
-    try { localStorage.setItem(fieldsStorageKey, JSON.stringify(addedFilterIds)); } catch {}
-  }, [addedFilterIds, fieldsStorageKey, spaceKey]);
-
   // Dynamic custom-field columns for this space
   const [customFieldCols, setCustomFieldCols] = useState<Array<{ id: string; label: string; width: string; fieldId: string }>>([]);
-  const [spaceFieldLabels, setSpaceFieldLabels] = useState<Set<string>>(new Set());
   const [cfValuesMap, setCfValuesMap] = useState<Map<string, Record<string, string>>>(new Map());
   const [slaPolicies, setSlaPolicies] = useState<any[]>([]);
   const [assigneeSearch, setAssigneeSearch] = useState('');
@@ -322,8 +472,6 @@ function SpaceDetailContent() {
   // Fixed-position coords for Assignee / Reporter (full-panel dropdowns)
   const [assigneeDropPos, setAssigneeDropPos] = useState<{ top: number; left: number } | null>(null);
   const [reporterDropPos, setReporterDropPos] = useState<{ top: number; left: number } | null>(null);
-  const [statusDropPos, setStatusDropPos] = useState<{ top: number; left: number } | null>(null);
-  const [typeDropPos, setTypeDropPos] = useState<{ top: number; left: number } | null>(null);
 
   // Combined columns: static + any custom fields assigned to this space
   const ALL_COLUMNS = [...STATIC_COLUMNS, ...customFieldCols];
@@ -347,12 +495,22 @@ function SpaceDetailContent() {
     orderedVisibleCols.reduce((sum, c) => sum + parseInt(c.width), 0) + 32;
 
   // Always load space metadata (needed for breadcrumb etc.)
-  useEffect(() => { if (spaceKey) loadSpace(spaceKey); }, [spaceKey]);
+  useEffect(() => {
+    if (!spaceKey) return;
+    loadSpace(spaceKey).catch(() => {
+      router.replace('/spaces');
+    });
+  }, [spaceKey, loadSpace, router]);
 
   useEffect(() => {
     if (!spaceKey || queueFilter === 'queues') return;
+    // For custom queues, wait until allCustomQueues has loaded so activeCustomQueue is resolved
+    if (queueFilter.startsWith('cq_') && customQueuesLoadedFor !== spaceKey) return;
+    // If queue ID is known but can't be resolved to a queue object, don't load without dept filter
+    if (queueFilter.startsWith('cq_') && !activeCustomQueue) return;
     let cancelled = false;
     setLoadError(null);
+    setIsFetching(true);
     (async () => {
       try {
         if (cancelled) return;
@@ -368,10 +526,18 @@ function SpaceDetailContent() {
           }
         } else {
           params.page  = '1';
-          params.limit = '500';
-          // Exclude done issues at DB level for open queues
-          if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-dept' || queueFilter === 'my-queue') {
+          params.limit = '100';
+          // Exclude done issues at DB level for open queues. "all-open" is
+          // deliberately NOT here — renamed to "All Tickets" in the sidebar, it
+          // now shows every ticket in the space regardless of status.
+          if (queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-dept' || queueFilter === 'my-queue') {
             params.excludeDone = 'true';
+          }
+          // Closed tickets (service_desk boards) — the inverse of "All Tickets": only
+          // resolved/done tickets. This used to link to all-requests, which has no
+          // status filtering at all, so open tickets showed up under "Closed tickets".
+          if (queueFilter === 'closed') {
+            params.statusCategory = 'done';
           }
           // Unassigned queue — pass unassigned flag; dept-scoped users get filtered by dept
           if (queueFilter === 'unassigned') {
@@ -380,42 +546,51 @@ function SpaceDetailContent() {
           }
           // Sent/Watching — show all tickets that moved OUT of this dept (no reporter filter)
           if (queueFilter === 'sent-watching') {
-            params.limit = '500';
+            params.limit = '100';
             if (deptParam) params.sentDept = deptParam;
           }
-          // Dept sub-queue: all open tickets in dept (any assignee)
+          // Dept sub-queue: all open tickets in dept (any assignee) — a whole
+          // department's open tickets can run into the thousands (unlike the
+          // personal views above), so this needs real pagination instead of the
+          // fixed page 1 / 100-row cap every other branch here uses, or anything
+          // past the first 100 is silently unreachable.
           if (queueFilter === 'dept_all') {
             params.excludeDone = 'true';
+            params.page = String(currentPage);
+            params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
           // Dept sub-queue: unassigned in dept
           if (queueFilter === 'dept_unassigned') {
             params.unassigned = 'true';
             params.excludeDone = 'true';
+            params.page = String(currentPage);
+            params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
-          // Dept sub-queue: assigned to me in dept
+          // Dept sub-queue: assigned to me in dept — includeHistory keeps a
+          // ticket showing here (with its real current status/department)
+          // after it's resolved or handed to another department, instead of
+          // it just disappearing once it's no longer open-and-assigned-to-me.
           if (queueFilter === 'dept_assigned') {
             if (user?.id) params.assignee = user.id;
             params.excludeDone = 'true';
+            params.includeHistory = 'true';
+            params.page = String(currentPage);
+            params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
-          // Dept sub-queue: closed tickets — fetched separately, cached per dept
+          // Dept sub-queue: closed tickets — fetched separately, auto-refreshed every 30s
           if (queueFilter === 'dept_closed') {
-            if (!cancelled && closedIssues.length === 0) {
-              try {
-                const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
-                const closedRes = await fetch(
-                  `/api/spaces/${spaceKey}/dept-queue/closed?dept=${encodeURIComponent(deptParam)}&page=1`,
-                  { headers: token ? { Authorization: `Bearer ${token}` } : {} }
-                );
-                if (closedRes.ok) {
-                  const closedData = await closedRes.json();
-                  if (!cancelled) setClosedIssues(closedData.issues || []);
-                }
-              } catch { /* non-fatal */ }
-            }
+            if (!cancelled) await fetchClosedIssues(spaceKey, deptParam, viewUserParam);
             return; // skip normal loadIssues for closed view
+          }
+          // Summary opened from inside a specific queue (sidebar's per-queue
+          // "Summary" link) has its own dedicated, range-aware endpoint and
+          // effect (deptSummaryData) instead of this generic issue list --
+          // skip the fetch here entirely either way.
+          if (queueFilter === 'summary' && deptParam) {
+            return;
           }
         }
         // Pass active filters to the API so server handles them (large boards like L2B)
@@ -453,40 +628,101 @@ function SpaceDetailContent() {
         if (filters.projectManager)   params.projectManager   = filters.projectManager;
         if (filters.manageClientName) params.manageClientName = filters.manageClientName;
         if (filters.customerPlan)     params.customerPlan     = filters.customerPlan;
+        // NOTE: previously cleared this exact param set's cache here before every load,
+        // which defeated prefetching entirely — every queue switch (esp. custom queues)
+        // was forced into a full network round-trip even when the data was already warm.
+        // The store's activeQueueKey guard already prevents a slow in-flight fetch from
+        // overwriting the display once the user has switched away, so no clear is needed.
         await loadIssues(params);
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load space');
+      } finally {
+        if (!cancelled) setIsFetching(false);
       }
     })();
-    return () => { cancelled = true; };
-  }, [spaceKey, currentPage, queueFilter, deptParam, activeCustomQueue, filters, debouncedSearch, loadSpace, loadIssues, user?.id]);
+    return () => { cancelled = true; setIsFetching(false); };
+  }, [spaceKey, currentPage, queueFilter, deptParam, viewUserParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id, issuesVersion]);
 
-  // Load custom fields assigned to this space → dynamic columns
+  // Auto-refresh Sent/Watching every 15s — silent background refresh, never clears display
   useEffect(() => {
-    if (!currentSpace?.id) return;
-    api.getCustomFields().then((fields: any[]) => {
-      const spaceFields = fields.filter((f: any) =>
-        !f.isDeleted &&
-        f.source !== 'system' &&
-        Array.isArray(f.spaceIds) &&
-        f.spaceIds.includes(currentSpace.id)
-      );
-      // Disambiguate custom fields whose name collides with a system column (or each
-      // other) so the table header never shows the same label twice with no way to
-      // tell which is which.
-      const staticLabels = new Set(STATIC_COLUMNS.map(c => c.label.toLowerCase()));
-      const seenLabels = new Set<string>();
-      setCustomFieldCols(spaceFields.map((f: any) => {
-        const baseLabel = String(f.name);
-        const key = baseLabel.toLowerCase();
-        const label = (staticLabels.has(key) || seenLabels.has(key)) ? `${baseLabel} (Field)` : baseLabel;
-        seenLabels.add(key);
-        return { id: `cf_${f.id}`, label, width: '110px', fieldId: f.id };
-      }));
-      // Track field names enabled for this space (used to filter the "+ Fields" dropdown)
-      setSpaceFieldLabels(new Set(spaceFields.map((f: any) => (f.name as string).toLowerCase().trim())));
-    }).catch(() => {});
-  }, [currentSpace?.id]);
+    if (queueFilter !== 'sent-watching' || !spaceKey || !deptParam) return;
+    const interval = setInterval(() => {
+      const params: Record<string, string> = { spaceKey, page: '1', limit: '100', sentDept: deptParam };
+      prefetchIssues(params).catch(() => {});
+    }, 15_000);
+    return () => clearInterval(interval);
+  }, [queueFilter, spaceKey, deptParam, prefetchIssues]);
+
+  // Deliberately NOT prefetching all-open/assigned/unassigned/my-queue/all-requests here
+  // either — same reasoning as above. This fired 5 more background API calls the moment
+  // the space loaded, regardless of which (if any) of those views the user was about to
+  // open.
+
+  // Deliberately NOT prefetching every custom queue here. This used to warm the cache
+  // for every queue on the board as soon as it loaded (2 requests each — a dept-scoped
+  // list plus Sent/Watching), which meant opening a board with, say, 8 queues fired 16+
+  // background API calls whether or not you ever looked at most of them, plus 2 more per
+  // sidebar sub-item Next.js prefetched on hover/viewport. A queue's data should only be
+  // fetched when someone actually opens it — that's what the main load effect below
+  // already does the moment queueFilter/deptParam changes.
+
+  // Auto-refresh every 15s for all dept_queue spaces — silent background refresh, never clears display
+  useEffect(() => {
+    const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
+    if (!isDeptQueue) return;
+    if (queueFilter === 'dept_closed') return; // handled by its own interval below
+    const id = setInterval(() => {
+      const params: Record<string, string> = { spaceKey };
+      if (queueFilter.startsWith('cq_') && activeCustomQueue?.name) {
+        params.dept = activeCustomQueue.name;
+        params.page = String(currentPage);
+        params.limit = '50';
+      } else if (queueFilter.startsWith('cq_')) {
+        return;
+      } else if (queueFilter === 'all-requests') {
+        params.page = String(currentPage);
+        params.limit = '50';
+      } else if (queueFilter === 'sent-watching') {
+        params.page = '1';
+        params.limit = '100';
+        if (deptParam) params.sentDept = deptParam;
+      } else if (queueFilter && queueFilter !== 'queues') {
+        params.queue = queueFilter;
+        if (deptParam) params.dept = deptParam;
+      }
+      prefetchIssues(params).catch(() => {});
+    }, 15000);
+    return () => clearInterval(id);
+  }, [spaceKey, queueFilter, deptParam, currentPage, activeCustomQueue, currentSpace?.type, allCustomQueues.length, prefetchIssues]);
+
+  // Auto-refresh Worked on (dept_closed) every 30s
+  useEffect(() => {
+    if (queueFilter !== 'dept_closed' || !spaceKey || !deptParam) return;
+    const id = setInterval(() => {
+      fetchClosedIssues(spaceKey, deptParam, viewUserParam);
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [queueFilter, spaceKey, deptParam, viewUserParam, fetchClosedIssues]);
+
+  // Auto-refresh every 30s for regular (non-dept-queue) spaces — silent background refresh, never clears display
+  useEffect(() => {
+    const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
+    if (isDeptQueue) return; // dept_queue spaces already handled above
+    if (!spaceKey || !queueFilter || queueFilter === 'queues' || queueFilter === 'summary') return;
+    const id = setInterval(() => {
+      const params: Record<string, string> = { spaceKey, page: String(currentPage), limit: '100' };
+      if (queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-queue') params.excludeDone = 'true';
+      if (queueFilter === 'unassigned') params.unassigned = 'true';
+      if (queueFilter === 'assigned' && user?.id) params.assignee = user.id;
+      if (queueFilter === 'closed') params.statusCategory = 'done';
+      if (queueFilter === 'all-requests') params.limit = '50';
+      prefetchIssues(params).catch(() => {});
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [spaceKey, queueFilter, currentPage, currentSpace?.type, allCustomQueues.length, user?.id, prefetchIssues]);
+
+  // Custom-field columns are now derived in the RR-departments effect above,
+  // from the same GET /custom-fields response instead of a second fetch.
 
   // Load SLA policies for this space (used to compute SLA field values inline)
   useEffect(() => {
@@ -582,36 +818,14 @@ function SpaceDetailContent() {
 
   const setFilter = (key: string, value: string) => {
     setFilters(f => value ? { ...f, [key]: value } : Object.fromEntries(Object.entries(f).filter(([k]) => k !== key)));
+    setOpenFilter(null);
     setCurrentPage(1); // reset pagination when filter changes
-    // Closing the panel is each call site's decision — single-select options close it
-    // explicitly via setOpenFilter(null); multi-select checkboxes deliberately don't,
-    // so the panel stays open to pick more than one value.
   };
   const clearFilter = (key: string) => { setFilters(f => Object.fromEntries(Object.entries(f).filter(([k]) => k !== key))); setCurrentPage(1); };
   const clearAllFilters = () => {
     setFilters({});
     setSearch('');
-    // Remove any field-filter columns that were auto-added, keeping only manually toggled ones
-    const fieldFilterIds = ADDABLE_FILTER_DEFS.map(d => d.id);
-    setVisibleCols(prev => prev.filter(c => !fieldFilterIds.includes(c) || DEFAULT_COLS.includes(c)));
-    setAddedFilterIds([]);
     setCurrentPage(1);
-    // Clear persisted field state
-    try { localStorage.removeItem(fieldsStorageKey); } catch {}
-  };
-
-  const addExtraFilter = (id: string) => {
-    setAddedFilterIds(prev => prev.includes(id) ? prev : [...prev, id]);
-    // Also make the column visible so data shows immediately
-    setVisibleCols(prev => prev.includes(id) ? prev : [...prev, id]);
-    setOpenFilter(null);
-    setAddFilterDropPos(null);
-  };
-  const removeExtraFilter = (id: string) => {
-    setAddedFilterIds(prev => prev.filter(x => x !== id));
-    clearFilter(id);
-    // Remove column visibility when filter is removed
-    setVisibleCols(prev => prev.filter(x => x !== id));
   };
 
   // Track recently visited space — per user
@@ -627,46 +841,130 @@ function SpaceDetailContent() {
     }
   }, [currentSpace?.key, user?.id]);
 
-  const handleInlineUpdate = useCallback(async (issueKey: string, field: string, value: any) => {
+  // displayPatch covers relational fields (assignee, status) whose visible name lives
+  // on a different key than the raw id being saved (issue.assignee vs assigneeId).
+  const handleInlineUpdate = useCallback(async (issueKey: string, field: string, value: any, displayPatch?: Record<string, any>) => {
     setOpenDropdown(null); setUpdating(issueKey);
-    try { await api.updateIssue(issueKey, { [field]: value }); await loadIssues({ spaceKey, page: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(currentPage) : '1', limit: (queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) ? String(PAGE_SIZE) : '500' }); }
-    catch (err) { console.error(err); }
+    const prevIssues = useStore.getState().issues;
+    // Reflect the change in the row immediately — don't wait on a PATCH plus a full
+    // list reload (up to 500 rows) before the row shows the new value.
+    useStore.setState(s => ({
+      issues: s.issues.map((i: any) => i.key === issueKey ? { ...i, [field]: value, ...(displayPatch || {}) } : i),
+    }));
+    try {
+      await api.updateIssue(issueKey, { [field]: value });
+      // Force a fresh fetch (not a cache hit) so the background reconcile reflects
+      // this edit and any server-side side effects, instead of re-showing stale
+      // data. Guessing the reload params here (as this used to) drops whatever
+      // this view's actual filter state is (dept, excludeDone, custom filters,
+      // etc.) -- bumping the version instead lets the main load effect re-fetch
+      // with its own already-correct params, same as any other list mutation.
+      clearIssuesCache();
+      bumpIssuesVersion();
+    }
+    catch (err) {
+      console.error(err);
+      useStore.setState({ issues: prevIssues });
+    }
     finally { setUpdating(null); }
-  }, [spaceKey, loadIssues]);
+  }, [clearIssuesCache, bumpIssuesVersion]);
+
+  // Custom-queue statuses (qst_...) aren't real Status rows — they live in
+  // dept_statuses[dept], set via queueStatusId/Name/Color/Category, same as
+  // handleStatusChange on the issue detail page.
+  const handleInlineQueueStatusUpdate = useCallback(async (issueKey: string, dept: string, s: any) => {
+    setOpenDropdown(null); setUpdating(issueKey);
+    const prevIssues = useStore.getState().issues;
+    const queueSt = { id: s.id, name: s.name, color: s.color || '#64748B', category: s.category || 'todo' };
+    useStore.setState(st => ({
+      issues: st.issues.map((i: any) => i.key === issueKey
+        ? { ...i, dept_statuses: { ...(i.dept_statuses || {}), [dept]: queueSt } }
+        : i),
+    }));
+    try {
+      await api.updateIssue(issueKey, {
+        queueStatusId: queueSt.id,
+        queueStatusName: queueSt.name,
+        queueStatusColor: queueSt.color,
+        queueStatusCategory: queueSt.category,
+      } as any);
+      clearIssuesCache();
+      bumpIssuesVersion();
+    } catch (err) {
+      console.error(err);
+      useStore.setState({ issues: prevIssues });
+    }
+    finally { setUpdating(null); }
+  }, [clearIssuesCache, bumpIssuesVersion]);
 
   const recallIssue = async (issueKey: string) => {
+    const prevIssues = useStore.getState().issues;
+    // Remove from the list immediately — recalling should make the ticket
+    // disappear from Sent/Watching right away, not after two round-trips.
+    useStore.setState(s => ({ issues: s.issues.filter((i: any) => i.key !== issueKey) }));
     try {
       await api.updateIssue(issueKey, { recall: true } as any);
-      if (user?.id) {
-        await loadIssues({ spaceKey, page: '1', limit: '500', reporter: user.id });
-      }
     } catch (e) {
-      console.error('Failed to recall ticket', e);
+      console.error('Recall failed', e);
       alert('Failed to recall ticket');
+      useStore.setState({ issues: prevIssues });
+      return;
     }
+    // Background reconcile — no need to block the UI on this. Bump the
+    // version instead of guessing reload params (this only covered
+    // sent-watching, so recalling from a dept-filtered view like "All
+    // Tickets — Migration" reloaded without the dept filter and could
+    // flash "0 Tickets").
+    clearIssuesCache();
+    bumpIssuesVersion();
   };
 
   const [commentingOn, setCommentingOn] = useState<string | null>(null); // issueKey
   const [commentText, setCommentText] = useState('');
   const [richCommentHtml, setRichCommentHtml] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
+  // Same upload-in-flight guard as the ticket detail page's comment box — saving
+  // before an attachment upload resolves bakes its inert "Uploading…" placeholder
+  // into the stored comment permanently.
+  const [isUploadingSentComment, setIsUploadingSentComment] = useState(false);
   const submitComment = async (issueKey: string) => {
     const body = richCommentHtml.replace(/<[^>]+>/g, '').trim() ? richCommentHtml : commentText.trim();
     if (!body) return;
+    const tempId = `opt-${Date.now()}`;
+    const optimisticComment = {
+      id: tempId,
+      body,
+      isInternal: false,
+      authorName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || 'You',
+      author: user,
+      createdAt: new Date().toISOString(),
+    };
+    const prevIssues = useStore.getState().issues;
+    // Show the comment immediately — don't wait on a PATCH plus a full list
+    // reload (up to 100-500 rows) before the card reflects anything.
+    useStore.setState(s => ({
+      issues: s.issues.map((i: any) => i.key === issueKey ? { ...i, comments: [...((i as any).comments || []), optimisticComment] } : i),
+    }));
+    setCommentText('');
+    setRichCommentHtml('');
+    setCommentingOn(null);
     setSubmittingComment(true);
     try {
-      await api.addComment(issueKey, { body });
-      setCommentText('');
-      setRichCommentHtml('');
-      setCommentingOn(null);
-      // Reload with current queue params (not a hardcoded reporter filter)
-      const params: Record<string, string> = { spaceKey, page: '1', limit: '500' };
-      if (queueFilter === 'sent-watching' && deptParam) {
-        params.sentDept = deptParam;
+      const saved = await api.addComment(issueKey, { body });
+      // Swap the placeholder for the real saved comment
+      useStore.setState(s => ({
+        issues: s.issues.map((i: any) => i.key === issueKey
+          ? { ...i, comments: ((i as any).comments || []).map((c: any) => c.id === tempId ? (saved || c) : c) }
+          : i),
+      }));
+      // Reload with current queue params in the background (not a hardcoded reporter filter)
+      const params: Record<string, string> = { spaceKey, page: '1', limit: '100' };
+      if (queueFilter === 'sent-watching') {
+        if (deptParam) params.sentDept = deptParam;
       } else if (queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
         params.excludeDone = 'true';
         if (deptParam) params.dept = deptParam;
-      } else if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned') {
+      } else if (queueFilter === 'assigned' || queueFilter === 'unassigned') {
         params.excludeDone = 'true';
       } else if (queueFilter.startsWith('cq_') && activeCustomQueue?.name) {
         params.dept = activeCustomQueue.name;
@@ -675,8 +973,12 @@ function SpaceDetailContent() {
       } else {
         params.reporter = user?.id || '';
       }
-      await loadIssues(params);
-    } catch (e) { console.error(e); }
+      clearIssuesCache(params);
+      loadIssues(params);
+    } catch (e) {
+      console.error(e);
+      useStore.setState({ issues: prevIssues });
+    }
     finally { setSubmittingComment(false); }
   };
 
@@ -703,7 +1005,14 @@ function SpaceDetailContent() {
       } catch { /* ignore individual errors */ }
     }
     setSelectedRows(new Set());
-    await loadIssues({ spaceKey, page: String(currentPage), limit: queueFilter === 'all-requests' ? String(PAGE_SIZE) : '500' });
+    // Re-run the main load effect's own (correctly dept/filter-scoped) params instead
+    // of rebuilding a partial copy here — this reload used to drop the dept/queue
+    // scoping entirely (no `dept`, no `excludeDone`), so after deleting from a
+    // custom queue or a department view the list would silently repopulate with an
+    // unscoped, unrelated set of tickets — looking like "delete didn't work" even
+    // though the deletes themselves succeeded.
+    clearIssuesCache();
+    bumpIssuesVersion();
   };
 
   if (!spaceKey) {
@@ -741,7 +1050,6 @@ function SpaceDetailContent() {
   if (!currentSpace) return null;
 
   // Access check — admins always pass; others must be a member of this space
-  const isAdmin = user?.role === 'admin';
   const isMember = isAdmin || (currentSpace.members || []).some(
     (m: any) => (m.email || m.user?.email || '').toLowerCase() === (user?.email || '').toLowerCase()
   );
@@ -778,36 +1086,46 @@ function SpaceDetailContent() {
   })();
 
   const QUEUE_LABELS: Record<string, string> = {
-    'all-open':        'All open',
+    'all-open':        'All Tickets',
     'assigned':        'Assigned to me',
     'unassigned':      'Unassigned',
     'all-requests':    'All Requests',
+    'closed':          'Closed tickets',
     'my-dept':         'My Dept',
     'my-queue':        'My Queue',
     'sent-watching':   'Sent / Watching',
     'dept_all':        deptParam ? `All Tickets — ${deptParam}` : 'All Tickets',
     'dept_unassigned': deptParam ? `Unassigned — ${deptParam}` : 'Unassigned',
     'dept_assigned':   deptParam ? `Assigned to me — ${deptParam}` : 'Assigned to me',
-    'dept_closed':     deptParam ? `Closed Tickets — ${deptParam}` : 'Closed Tickets',
+    'dept_closed':     deptParam
+      ? `Worked on — ${deptParam}${viewUserNameParam ? ` — ${viewUserNameParam}` : ''}`
+      : 'Worked on',
   };
   const queueLabel = (activeCustomQueue?.name) || QUEUE_LABELS[queueFilter] || 'Queues';
-  const isQueueView = ['all-open', 'assigned', 'unassigned', 'all-requests', 'my-dept', 'my-queue', 'sent-watching', 'dept_all', 'dept_unassigned', 'dept_assigned', 'dept_closed'].includes(queueFilter) || queueFilter.startsWith('cq_');
+  const isQueueView = ['all-open', 'assigned', 'unassigned', 'all-requests', 'closed', 'my-dept', 'my-queue', 'sent-watching', 'dept_all', 'dept_unassigned', 'dept_assigned', 'dept_closed'].includes(queueFilter) || queueFilter.startsWith('cq_');
 
   const filteredIssues = issues.filter((issue) => {
     // Queue filter — skip category check when user has explicitly selected a status
     if (!filters.status) {
-      if (queueFilter === 'all-open') {
-        // Only show open (non-done) tickets
+      if (queueFilter === 'closed') {
+        // Inverse of "All Tickets" — only resolved/done tickets. Matching on
+        // category alone (not a name substring like "done"/"resolved") — this
+        // codebase has real in-progress statuses whose NAME happens to contain
+        // one of those words (e.g. "ASSUMED CODE DONE", "API NOT AVAILABLE
+        // DONE"), which a substring match would wrongly treat as done and hide
+        // from "All Tickets" / wrongly show under "Closed tickets".
         const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
+        if (cat !== 'done') return false;
       } else if (queueFilter === 'assigned') {
         if (!user || issue.assignee?.id !== user.id) return false;
       } else if (queueFilter === 'unassigned') {
         // Only show open tickets with no assignee
         const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
+        // Category alone, not a name substring — this codebase has real non-done
+        // statuses whose NAME happens to contain "done"/"resolved" (e.g. "ASSUMED
+        // CODE DONE", "API NOT AVAILABLE DONE"), which a substring match would
+        // wrongly treat as done and hide from these views.
+        if (cat === 'done') return false;
         if (issue.assignee) return false;
         // If dept-scoped (user clicked Unassigned (Dev) etc.), filter by that dept
         if (deptParam) {
@@ -817,8 +1135,11 @@ function SpaceDetailContent() {
       } else if (queueFilter === 'my-dept') {
         // Show open tickets that have a department set (unassigned or assigned to me)
         const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
+        // Category alone, not a name substring — this codebase has real non-done
+        // statuses whose NAME happens to contain "done"/"resolved" (e.g. "ASSUMED
+        // CODE DONE", "API NOT AVAILABLE DONE"), which a substring match would
+        // wrongly treat as done and hide from these views.
+        if (cat === 'done') return false;
         const issueDept = ((issue as any).current_department || '').toLowerCase();
         if (!issueDept) return false;
         const userDept = mySpaceDept.toLowerCase();
@@ -829,8 +1150,11 @@ function SpaceDetailContent() {
       } else if (queueFilter === 'my-queue') {
         // Show open tickets where current_department matches user's dept
         const cat = (issue.status?.category || '').toLowerCase();
-        const name = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || name.includes('done') || name.includes('resolved') || name.includes('closed')) return false;
+        // Category alone, not a name substring — this codebase has real non-done
+        // statuses whose NAME happens to contain "done"/"resolved" (e.g. "ASSUMED
+        // CODE DONE", "API NOT AVAILABLE DONE"), which a substring match would
+        // wrongly treat as done and hide from these views.
+        if (cat === 'done') return false;
         const issueDept = ((issue as any).current_department || '').toLowerCase();
         const userDept = (mySpaceDept || '').toLowerCase();
         if (!userDept || issueDept !== userDept) return false;
@@ -859,14 +1183,13 @@ function SpaceDetailContent() {
           if (issueDept !== deptParam.toLowerCase()) return false;
         }
       } else if (queueFilter === 'dept_assigned') {
-        const cat = (issue.status?.category || '').toLowerCase();
-        const stName = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || stName.includes('done') || stName.includes('resolved') || stName.includes('closed')) return false;
-        if (!user || issue.assignee?.id !== user.id) return false;
-        if (deptParam) {
-          const issueDept = ((issue as any).current_department || '').toLowerCase();
-          if (issueDept !== deptParam.toLowerCase()) return false;
-        }
+        // Server already does all the scoping (assignee, dept, excludeDone) via
+        // includeHistory — re-applying "still open, still in this dept, still
+        // assigned to me" here undid that: a resolved or moved-on ticket the
+        // server correctly kept (with its real current status/department) got
+        // silently stripped right back out, so the list shrank below the
+        // "Open" pill's server-reported total. No client-side filter needed;
+        // just pass through what the server returned, same as custom queues.
       } else if (queueFilter.startsWith('cq_')) {
         // Custom queue — server already filters by current_department (dept param sent to API)
         // No client-side dept filter needed; just pass through all server-returned issues
@@ -877,16 +1200,10 @@ function SpaceDetailContent() {
       const issueDept = ((issue as any).current_department || '').toUpperCase();
       if (issueDept !== deptFilter.toUpperCase()) return false;
     }
-    // Type/Status/Priority/Label (and the "extra added" fields below) all support
-    // comma-separated multi-select — a filter value of "a,b" matches either.
-    const matchesMulti = (filterVal: string, issueVal: string) => {
-      const selected = filterVal.split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
-      return selected.length === 0 || selected.includes((issueVal || '').toLowerCase());
-    };
     // Type filter
-    if (filters.type && !matchesMulti(filters.type, issue.type || '')) return false;
+    if (filters.type && (issue.type || '').toLowerCase() !== filters.type.toLowerCase()) return false;
     // Status filter
-    if (filters.status && !matchesMulti(filters.status, issue.status?.name || '')) return false;
+    if (filters.status && (issue.status?.name || '') !== filters.status) return false;
     // Assignee filter — match by email (member id ≠ user id in seeded data)
     if (filters.assignee) {
       if (filters.assignee === '__unassigned') { if (issue.assignee) return false; }
@@ -899,7 +1216,7 @@ function SpaceDetailContent() {
       }
     }
     // Priority filter
-    if (filters.priority && !matchesMulti(filters.priority, issue.priority || '')) return false;
+    if (filters.priority && (issue.priority || '').toLowerCase() !== filters.priority.toLowerCase()) return false;
     // Reporter filter
     if (filters.reporter) {
       if (filters.reporter === '__current') {
@@ -908,13 +1225,12 @@ function SpaceDetailContent() {
         if (issue.reporter?.id !== filters.reporter) return false;
       }
     }
-    // Label filter — match if the issue has ANY of the selected labels
+    // Label filter
     if (filters.label) {
       const issueLabels: string[] = Array.isArray(issue.labels)
         ? issue.labels.map((l: any) => (typeof l === 'string' ? l : l?.name || '')).filter(Boolean)
         : [];
-      const selectedLabels = filters.label.split(',').map(v => v.trim()).filter(Boolean);
-      if (!selectedLabels.some(l => issueLabels.includes(l))) return false;
+      if (!issueLabels.includes(filters.label)) return false;
     }
     // Created date filter (client-side fallback)
     if (filters.created && issue.createdAt) {
@@ -925,7 +1241,11 @@ function SpaceDetailContent() {
       const ms = ranges[filters.created];
       if (ms && created < now - ms) return false;
     }
-    // Extra added filters — reuse the same comma-separated multi-select matcher
+    // Extra added filters — all support comma-separated multi-select
+    const matchesMulti = (filterVal: string, issueVal: string) => {
+      const selected = filterVal.split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+      return selected.length === 0 || selected.includes((issueVal || '').toLowerCase());
+    };
     if (filters.workType)         { if (!matchesMulti(filters.workType,        (issue as any).workType        || '')) return false; }
     if (filters.productType)      { if (!matchesMulti(filters.productType,     (issue as any).productType     || '')) return false; }
     if (filters.combination)      { if (!matchesMulti(filters.combination,     (issue as any).combination     || '')) return false; }
@@ -952,13 +1272,14 @@ function SpaceDetailContent() {
       if (filters.dueDate === 'this_month') { if (!dd || dd < now || dd > now + 30*86400000) return false; }
       if (filters.dueDate === 'no_due')     { if (dd) return false; }
     }
-    // Search filter
-    if (search) {
-      const q = search.toLowerCase();
-      const sum = String(issue.summary ?? '').toLowerCase();
-      const k = String(issue.cfKey ?? issue.key ?? '').toLowerCase();
-      if (!sum.includes(q) && !k.includes(q)) return false;
-    }
+    // Search is already applied server-side (params.q, above) against summary/key/
+    // cf_key/description for every queue variant. A second, cruder client-side
+    // re-filter used to run here on top of that — plain lowercase .includes() with
+    // no key normalization — which could re-exclude a result the server had
+    // already correctly matched (e.g. searching "CF - 29236" reached the server
+    // as-is, which normalizes it to "CF-29236" and matches; this client filter
+    // then compared literal "cf - 29236" against "cf-29236" and dropped it,
+    // showing "No issues found" for a query that had a real match).
     return true;
   // Newest first — sort by createdAt descending
   }).sort((a, b) => {
@@ -977,9 +1298,11 @@ function SpaceDetailContent() {
   // Unique values for addable select filters
   const uniqueValues = (field: string): string[] =>
     Array.from(new Set(issues.map((i: any) => i[field]).filter(Boolean))).sort() as string[];
-  // Merge server-fetched values with any locally visible values (dedup + sort)
+  // Merge server-fetched values with any locally visible values (dedup + sort).
+  // Server values are keyed by `${field}::${effectiveDept}` (see the fetch effect
+  // above) since they're scoped to the currently-viewed department.
   const mergedOptions = (field: string): string[] => {
-    const server = serverFieldOptions[field] || [];
+    const server = serverFieldOptions[`${field}::${effectiveDept}`] || [];
     const local  = uniqueValues(field);
     return Array.from(new Set([...server, ...local])).sort();
   };
@@ -1024,11 +1347,6 @@ function SpaceDetailContent() {
             ) : isQueueView ? (
               <div>
                 <h1 className="text-[17px] font-semibold text-gray-900">{queueLabel}</h1>
-                <p className="text-[11.5px] text-gray-400 mt-0.5">
-                  {(queueFilter === 'all-requests' || queueFilter.startsWith('cq_'))
-                    ? `${(issueTotal ?? issues.length).toLocaleString()} issues`
-                    : `${filteredIssues.length} issues`}
-                </p>
               </div>
             ) : (
               <>
@@ -1052,10 +1370,12 @@ function SpaceDetailContent() {
                 <ClipboardList size={13} /> Backlog
               </Link>
             )}
-            <Link href={`/spaces/${spaceKey}/settings`}
-              className="w-8 h-8 border border-gray-300 rounded-md flex items-center justify-center text-gray-500 hover:bg-gray-50 transition-colors">
-              <Settings size={14} />
-            </Link>
+            {isAdmin && (
+              <Link href={`/spaces/${spaceKey}/settings`}
+                className="w-8 h-8 border border-gray-300 rounded-md flex items-center justify-center text-gray-500 hover:bg-gray-50 transition-colors">
+                <Settings size={14} />
+              </Link>
+            )}
           </div>
         </div>
 
@@ -1067,11 +1387,19 @@ function SpaceDetailContent() {
               <span className="font-bold text-[15px]">{(issueTotal ?? issues.length).toLocaleString()}</span>
               <span>{queueFilter.startsWith('cq_') ? 'Total' : 'Total Requests'}</span>
             </div>
+          ) : ['dept_all', 'dept_unassigned', 'dept_assigned'].includes(queueFilter) ? (
+            // Department-wide queues — also paginated, so use the real backend
+            // total rather than the current page's row count (which used to show
+            // as e.g. "100 Open" even when the department actually had thousands).
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border text-[12px] font-medium bg-blue-50 text-blue-700 border-blue-200">
+              <span className="font-bold text-[15px]">{(issueTotal ?? filteredIssues.length).toLocaleString()}</span>
+              <span>Open</span>
+            </div>
           ) : (
-            // All open / Assigned — show only filtered open count
+            // All Tickets / Assigned — show only filtered count
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border text-[12px] font-medium bg-blue-50 text-blue-700 border-blue-200">
               <span className="font-bold text-[15px]">{filteredIssues.length}</span>
-              <span>{queueFilter === 'assigned' ? 'Assigned to me' : 'Open'}</span>
+              <span>{queueFilter === 'assigned' ? 'Assigned to me' : queueFilter === 'all-open' ? 'Tickets' : 'Open'}</span>
             </div>
           )}
         </div>
@@ -1079,57 +1407,323 @@ function SpaceDetailContent() {
 
       {/* ── Queues overview — default landing when clicking a space ── */}
       {queueFilter === 'queues' && (() => {
-        const defaultQueues = [
-          { id: 'all-open',      label: 'All open',        desc: 'All unresolved tickets in this space'    },
-          { id: 'unassigned',    label: 'Unassigned',      desc: 'Tickets with no assignee'                },
-          { id: 'assigned',      label: 'Assigned to me',  desc: 'Tickets assigned to you'                 },
-          { id: 'all-requests',  label: 'All Requests',    desc: 'Every ticket ever created in this space' },
-          { id: 'sent-watching', label: 'Sent / Watching', desc: 'Tickets you reported or are watching'    },
-        ];
-        const customQueues = allCustomQueues;
+        // Until the custom-queues fetch resolves, we don't yet know whether
+        // this board has any — rendering "No queues available." here was a
+        // premature (and usually wrong) conclusion that flashed for however
+        // long the fetch took, right before the redirect effect above sent
+        // plain boards on to the tickets list. Show a spinner instead of a
+        // false negative while that's still in flight. Once currentSpace is
+        // known to be a non-dept_queue board, the redirect effect above is
+        // about to fire on the next tick regardless of customQueuesLoadedFor
+        // — keep showing the spinner rather than painting this landing page
+        // for the one render it'd otherwise flash on screen.
+        if (customQueuesLoadedFor !== spaceKey || currentSpace?.type !== 'dept_queue') {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <DotLoader className="h-64" />
+            </div>
+          );
+        }
+        const isDeptQueue = currentSpace?.type === 'dept_queue' || allCustomQueues.length > 0;
+        const customQueues = isDeptQueue
+          ? (isAdmin ? allCustomQueues : allCustomQueues.filter(q => q.memberIds.includes(user?.id || '')))
+          : [];
         return (
           <div className="flex-1 overflow-y-auto px-6 py-6">
             <h2 className="text-[15px] font-semibold text-gray-800 mb-1">Queues</h2>
             <p className="text-[12px] text-gray-400 mb-5">Select a queue to view its tickets</p>
             <div className="grid grid-cols-1 gap-2 max-w-2xl">
-              {defaultQueues.map(q => (
-                <Link key={q.id} href={`/spaces/${spaceKey}?queue=${q.id}`}
+              {customQueues.length === 0 && (
+                <p className="text-[13px] text-gray-400 py-4">No queues available.</p>
+              )}
+              {customQueues.map(q => (
+                // Same fix as the sidebar's queue-name link (commit e78b353): route to
+                // dept_all (open tickets, paginated) instead of the cq_<id> custom-queue
+                // view, which loads every ticket ever routed there including closed ones
+                // — for a queue with years of history that's thousands of rows, and this
+                // page appeared to hang because that load was so much heavier than expected.
+                <Link key={q.id} href={`/spaces/${spaceKey}?queue=dept_all&dept=${encodeURIComponent(q.name)}`}
                   className="flex items-center gap-4 px-4 py-3 rounded-lg border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all group">
-                  <div className="w-8 h-8 rounded-md bg-blue-100 flex items-center justify-center flex-shrink-0">
-                    <InboxIcon size={15} className="text-blue-600" />
+                  <div className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0" style={{ backgroundColor: getDeptColor(q.name) + '20' }}>
+                    <Layers size={15} style={{ color: getDeptColor(q.name) }} />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-[13px] font-medium text-gray-800 group-hover:text-blue-700">{q.label}</p>
-                    <p className="text-[11px] text-gray-400 mt-0.5">{q.desc}</p>
+                    <p className="text-[13px] font-medium text-gray-800 group-hover:text-blue-700">{q.name}</p>
+                    <p className="text-[11px] text-gray-400 mt-0.5">Custom department queue</p>
                   </div>
                   <ChevronRight size={14} className="text-gray-300 group-hover:text-blue-400" />
                 </Link>
               ))}
-              {customQueues.length > 0 && (
-                <>
-                  <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mt-4 mb-1 px-1">Custom Queues</p>
-                  {customQueues.map(q => (
-                    <Link key={q.id} href={`/spaces/${spaceKey}?queue=${q.id}`}
-                      className="flex items-center gap-4 px-4 py-3 rounded-lg border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all group">
-                      <div className="w-8 h-8 rounded-md bg-purple-100 flex items-center justify-center flex-shrink-0">
-                        <Layers size={15} className="text-purple-600" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-medium text-gray-800 group-hover:text-blue-700">{q.name}</p>
-                        <p className="text-[11px] text-gray-400 mt-0.5">Custom department queue</p>
-                      </div>
-                      <ChevronRight size={14} className="text-gray-300 group-hover:text-blue-400" />
-                    </Link>
-                  ))}
-                </>
-              )}
             </div>
           </div>
         );
       })()}
 
       {/* ── Summary view ── */}
-      {queueFilter === 'summary' && (() => {
+      {queueFilter === 'summary' && deptParam && !isAdmin && (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center max-w-sm">
+            <p className="text-[14px] font-semibold text-gray-700 mb-1">Admins only</p>
+            <p className="text-[12.5px] text-gray-400">Only an admin can view a queue's summary.</p>
+          </div>
+        </div>
+      )}
+      {/* Per-queue summary (admin-only) — range-aware, server-computed, with
+          a per-user "tickets worked" breakdown. Separate branch from the
+          space-wide one below since it has its own data source entirely. */}
+      {queueFilter === 'summary' && deptParam && isAdmin && (() => {
+        const RANGE_OPTIONS = [
+          { id: 'all', label: 'All time' },
+          { id: 'today', label: 'Today' },
+          { id: '7d', label: 'Last 7 days' },
+          { id: '30d', label: 'Last 30 days' },
+          { id: '90d', label: 'Last 90 days' },
+        ];
+        const CAT_ORDER: Record<string, number> = { todo: 0, in_progress: 1, done: 2 };
+        const statusData: [string, { count: number; color: string; category: string }][] =
+          (deptSummaryData?.statusBreakdown || [])
+            .map((s: any) => [s.name, { count: s.count, color: s.color, category: s.category }] as [string, any])
+            .sort((a: any, b: any) => {
+              const catDiff = (CAT_ORDER[a[1].category] ?? 1) - (CAT_ORDER[b[1].category] ?? 1);
+              return catDiff !== 0 ? catDiff : b[1].count - a[1].count;
+            });
+        const maxStatus = Math.max(...statusData.map(([, v]) => v.count), 1);
+
+        const PRIORITY_COLORS: Record<string, string> = { highest: '#EF4444', high: '#F97316', medium: '#F59E0B', low: '#64748B', lowest: '#94A3B8' };
+        const priorityData = (deptSummaryData?.priorityBreakdown || []).map((p: any) => ({
+          id: p.priority, label: p.priority.charAt(0).toUpperCase() + p.priority.slice(1), count: p.count, color: PRIORITY_COLORS[p.priority] || '#94A3B8',
+        }));
+        const maxPriority = Math.max(...priorityData.map((d: any) => d.count), 1);
+
+        const BAR_H = 180;
+        const perUser: any[] = deptSummaryData?.perUser || [];
+
+        // Pie slices for "tickets worked" share per user -- indexed by each
+        // user's rank in perUser (already sorted by ticketsWorked desc) so
+        // color assignment stays stable even as zero-activity members (no
+        // slice) are filtered out below.
+        const USER_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'];
+        const totalWorked = perUser.reduce((s: number, u: any) => s + u.ticketsWorked, 0);
+        let pieCumulative = 0;
+        const pieSlices = perUser
+          .map((u: any, idx: number) => ({ u, color: USER_COLORS[idx % USER_COLORS.length] }))
+          .filter(({ u }: any) => u.ticketsWorked > 0)
+          .map(({ u, color }: any) => {
+            const pct = totalWorked > 0 ? (u.ticketsWorked / totalWorked) * 100 : 0;
+            const start = pieCumulative;
+            pieCumulative += pct;
+            return { userId: u.userId, color, pct, start, end: pieCumulative };
+          });
+        const pieColorByUser: Record<string, string> = Object.fromEntries(pieSlices.map((s: any) => [s.userId, s.color]));
+        const pieGradient = pieSlices.length
+          ? `conic-gradient(${pieSlices.map((s: any) => `${s.color} ${s.start}% ${s.end}%`).join(', ')})`
+          : undefined;
+
+        const STAT_CARDS = [
+          { label: 'Total Issues', value: deptSummaryData?.totalIssues ?? 0, icon: ClipboardList,
+            ring: 'ring-indigo-100', iconWrap: 'bg-gradient-to-br from-indigo-500 to-violet-600', text: 'text-gray-800' },
+          { label: 'To Do', value: statusData.filter(([, v]) => v.category === 'todo').reduce((s, [, v]) => s + v.count, 0), icon: Clock,
+            ring: 'ring-slate-100', iconWrap: 'bg-gradient-to-br from-slate-400 to-slate-600', text: 'text-slate-700' },
+          { label: 'In Progress', value: statusData.filter(([, v]) => v.category === 'in_progress').reduce((s, [, v]) => s + v.count, 0), icon: RefreshCw,
+            ring: 'ring-blue-100', iconWrap: 'bg-gradient-to-br from-blue-500 to-cyan-500', text: 'text-blue-700' },
+          { label: 'Done', value: statusData.filter(([, v]) => v.category === 'done').reduce((s, [, v]) => s + v.count, 0), icon: CheckCircle2,
+            ring: 'ring-emerald-100', iconWrap: 'bg-gradient-to-br from-emerald-500 to-teal-500', text: 'text-emerald-700' },
+          { label: 'SLA Breached', value: deptSummaryData?.slaBreachedCount ?? 0, icon: AlertTriangle,
+            ring: 'ring-rose-100', iconWrap: 'bg-gradient-to-br from-rose-500 to-red-600', text: 'text-rose-700' },
+        ];
+        const RANK_COLORS = ['text-amber-500', 'text-slate-400', 'text-orange-700'];
+
+        return (
+          <div className="flex-1 overflow-auto px-8 py-7 bg-gradient-to-b from-slate-50 via-white to-slate-50">
+            <div className="flex items-start justify-between mb-6 gap-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-600 to-purple-700 shadow-lg shadow-indigo-200 flex items-center justify-center flex-shrink-0">
+                  <BarChart2 size={19} className="text-white" />
+                </div>
+                <div>
+                  <h2 className="text-[17px] font-bold text-gray-900 tracking-tight">Summary <span className="text-gray-300 mx-1">·</span> {deptParam}</h2>
+                  <p className="text-[12px] text-gray-400 mt-0.5">Computed from tickets in the {deptParam} queue.</p>
+                </div>
+              </div>
+              {/* Segmented range control */}
+              <div className="flex items-center gap-0.5 bg-white border border-gray-200/80 rounded-full p-1 shadow-sm flex-shrink-0">
+                {RANGE_OPTIONS.map((r) => (
+                  <button key={r.id} onClick={() => setSummaryRange(r.id)}
+                    className={`text-[12px] font-medium px-3 py-1.5 rounded-full transition-all whitespace-nowrap ${
+                      summaryRange === r.id
+                        ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-md shadow-indigo-200'
+                        : 'text-gray-500 hover:text-gray-800 hover:bg-gray-50'
+                    }`}>
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {deptSummaryLoading && (
+              <div className="py-16 flex items-center justify-center"><DotLoader /></div>
+            )}
+            {deptSummaryError && !deptSummaryLoading && (
+              <p className="text-[13px] text-red-500 py-8 text-center">{deptSummaryError}</p>
+            )}
+
+            {!deptSummaryLoading && !deptSummaryError && deptSummaryData && (
+              <>
+                {/* Stat cards */}
+                <div className="grid grid-cols-5 gap-4 mb-6">
+                  {STAT_CARDS.map((s) => (
+                    <div key={s.label} className={`group relative bg-white rounded-2xl px-5 py-4 ring-1 ${s.ring} shadow-sm hover:shadow-lg transition-shadow overflow-hidden`}>
+                      <div className={`absolute -right-4 -top-4 w-20 h-20 rounded-full ${s.iconWrap} opacity-[0.07] group-hover:opacity-[0.12] transition-opacity`} />
+                      <div className={`w-9 h-9 rounded-xl ${s.iconWrap} shadow-sm flex items-center justify-center mb-3`}>
+                        <s.icon size={16} className="text-white" />
+                      </div>
+                      <p className="text-[11px] font-medium text-gray-400 uppercase tracking-wide mb-1">{s.label}</p>
+                      <p className={`text-[24px] font-extrabold tracking-tight ${s.text}`}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex gap-5">
+                  {/* Status Distribution */}
+                  <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm p-6 flex-1 min-w-0">
+                    <h3 className="text-[13.5px] font-bold text-gray-800 mb-5 flex items-center gap-2">
+                      <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-indigo-500 to-violet-600" />
+                      Status Distribution
+                    </h3>
+                    <div className="flex items-end gap-4" style={{ height: BAR_H + 40 }}>
+                      {statusData.map(([name, v]) => {
+                        const barH = Math.max(4, Math.round((v.count / maxStatus) * BAR_H));
+                        return (
+                          <div key={name} className="flex flex-col items-center gap-1.5 flex-1 min-w-[48px] group">
+                            <span className="text-[11px] font-semibold text-gray-600">{v.count}</span>
+                            <div className="w-full rounded-t-lg transition-all shadow-sm group-hover:brightness-110"
+                              style={{ height: barH, background: `linear-gradient(180deg, ${v.color}, ${v.color}cc)` }} />
+                            <span className="text-[11px] text-gray-500 text-center leading-tight">{name}</span>
+                          </div>
+                        );
+                      })}
+                      {statusData.length === 0 && <p className="text-[12.5px] text-gray-400">No tickets in this range.</p>}
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-5 pt-4 border-t border-gray-50">
+                      {statusData.map(([name, v]) => (
+                        <span key={name} className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                          <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 ring-2 ring-white shadow-sm" style={{ background: v.color }} />
+                          {name} <span className="text-gray-300">·</span> <span className="font-medium text-gray-600">{v.count}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Priority Distribution */}
+                  <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm p-6 flex-1 min-w-0">
+                    <h3 className="text-[13.5px] font-bold text-gray-800 mb-5 flex items-center gap-2">
+                      <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-amber-500 to-rose-600" />
+                      Priority Distribution
+                    </h3>
+                    <div className="flex items-end gap-4" style={{ height: BAR_H + 40 }}>
+                      {priorityData.map((d: any) => {
+                        const barH = Math.max(d.count > 0 ? 4 : 2, Math.round((d.count / maxPriority) * BAR_H));
+                        return (
+                          <div key={d.id} className="flex flex-col items-center gap-1.5 flex-1 min-w-[48px] group">
+                            <span className="text-[11px] font-semibold text-gray-600">{d.count}</span>
+                            <div className="w-full rounded-t-lg transition-all shadow-sm group-hover:brightness-110"
+                              style={{ height: barH, background: d.count > 0 ? `linear-gradient(180deg, ${d.color}, ${d.color}cc)` : '#E5E7EB' }} />
+                            <span className="text-[11px] text-gray-500 text-center">{d.label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-5 pt-4 border-t border-gray-50">
+                      {priorityData.map((d: any) => (
+                        <span key={d.id} className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                          <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 ring-2 ring-white shadow-sm" style={{ background: d.count > 0 ? d.color : '#E5E7EB' }} />
+                          {d.label} <span className="text-gray-300">·</span> <span className="font-medium text-gray-600">{d.count}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Per-user breakdown */}
+                <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm mt-5 overflow-hidden">
+                  <div className="px-6 py-4 border-b border-gray-50 flex items-center gap-2">
+                    <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-emerald-500 to-teal-600" />
+                    <div>
+                      <h3 className="text-[13.5px] font-bold text-gray-800">Per user</h3>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">Tickets each team member worked in this queue, in the selected range.</p>
+                    </div>
+                  </div>
+                  {perUser.length === 0 ? (
+                    <p className="text-[12.5px] text-gray-400 py-8 text-center">No queue members found, or no activity in this range.</p>
+                  ) : (
+                    <div className="flex gap-8 p-6">
+                      {/* Donut chart -- share of tickets worked per user in this range */}
+                      <div className="flex flex-col items-center gap-3 flex-shrink-0" style={{ width: 168 }}>
+                        <div className="relative rounded-full flex items-center justify-center shadow-inner ring-1 ring-black/5"
+                          style={{ width: 152, height: 152, background: pieGradient || '#EEF0F3' }}>
+                          <div className="rounded-full bg-white flex flex-col items-center justify-center shadow-md" style={{ width: 96, height: 96 }}>
+                            <span className="text-[20px] font-extrabold text-gray-800 leading-none">{totalWorked}</span>
+                            <span className="text-[9.5px] font-medium text-gray-400 uppercase tracking-wide mt-0.5">Tickets</span>
+                          </div>
+                        </div>
+                        {totalWorked === 0 && (
+                          <p className="text-[11px] text-gray-400 text-center">No activity in this range.</p>
+                        )}
+                      </div>
+                      <table className="w-full text-[12.5px]">
+                        <thead>
+                          <tr className="text-left text-[10.5px] font-semibold text-gray-400 uppercase tracking-wide">
+                            <th className="pb-2.5">User</th>
+                            <th className="pb-2.5 text-right">Tickets Worked</th>
+                            <th className="pb-2.5 text-right">SLA Breached</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {perUser.map((u: any, idx: number) => {
+                            const displayName = `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || 'Unknown';
+                            const goToWorkedOn = () => router.push(
+                              `/spaces/${spaceKey}?queue=dept_closed&dept=${encodeURIComponent(deptParam)}&viewUser=${encodeURIComponent(u.userId)}&viewUserName=${encodeURIComponent(displayName)}`
+                            );
+                            const ringColor = pieColorByUser[u.userId] || '#D1D5DB';
+                            return (
+                              <tr key={u.userId} onClick={goToWorkedOn}
+                                className="border-t border-gray-50 cursor-pointer hover:bg-indigo-50/40 transition-colors">
+                                <td className="py-2.5 flex items-center gap-2.5">
+                                  <span className="w-4 text-center flex-shrink-0">
+                                    {idx < 3 && u.ticketsWorked > 0
+                                      ? <Trophy size={13} className={RANK_COLORS[idx]} />
+                                      : <span className="text-[10.5px] text-gray-300 font-medium">{idx + 1}</span>}
+                                  </span>
+                                  <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-[9.5px] font-bold flex-shrink-0 ring-2"
+                                    style={{ boxShadow: `0 0 0 2px white, 0 0 0 3.5px ${ringColor}` }}>
+                                    {getInitials(u.firstName, u.lastName)}
+                                  </div>
+                                  <span className="text-gray-700 font-medium group-hover:text-indigo-600">{displayName}</span>
+                                </td>
+                                <td className="py-2.5 text-right">
+                                  <span className="font-bold text-gray-800">{u.ticketsWorked}</span>
+                                </td>
+                                <td className="py-2.5 text-right">
+                                  <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${u.slaBreached > 0 ? 'bg-rose-50 text-rose-600' : 'bg-gray-50 text-gray-400'}`}>
+                                    {u.slaBreached}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── Space-wide Summary view ── */}
+      {queueFilter === 'summary' && !deptParam && (() => {
         const allIssues = issues;
         // Status distribution
         const statusMap: Record<string, { count: number; color: string; category: string }> = {};
@@ -1164,6 +1758,10 @@ function SpaceDetailContent() {
 
         return (
           <div className="flex-1 overflow-auto px-6 py-6 bg-gray-50">
+            <div className="mb-5">
+              <h2 className="text-[15px] font-semibold text-gray-800">Summary</h2>
+              <p className="text-[12px] text-gray-400 mt-0.5">Computed from all issues in {currentSpace?.name || spaceKey}.</p>
+            </div>
             <div className="flex gap-6">
               {/* Status Distribution */}
               <div className={chartCard}>
@@ -1246,23 +1844,20 @@ function SpaceDetailContent() {
         {/* ── Unified Filter button ── */}
         {(() => {
           const allMembers = members.map((m: any) => m.user || m);
-          const ALWAYS_AVAILABLE = new Set(['updated', 'dueDate']);
-          const availableToAdd = ADDABLE_FILTER_DEFS.filter(d =>
-            !addedFilterIds.includes(d.id) &&
-            (ALWAYS_AVAILABLE.has(d.id) || spaceFieldLabels.has(d.label.toLowerCase().trim()))
-          );
 
-          // Assignee, Status, and Request type (Type) each get their own standalone
-          // button — like Jira's toolbar. Everything else lives under "More filters".
+          // Count active filters for badge
           const activeFilterCount = [
-            filters.priority, filters.reporter, filters.label, filters.created,
+            filters.type, filters.status, filters.priority, filters.assignee,
+            filters.reporter, filters.label, filters.created,
             deptFilter,
-            ...addedFilterIds.filter(id => filters[id]),
+            ...ADDABLE_FILTER_DEFS.map(d => filters[d.id]).filter(Boolean),
           ].filter(Boolean).length;
 
-          // Full category list (used for label lookups regardless of which button opened it)
+          // Build filter category list — every field (Product Type, Combination,
+          // Project Manager, etc.) is listed directly instead of behind a
+          // "+ More Fields" sub-step, so it's reachable in a single click.
           const filterCats = [
-            { id: 'type', label: 'Request type', icon: <SlidersHorizontal size={13} /> },
+            { id: 'type', label: 'Type', icon: <SlidersHorizontal size={13} /> },
             ...(rrDepartments.length > 0 ? [{ id: 'department', label: 'Department', icon: <SlidersHorizontal size={13} /> }] : []),
             { id: 'status', label: 'Status', icon: <SlidersHorizontal size={13} /> },
             { id: 'assignee', label: 'Assignee', icon: <User size={13} /> },
@@ -1270,19 +1865,12 @@ function SpaceDetailContent() {
             { id: 'reporter', label: 'Reporter', icon: <UserCheck size={13} /> },
             { id: 'label', label: 'Label', icon: <Tag size={13} /> },
             { id: 'created', label: 'Created', icon: <Calendar size={13} /> },
-            ...addedFilterIds.map(id => {
-              const def = ADDABLE_FILTER_DEFS.find(d => d.id === id);
-              return def ? { id, label: def.label, icon: <AddableIcon icon={def.icon} size={13} />, isExtra: true } : null;
-            }).filter(Boolean) as { id: string; label: string; icon: React.ReactNode; isExtra?: boolean }[],
-            ...(availableToAdd.length > 0 ? [{ id: '__addFields', label: '+ More Fields', icon: <Plus size={13} /> }] : []),
+            ...ADDABLE_FILTER_DEFS.map(def => ({ id: def.id, label: def.label, icon: <AddableIcon icon={def.icon} size={13} /> })),
           ];
-          // "More filters" left panel — everything except the fields with their own button
-          const moreFilterCats = filterCats.filter(c => !['type', 'status', 'assignee'].includes(c.id));
 
           // Helper: is a category active?
           const isCatActive = (catId: string) => {
             if (catId === 'department') return !!deptFilter;
-            if (catId === '__addFields') return false;
             return !!filters[catId];
           };
 
@@ -1291,44 +1879,16 @@ function SpaceDetailContent() {
             const cat = filterCategory;
 
             if (cat === 'type') {
-              const selectedVals = filters.type ? filters.type.split(',').map((v: string) => v.trim()).filter(Boolean) : [];
-              const toggle = (val: string) => {
-                const next = selectedVals.includes(val) ? selectedVals.filter((v: string) => v !== val) : [...selectedVals, val];
-                if (next.length === 0) clearFilter('type'); else setFilter('type', next.join(','));
-              };
-              const allTypes: [string, string][] = [['epic','Epic'],['story','Story'],['task','Task'],['bug','Bug'],['subtask','Subtask']];
-              const tq = dropdownSearch.trim().toLowerCase();
-              const filteredTypes = allTypes.filter(([, lbl]) => lbl.toLowerCase().includes(tq));
               return (
-                <div className="flex flex-col max-h-[380px]">
-                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
-                    Type <span className="font-semibold text-gray-700">= (equals)</span>
-                  </div>
-                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
-                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
-                      placeholder="Search Type…"
-                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
-                  </div>
-                  <div className="overflow-y-auto flex-1">
-                    {filteredTypes.length === 0
-                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
-                      : filteredTypes.map(([val, lbl]) => {
-                          const checked = selectedVals.includes(val);
-                          return (
-                            <button key={val} onClick={() => toggle(val)}
-                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
-                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
-                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
-                              </span>
-                              <IssueTypeIcon type={val} size={14} />
-                              <span>{lbl}</span>
-                            </button>
-                          );
-                        })
-                    }
-                  </div>
-                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredTypes.length} of {allTypes.length}</div>
+                <div className="overflow-y-auto max-h-[340px]">
+                  {[['epic','Epic'],['story','Story'],['task','Task'],['bug','Bug'],['subtask','Subtask']].map(([val, lbl]) => (
+                    <button key={val} onClick={() => { setFilter('type', val); setOpenFilter(null); }}
+                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.type === val ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
+                      <IssueTypeIcon type={val} size={14} />
+                      <span>{lbl}</span>
+                      {filters.type === val && <Check size={12} className="ml-auto text-blue-600" />}
+                    </button>
+                  ))}
                 </div>
               );
             }
@@ -1353,46 +1913,15 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'status') {
-              const selectedVals = filters.status ? filters.status.split(',').map((v: string) => v.trim()) : [];
-              const toggle = (name: string) => {
-                const next = selectedVals.includes(name) ? selectedVals.filter((v: string) => v !== name) : [...selectedVals, name];
-                if (next.length === 0) clearFilter('status'); else setFilter('status', next.join(','));
-              };
-              const sq = dropdownSearch.trim().toLowerCase();
-              const filteredStatuses = statuses.filter((s: any) => s.name.toLowerCase().includes(sq));
               return (
-                <div className="flex flex-col max-h-[380px]">
-                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
-                    Status <span className="font-semibold text-gray-700">= (equals)</span>
-                  </div>
-                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
-                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
-                      placeholder="Search Status…"
-                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
-                  </div>
-                  <div className="overflow-y-auto flex-1">
-                    {filteredStatuses.length === 0
-                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
-                      : filteredStatuses.map((s: any) => {
-                          const checked = selectedVals.includes(s.name);
-                          const color = s.color || '#6B7280';
-                          return (
-                            <button key={s.id} onClick={() => toggle(s.name)}
-                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50' : ''}`}>
-                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
-                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
-                              </span>
-                              <span className="text-[11.5px] font-medium px-2 py-0.5 rounded-full border truncate"
-                                style={{ backgroundColor: `${color}18`, color, borderColor: `${color}40` }}>
-                                {s.name}
-                              </span>
-                            </button>
-                          );
-                        })
-                    }
-                  </div>
-                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredStatuses.length} of {statuses.length}</div>
+                <div className="overflow-y-auto max-h-[340px]">
+                  {statuses.map((s: any) => (
+                    <button key={s.id} onClick={() => { setFilter('status', s.name); setOpenFilter(null); }}
+                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.status === s.name ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
+                      <span>{s.name}</span>
+                      {filters.status === s.name && <Check size={12} className="ml-auto text-blue-600" />}
+                    </button>
+                  ))}
                 </div>
               );
             }
@@ -1403,11 +1932,8 @@ function SpaceDetailContent() {
                 ? allMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
                 : allMembers;
               return (
-                <div className="flex flex-col max-h-[380px]">
-                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
-                    Assignee <span className="font-semibold text-gray-700">= (equals)</span>
-                  </div>
-                  <div className="px-2 pt-2 pb-1 flex-shrink-0">
+                <div className="flex flex-col max-h-[340px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0">
                     <div className="relative">
                       <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                       <input autoFocus type="text" value={assigneeSearch} onChange={e => setAssigneeSearch(e.target.value)}
@@ -1457,40 +1983,16 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'priority') {
-              const selectedVals = filters.priority ? filters.priority.split(',').map((v: string) => v.trim()) : [];
-              const toggle = (val: string) => {
-                const next = selectedVals.includes(val) ? selectedVals.filter((v: string) => v !== val) : [...selectedVals, val];
-                if (next.length === 0) clearFilter('priority'); else setFilter('priority', next.join(','));
-              };
-              const pq = dropdownSearch.trim().toLowerCase();
-              const filteredPriorities = PRIORITIES.filter(p => p.label.toLowerCase().includes(pq));
               return (
-                <div className="flex flex-col max-h-[380px]">
-                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
-                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
-                      placeholder="Search Priority…"
-                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
-                  </div>
-                  <div className="overflow-y-auto flex-1">
-                    {filteredPriorities.length === 0
-                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
-                      : filteredPriorities.map(p => {
-                          const checked = selectedVals.includes(p.value);
-                          return (
-                            <button key={p.value} onClick={() => toggle(p.value)}
-                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
-                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
-                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
-                              </span>
-                              <PriorityIcon priority={p.value} size={14} />
-                              <span>{p.label}</span>
-                            </button>
-                          );
-                        })
-                    }
-                  </div>
-                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredPriorities.length} of {PRIORITIES.length}</div>
+                <div className="overflow-y-auto max-h-[340px]">
+                  {PRIORITIES.map(p => (
+                    <button key={p.value} onClick={() => { setFilter('priority', p.value); setOpenFilter(null); }}
+                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.priority === p.value ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
+                      <PriorityIcon priority={p.value} size={14} />
+                      <span>{p.label}</span>
+                      {filters.priority === p.value && <Check size={12} className="ml-auto text-blue-600" />}
+                    </button>
+                  ))}
                 </div>
               );
             }
@@ -1543,42 +2045,19 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'label') {
-              const selectedVals = filters.label ? filters.label.split(',').map((v: string) => v.trim()) : [];
-              const toggle = (lbl: string) => {
-                const next = selectedVals.includes(lbl) ? selectedVals.filter((v: string) => v !== lbl) : [...selectedVals, lbl];
-                if (next.length === 0) clearFilter('label'); else setFilter('label', next.join(','));
-              };
-              const lq = dropdownSearch.trim().toLowerCase();
-              const filteredLabels = allLabels.filter(l => l.toLowerCase().includes(lq));
               return (
-                <div className="flex flex-col max-h-[380px]">
-                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
-                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
-                      placeholder="Search Label…"
-                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
-                  </div>
-                  <div className="overflow-y-auto flex-1">
-                    {allLabels.length === 0
-                      ? <p className="px-3 py-4 text-[12.5px] text-gray-400 text-center">No labels</p>
-                      : filteredLabels.length === 0
-                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
-                      : filteredLabels.map(lbl => {
-                          const checked = selectedVals.includes(lbl);
-                          return (
-                            <button key={lbl} onClick={() => toggle(lbl)}
-                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
-                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
-                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
-                              </span>
-                              <span className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />
-                              <span className="truncate">{lbl}</span>
-                            </button>
-                          );
-                        })
-                    }
-                  </div>
-                  {allLabels.length > 0 && <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredLabels.length} of {allLabels.length}</div>}
+                <div className="overflow-y-auto max-h-[340px]">
+                  {allLabels.length === 0
+                    ? <p className="px-3 py-4 text-[12.5px] text-gray-400 text-center">No labels</p>
+                    : allLabels.map(lbl => (
+                      <button key={lbl} onClick={() => { setFilter('label', lbl); setOpenFilter(null); }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.label === lbl ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
+                        <span className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />
+                        <span>{lbl}</span>
+                        {filters.label === lbl && <Check size={12} className="ml-auto text-blue-600" />}
+                      </button>
+                    ))
+                  }
                 </div>
               );
             }
@@ -1599,25 +2078,7 @@ function SpaceDetailContent() {
               );
             }
 
-            if (cat === '__addFields') {
-              return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {availableToAdd.length === 0
-                    ? <p className="px-3 py-4 text-[12.5px] text-gray-400 text-center">All fields added</p>
-                    : availableToAdd.map(def => (
-                        <button key={def.id} onClick={() => { addExtraFilter(def.id); setFilterCategory(def.id); }}
-                          className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors">
-                          <AddableIcon icon={def.icon} size={13} />
-                          <span>{def.label}</span>
-                          <Plus size={11} className="ml-auto text-gray-300" />
-                        </button>
-                      ))
-                  }
-                </div>
-              );
-            }
-
-            // Extra added field filter
+            // Extra field filter (Product Type, Combination, etc.)
             const def = ADDABLE_FILTER_DEFS.find(d => d.id === cat);
             if (def) {
               const isDate = def.id === 'updated' || def.id === 'dueDate';
@@ -1684,19 +2145,12 @@ function SpaceDetailContent() {
             return null;
           };
 
-          // Multi-select fields store comma-separated values — join formatted labels,
-          // or collapse to a count once there are more than a couple selected.
-          const joinMulti = (vals: string[], formatOne: (v: string) => string): string => {
-            if (vals.length <= 2) return vals.map(formatOne).join(', ');
-            return `${vals.length} selected`;
-          };
-
           // Filter chips for active filters
           const getChipLabel = (key: string, val: string): string => {
-            if (key === 'type') return joinMulti(val.split(','), v => v.charAt(0).toUpperCase() + v.slice(1));
+            if (key === 'type') return val.charAt(0).toUpperCase() + val.slice(1);
             if (key === 'department') return val;
-            if (key === 'status') return joinMulti(val.split(','), v => v);
-            if (key === 'priority') return joinMulti(val.split(','), v => getPriorityMeta(v).label);
+            if (key === 'status') return val;
+            if (key === 'priority') return getPriorityMeta(val).label;
             if (key === 'assignee') {
               if (val === '__unassigned') return 'Unassigned';
               if (val === '__current') return 'Current User';
@@ -1708,7 +2162,7 @@ function SpaceDetailContent() {
               const mb = allMembers.find((m: any) => m.id === val);
               return mb ? `${mb.firstName} ${mb.lastName}` : val;
             }
-            if (key === 'label') return joinMulti(val.split(','), v => v);
+            if (key === 'label') return val;
             if (key === 'created') return ({ today: 'Today', '7d': 'Last 7d', '30d': 'Last 30d', '90d': 'Last 90d' } as Record<string,string>)[val] || val;
             const def = ADDABLE_FILTER_DEFS.find(d => d.id === key);
             return def ? `${def.label}: ${val}` : val;
@@ -1723,70 +2177,17 @@ function SpaceDetailContent() {
           if (filters.reporter) chips.push({ key: 'reporter', val: filters.reporter });
           if (filters.label) chips.push({ key: 'label', val: filters.label });
           if (filters.created) chips.push({ key: 'created', val: filters.created });
-          addedFilterIds.forEach(id => { if (filters[id]) chips.push({ key: id, val: filters[id] }); });
-
-          // Standalone single-panel button — one per quick-access field (Assignee,
-          // Status, Request type), matching Jira's toolbar instead of one mega-menu.
-          const QuickFilterButton = ({
-            catId, label, buttonRef, dropPos, setDropPos,
-          }: {
-            catId: string; label: string;
-            buttonRef: React.RefObject<HTMLButtonElement | null>;
-            dropPos: { top: number; left: number } | null;
-            setDropPos: (p: { top: number; left: number } | null) => void;
-          }) => {
-            const isOpen = openFilter === catId;
-            const active = isCatActive(catId);
-            return (
-              <div className="relative flex-shrink-0">
-                <button ref={buttonRef}
-                  onClick={() => {
-                    if (isOpen) { setOpenFilter(null); return; }
-                    const rect = buttonRef.current?.getBoundingClientRect();
-                    if (rect) setDropPos({ top: rect.bottom + 4, left: rect.left });
-                    setFilterCategory(catId);
-                    setOpenFilter(catId);
-                    setAssigneeSearch('');
-                    setDropdownSearch('');
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] rounded-md border transition-colors whitespace-nowrap
-                    ${isOpen || active
-                      ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
-                      : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'}`}>
-                  <span>{label}</span>
-                  <ChevronDown size={11} />
-                </button>
-                {isOpen && dropPos && (
-                  <>
-                    <div className="fixed inset-0 z-[9998]" onClick={() => setOpenFilter(null)} />
-                    <div className="fixed z-[9999] bg-white rounded-lg shadow-xl border border-gray-200"
-                      style={{ top: dropPos.top, left: dropPos.left, minWidth: 260 }}
-                      onMouseDown={e => e.stopPropagation()}>
-                      {renderRightPanel()}
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          };
+          ADDABLE_FILTER_DEFS.forEach(({ id }) => { if (filters[id]) chips.push({ key: id, val: filters[id] }); });
 
           return (
             <>
-              <QuickFilterButton catId="assignee" label="Assignee" buttonRef={assigneeFilterRef} dropPos={assigneeDropPos} setDropPos={setAssigneeDropPos} />
-              <QuickFilterButton catId="status" label="Status" buttonRef={statusFilterRef} dropPos={statusDropPos} setDropPos={setStatusDropPos} />
-              <QuickFilterButton catId="type" label="Request type" buttonRef={typeFilterRef} dropPos={typeDropPos} setDropPos={setTypeDropPos} />
-
-              {/* More filters button — everything else, still a two-panel category menu */}
+              {/* Filter button */}
               <div className="relative flex-shrink-0">
                 <button ref={addFilterRef}
                   onClick={() => {
                     if (openFilter === '__filterPanel') { setOpenFilter(null); return; }
                     const rect = addFilterRef.current?.getBoundingClientRect();
                     if (rect) setAddFilterDropPos({ top: rect.bottom + 4, left: rect.left });
-                    // Land on a category that actually lives in this menu
-                    if (!moreFilterCats.some(c => c.id === filterCategory)) {
-                      setFilterCategory(moreFilterCats[0]?.id || 'priority');
-                    }
                     setOpenFilter('__filterPanel');
                     setAssigneeSearch('');
                     setReporterSearch('');
@@ -1796,7 +2197,8 @@ function SpaceDetailContent() {
                     ${openFilter === '__filterPanel' || activeFilterCount > 0
                       ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
                       : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'}`}>
-                  <span>More filters</span>
+                  <SlidersHorizontal size={13} className="flex-shrink-0" />
+                  <span>Filter</span>
                   {activeFilterCount > 0 && (
                     <span className="ml-0.5 bg-blue-600 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center flex-shrink-0">
                       {activeFilterCount}
@@ -1818,7 +2220,7 @@ function SpaceDetailContent() {
                         <div className="px-3 pb-1 pt-0.5">
                           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Filters</p>
                         </div>
-                        {moreFilterCats.map(cat => {
+                        {filterCats.map(cat => {
                           const active = isCatActive(cat.id);
                           const isSelected = filterCategory === cat.id;
                           return (
@@ -1839,7 +2241,7 @@ function SpaceDetailContent() {
                       <div className="flex-1 min-w-[200px] max-w-[260px]">
                         <div className="px-3 py-2 border-b border-gray-100">
                           <div className="flex items-center justify-between">
-                            <p className="text-[11px] font-semibold text-gray-500 capitalize">{moreFilterCats.find(c => c.id === filterCategory)?.label || ''}</p>
+                            <p className="text-[11px] font-semibold text-gray-500 capitalize">{filterCats.find(c => c.id === filterCategory)?.label || ''}</p>
                             {isCatActive(filterCategory) && (
                               <button onClick={() => {
                                 if (filterCategory === 'department') setDeptFilter('');
@@ -1857,13 +2259,26 @@ function SpaceDetailContent() {
 
               {/* Active filter chips */}
               {chips.map(chip => (
-                <span key={chip.key} className="flex items-center gap-1 px-2 py-1 text-[11.5px] bg-blue-50 text-blue-700 border border-blue-200 rounded-full whitespace-nowrap flex-shrink-0 font-medium">
-                  <span className="text-blue-400 text-[10px] font-normal capitalize">{chip.key === 'department' ? 'Dept' : chip.key}:</span>
-                  <span className="max-w-[100px] truncate">{getChipLabel(chip.key, chip.val)}</span>
+                <span key={chip.key} className="flex items-center gap-1 pl-0.5 pr-1 py-1 text-[11.5px] bg-blue-50 text-blue-700 border border-blue-200 rounded-full whitespace-nowrap flex-shrink-0 font-medium">
+                  <button
+                    title="Click to change this filter's values"
+                    onClick={() => {
+                      // Reopen the same picker this chip belongs to, so clicking an
+                      // active filter re-edits its values instead of only offering
+                      // to remove it — matches clicking a filter pill in Jira.
+                      const rect = addFilterRef.current?.getBoundingClientRect();
+                      if (rect) setAddFilterDropPos({ top: rect.bottom + 4, left: rect.left });
+                      setFilterCategory(chip.key === 'department' ? 'department' : chip.key);
+                      setOpenFilter('__filterPanel');
+                      setAssigneeSearch(''); setReporterSearch(''); setDropdownSearch('');
+                    }}
+                    className="max-w-[120px] truncate px-1.5 py-0.5 rounded-full hover:bg-blue-100 transition-colors">
+                    {getChipLabel(chip.key, chip.val)}
+                  </button>
                   <button onClick={() => {
                     if (chip.key === 'department') setDeptFilter('');
                     else clearFilter(chip.key);
-                  }} className="ml-0.5 hover:text-blue-900 flex-shrink-0"><X size={10} /></button>
+                  }} className="hover:text-blue-900 flex-shrink-0"><X size={10} /></button>
                 </span>
               ))}
             </>
@@ -1931,18 +2346,22 @@ function SpaceDetailContent() {
 
         <div className="ml-auto flex items-center gap-2">
           <span className="text-[12px] text-gray-400">
-            {loading ? 'Loading…' : `${filteredIssues.length} issue${filteredIssues.length !== 1 ? 's' : ''}`}
+            {(isFetching || isQueuesLoading) ? 'Loading…' : `${filteredIssues.length} issue${filteredIssues.length !== 1 ? 's' : ''}`}
           </span>
           <button
-            onClick={async () => {
+            onClick={() => {
               setRefreshing(true);
               try {
-                await loadIssues({ spaceKey, page: String(currentPage), limit: queueFilter === 'all-requests' ? String(PAGE_SIZE) : '500' });
+                // Same fix as bulk delete — re-run the main load effect's own
+                // dept/filter-scoped params instead of a partial rebuild that
+                // used to drop dept/excludeDone scoping on refresh.
+                clearIssuesCache();
+                bumpIssuesVersion();
               } finally {
                 setRefreshing(false);
               }
             }}
-            disabled={refreshing || loading}
+            disabled={refreshing || isFetching}
             title="Refresh"
             className="flex items-center justify-center w-7 h-7 rounded-md border border-gray-300 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors disabled:opacity-40">
             <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
@@ -1955,11 +2374,12 @@ function SpaceDetailContent() {
         <div className="flex-1 overflow-auto bg-gray-50 p-4">
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
             <div className="grid px-4 py-2 bg-gray-50 border-b border-gray-200 text-[10.5px] font-semibold text-gray-500 uppercase tracking-wide"
-              style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 150px 140px' }}>
+              style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 140px 110px 110px' }}>
               <div>Key</div>
               <div>Summary</div>
               <div>Status</div>
               <div>Assignee</div>
+              <div>SLA Used</div>
               <div>Closed At</div>
             </div>
             {loading && (
@@ -1973,28 +2393,43 @@ function SpaceDetailContent() {
                 <p className="text-[12px] text-gray-400 mt-1">Tickets processed through this queue will appear here</p>
               </div>
             )}
-            {closedIssues.map((issue: any) => (
+            {closedIssues.map((issue: any) => {
+              const slaLog = issue.dept_sla_log || {};
+              const deptKey = Object.keys(slaLog).find(k => k.toLowerCase() === (issue.dept_name || '').toLowerCase()) || issue.dept_name;
+              const elapsedMs: number = slaLog[deptKey]?.elapsed_ms || 0;
+              const fmtMs = (ms: number) => {
+                if (!ms || ms < 60000) return ms > 0 ? `${Math.floor(ms / 1000)}s` : '—';
+                const h = Math.floor(ms / 3600000);
+                const m = Math.floor((ms % 3600000) / 60000);
+                return h > 0 ? `${h}h ${m}m` : `${m}m`;
+              };
+              return (
               <a key={issue.id} href={`/issues/${issue.cfKey ?? issue.key}`}
                 className="grid px-4 py-3 border-b border-gray-100 hover:bg-blue-50 transition-colors cursor-pointer items-center"
-                style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 150px 140px' }}>
+                style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 140px 110px 110px' }}>
                 <span className="text-[12px] font-semibold text-blue-600 font-mono">{issue.cfKey ?? issue.key}</span>
                 <span className="text-[12.5px] text-gray-800 truncate">{issue.title || issue.summary}</span>
                 <span className="flex items-center gap-1.5">
-                  {issue.status_name && (
-                    <span className="text-[11px] font-medium px-2 py-0.5 rounded-full border"
-                      style={{ borderColor: issue.status_color || '#E5E7EB', color: issue.status_color || '#6B7280', backgroundColor: `${issue.status_color}18` || '#F9FAFB' }}>
-                      {issue.status_name}
-                    </span>
-                  )}
+                  {issue.status_name && (() => {
+                    const sc = resolveStatusColor({ name: issue.status_name, color: issue.status_color, category: issue.status_category });
+                    return (
+                      <span className="text-[11px] font-medium px-2 py-0.5 rounded-full border"
+                        style={{ borderColor: sc, color: sc, backgroundColor: sc + '18' }}>
+                        {issue.status_name}
+                      </span>
+                    );
+                  })()}
                 </span>
                 <span className="text-[12px] text-gray-600 truncate">
                   {issue.assignee_name?.trim() || <span className="text-gray-400 italic">Unassigned</span>}
                 </span>
+                <span className="text-[12px] font-medium text-amber-700">{fmtMs(elapsedMs)}</span>
                 <span className="text-[11.5px] text-gray-400">
                   {issue.closed_at ? new Date(issue.closed_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
                 </span>
               </a>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -2069,8 +2504,14 @@ function SpaceDetailContent() {
                 const assigneeName = currentAssignee
                   ? `${currentAssignee.firstName || ''} ${currentAssignee.lastName || ''}`.trim()
                   : null;
+                // Sent/Watching exists so the sending dept can watch what happens to a
+                // ticket after it leaves — always show the real current status, not a
+                // frozen snapshot of whatever it was right before the transfer. That
+                // snapshot used to be shown for every non-"done" status too, so once
+                // the receiving dept moved the ticket along (e.g. To Do -> In Progress)
+                // this view kept showing the old pre-transfer status forever.
                 const st = getIssueStatus(issue);
-                const stColor = st?.color || '#6B7280';
+                const stColor = st ? resolveStatusColor(st) : '#6B7280';
                 // Last comment from issue (if comments loaded)
                 const comments: any[] = (issue as any).comments || [];
                 const lastComment = comments.length > 0 ? comments[comments.length - 1] : null;
@@ -2087,52 +2528,32 @@ function SpaceDetailContent() {
                 };
                 const slaIsPaused = !!pausedSla;
                 const pausedElapsedMs: number = pausedSla?.elapsed_ms || 0;
-                // Priority
-                const pm = getPriorityMeta(issue.priority ?? 'medium');
-                const hasUpdate = issue.updatedAt && issue.createdAt &&
-                  new Date(issue.updatedAt).getTime() - new Date(issue.createdAt).getTime() > 5000;
                 return (
                   <div key={issue.id}
                     className="bg-white rounded-xl border border-gray-150 shadow-sm hover:shadow-md hover:border-blue-200 transition-all cursor-pointer group"
                     onClick={() => { window.location.href = `/issues/${issue.cfKey ?? issue.key}`; }}>
                     {/* Card top row */}
                     <div className="flex items-start gap-3 px-4 pt-4 pb-3">
-                      {/* Unread dot */}
-                      <div className="flex-shrink-0 mt-1">
-                        {hasUpdate
-                          ? <div className="w-2 h-2 rounded-full bg-orange-400" title="New update" />
-                          : <div className="w-2 h-2 rounded-full bg-gray-200" />}
-                      </div>
-                      {/* Type icon */}
-                      <div className="flex-shrink-0 mt-0.5"><IssueTypeIcon type={issue.type || 'task'} size={15} /></div>
                       {/* Main content */}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1 flex-wrap">
                           <span className="text-[12px] text-blue-600 font-semibold font-mono">{issue.cfKey ?? issue.key}</span>
-                          {/* Dept badge */}
-                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${deptBadge}`}>{currentDept || '—'}</span>
+                          {/* Transferred-to queue */}
+                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${deptBadge}`} title="Transferred to this queue">→ {currentDept || '—'}</span>
                           {/* Status */}
                           <span className="text-[11px] font-medium px-2 py-0.5 rounded-full border"
                             style={{ background: stColor + '18', color: stColor, borderColor: stColor + '40' }}>
                             {st?.name || 'Open'}
                           </span>
-                          {/* Priority */}
-                          <span className="flex items-center gap-1 text-[11px] text-gray-400">
-                            <PriorityIcon priority={issue.priority ?? 'medium'} size={11} />
-                            <span className="capitalize">{issue.priority || 'Medium'}</span>
-                          </span>
                         </div>
                         <p className="text-[13.5px] font-medium text-gray-800 group-hover:text-blue-700 line-clamp-1">{issue.summary}</p>
                       </div>
-                      {/* Last updated + Recall */}
-                      <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                        <span className="text-[11px] text-gray-400">{issue.updatedAt ? timeAgo(issue.updatedAt) : '—'}</span>
-                        <div onClick={e => e.stopPropagation()}>
-                          <button onClick={() => recallIssue(issue.key)}
-                            className="px-2.5 py-1 text-[11px] font-semibold bg-orange-50 text-orange-600 border border-orange-200 rounded-lg hover:bg-orange-100 transition-colors">
-                            ↩ Recall
-                          </button>
-                        </div>
+                      {/* Recall */}
+                      <div className="flex-shrink-0" onClick={e => e.stopPropagation()}>
+                        <button onClick={() => recallIssue(issue.key)}
+                          className="px-2.5 py-1 text-[11px] font-semibold bg-orange-50 text-orange-600 border border-orange-200 rounded-lg hover:bg-orange-100 transition-colors">
+                          ↩ Recall
+                        </button>
                       </div>
                     </div>
 
@@ -2166,16 +2587,9 @@ function SpaceDetailContent() {
                           <span className="text-[12px] text-gray-400 italic">Unassigned — waiting for {currentDept}</span>
                         )}
                       </div>
-                      {/* Divider */}
-                      <div className="h-3 w-px bg-gray-200" />
-                      {/* Created */}
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10.5px] text-gray-400 font-medium uppercase tracking-wide">Raised</span>
-                        <span className="text-[12px] text-gray-600">{issue.createdAt ? timeAgo(issue.createdAt) : '—'}</span>
-                      </div>
                     </div>
 
-                    {/* Paused SLA panel */}
+                    {/* Paused SLA panel — how much was worked, when it paused, how much remains */}
                     {slaIsPaused && pausedSla && (
                       <div className={`mx-4 mb-2 rounded-lg border px-3 py-2 ${pausedSla.isBreached ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
                         <div className="flex items-center justify-between mb-1.5">
@@ -2191,13 +2605,18 @@ function SpaceDetailContent() {
                         </div>
                         <div className="flex items-center gap-4">
                           <div className="flex flex-col">
-                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">{deptParam} Time Used</span>
+                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Time Worked</span>
                             <span className={`text-[13px] font-bold ${pausedSla.isBreached ? 'text-red-600' : 'text-amber-600'}`}>{fmtDuration(pausedSla.elapsed_ms)}</span>
                           </div>
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
-                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Target</span>
+                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Actual SLA</span>
                             <span className="text-[13px] font-bold text-gray-600">{fmtDuration(pausedSla.goalDurationMs)}</span>
+                          </div>
+                          <div className="h-6 w-px bg-gray-200" />
+                          <div className="flex flex-col">
+                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Paused At</span>
+                            <span className="text-[13px] font-bold text-gray-600">{pausedSla.paused_at ? timeAgo(pausedSla.paused_at) : '—'}</span>
                           </div>
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
@@ -2205,11 +2624,6 @@ function SpaceDetailContent() {
                             <span className={`text-[13px] font-bold ${pausedSla.isBreached ? 'text-red-600' : 'text-green-600'}`}>
                               {pausedSla.isBreached ? fmtDuration(pausedSla.elapsed_ms - pausedSla.goalDurationMs) : fmtDuration(pausedSla.remainingMs)}
                             </span>
-                          </div>
-                          <div className="h-6 w-px bg-gray-200" />
-                          <div className="flex flex-col">
-                            <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Waiting For</span>
-                            <span className="text-[13px] font-bold text-blue-600">{currentDept}</span>
                           </div>
                         </div>
                         {/* Progress bar */}
@@ -2247,12 +2661,6 @@ function SpaceDetailContent() {
                         })}
                       </div>
                     )}
-                    {comments.length === 0 && hasUpdate && (
-                      <div className="mx-4 mb-3 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100 text-[12px] text-gray-500">
-                        Status changed to <strong>{st?.name}</strong> · {timeAgo(issue.updatedAt!)}
-                      </div>
-                    )}
-
                     {/* Inline comment area */}
                     <div className="mx-4 mb-3" onClick={e => e.stopPropagation()}>
                       {commentingOn === issue.key ? (
@@ -2264,6 +2672,7 @@ function SpaceDetailContent() {
                             minHeight="80px"
                             compact
                             members={members}
+                            onUploadingChange={setIsUploadingSentComment}
                           />
                           <div className="flex items-center justify-between px-3 pb-2.5 border-t border-gray-100 pt-2 bg-gray-50">
                             <span className="text-[11px] text-gray-400">Ctrl+Enter to send · Esc to cancel</span>
@@ -2275,10 +2684,10 @@ function SpaceDetailContent() {
                               </button>
                               <button
                                 onClick={() => submitComment(issue.key)}
-                                disabled={!commentText.trim() || submittingComment}
+                                disabled={!commentText.trim() || submittingComment || isUploadingSentComment}
                                 className="px-4 py-1.5 text-[12px] font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5">
                                 {submittingComment && <div className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                                Send
+                                {isUploadingSentComment ? 'Uploading…' : 'Send'}
                               </button>
                             </div>
                           </div>
@@ -2303,9 +2712,12 @@ function SpaceDetailContent() {
             {filteredIssues.map(issue => {
               const t = typeIcons[issue.type] || typeIcons.task;
               const pm = getPriorityMeta(issue.priority ?? 'medium');
-              // Dept-aware status: show per-dept status if user has a dept set
+              // Show the status for the dept the ticket is currently in (from dept_statuses)
               const deptStatusMap: Record<string, any> = (issue as any).dept_statuses || {};
-              const deptSt = mySpaceDept && deptStatusMap[mySpaceDept] ? deptStatusMap[mySpaceDept] : null;
+              const ticketCurrentDept: string = (issue as any).current_department || '';
+              const deptSt = ticketCurrentDept && deptStatusMap[ticketCurrentDept]
+                ? deptStatusMap[ticketCurrentDept]
+                : null;
               const st = deptSt || getIssueStatus(issue);
               const isUpdating = updating === issue.key;
               const isSelected = selectedRows.has(issue.id);
@@ -2380,8 +2792,16 @@ function SpaceDetailContent() {
                     // Dept-aware assignee: when dept filter active, show that dept's assignee
                     const deptMap: Record<string, any> = (issue as any).dept_assignees || {};
                     const activeDept = deptFilter || (queueFilter === 'my-dept' ? mySpaceDept : mySpaceDept);
-                    // If dept key exists but value is null, fall back to issue.assignee (they may have self-assigned after handoff)
-                    const displayAssignee = activeDept && activeDept in deptMap ? (deptMap[activeDept] ?? issue.assignee) : issue.assignee;
+                    // "Assigned to me" is this viewer's own personal tracking list (how many
+                    // tickets they've been assigned/worked, current or past) — a ticket lands
+                    // here either because it's currently assigned to them, or because they're
+                    // credited with having worked it before it moved on/got reassigned. Showing
+                    // the ticket's real current owner (now someone else) in that second case reads
+                    // as if the page mislabeled whose list this is; show the viewer's own name
+                    // here instead, since by definition every row is "theirs" for this view.
+                    const displayAssignee = queueFilter === 'dept_assigned'
+                      ? (user ? { firstName: user.firstName, lastName: user.lastName, id: user.id } : issue.assignee)
+                      : (activeDept && activeDept in deptMap ? (deptMap[activeDept] ?? issue.assignee) : issue.assignee);
                     return (
                       <div key={id} className="px-2" onClick={e => e.stopPropagation()}>
                         <button onClick={e => toggleDropdown(e, issue.key, 'assignee')}
@@ -2405,7 +2825,7 @@ function SpaceDetailContent() {
                             </div>
                             <div className="max-h-52 overflow-y-auto py-1">
                               {!inlineAssigneeSearch && (
-                                <button onClick={() => { handleInlineUpdate(issue.key, 'assigneeId', null); setInlineAssigneeSearch(''); }}
+                                <button onClick={() => { handleInlineUpdate(issue.key, 'assigneeId', null, { assignee: null }); setInlineAssigneeSearch(''); }}
                                   className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 ${!issue.assignee ? 'text-blue-600 font-medium' : 'text-gray-500'}`}>
                                   <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center"><User size={10} className="text-gray-400" /></div>
                                   Unassigned {!issue.assignee && <Check size={11} className="ml-auto text-blue-600" />}
@@ -2422,7 +2842,7 @@ function SpaceDetailContent() {
                                   const member = m.user || m;
                                   const isSel = issue.assignee?.email === member.email || issue.assignee?.id === member.id;
                                   return (
-                                    <button key={member.id} onClick={() => { handleInlineUpdate(issue.key, 'assigneeId', member.id); setInlineAssigneeSearch(''); }}
+                                    <button key={member.id} onClick={() => { handleInlineUpdate(issue.key, 'assigneeId', member.id, { assignee: { id: member.id, firstName: member.firstName, lastName: member.lastName, email: member.email, avatarUrl: member.avatarUrl ?? null } }); setInlineAssigneeSearch(''); }}
                                       className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] hover:bg-gray-50 ${isSel ? 'text-blue-600 font-medium' : 'text-gray-700'}`}>
                                       <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold text-white ${avatarColor(member.firstName)}`}>{getInitials(member.firstName, member.lastName)}</div>
                                       <span className="flex-1 text-left truncate">{member.firstName} {member.lastName}</span>
@@ -2477,14 +2897,38 @@ function SpaceDetailContent() {
                           <span className="truncate">{st.name}</span><ChevronDown size={8} className="flex-shrink-0" />
                         </button>
                         {openDropdown?.key === issue.key && openDropdown.field === 'status' && (() => {
-                          const spaceTransitions: {fromStatusId:string; toStatusId:string}[] = (currentSpace as any).transitions || [];
-                          const validIds = spaceTransitions.filter(t => t.fromStatusId === st.id).map(t => t.toStatusId);
-                          const options = validIds.length > 0 ? statuses.filter(s => validIds.includes(s.id)) : statuses.filter(s => s.id !== st.id);
+                          // If this ticket's current department maps to a configured custom
+                          // queue, show THAT queue's statuses/transitions (matching the issue
+                          // detail page) instead of the space's full/generic status list —
+                          // otherwise this dropdown offers moves the queue's workflow doesn't
+                          // even have, and disagrees with what the detail page shows.
+                          const rowQueue: any = ticketCurrentDept
+                            ? allCustomQueues.find((q: any) => (q.name || '').toLowerCase() === ticketCurrentDept.toLowerCase())
+                            : null;
+                          const queueStatusList: any[] = rowQueue?.queueStatuses || [];
+                          const isQueueStatus = queueStatusList.length > 0;
+                          const optionStatuses = isQueueStatus ? queueStatusList : statuses;
+                          const optionTransitions: {fromStatusId:string; toStatusId:string}[] = isQueueStatus
+                            ? (rowQueue?.queueTransitions || []).map((t: any) => ({ fromStatusId: t.fromStatusId ?? t.from, toStatusId: t.toStatusId ?? t.to }))
+                            : ((currentSpace as any).transitions || []);
+                          const validIds = optionTransitions.filter(t => t.fromStatusId === st.id).map(t => t.toStatusId);
+                          const options = validIds.length > 0 ? optionStatuses.filter(s => validIds.includes(s.id)) : optionStatuses.filter(s => s.id !== st.id);
                           return (
                             <InlineDropdown onClose={() => setOpenDropdown(null)} anchorRect={openDropdown.rect}>
                               <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Move to</div>
                               {options.map(s => (
-                                <button key={s.id} onClick={() => handleInlineUpdate(issue.key, 'statusId', s.id)}
+                                <button key={s.id} onClick={() => {
+                                  if (!issue.assignee) {
+                                    setOpenDropdown(null);
+                                    setAssigneeRequiredModal(true);
+                                    return;
+                                  }
+                                  if (isQueueStatus) {
+                                    handleInlineQueueStatusUpdate(issue.key, ticketCurrentDept, s);
+                                  } else {
+                                    handleInlineUpdate(issue.key, 'statusId', s.id, { status: { id: s.id, name: s.name, category: (s as any).category, color: (s as any).color } });
+                                  }
+                                }}
                                   className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-50 transition-colors">
                                   {s.name}
                                 </button>
@@ -2499,8 +2943,10 @@ function SpaceDetailContent() {
                     if (id === 'created') return <div key={id} className="px-2 text-[11px] text-gray-500 whitespace-nowrap">{formatJiraDateTime(issue.createdAt)}</div>;
                     if (id === 'updated') return <div key={id} className="px-2 text-[11px] text-gray-500 whitespace-nowrap">{formatJiraDateTime(issue.updatedAt)}</div>;
                     if (id === 'dueDate') return <div key={id} className="px-2 text-[11px] whitespace-nowrap">{issue.dueDate ? <span className={`font-medium ${new Date(issue.dueDate) < new Date() ? 'text-red-500' : 'text-gray-500'}`}>{new Date(issue.dueDate).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span> : <span className="text-gray-300">—</span>}</div>;
+                    if (id === 'breached') return <div key={id} className="px-2">{(issue as any).sla_breached ? <span className="text-[11px] font-medium text-red-600 bg-red-50 border border-red-100 rounded px-1.5 py-0.5">Yes</span> : <span className="text-[11px] font-medium text-emerald-600 bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5">No</span>}</div>;
                     if (id === 'labels') return <div key={id} className="px-2 flex flex-wrap gap-1">{(issue.labels||[]).length > 0 ? ((issue.labels as unknown) as string[]).slice(0,2).map((l:string) => <span key={l} className="text-[10px] bg-blue-50 text-blue-600 border border-blue-100 rounded px-1.5 py-0.5">{l}</span>) : <span className="text-[11px] text-gray-300">—</span>}</div>;
                     if (id === 'storyPoints') return <div key={id} className="px-2">{issue.storyPoints ? <span className="text-[11.5px] font-semibold text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{issue.storyPoints}</span> : <span className="text-[11px] text-gray-300">—</span>}</div>;
+                    if (id === 'type') return <div key={id} className="px-2 text-[11px] text-gray-600 capitalize">{issue.type || '—'}</div>;
                     if (id === 'workType') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).workType || <span className="text-gray-300">—</span>}</div>;
                     if (id === 'productType') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).productType || <span className="text-gray-300">—</span>}</div>;
                     if (id === 'combination') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).combination || <span className="text-gray-300">—</span>}</div>;
@@ -2519,7 +2965,7 @@ function SpaceDetailContent() {
               );
             })}
 
-            {filteredIssues.length === 0 && !loading && (
+            {filteredIssues.length === 0 && !isFetching && !isQueuesLoading && (
               <div className="bg-white py-16 text-center">
                 <CheckCircle2 size={28} className="text-gray-200 mx-auto mb-3" />
                 <p className="text-[13px] text-gray-500 font-medium">No issues found</p>
@@ -2527,7 +2973,7 @@ function SpaceDetailContent() {
               </div>
             )}
 
-            {loading && (
+            {(isFetching || isQueuesLoading) && (
               <div className="bg-white py-16 flex items-center justify-center">
                 <div className="animate-spin w-6 h-6 border-2 border-blue-200 border-t-blue-600 rounded-full" />
               </div>
@@ -2537,8 +2983,8 @@ function SpaceDetailContent() {
         </div>
       </div>
 
-      {/* ── Pagination bar — for All Requests and custom queues ── */}
-      {(queueFilter === 'all-requests' || queueFilter.startsWith('cq_')) && issueTotal > PAGE_SIZE && (
+      {/* ── Pagination bar — for All Requests, custom queues, and department-wide queues (a whole department's tickets can run into the thousands) ── */}
+      {(queueFilter === 'all-requests' || queueFilter.startsWith('cq_') || queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') && issueTotal > PAGE_SIZE && (
         <div className="flex items-center justify-between px-6 py-3 bg-white border-t border-gray-200 flex-shrink-0">
           <span className="text-[12px] text-gray-500">
             Showing {((currentPage - 1) * PAGE_SIZE) + 1}–{Math.min(currentPage * PAGE_SIZE, issueTotal)} of <strong>{issueTotal.toLocaleString()}</strong> issues
@@ -2568,8 +3014,12 @@ function SpaceDetailContent() {
           </div>
         </div>
       )}
-      {/* All open — simple count footer */}
-      {queueFilter !== 'all-requests' && (
+      {/* All open — simple count footer (hidden once the paginated bar above is
+          showing a real total, so this doesn't contradict it with just the
+          current page's count) */}
+      {queueFilter !== 'all-requests' && !(
+        ['dept_all', 'dept_unassigned', 'dept_assigned'].includes(queueFilter) && issueTotal > PAGE_SIZE
+      ) && (
         <div className="px-6 py-2.5 bg-white border-t border-gray-200 flex-shrink-0">
           <span className="text-[12px] text-gray-400">
             Showing <strong>{filteredIssues.length}</strong> {filters.status ? `"${filters.status}" issues` : 'open issues'}
@@ -2581,7 +3031,7 @@ function SpaceDetailContent() {
       {showCreate && (
         <CreateIssueModal spaceKey={spaceKey} statuses={currentSpace.statuses || []} members={currentSpace.members || []}
           initialDept={
-            (['dept_all','dept_unassigned','dept_assigned'].includes(queueFilter) && deptParam)
+            deptParam
               ? deptParam
               : (queueFilter.startsWith('cq_') && activeCustomQueue?.name)
                 ? activeCustomQueue.name
@@ -2595,22 +3045,10 @@ function SpaceDetailContent() {
               setCreatedToast({ key: newIssue.key, cfKey: navKey });
               setTimeout(() => setCreatedToast(null), 10000);
             }
-            // Stay on current queue — just refresh the list
-            const params: Record<string, string> = { spaceKey, page: '1', limit: '500' };
-            if (queueFilter === 'sent-watching' && deptParam) params.sentDept = deptParam;
-            if (queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
-              params.excludeDone = 'true';
-              if (deptParam) params.dept = deptParam;
-            }
-            if (queueFilter === 'all-open' || queueFilter === 'assigned' || queueFilter === 'unassigned') {
-              params.excludeDone = 'true';
-            }
-            if (['all-requests'].includes(queueFilter) || queueFilter.startsWith('cq_')) {
-              params.page = String(currentPage);
-              params.limit = String(PAGE_SIZE);
-              if (queueFilter.startsWith('cq_') && activeCustomQueue?.name) params.dept = activeCustomQueue.name;
-            }
-            loadIssues(params);
+            // Stay on current queue — just refresh the list via the main load
+            // effect's own params instead of a partial rebuild here.
+            clearIssuesCache();
+            bumpIssuesVersion();
           }} />
       )}
 
@@ -2623,22 +3061,49 @@ function SpaceDetailContent() {
           <button
             onClick={() => {
               const text = createdToast.cfKey;
-              if (navigator.clipboard) {
-                navigator.clipboard.writeText(text).catch(() => {
+              const doCopy = () => {
+                if (navigator.clipboard) {
+                  navigator.clipboard.writeText(text).catch(() => {
+                    const el = document.createElement('textarea');
+                    el.value = text; document.body.appendChild(el); el.select();
+                    document.execCommand('copy'); document.body.removeChild(el);
+                  });
+                } else {
                   const el = document.createElement('textarea');
                   el.value = text; document.body.appendChild(el); el.select();
                   document.execCommand('copy'); document.body.removeChild(el);
-                });
-              } else {
-                const el = document.createElement('textarea');
-                el.value = text; document.body.appendChild(el); el.select();
-                document.execCommand('copy'); document.body.removeChild(el);
-              }
+                }
+              };
+              doCopy();
+              setCreatedToast(t => t ? { ...t, copied: true } : t);
+              setTimeout(() => setCreatedToast(t => t ? { ...t, copied: false } : t), 2000);
             }}
-            className="ml-1 px-2 py-0.5 text-xs bg-white/10 hover:bg-white/20 rounded-md transition-colors"
+            className={`ml-1 px-2 py-0.5 text-xs rounded-md transition-colors ${(createdToast as any).copied ? 'bg-green-500 text-white' : 'bg-white/10 hover:bg-white/20'}`}
             title="Copy ticket key"
-          >Copy</button>
+          >{(createdToast as any).copied ? '✓ Copied!' : 'Copy'}</button>
           <button onClick={() => setCreatedToast(null)} className="ml-1 text-white/50 hover:text-white text-lg leading-none">×</button>
+        </div>
+      )}
+
+      {/* Assignee required popup */}
+      {assigneeRequiredModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40" onClick={() => setAssigneeRequiredModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-[380px] overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="h-1 bg-gradient-to-r from-amber-400 to-orange-500" />
+            <div className="px-6 py-5">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-9 h-9 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                </div>
+                <h3 className="text-[15px] font-semibold text-gray-900">Assignee Required</h3>
+              </div>
+              <p className="text-[13px] text-gray-600 mb-5">Please assign this ticket to someone before changing its status.</p>
+              <button onClick={() => setAssigneeRequiredModal(false)}
+                className="w-full bg-amber-500 hover:bg-amber-600 text-white text-[13px] font-medium py-2 rounded-lg transition-colors">
+                OK
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

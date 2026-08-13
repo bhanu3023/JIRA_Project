@@ -35,25 +35,24 @@ export async function GET(req: NextRequest) {
   const state = searchParams.get('state') || '';
   const error = searchParams.get('error');
 
-  // Behind a reverse proxy (nginx), req.url is localhost:port internally.
-  // Use x-forwarded headers to get the real public origin for browser redirects.
-  const fwdHost  = req.headers.get('x-forwarded-host');
-  const fwdProto = req.headers.get('x-forwarded-proto') || 'https';
-  const appUrl   = fwdHost
-    ? `${fwdProto}://${fwdHost}`
-    : (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin);
-  // For internal server→server fetches use the env var (reachable within Docker network)
-  const internalBase = process.env.NEXT_PUBLIC_APP_URL || appUrl;
+  // Always use the configured public URL for redirectUri — must match Azure AD exactly.
+  // Never compute from request headers (x-forwarded-host can differ between proxy layers).
+  const appUrl       = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://neutaraticketing.cftools.live').replace(/\/$/, '');
+  // For internal server→server fetches use localhost (reachable within Docker network)
+  const internalPort = process.env.PORT || '3000';
+  const internalBase = `http://localhost:${internalPort}`;
 
   // Decode state
-  let spaceKey  = 'INFRA';
-  let returnUrl = `/spaces/INFRA/settings?tab=email`;
-  let mode      = 'email'; // 'login' | 'email'
+  let spaceKey   = 'INFRA';
+  let returnUrl  = `/spaces/INFRA/settings?tab=email`;
+  let mode       = 'email'; // 'login' | 'email'
+  let department = '';
   try {
     const parsed = JSON.parse(Buffer.from(state, 'base64url').toString());
-    spaceKey  = parsed.spaceKey  || spaceKey;
-    returnUrl = parsed.returnUrl || returnUrl;
-    mode      = parsed.mode      || mode;
+    spaceKey   = parsed.spaceKey   || spaceKey;
+    returnUrl  = parsed.returnUrl  || returnUrl;
+    mode       = parsed.mode       || mode;
+    department = parsed.department || '';
   } catch {}
 
   const failUrl = `${appUrl}${mode === 'login' ? '/auth/login' : returnUrl}?oauth_error=${encodeURIComponent(error || 'unknown_error')}`;
@@ -61,8 +60,12 @@ export async function GET(req: NextRequest) {
 
   // redirectUri must match what was registered in Azure AD
   const redirectUri = `${appUrl}/api/auth/oauth/microsoft/callback`;
-  const result = await exchangeMicrosoftCode(code, redirectUri);
-  if (!result) return NextResponse.redirect(`${appUrl}/auth/login?oauth_error=token_exchange_failed`);
+  console.log(`[OAuthCallback] mode=${mode} redirectUri=${redirectUri}`);
+  const result = await exchangeMicrosoftCode(code, redirectUri, mode === 'login' ? 'login' : 'email');
+  if (!result) {
+    console.error(`[OAuthCallback] exchangeMicrosoftCode returned null for mode=${mode} redirectUri=${redirectUri}`);
+    return NextResponse.redirect(`${appUrl}/auth/login?oauth_error=token_exchange_failed&debug_uri=${encodeURIComponent(redirectUri)}`);
+  }
 
   // ── LOGIN MODE: look up user directly in DB, mint JWT locally ─────────────
   if (mode === 'login') {
@@ -85,7 +88,14 @@ export async function GET(req: NextRequest) {
         const candidates = await db.user.findMany({ where: { email: { startsWith: localPart + '@' } }, take: 1 });
         user = candidates[0] ?? null;
       }
-      // Update avatar in DB (non-blocking) — don't put it in the JWT
+      // Activate invited user on first Microsoft login + update avatar (both non-blocking)
+      if (user && !user.isActive) {
+        db.$executeRawUnsafe(
+          `UPDATE users SET "isActive"=true, status='active' WHERE id=$1`,
+          user.id
+        ).catch(() => {});
+        user = { ...user, isActive: true };
+      }
       if (user && result.avatarUrl) {
         db.$executeRawUnsafe(`UPDATE users SET "avatarUrl" = $1 WHERE id = $2`, result.avatarUrl, user.id).catch(() => {});
       }
@@ -136,7 +146,7 @@ export async function GET(req: NextRequest) {
         email: result.email, oauthAccessToken: result.tokens.accessToken,
         oauthRefreshToken: result.tokens.refreshToken, oauthProvider: 'microsoft',
         imapHost: 'outlook.office365.com', smtpHost: 'smtp.office365.com',
-        spaceKey, autoReply: true, appUrl: internalBase,
+        spaceKey, department: department || undefined, autoReply: true, appUrl: internalBase,
       }),
     });
     const cd = await connectRes.json().catch(() => ({}));

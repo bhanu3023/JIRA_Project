@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, Suspense } from 'react';
+import { useEffect, useState, useCallback, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -88,6 +88,57 @@ function SyncMsPhotosButton({ onDone }: { onDone: () => void }) {
   );
 }
 
+// ── Sync Jira Board Fields button ────────────────────────────────────────────
+function SyncBoardFieldsButton() {
+  const [syncing, setSyncing] = useState(false);
+  const [result, setResult] = useState<{ totalUpdated: number; boards: Record<string, { updated: number; total: number }> } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSync() {
+    setSyncing(true);
+    setResult(null);
+    setError(null);
+    // Read Jira credentials saved during import
+    const jiraUrl   = localStorage.getItem('jira_cred_url')   || 'https://cf2020.atlassian.net';
+    const email     = localStorage.getItem('jira_cred_email') || 'sujana.manapuram@cloudfuze.com';
+    const apiToken  = localStorage.getItem('jira_cred_token') || '';
+    try {
+      const res = await fetch('/api/admin/sync-board-fields', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret: 'cf-admin-sync-2024', jiraUrl, email, apiToken }),
+      });
+      const data = await res.json();
+      if (data.ok) setResult({ totalUpdated: data.totalUpdated, boards: data.boards });
+      else setError(data.error || 'Sync failed');
+    } catch (e: any) { setError(e.message); }
+    setSyncing(false);
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <button
+        onClick={handleSync}
+        disabled={syncing}
+        title="Sync field values (productType, combination, projectManager, customerName, clientName) from Jira to L1/L2/L3 boards"
+        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors disabled:opacity-60"
+      >
+        {syncing
+          ? <><div className="w-3 h-3 border-2 border-blue-400 border-t-blue-700 rounded-full animate-spin" /> Syncing Fields…</>
+          : <><RefreshCw size={12} /> Sync Jira Field Values</>}
+      </button>
+      {result && (
+        <span className={`text-[11.5px] font-medium ${result.totalUpdated > 0 ? 'text-green-600' : 'text-gray-500'}`}>
+          {result.totalUpdated > 0
+            ? `✓ ${result.totalUpdated} tickets updated (L1:${result.boards['L1BOAR']?.updated ?? 0} L2:${result.boards['L2BOARD']?.updated ?? 0} L3:${result.boards['L3BOARD']?.updated ?? 0})`
+            : 'All field values already up to date'}
+        </span>
+      )}
+      {error && <span className="text-[11.5px] text-red-500">{error}</span>}
+    </div>
+  );
+}
+
 type SettingsView = 'main' | 'general' | 'notifications' | 'system' | 'apps' | 'spaces' | 'work-items' | 'marketplace' | 'operations' | 'users' | 'billing' | 'permissions' | 'sites' | 'api' | 'connectors';
 
 interface Site {
@@ -141,6 +192,8 @@ function SettingsContent() {
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteForm, setInviteForm] = useState({ email: '', firstName: '', lastName: '', role: 'developer', password: 'changeme123' });
   const [inviting, setInviting] = useState(false);
+  const invitingRef = useRef(false);
+  const usersLastFetchRef = useRef(0);
   const [openUserMenu, setOpenUserMenu] = useState<string | null>(null);
   const [roleMenuPos, setRoleMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [selectedUser, setSelectedUser] = useState<any | null>(null);
@@ -206,7 +259,10 @@ function SettingsContent() {
     if (sectionParam && sectionParam !== view) setView(sectionParam);
   }, [sectionParam]);
 
-  const loadUsers = () => {
+  const loadUsers = (force = false) => {
+    const now = Date.now();
+    if (!force && usersLastFetchRef.current && now - usersLastFetchRef.current < 30000) return;
+    usersLastFetchRef.current = now;
     setUsersLoading(true);
     api.getUsers().then(data => { setUsers(data); setUsersLoading(false); }).catch(() => setUsersLoading(false));
   };
@@ -220,7 +276,6 @@ function SettingsContent() {
   }, []);
 
   useEffect(() => {
-    loadUsers();
     api.getSpaces().then(setSpaces).catch(() => {});
     api.getCustomFields().then(fields => {
       setCustomFields(fields.map((f: any) => ({
@@ -247,7 +302,7 @@ function SettingsContent() {
     try {
       await api.createUser(newUser);
       setNewUser({ email: '', firstName: '', lastName: '', role: 'developer', password: 'changeme123' });
-      loadUsers();
+      loadUsers(true);
       setMessage('User created successfully');
       setTimeout(() => setMessage(''), 3000);
     } catch (err: any) { setMessage(err.message); }
@@ -255,12 +310,12 @@ function SettingsContent() {
 
   const handleToggleActive = async (userId: string, isActive: boolean) => {
     await api.updateUser(userId, { isActive: !isActive });
-    loadUsers();
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, isActive: !isActive } : u));
   };
 
   const handleRoleChange = async (userId: string, role: string) => {
     await api.updateUser(userId, { role });
-    loadUsers();
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, role } : u));
   };
 
   const handleProfileSave = async () => {
@@ -1829,12 +1884,14 @@ function SettingsContent() {
 
     const handleInvite = async (e: React.FormEvent) => {
       e.preventDefault();
+      if (invitingRef.current) return;
+      invitingRef.current = true;
       setInviting(true);
       try {
         // Create user in DB
         await api.createUser(inviteForm);
 
-        // Send invite email via Microsoft 365 SMTP
+        // Send invite email via Microsoft 365 SMTP — called exactly once
         try {
           const currentUser = useStore.getState().user;
           await fetch('/api/users/invite', {
@@ -1852,10 +1909,11 @@ function SettingsContent() {
 
         setInviteForm({ email: '', firstName: '', lastName: '', role: 'developer', password: 'changeme123' });
         setShowInviteModal(false);
-        loadUsers();
+        loadUsers(true);
         setMessage('User invited successfully — invite email sent to ' + inviteForm.email);
-        setTimeout(() => setMessage(''), 5000);
+        setTimeout(() => setMessage(''), 10000);
       } catch (err: any) { setMessage(err.message); }
+      invitingRef.current = false;
       setInviting(false);
     };
 
@@ -2020,10 +2078,11 @@ function SettingsContent() {
                   </>
                 )}
               </div>
-              <button onClick={() => loadUsers()} disabled={usersLoading} className="p-1.5 text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-50" title="Refresh">
+              <button onClick={() => loadUsers(true)} disabled={usersLoading} className="p-1.5 text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-50" title="Refresh">
                 <RefreshCw size={13} className={usersLoading ? 'animate-spin' : ''} />
               </button>
-              <SyncMsPhotosButton onDone={() => loadUsers()} />
+              <SyncMsPhotosButton onDone={() => loadUsers(true)} />
+              <SyncBoardFieldsButton />
             </div>
 
             <p className="text-xs text-gray-500 mb-3">
@@ -2386,7 +2445,7 @@ function SettingsContent() {
                           body: JSON.stringify({ email: u.email, firstName: u.firstName, lastName: u.lastName, role: u.role,
                             invitedBy: `${user?.firstName} ${user?.lastName}`.trim() }) });
                         setMessage(`Invite resent to ${u.email}`);
-                        setTimeout(() => setMessage(''), 4000);
+                        setTimeout(() => setMessage(''), 10000);
                       } catch { setMessage('Failed to resend invite'); }
                     }}
                     className="flex-1 py-2 rounded-lg text-sm font-medium border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors">

@@ -2,9 +2,7 @@
  * Round Robin Assignment Service
  * Assigns agents to tickets based on department round robin config + shift timings
  */
-import { Pool } from 'pg';
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+import { pgPool as pool } from '@/lib/pg-pool';
 
 export interface RrDepartment {
   name: string;
@@ -19,6 +17,11 @@ export interface RrDepartment {
     shiftEnd?: string;   // "HH:MM" 24h, e.g. "17:00"
   }>;
   currentIndex: number; // round robin pointer
+  // Deterministic override: tickets of a given product type always go to a specific
+  // person in this queue, instead of the normal rotation — e.g. Content -> Mayank,
+  // Email/Message -> Ankit. Checked before rotation; doesn't require the person to be
+  // in `agents` (they may be a dedicated specialist who never takes rotation tickets).
+  productTypeRules?: Array<{ productType: string; userId: string; name: string }>;
 }
 
 export interface RrConfig {
@@ -62,8 +65,13 @@ export async function saveRrConfig(spaceId: string, departments: RrDepartment[])
 }
 
 /** Get next agent for a department using round robin, honouring shift timings.
- *  Priority: active agents currently on shift → fall back to all active agents. */
-export async function getNextAgent(spaceId: string, departmentName: string | null | undefined): Promise<{ userId: string; name: string } | null> {
+ *  Priority: a matching product-type rule (deterministic, no rotation) → active
+ *  agents currently on shift → fall back to all active agents. */
+export async function getNextAgent(
+  spaceId: string,
+  departmentName: string | null | undefined,
+  productType?: string | null,
+): Promise<{ userId: string; name: string } | null> {
   if (!departmentName) return null;
   const config = await getRrConfig(spaceId);
   if (!config) return null;
@@ -72,6 +80,21 @@ export async function getNextAgent(spaceId: string, departmentName: string | nul
   if (deptIndex === -1) return null;
 
   const dept = config.departments[deptIndex];
+
+  // Product-type override — checked first, doesn't touch the rotation pointer.
+  // A ticket's productType can be several comma-joined values (e.g. picked from a
+  // multi-select), so match if any of them relates to the rule's configured value.
+  if (productType && dept.productTypeRules?.length) {
+    const ticketTypes = productType.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+    for (const rule of dept.productTypeRules) {
+      const ruleType = (rule.productType || '').trim().toLowerCase();
+      if (!ruleType) continue;
+      if (ticketTypes.some(t => t.includes(ruleType) || ruleType.includes(t))) {
+        return { userId: rule.userId, name: rule.name };
+      }
+    }
+  }
+
   // Treat missing isActive as active (default = active)
   const activeAgents = dept.agents.filter(a => a.isActive !== false);
   if (!activeAgents.length) return null;

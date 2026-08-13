@@ -4,12 +4,13 @@ import { useState, useEffect, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { WorkflowStatus, SpaceMember } from '@/types';
-import { X, Minus, Maximize2, MoreHorizontal, ChevronDown, Info, AlertCircle, Search, Check } from 'lucide-react';
+import { X, ChevronDown, Info, AlertCircle, Search, Check } from 'lucide-react';
 import { getInitials } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import SpaceIcon from '@/components/ui/SpaceIcon';
 import { api } from '@/lib/api';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
+import DeptDropdown from '@/components/ui/DeptDropdown';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 
 interface Props {
@@ -21,9 +22,17 @@ interface Props {
   onCreated: (issue?: any) => void;
 }
 
+// Fallback status list for a queue that's configured but has no queueStatuses
+// of its own — shows this minimal set instead of the space's entire unscoped
+// list, matching the same default used on the issue detail page's status
+// dropdown for the same situation.
+const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
+  { id: 'qst_default_open', name: 'Open', category: 'todo', color: '#6366F1' } as WorkflowStatus,
+  { id: 'qst_default_inprogress', name: 'In Progress', category: 'in_progress', color: '#3B82F6' } as WorkflowStatus,
+  { id: 'qst_default_resolved', name: 'Resolved', category: 'done', color: '#10B981' } as WorkflowStatus,
+];
+
 const WORK_TYPES = [
-  { value: 'epic',            label: 'Epic' },
-  { value: 'story',           label: 'Story' },
   { value: 'task',            label: 'Task' },
   { value: 'bug',             label: 'Bug' },
   { value: 'subtask',         label: 'Sub-task' },
@@ -44,7 +53,7 @@ const COMBINATION_OPTIONS = [
   'Egnyte - OneDrive', 'Egnyte - SharePoint', 'Egnyte - MyDrive',
   'Egnyte - Shared Drive', 'Egnyte - Azure',
   'SharePoint - ShareDrive', 'SharePoint - MyDrive', 'SharePoint - SharePoint',
-  'SharePoint - Amazon S3', 'SharePoint - Azure',
+  'SharePoint - Amazon S3', 'SharePoint - Azure', 'SharePoint - Egnyte',
   'NFS - OneDrive', 'NFS - SharePoint', 'NFS - MyDrive', 'NFS - SharedDrive',
   'OneDrive - Amazon S3', 'OneDrive - OneDrive', 'OneDrive - MyDrive',
   'Sharefile - Amazon S3', 'Sharefile - Azure',
@@ -52,8 +61,8 @@ const COMBINATION_OPTIONS = [
   'Amazon S3 - SharePoint',
   'Amazon Workdocs - NFS',
   'Slack - Slack', 'Slack - Teams', 'Slack - Chat',
-  'Chat - Chat', 'Chat - Teams',
-  'Teams - Teams', 'Teams - Chat',
+  'Chat - Chat', 'Chat - Teams', 'Chat - Slack',
+  'Teams - Teams', 'Teams - Chat', 'Teams - Slack',
   'Meta - Chat', 'Meta - Teams', 'Meta - Viva',
   'Gmail - Gmail', 'Gmail - Outlook',
   'Outlook - Outlook', 'Outlook - Gmail',
@@ -61,7 +70,7 @@ const COMBINATION_OPTIONS = [
 ];
 
 // Searchable multi-select dropdown
-function CombinationDropdown({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function MultiSelectDropdown({ value, onChange, options, placeholder }: { value: string[]; onChange: (v: string[]) => void; options: string[]; placeholder: string }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const ref = useRef<HTMLDivElement>(null);
@@ -74,21 +83,36 @@ function CombinationDropdown({ value, onChange }: { value: string; onChange: (v:
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const filtered = COMBINATION_OPTIONS.filter(o =>
+  const filtered = options.filter(o =>
     o.toLowerCase().includes(search.toLowerCase())
   );
+
+  const toggle = (opt: string) => {
+    if (value.includes(opt)) onChange(value.filter(v => v !== opt));
+    else onChange([...value, opt]);
+  };
 
   return (
     <div ref={ref} className="relative">
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-3 py-2 bg-white border border-gray-300 rounded text-[13px] hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+        className="w-full min-h-[36px] flex items-center justify-between px-3 py-1.5 bg-white border border-gray-300 rounded text-[13px] hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
       >
-        <span className={value ? 'text-gray-900' : 'text-gray-400'}>
-          {value || 'Select...'}
+        <span className="flex flex-wrap gap-1 flex-1 text-left">
+          {value.length === 0
+            ? <span className="text-gray-400">{placeholder}</span>
+            : value.map(v => (
+                <span key={v} className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 text-[11px] font-medium px-2 py-0.5 rounded-full border border-blue-200">
+                  {v}
+                  <button type="button" onClick={e => { e.stopPropagation(); toggle(v); }} className="hover:text-red-500">
+                    <X size={10} />
+                  </button>
+                </span>
+              ))
+          }
         </span>
-        <ChevronDown size={14} className={`text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown size={14} className={`text-gray-400 flex-shrink-0 ml-1 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
       {open && (
@@ -122,27 +146,29 @@ function CombinationDropdown({ value, onChange }: { value: string; onChange: (v:
                 <button
                   key={opt}
                   type="button"
-                  onClick={() => { onChange(opt); setOpen(false); setSearch(''); }}
-                  className={`w-full flex items-center justify-between px-3 py-2 text-[13px] hover:bg-blue-50 transition-colors ${
-                    value === opt ? 'text-blue-600 bg-blue-50 font-medium' : 'text-gray-700'
+                  onClick={() => toggle(opt)}
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-blue-50 transition-colors ${
+                    value.includes(opt) ? 'text-blue-600 bg-blue-50 font-medium' : 'text-gray-700'
                   }`}
                 >
+                  <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${value.includes(opt) ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                    {value.includes(opt) && <Check size={10} className="text-white" />}
+                  </div>
                   <span>{opt}</span>
-                  {value === opt && <Check size={12} className="text-blue-600 flex-shrink-0" />}
                 </button>
               ))
             )}
           </div>
 
           {/* Clear */}
-          {value && (
+          {value.length > 0 && (
             <div className="border-t border-gray-100 px-2 py-1.5">
               <button
                 type="button"
-                onClick={() => { onChange(''); setOpen(false); setSearch(''); }}
+                onClick={() => { onChange([]); setSearch(''); }}
                 className="w-full text-[12px] text-gray-500 hover:text-red-500 py-1 transition-colors"
               >
-                Clear selection
+                Clear all ({value.length})
               </button>
             </div>
           )}
@@ -163,17 +189,30 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   const [selectedSpaceKey, setSelectedSpaceKey] = useState(spaceKey);
   const [spaceMembers, setSpaceMembers]         = useState<SpaceMember[]>(members);
+  // baseStatuses = the space's own full status list (fallback when the
+  // selected queue has no restricted list of its own). spaceStatuses = what
+  // the Status dropdown actually shows — narrowed to the selected queue's
+  // queueStatuses when it has one, same concept the issue detail page's
+  // status dropdown already uses for department workflows.
+  const [baseStatuses, setBaseStatuses]         = useState<WorkflowStatus[]>(statuses);
   const [spaceStatuses, setSpaceStatuses]       = useState<WorkflowStatus[]>(statuses);
   const [createIssueFields, setCreateIssueFields] = useState<any[]>([]);
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
+  const [spaceQueues, setSpaceQueues] = useState<{ id: string; label: string; dept?: string; queueStatuses?: WorkflowStatus[]; memberIds?: string[]; suspendedIds?: string[] }[]>([]);
+  const [selectedQueueId, setSelectedQueueId] = useState('');
   const [form, setForm] = useState({
     summary: '', description: '', type: 'task', priority: 'medium',
-    assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: '',
+    assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
+    productType: [] as string[], projectManager: [] as string[],
   });
   const [summaryError, setSummaryError] = useState(false);
+  const [queueError, setQueueError]                 = useState(false);
+  const [combinationError, setCombinationError]     = useState(false);
+  const [productTypeError, setProductTypeError]     = useState(false);
+  const [projectManagerError, setProjectManagerError] = useState(false);
   const [error, setError]               = useState('');
   const [loading, setLoading]           = useState(false);
-  const [createAnother, setCreateAnother] = useState(false);
+  const [uploading, setUploading]       = useState(false);
   const [infoBannerVisible, setInfoBannerVisible] = useState(true);
   const [requestTypeOpen, setRequestTypeOpen]     = useState(false);
 
@@ -184,13 +223,90 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     if (selectedSpaceKey !== spaceKey) {
       api.getSpace(selectedSpaceKey).then((space: any) => {
         setSpaceMembers(space.members || []);
-        setSpaceStatuses(space.statuses || []);
+        setBaseStatuses(space.statuses || []);
       }).catch(() => {});
     } else {
       setSpaceMembers(members);
-      setSpaceStatuses(statuses);
+      setBaseStatuses(statuses);
     }
   }, [selectedSpaceKey]);
+
+  // Load queues for the selected space — keep each queue's own queueStatuses
+  // so the Status dropdown can be narrowed to whatever that specific queue's
+  // workflow allows (e.g. Dev queue vs Migration queue each having a
+  // different, smaller set of valid statuses).
+  useEffect(() => {
+    const builtIn = [
+      { id: 'all-open',      label: 'All Open' },
+      { id: 'unassigned',    label: 'Unassigned' },
+      { id: 'assigned',      label: 'Assigned' },
+      { id: 'my-queue',      label: 'My Queue' },
+      { id: 'all-requests',  label: 'All Requests' },
+    ];
+    api.request<any[]>(`custom-queues/${selectedSpaceKey}`).then((q) => {
+      const custom = (q || []).map((cq: any) => ({
+        id: cq.id, label: cq.name, dept: cq.name,
+        queueStatuses: cq.queueStatuses,
+        memberIds: cq.memberIds, suspendedIds: cq.suspendedIds,
+      }));
+      setSpaceQueues([...builtIn, ...custom]);
+    }).catch(() => {
+      setSpaceQueues(builtIn);
+    });
+  }, [selectedSpaceKey]);
+
+  const selectedQueue = form.department
+    ? spaceQueues.find(q => q.dept?.toLowerCase() === form.department.toLowerCase())
+    : undefined;
+
+  // Pre-Sales tickets don't have a project manager assigned at creation time
+  const isPreSalesQueue = form.department.trim().toLowerCase() === 'pre-sales';
+
+  // Narrow the Status dropdown to the selected queue's own status list, same
+  // as the issue detail page's department status dropdown already does —
+  // falls back to the space's full list when the queue has no restricted one.
+  const hasDeptQueues = spaceQueues.some(q => !!q.dept);
+  useEffect(() => {
+    // Selected a queue but it has no status list of its own configured — use
+    // the minimal default rather than the space's entire unscoped list. If
+    // this space routes through departments at all but none is picked yet,
+    // show that same minimal default too — the full unscoped list (every
+    // status ever used on every board) is never a useful thing to show here,
+    // and a department must be chosen before the ticket can be created
+    // anyway. Only spaces with no department concept at all fall back to
+    // the space's full list, since there's no queue context to narrow by.
+    const nextStatuses = selectedQueue?.queueStatuses?.length
+      ? selectedQueue.queueStatuses
+      : selectedQueue || hasDeptQueues
+      ? DEFAULT_QUEUE_STATUSES
+      : baseStatuses;
+    setSpaceStatuses(nextStatuses);
+    // If the currently-selected status isn't valid for this queue, clear it
+    // so the "Set default status" effect below picks a valid one.
+    if (form.statusId && !nextStatuses.some(s => s.id === form.statusId)) {
+      setForm(f => ({ ...f, statusId: '' }));
+    }
+  }, [selectedQueue, baseStatuses, hasDeptQueues]);
+
+  // Assignee options — only members with access to the selected queue (its
+  // memberIds, minus anyone suspended from it), not every member of the whole
+  // space. Falls back to full space membership when the queue has no
+  // configured member list (or no queue is selected).
+  const assigneeOptions = (() => {
+    const memberIds = selectedQueue?.memberIds;
+    if (!memberIds?.length) return spaceMembers;
+    const suspended = new Set((selectedQueue as any)?.suspendedIds || []);
+    const allowed = new Set(memberIds.filter((id: string) => !suspended.has(id)));
+    return spaceMembers.filter(m => allowed.has(m.id));
+  })();
+
+  // If the currently-selected assignee has no access to the newly-selected
+  // queue, clear it rather than silently keeping an invalid assignment.
+  useEffect(() => {
+    if (form.assigneeId && !assigneeOptions.some(m => m.id === form.assigneeId)) {
+      setForm(f => ({ ...f, assigneeId: '' }));
+    }
+  }, [selectedQueue]);
 
   // Load custom fields enabled for Create Issue for the selected space
   useEffect(() => {
@@ -209,15 +325,42 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // Set default status
   useEffect(() => {
     if (spaceStatuses.length > 0 && !form.statusId) {
-      const def = spaceStatuses.find(s => s.name.toLowerCase() === 'to do') || spaceStatuses[0];
+      const def = spaceStatuses.find(s => s.name.toLowerCase() === 'open')
+        || spaceStatuses.find(s => s.name.toLowerCase() === 'to do')
+        || spaceStatuses.find(s => s.name.toLowerCase() === 'todo')
+        || spaceStatuses[0];
       setForm(f => ({ ...f, statusId: def.id }));
     }
   }, [spaceStatuses]);
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!form.summary.trim()) { setSummaryError(true); return; }
-    setSummaryError(false);
+
+    const missingSummary        = !form.summary.trim();
+    // Only require a queue when this space actually has queues to pick from
+    const missingQueue          = queueOptions.length > 0 && !form.department;
+    const missingCombination    = form.combination.length === 0;
+    const missingProductType    = form.productType.length === 0;
+    const missingProjectManager = form.projectManager.length === 0 && !isPreSalesQueue;
+
+    setSummaryError(missingSummary);
+    setQueueError(missingQueue);
+    setCombinationError(missingCombination);
+    setProductTypeError(missingProductType);
+    setProjectManagerError(missingProjectManager);
+
+    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager) {
+      const missingLabels = [
+        missingSummary && 'Summary',
+        missingQueue && 'Queue',
+        missingCombination && 'Combination',
+        missingProductType && 'Product Type',
+        missingProjectManager && 'Project Manager',
+      ].filter(Boolean);
+      setError(`Please fill in the required field${missingLabels.length > 1 ? 's' : ''}: ${missingLabels.join(', ')}`);
+      return;
+    }
+    if (uploading) { setError('Please wait for attachments to finish uploading before creating.'); return; }
     setError('');
     setLoading(true);
     try {
@@ -228,11 +371,12 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         type: form.type,
         priority: form.priority,
         assigneeId: form.assigneeId || undefined,
-        storyPoints: form.storyPoints ? parseInt(form.storyPoints) : undefined,
         dueDate: form.dueDate || undefined,
         statusId: form.statusId || undefined,
-        combination: form.combination || undefined,
-        ...(initialDept ? { department: initialDept } : {}),
+        combination: form.combination.length > 0 ? form.combination.join(', ') : undefined,
+        productType: form.productType.length > 0 ? form.productType.join(', ') : undefined,
+        projectManager: form.projectManager.length > 0 ? form.projectManager.join(', ') : undefined,
+        ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
       });
       // Save custom field values
       if (newIssue?.id) {
@@ -242,13 +386,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             .map(([fieldId, value]) => api.setCustomFieldValue(newIssue.id, fieldId, value).catch(() => {}))
         );
       }
-      if (createAnother) {
-        setForm(f => ({ ...f, summary: '', description: '', storyPoints: '', dueDate: '', combination: '' }));
-        setCustomFieldValues({});
-        setSummaryError(false);
-      } else {
-        onCreated(newIssue);
-      }
+      onCreated(newIssue);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -256,13 +394,39 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     }
   };
 
-  const update = (field: string, value: string) => {
+  const update = (field: string, value: any) => {
     setForm(f => ({ ...f, [field]: value }));
     if (field === 'summary' && value.trim()) setSummaryError(false);
+    if (field === 'department' && value) setQueueError(false);
+    if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
+    if (field === 'productType' && Array.isArray(value) && value.length > 0) setProductTypeError(false);
+    if (field === 'projectManager' && Array.isArray(value) && value.length > 0) setProjectManagerError(false);
   };
 
   const selectedAssignee = spaceMembers.find(m => m.id === form.assigneeId);
   const workTypeLabel = WORK_TYPES.find(t => t.value === form.type)?.label || 'Task';
+  // Real department destinations only — the built-in entries (Unassigned/Assigned/My
+  // Queue/All Requests) are list-filter views, not places a new ticket can be routed to.
+  // Non-admins only see queues they're a member of (and not suspended from) — same
+  // access rule as the Queues overview page, so this list matches what they can open.
+  const isAdmin = user?.role === 'admin';
+  const queueOptions = Array.from(new Set(
+    spaceQueues
+      .filter(q => !!q.dept)
+      .filter(q => isAdmin || (
+        (q.memberIds || []).includes(user?.id || '') && !(q.suspendedIds || []).includes(user?.id || '')
+      ))
+      .map(q => q.dept as string)
+  ));
+
+  const categoryOrder: Record<string, number> = { todo: 0, in_progress: 1, done: 3 };
+  const sortedStatuses = [...spaceStatuses].sort((a, b) => {
+    const ac = (a as any).category as string | undefined;
+    const bc = (b as any).category as string | undefined;
+    const ao = ac !== undefined ? (categoryOrder[ac] ?? 2) : 2;
+    const bo = bc !== undefined ? (categoryOrder[bc] ?? 2) : 2;
+    return ao - bo;
+  });
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -285,9 +449,6 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             )}
           </div>
           <div className="flex items-center gap-0.5">
-            <button className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><Minus size={15} /></button>
-            <button className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><Maximize2 size={15} /></button>
-            <button className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><MoreHorizontal size={15} /></button>
             <button onClick={onClose} className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"><X size={15} /></button>
           </div>
         </div>
@@ -338,16 +499,71 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 onChange={v => update('description', v)}
                 placeholder="Add a description… paste or drag images, use the toolbar to format"
                 minHeight="280px"
+                onUploadingChange={setUploading}
               />
             </div>
 
             {/* Combination */}
             <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Combination</label>
-              <CombinationDropdown
-                value={form.combination}
-                onChange={v => update('combination', v)}
-              />
+              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                Combination <span className="text-red-500">*</span>
+              </label>
+              <div className={combinationError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                <MultiSelectDropdown
+                  value={form.combination}
+                  onChange={v => update('combination', v)}
+                  options={COMBINATION_OPTIONS}
+                  placeholder="Select combinations..."
+                />
+              </div>
+              {combinationError && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                  <p className="text-[12px] text-red-600 font-medium">Combination is required</p>
+                </div>
+              )}
+            </div>
+
+            {/* Product Type */}
+            <div className="mb-4">
+              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                Product Type <span className="text-red-500">*</span>
+              </label>
+              <div className={productTypeError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                <MultiSelectDropdown
+                  value={form.productType}
+                  onChange={v => update('productType', v)}
+                  options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
+                  placeholder="Select product type..."
+                />
+              </div>
+              {productTypeError && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                  <p className="text-[12px] text-red-600 font-medium">Product Type is required</p>
+                </div>
+              )}
+            </div>
+
+            {/* Project Manager */}
+            <div className="mb-4">
+              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                Project Manager {!isPreSalesQueue && <span className="text-red-500">*</span>}
+              </label>
+              <div className={projectManagerError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                <MultiSelectDropdown
+                  value={form.projectManager}
+                  onChange={v => update('projectManager', v)}
+                  options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan']}
+                  placeholder="Select project manager..."
+                />
+              </div>
+              {projectManagerError && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                  <p className="text-[12px] text-red-600 font-medium">Project Manager is required</p>
+                </div>
+              )}
             </div>
 
             {/* Dynamic custom fields */}
@@ -426,12 +642,13 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   className="w-full pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   {spaces.map(s => (
-                    <option key={s.key} value={s.key}>{s.name} ({s.key})</option>
+                    <option key={s.key} value={s.key}>{s.name}</option>
                   ))}
                 </select>
                 <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
               </div>
             </div>
+
 
             {/* Work type */}
             <div className="mb-4">
@@ -464,13 +681,34 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   onChange={e => update('statusId', e.target.value)}
                   className="w-full px-3 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  {spaceStatuses.map(s => (
+                  {sortedStatuses.map(s => (
                     <option key={s.id} value={s.id}>{s.name}</option>
                   ))}
                 </select>
                 <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
               </div>
             </div>
+
+            {/* Queue — which department/queue this ticket lands in */}
+            {queueOptions.length > 0 && (
+              <div className="mb-4">
+                <label className="block text-[12px] font-semibold text-gray-500 mb-1">
+                  Queue <span className="text-red-500">*</span>
+                </label>
+                <DeptDropdown
+                  value={form.department}
+                  onChange={v => update('department', v)}
+                  options={queueOptions}
+                  error={queueError}
+                />
+                {queueError && (
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                    <p className="text-[12px] text-red-600 font-medium">Queue is required</p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Priority */}
             <div className="mb-4">
@@ -495,7 +733,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   className={`w-full ${selectedAssignee ? 'pl-8' : 'pl-3'} pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500`}
                 >
                   <option value="">Unassigned</option>
-                  {spaceMembers.map(m => (
+                  {user && assigneeOptions.some(m => m.id === user.id) && <option value={user.id}>Assign to me</option>}
+                  {assigneeOptions.map(m => (
                     <option key={m.id} value={m.id}>{m.firstName} {m.lastName}</option>
                   ))}
                 </select>
@@ -516,17 +755,6 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
             <hr className="my-3 border-gray-200" />
 
-            {/* Story Points & Due Date */}
-            <div className="mb-3">
-              <label className="block text-[12px] font-semibold text-gray-500 mb-1">Story Points</label>
-              <input
-                type="number"
-                value={form.storyPoints}
-                onChange={e => update('storyPoints', e.target.value)}
-                className="w-full px-3 py-1.5 border border-gray-200 rounded-lg text-[12px] bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                min="0" max="100" placeholder="0"
-              />
-            </div>
             <div className="mb-4">
               <label className="block text-[12px] font-semibold text-gray-500 mb-1">Due Date</label>
               <input
@@ -540,16 +768,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         </div>
 
         {/* ── Footer ── */}
-        <div className="flex items-center justify-between px-6 py-3.5 border-t border-gray-200 bg-white rounded-b-xl">
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={createAnother}
-              onChange={e => setCreateAnother(e.target.checked)}
-              className="w-3.5 h-3.5 rounded border-gray-300 accent-blue-600"
-            />
-            <span className="text-[13px] text-gray-700">Create another</span>
-          </label>
+        <div className="flex items-center justify-end px-6 py-3.5 border-t border-gray-200 bg-white rounded-b-xl">
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -560,10 +779,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             </button>
             <button
               onClick={handleSubmit}
-              disabled={loading}
+              disabled={loading || uploading}
+              title={uploading ? 'Waiting for attachments to finish uploading…' : undefined}
               className="px-6 py-1.5 text-[13px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {loading ? 'Creating…' : 'Create'}
+              {loading ? 'Creating…' : uploading ? 'Uploading…' : 'Create'}
             </button>
           </div>
         </div>

@@ -42,7 +42,7 @@ const TEMPLATES = [
   },
 ];
 
-const toBackendType = (t: string) => t === 'hr' ? 'kanban' : t === 'dept_queue' ? 'service_desk' : t;
+const toBackendType = (t: string) => t === 'hr' ? 'kanban' : t;
 
 function CreateSpaceModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const createSpace = useStore((s) => s.createSpace);
@@ -281,9 +281,11 @@ function SpacesInner() {
               placeholder="Search spaces..."
               className="pl-9 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl text-[13px] text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-violet-500 w-52 shadow-sm" />
           </div>
-          <button onClick={() => setShowCreate(true)} className="btn-primary flex items-center gap-2">
-            <Plus size={14} /> New Space
-          </button>
+          {user?.role === 'admin' && (
+            <button onClick={() => setShowCreate(true)} className="btn-primary flex items-center gap-2">
+              <Plus size={14} /> New Space
+            </button>
+          )}
         </div>
       </div>
 

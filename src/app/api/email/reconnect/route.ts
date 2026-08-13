@@ -22,8 +22,7 @@ export async function POST(req: NextRequest) {
 
   // Ensure persistent processed_emails table exists and pre-load all processed message IDs
   try {
-    const { Pool } = await import('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+    const { pgPool: pool } = await import('@/lib/pg-pool');
 
     // Create the table if it doesn't exist (survives ticket deletions)
     await pool.query(`
@@ -42,24 +41,49 @@ export async function POST(req: NextRequest) {
 
     // Load ALL processed message IDs from the dedicated table
     const res = await pool.query(`SELECT message_id FROM processed_emails`);
-    await pool.end();
 
-    // Always REPLACE the in-memory set with the DB contents so any emails that
-    // failed (webhook returned ok:false) and were wrongly added to in-memory
-    // get a fresh retry on the next poll cycle.
-    const processedIds: Set<string> = new Set();
+    // MERGE the DB contents into the existing in-memory set — never replace
+    // it outright. This used to build a brand-new Set from just the DB rows
+    // and swap it in wholesale, on the theory that anything missing from the
+    // DB had failed and deserved "a fresh retry." That was true when only
+    // successful ticket-creations were ever persisted. Now that permanent
+    // failures (e.g. "no space found for this address") are also persisted
+    // immediately when the webhook returns them, replacing the whole set on
+    // every reconnect call (fired automatically on page load, at most once
+    // per browser session per 10 minutes — but that adds up fast across a
+    // whole team's simultaneous sessions) could race a just-written DB
+    // insert and silently un-mark it, making it eligible for retry again.
+    // Merging only ever adds — it can't undo an in-memory mark that hasn't
+    // reached the DB yet for any reason.
+    const processedIds: Set<string> = (globalThis as any).__processedMsgIds || new Set();
     res.rows.forEach((r: any) => { if (r.message_id) processedIds.add(r.message_id); });
     (globalThis as any).__processedMsgIds = processedIds;
     (globalThis as any).__processedMsgIdsLoaded = true;
-    console.log(`[Reconnect] Reloaded ${processedIds.size} processed message IDs from DB (in-memory reset)`);
+    console.log(`[Reconnect] Merged ${res.rows.length} processed message IDs from DB (now tracking ${processedIds.size} total)`);
   } catch (e) { console.error('[Reconnect] Failed to pre-load processed IDs:', e); }
 
   const emails = getAllOAuthEmails();
   const started: string[] = [];
 
-  for (const email of emails) {
+  // Process mailboxes in bounded-concurrency batches instead of one at a
+  // time. getValidAccessToken() below does a real network round trip to
+  // Microsoft's OAuth endpoint whenever a token needs refreshing — several
+  // accounts are permanently stuck in a consent-required failure state, so
+  // they retry that full round trip on every single call. Awaiting 35+ of
+  // these sequentially could take tens of seconds, all while this request
+  // (fired automatically on every page's first load per session, see
+  // RootLayoutClient) holds open DB connections that compete with whatever
+  // page the user actually just loaded (e.g. the Filters page's own query).
+  const RECONNECT_CONCURRENCY = 6;
+  async function processInBatches<T>(items: T[], worker: (item: T) => Promise<void>) {
+    for (let i = 0; i < items.length; i += RECONNECT_CONCURRENCY) {
+      await Promise.all(items.slice(i, i + RECONNECT_CONCURRENCY).map(worker));
+    }
+  }
+
+  await processInBatches(emails, async (email) => {
     const tokens = getOAuthTokens(email);
-    if (!tokens) continue;
+    if (!tokens) return;
 
     // Determine spaceKey: hint → stored in token → derive from email prefix
     const prefix = email.split('@')[0].toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -71,12 +95,12 @@ export async function POST(req: NextRequest) {
     // Skip if already running with the correct spaceKey
     if (isPollerActiveForEmail(email)) {
       console.log(`[Reconnect] Poller already active for ${email} → space ${spaceKey}`);
-      continue;
+      return;
     }
 
     try {
       const accessToken = await getValidAccessToken(email);
-      if (!accessToken) continue;
+      if (!accessToken) return;
 
       startImapPoller(
         {
@@ -123,12 +147,11 @@ export async function POST(req: NextRequest) {
     } catch (err) {
       console.error(`[Reconnect] Failed for ${email}:`, err);
     }
-  }
+  });
 
   // ── Load ALL boards' email configs from DB and restart any missing pollers ──
   try {
-    const { Pool } = await import('pg');
-    const pool2 = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+    const { pgPool: pool2 } = await import('@/lib/pg-pool');
 
     // Ensure table exists (in case it was never created yet)
     await pool2.query(`
@@ -149,15 +172,16 @@ export async function POST(req: NextRequest) {
     `);
 
     const dbResult = await pool2.query('SELECT * FROM email_configs ORDER BY created_at');
-    await pool2.end();
 
-    for (const row of dbResult.rows) {
+    // Same bounded-concurrency treatment as the loop above — each row can
+    // also trigger a real OAuth token refresh network call.
+    await processInBatches(dbResult.rows, async (row: any) => {
       const emailAddr: string = row.address;
 
       // Skip if already running
       if (isPollerActiveForEmail(emailAddr)) {
         console.log(`[Reconnect] DB poller already active for ${emailAddr} → space ${row.space_key}`);
-        continue;
+        return;
       }
 
       // Try to get OAuth token first
@@ -177,7 +201,7 @@ export async function POST(req: NextRequest) {
       const hasPassword = !!(row.password_enc);
       if (!accessToken && !hasPassword) {
         console.log(`[Reconnect] No credentials for ${emailAddr} — skipping`);
-        continue;
+        return;
       }
 
       const isOAuth = !!accessToken;
@@ -227,7 +251,7 @@ export async function POST(req: NextRequest) {
 
       started.push(emailAddr);
       console.log(`[Reconnect] ✅ Started DB-configured poller for ${emailAddr} → space ${row.space_key}`);
-    }
+    });
   } catch (e) {
     console.error('[Reconnect] Failed to load DB email configs:', e);
   }

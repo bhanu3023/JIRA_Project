@@ -1,7 +1,7 @@
 ﻿'use client';
 
 import { useState, useEffect, Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { Search } from 'lucide-react';
@@ -9,9 +9,20 @@ import { formatDate, getIssueStatus } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { PriorityIcon } from '@/components/ui/PriorityIcon';
 
+function extractIssueKey(input: string): string | null {
+  const urlMatch = input.match(/\/issues\/([A-Za-z0-9_-]+(?:-[A-Za-z0-9]+)*)(?:\?|#|$)/);
+  if (urlMatch) return urlMatch[1];
+  const keyMatch = input.trim().match(/^(CF-\d+|[A-Z][A-Z0-9]+-\d+)$/i);
+  if (keyMatch) return keyMatch[1].toUpperCase();
+  return null;
+}
+
 function SearchInner() {
   const searchParams = useSearchParams();
-  const [query, setQuery] = useState(searchParams.get('q') || '');
+  const router = useRouter();
+  const rawQuery = searchParams.get('q') || '';
+  const issueKey = extractIssueKey(rawQuery);
+  const [query, setQuery] = useState(issueKey || rawQuery);
   const [results, setResults] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -19,6 +30,11 @@ function SearchInner() {
 
   const handleSearch = async (q = query) => {
     if (!q.trim()) return;
+    const key = extractIssueKey(q);
+    if (key) {
+      router.push(`/issues/${key}`);
+      return;
+    }
     setLoading(true);
     try {
       const data = await api.search(q, 1);
@@ -33,6 +49,10 @@ function SearchInner() {
   };
 
   useEffect(() => {
+    if (issueKey) {
+      router.replace(`/issues/${issueKey}`);
+      return;
+    }
     if (query) handleSearch(query);
   }, []);
 

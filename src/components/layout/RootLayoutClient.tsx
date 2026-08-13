@@ -26,13 +26,19 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
     loadUser();
   }, [loadUser]);
 
-  // Auto-reconnect IMAP pollers on app startup (restores pollers after server hot-reload)
+  // Auto-reconnect IMAP pollers once per authenticated session (not on auth pages)
   useEffect(() => {
+    if (isAuthPage) return;
+    const sessionKey = 'pollers_reconnected_at';
+    const last = Number(sessionStorage.getItem(sessionKey) || 0);
+    // Only reconnect at most once every 10 minutes to avoid hammering the server
+    if (Date.now() - last < 10 * 60 * 1000) return;
+    sessionStorage.setItem(sessionKey, String(Date.now()));
     fetch('/api/email/reconnect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       .then(r => r.json())
       .then(d => { if (d.started?.length) console.log('[App] Auto-reconnected pollers:', d.started); })
       .catch(() => {});
-  }, []);
+  }, [isAuthPage]);
 
   // Redirect to login if not authenticated after init
   useEffect(() => {
@@ -55,13 +61,15 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
 
   return (
     <div className="flex h-screen overflow-hidden bg-white">
-      <NavigationLoader />
       {isAuthenticated && <Sidebar />}
       <div
         className={`flex flex-1 flex-col overflow-hidden ${isAuthenticated && sidebarOpen ? 'ml-72' : isAuthenticated ? 'ml-[60px]' : ''}`}
       >
         {isAuthenticated && <Header />}
-        <main className="flex-1 overflow-auto bg-white">{children}</main>
+        <div className="relative flex-1 overflow-hidden">
+          <NavigationLoader />
+          <main className="h-full overflow-auto bg-white">{children}</main>
+        </div>
       </div>
     </div>
   );

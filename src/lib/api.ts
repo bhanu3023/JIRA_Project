@@ -7,7 +7,50 @@ class ApiClient {
     return localStorage.getItem('jira_token');
   }
 
+  // Coalesce identical concurrent GET requests into one network call. The sidebar
+  // and the page it's rendered alongside each independently fetch the same
+  // custom-queues/rr-config data for the same space on every load — this cuts
+  // that duplication (and any other accidental double-fetch) without needing to
+  // restructure which component owns the data.
+  private inFlightGets = new Map<string, Promise<any>>();
+
+  // The in-flight map above only catches callers that overlap WHILE the first
+  // request is still pending. Every actual duplicate-fetch bug found in this
+  // app (sidebar + page each independently fetching custom-fields, custom-
+  // queues/:key, rr-config, or the plain spaces list on the same page load)
+  // was two callers just far enough apart in time to miss that window — not
+  // simultaneous, just both firing on mount a few effects apart. Rather than
+  // hunting down and merging each new instance of that pattern as it's found,
+  // keep the resolved value around briefly for exactly this class of endpoint:
+  // static/config data that doesn't need to reflect a mutation a moment ago.
+  // Deliberately NOT applied to issues/notifications/anything else that does.
+  private static STATIC_GET_PATTERNS = [/^custom-fields$/, /^custom-queues\//, /\/rr-config$/, /^spaces$/];
+  private static STATIC_CACHE_MS = 5000;
+
   async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const method = (options.method || 'GET').toUpperCase();
+    if (method === 'GET') {
+      // Normalize so callers using "spaces/x" vs "/spaces/x" still coalesce —
+      // they resolve to the same URL below but would otherwise miss each other.
+      const dedupKey = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
+      const existing = this.inFlightGets.get(dedupKey);
+      if (existing) return existing as Promise<T>;
+      const isStatic = ApiClient.STATIC_GET_PATTERNS.some((re) => re.test(dedupKey));
+      const promise = this.requestUncoalesced<T>(endpoint, options);
+      promise.then(
+        () => {
+          if (isStatic) setTimeout(() => this.inFlightGets.delete(dedupKey), ApiClient.STATIC_CACHE_MS);
+          else this.inFlightGets.delete(dedupKey);
+        },
+        () => { this.inFlightGets.delete(dedupKey); }, // always drop on failure so a retry can go straight to the network
+      );
+      this.inFlightGets.set(dedupKey, promise);
+      return promise;
+    }
+    return this.requestUncoalesced<T>(endpoint, options);
+  }
+
+  private async requestUncoalesced<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const method = (options.method || 'GET').toUpperCase();
     const skipAuthHeader =
       method === 'POST' && (endpoint === '/auth/login' || endpoint === '/auth/register');
@@ -60,6 +103,10 @@ class ApiClient {
       throw new Error(errMsg);
     }
 
+    if (res.status === 413) {
+      throw new Error('That request is too large — the description or an attached image/file is too big. Try a smaller image or remove an attachment and try again.');
+    }
+
     if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
     return data as T;
   }
@@ -79,6 +126,11 @@ class ApiClient {
 
   getMe() {
     return this.request<any>('/auth/me');
+  }
+
+  getMyDashboard(params?: { from?: string; to?: string; userId?: string }) {
+    const qs = params ? new URLSearchParams(params as Record<string, string>).toString() : '';
+    return this.request<any>(`/my-dashboard${qs ? `?${qs}` : ''}`);
   }
 
   // Users
@@ -111,9 +163,9 @@ class ApiClient {
   addIssueLink(key: string, data: { targetKey: string; linkType: string }) { return this.addLink(key, data); }
   deleteIssueLink(linkId: string) { return this.request<any>(`/issues/links/${linkId}`, { method: 'DELETE' }); }
 
-  uploadAttachment(key: string, file: File) {
+  uploadAttachment(key: string, file: File, displayName?: string) {
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', file, displayName || file.name);
     return this.request<any>(`/issues/${key}/attachments`, { method: 'POST', body: formData });
   }
 

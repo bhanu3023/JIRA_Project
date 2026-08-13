@@ -26,7 +26,7 @@ export interface OAuthTokens {
   spaceKey?:    string; // the space this email account belongs to
 }
 
-// ── In-memory store + file-based persistence ─────────────────────────────────
+// ── In-memory store + DB persistence (survives container rebuilds) ────────────
 import fs from 'fs';
 import path from 'path';
 
@@ -34,13 +34,62 @@ const TOKEN_FILE = path.join(process.cwd(), '.oauth-tokens.json');
 
 declare global { var __oauthTokenStore: Map<string, OAuthTokens> | undefined; }
 
-export function reloadTokensFromDisk() {
-  const fresh = loadTokensFromDisk();
-  for (const [k, v] of fresh.entries()) {
-    globalThis.__oauthTokenStore!.set(k, v);
+// ── DB helpers ────────────────────────────────────────────────────────────────
+// All three used to open a BRAND NEW Pool (a real Postgres connection) and
+// close it again on every single call. saveTokensToDB in particular runs on
+// every OAuth token refresh — with dozens of mailboxes refreshing
+// continuously, that was a constant churn of extra connections competing
+// with every other pool in the app for the same finite max_connections,
+// causing unrelated features (login, JWT verification, the monitor agent) to
+// intermittently fail to get a connection. Now uses the one shared pool.
+async function ensureOAuthTable() {
+  const { pgPool: pool } = await import('@/lib/pg-pool');
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS oauth_tokens (
+        email       TEXT PRIMARY KEY,
+        tokens_json TEXT NOT NULL,
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } catch {}
+}
+
+async function saveTokensToDB(email: string, tokens: OAuthTokens) {
+  const { pgPool: pool } = await import('@/lib/pg-pool');
+  try {
+    await pool.query(`
+      INSERT INTO oauth_tokens (email, tokens_json, updated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (email) DO UPDATE SET tokens_json = EXCLUDED.tokens_json, updated_at = NOW()
+    `, [email.toLowerCase(), JSON.stringify(tokens)]);
+  } catch (e) {
+    console.error('[OAuthService] Failed to persist tokens to DB:', e);
   }
 }
 
+async function loadTokensFromDB(): Promise<Map<string, OAuthTokens>> {
+  const { pgPool: pool } = await import('@/lib/pg-pool');
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS oauth_tokens (
+        email TEXT PRIMARY KEY, tokens_json TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `).catch(() => {});
+    const rows = await pool.query(`SELECT email, tokens_json FROM oauth_tokens`);
+    const map = new Map<string, OAuthTokens>();
+    for (const row of rows.rows) {
+      try { map.set(row.email, JSON.parse(row.tokens_json)); } catch {}
+    }
+    console.log(`[OAuthService] Loaded ${map.size} OAuth token(s) from DB`);
+    return map;
+  } catch (e) {
+    console.error('[OAuthService] Failed to load tokens from DB:', e);
+    return new Map();
+  }
+}
+
+// ── File helpers (kept for local dev fallback) ────────────────────────────────
 function loadTokensFromDisk(): Map<string, OAuthTokens> {
   try {
     if (fs.existsSync(TOKEN_FILE)) {
@@ -57,18 +106,42 @@ function saveTokensToDisk(store: Map<string, OAuthTokens>) {
     const obj: Record<string, OAuthTokens> = {};
     for (const [k, v] of store.entries()) obj[k] = v;
     fs.writeFileSync(TOKEN_FILE, JSON.stringify(obj, null, 2), 'utf8');
-  } catch (e) {
-    console.error('[OAuthService] Failed to persist tokens:', e);
-  }
+  } catch {}
 }
 
+// ── Initialise: load from file first (sync, fast), then overlay DB (async) ────
 if (!globalThis.__oauthTokenStore) {
   globalThis.__oauthTokenStore = loadTokensFromDisk();
+  // Async: overlay with DB tokens (DB wins — it has the latest after a rebuild).
+  // Also migrate any file-only tokens to DB so they survive future container rebuilds.
+  loadTokensFromDB().then(dbTokens => {
+    for (const [k, v] of dbTokens.entries()) {
+      globalThis.__oauthTokenStore!.set(k, v);
+    }
+    // Migration: save tokens that are in the file but not yet in DB
+    for (const [k, v] of globalThis.__oauthTokenStore!.entries()) {
+      if (!dbTokens.has(k)) {
+        console.log(`[OAuthService] Migrating file token to DB for ${k}`);
+        saveTokensToDB(k, v);
+      }
+    }
+  }).catch(() => {});
+}
+
+export function reloadTokensFromDisk() {
+  const fresh = loadTokensFromDisk();
+  for (const [k, v] of fresh.entries()) globalThis.__oauthTokenStore!.set(k, v);
+  // Also reload from DB
+  loadTokensFromDB().then(dbTokens => {
+    for (const [k, v] of dbTokens.entries()) globalThis.__oauthTokenStore!.set(k, v);
+  }).catch(() => {});
 }
 
 export function storeOAuthTokens(email: string, tokens: OAuthTokens) {
   globalThis.__oauthTokenStore!.set(email.toLowerCase(), tokens);
-  saveTokensToDisk(globalThis.__oauthTokenStore!);
+  saveTokensToDisk(globalThis.__oauthTokenStore!);   // local file (fast)
+  saveTokensToDB(email, tokens);                      // DB (survives rebuilds)
+  ensureOAuthTable();                                 // no-op after first call
 }
 
 export function getOAuthTokens(email: string): OAuthTokens | undefined {
@@ -170,13 +243,17 @@ async function refreshGoogleToken(tokens: OAuthTokens): Promise<string | null> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-export function getMicrosoftAuthUrl(redirectUri: string, state: string, loginHint = ''): string {
+export function getMicrosoftAuthUrl(redirectUri: string, state: string, loginHint = '', mode: 'login' | 'email' = 'email'): string {
+  // Login only needs identity scopes. Email mode also needs Mail scopes for IMAP/Graph.
+  const scope = mode === 'login'
+    ? 'openid profile email offline_access'
+    : 'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile';
   const params = new URLSearchParams({
     client_id:     process.env.MICROSOFT_CLIENT_ID!,
     response_type: 'code',
     response_mode: 'query',
     redirect_uri:  redirectUri,
-    scope:         'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile',
+    scope,
     prompt:        'select_account',
     state,
   });
@@ -209,7 +286,10 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   }
 }
 
-export async function exchangeMicrosoftCode(code: string, redirectUri: string): Promise<{ tokens: OAuthTokens; email: string; name: string } | null> {
+export async function exchangeMicrosoftCode(code: string, redirectUri: string, mode: 'login' | 'email' = 'email'): Promise<{ tokens: OAuthTokens; email: string; name: string } | null> {
+  const scope = mode === 'login'
+    ? 'openid profile email offline_access'
+    : 'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile';
   const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
     method:  'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -219,10 +299,14 @@ export async function exchangeMicrosoftCode(code: string, redirectUri: string): 
       client_secret: process.env.MICROSOFT_CLIENT_SECRET!,
       code,
       redirect_uri:  redirectUri,
-      scope:         'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile',
+      scope,
     }),
   });
-  if (!res.ok) { return null; }
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    console.error(`[OAuthService] exchangeMicrosoftCode FAILED (${res.status}):`, errText);
+    return null;
+  }
   const data = await res.json() as Record<string, unknown>;
 
   // ── 1. Try id_token claims first (no extra network call) ───────────────────

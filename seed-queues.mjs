@@ -23,14 +23,11 @@ await pool.query(`
 const spaces = await pool.query(`SELECT id, key, name FROM spaces`);
 
 for (const space of spaces.rows) {
-  // Check if already seeded
   const existing = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [space.key]);
-  if (existing.rows.length > 0 && existing.rows[0].queues.length > 0) {
-    console.log(`✓ ${space.key} (${space.name}) — already has ${existing.rows[0].queues.length} queues, skipping`);
-    continue;
-  }
+  const existingQueues = existing.rows.length > 0 ? existing.rows[0].queues : [];
+  const existingNames = new Set(existingQueues.map((q) => (q.name || '').toLowerCase()));
 
-  // Get departments used in this space
+  // Get departments actually in use in this space's real ticket data
   const depts = await pool.query(`
     SELECT DISTINCT current_department
     FROM issues
@@ -39,25 +36,40 @@ for (const space of spaces.rows) {
   `, [space.id]);
 
   if (depts.rows.length === 0) {
-    console.log(`⚠ ${space.key} (${space.name}) — no departments found, skipping`);
+    console.log(existingQueues.length > 0
+      ? `✓ ${space.key} (${space.name}) — already has ${existingQueues.length} queues, no department data to check against`
+      : `⚠ ${space.key} (${space.name}) — no departments found, skipping`);
     continue;
   }
 
-  // Build queue objects from departments
-  const queues = depts.rows.map((d, i) => ({
+  // Only ADD departments missing from the existing list — never touch/remove/reorder
+  // existing entries, so per-queue config (queueStatuses, memberIds, etc.) already set
+  // on a queue survives. A space that "already has queues" can still be missing some:
+  // e.g. a non-admin member's GET/PUT round-trip on their own queue's settings used to
+  // silently drop every other queue from this same array (fixed elsewhere), which is
+  // exactly the kind of gap this merge step now repairs on the next deploy instead of
+  // requiring a manual DB fix.
+  const missing = depts.rows.filter((d) => !existingNames.has((d.current_department || '').toLowerCase()));
+  if (missing.length === 0) {
+    console.log(`✓ ${space.key} (${space.name}) — already has all ${existingQueues.length} known department queue(s)`);
+    continue;
+  }
+
+  const newQueues = missing.map((d, i) => ({
     id: `cq_${Date.now() + i}`,
     name: d.current_department,
     memberIds: []
   }));
+  const merged = [...existingQueues, ...newQueues];
 
   await pool.query(
     `INSERT INTO custom_queues (space_key, queues, updated_at) VALUES ($1, $2, NOW())
      ON CONFLICT (space_key) DO UPDATE SET queues = EXCLUDED.queues, updated_at = NOW()`,
-    [space.key, JSON.stringify(queues)]
+    [space.key, JSON.stringify(merged)]
   );
 
-  console.log(`✅ ${space.key} (${space.name}) — seeded ${queues.length} queues:`);
-  queues.forEach(q => console.log(`   - ${q.name} (${q.id})`));
+  console.log(`✅ ${space.key} (${space.name}) — had ${existingQueues.length}, merged in ${newQueues.length} missing queue(s), now ${merged.length} total:`);
+  newQueues.forEach((q) => console.log(`   + ${q.name} (${q.id})`));
 }
 
 await pool.end();
