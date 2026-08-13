@@ -1485,7 +1485,7 @@ async function _handleJiraPgApi(
     try {
       await pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`);
       const rows = await pool.query(
-        `SELECT i.id, i.key, i.title, i.priority, i.type, i."createdAt", i."updatedAt", qct.closed_at,
+        `SELECT i.id, i.key, i.cf_key AS "cfKey", i.summary, i.priority, i.type, i."createdAt", i."updatedAt", qct.closed_at,
                 s.name AS status_name, s.color AS status_color, s.category AS status_category,
                 CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
                 a.id AS assignee_id
@@ -3010,6 +3010,62 @@ async function _handleJiraPgApi(
         ).catch(() => {});
       }
 
+      // Resolved/closed in a dept other than where the ticket originated â€” drop a
+      // "Worked on" copy for the resolving dept, then send the ticket back to its
+      // origin queue so it doesn't stay stranded away from home.
+      if (newStRec?.category === 'done') {
+        try {
+          const deptRow = await pool.query(
+            `SELECT current_department, original_dept, dept_assignees FROM issues WHERE id=$1`,
+            [issue.id]
+          );
+          const resolvingDept: string = deptRow.rows[0]?.current_department || '';
+          const homeDept: string = deptRow.rows[0]?.original_dept || '';
+          if (resolvingDept && homeDept && resolvingDept.toLowerCase() !== homeDept.toLowerCase()) {
+            // Copy into the resolving dept's "Worked on" list
+            await pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`);
+            await pool.query(
+              `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+              [issue.spaceId, resolvingDept, issue.id]
+            );
+            await pauseDeptSLA(key, null, resolvingDept);
+
+            // Move the ticket back to its origin dept, restoring whoever was
+            // handling it there before it was passed along.
+            const deptAssignees: Record<string, any> = deptRow.rows[0]?.dept_assignees || {};
+            const homeAssignee = deptAssignees[homeDept];
+            const restoreAssigneeId: string | null = homeAssignee?.id || null;
+            await pool.query(
+              `UPDATE issues SET current_department=$1, "assigneeId"=$2, "updatedAt"=NOW() WHERE id=$3`,
+              [homeDept, restoreAssigneeId, issue.id]
+            );
+            await pool.query(
+              `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept) VALUES ($1, $2, $3, $4)`,
+              [issue.id, issue.spaceId, resolvingDept, homeDept]
+            );
+            await (db as any).issueHistory.create({
+              data: {
+                id: rid(), issueId: issue.id, field: 'department',
+                oldValue: resolvingDept,
+                newValue: `Resolved in ${resolvingDept} â€” returned to ${homeDept}`,
+                authorName: currentUser ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email) : 'System',
+                createdAt: new Date(),
+              },
+            });
+            // Notify whoever now owns it back home, plus the reporter
+            const notifyIds = [restoreAssigneeId, updated.reporterId].filter(Boolean) as string[];
+            if (notifyIds.length) {
+              await notifyUsers(notifyIds, userId, {
+                type: 'DEPT_CHANGE',
+                title: `Ticket ${updated.key} back in ${homeDept}`,
+                message: `Ticket "${updated.summary}" was resolved in ${resolvingDept} and has returned to ${homeDept}.`,
+                issueKey: updated.key,
+              });
+            }
+          }
+        } catch { /* non-critical */ }
+      }
+
       const oldStatusRec = issue.space?.statuses?.find((s: any) => s.id === issue.statusId);
       const changer = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
       notifyStatusChanged({
@@ -3234,25 +3290,6 @@ async function _handleJiraPgApi(
       const aName = authorUser ? (`${authorUser.firstName ?? ''} ${authorUser.lastName ?? ''}`.trim() || authorUser.email) : 'Unknown';
       await (db as any).issueHistory.create({ data: { issueId: issue.id, field: 'comment', oldValue: null, newValue: comment.body.slice(0, 500), authorName: aName, authorEmail: authorUser?.email ?? null, createdAt: new Date() } });
     } catch (_e) {}
-
-    // Track in closed tickets for this dept
-    try {
-      const deptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
-      const dept = deptRow.rows[0]?.current_department;
-      if (dept) {
-        await pool.query(`
-          CREATE TABLE IF NOT EXISTS queue_closed_tickets (
-            id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL,
-            issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(space_id, dept_name, issue_id)
-          )
-        `);
-        await pool.query(
-          `INSERT INTO queue_closed_tickets (space_id, dept_name, issue_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-          [issue.spaceId, dept, issue.id]
-        );
-      }
-    } catch (e) { /* non-fatal */ }
 
     // Email: notify assignee + reporter (not the commenter)
     notifyCommentAdded({
