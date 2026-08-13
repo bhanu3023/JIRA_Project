@@ -15,6 +15,15 @@ const CACHE_TTL = 30_000; // 30 seconds stale-while-revalidate
 // Tracks which queue is currently active so background fetches don't overwrite the display
 let activeQueueKey = '';
 
+// Tracks which issue key is currently the one the detail page wants displayed —
+// mirrors activeQueueKey's role above. loadIssue previously had no such guard:
+// clicking from one ticket into another (e.g. a subtask link) fires a new
+// loadIssue() call while a still-in-flight one for the PREVIOUS ticket can
+// resolve afterward and silently overwrite currentIssue with the wrong
+// ticket's data — the page then either shows the old ticket again or gets
+// stuck if the two calls's resolve order flips loading state back and forth.
+let activeIssueKey = '';
+
 interface AppState {
   // Auth
   user: User | null;
@@ -221,11 +230,16 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   loadIssue: async (key) => {
+    activeIssueKey = key;
     try {
       const issue = await api.getIssue(key);
-      set({ currentIssue: issue });
+      // Only apply this response if no newer loadIssue() call has superseded
+      // it in the meantime — otherwise a slow fetch for a ticket the user has
+      // already navigated away from can win the race and overwrite the
+      // ticket that's actually on screen now.
+      if (activeIssueKey === key) set({ currentIssue: issue });
     } catch {
-      set({ currentIssue: null });
+      if (activeIssueKey === key) set({ currentIssue: null });
     }
   },
   createIssue: async (data) => {

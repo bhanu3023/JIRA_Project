@@ -477,10 +477,24 @@ export default function RichTextEditor({
       emit();
       return;
     }
-    // Plain text: insert as-is
+    // Plain text: preserve indentation and repeated spaces exactly as pasted.
+    // execCommand('insertText', ...) inserts the literal characters, but the
+    // editor's default white-space:normal flow then collapses every run of
+    // spaces down to one at render time — pasting an indented JSON/code blob
+    // came through with every nesting level flattened against the left
+    // margin, reading as a jumbled single-spaced blob instead of the
+    // original structure. Wrapping the inserted text in a
+    // white-space:pre-wrap span keeps indentation/alignment intact while
+    // still wrapping normally at long lines (unlike plain "pre", which never
+    // wraps at all).
     if (plainText) {
       e.preventDefault();
-      document.execCommand('insertText', false, plainText);
+      editorRef.current?.focus();
+      const escaped = plainText
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      document.execCommand('insertHTML', false, `<span style="white-space:pre-wrap">${escaped}</span>`);
     }
     setTimeout(emit, 0);
   };
@@ -659,7 +673,7 @@ export default function RichTextEditor({
         onDragOver={e => e.preventDefault()}
         data-placeholder={placeholder}
         className={`
-          px-3 py-2.5 text-sm text-gray-800 outline-none leading-relaxed
+          px-3 py-2.5 text-sm text-gray-800 outline-none leading-relaxed break-words
           [&_h2]:text-base [&_h2]:font-bold [&_h2]:mt-2 [&_h2]:mb-1
           [&_h3]:text-sm  [&_h3]:font-bold [&_h3]:mt-2 [&_h3]:mb-1
           [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1

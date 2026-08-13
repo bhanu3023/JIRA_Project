@@ -3997,6 +3997,20 @@ async function _handleJiraPgApi(
           updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
           changes: [{ field: 'Department', from: oldDept || 'None', to: newDept }],
         }).catch(() => {});
+        // The "Department" email above never says WHO the ticket is now
+        // assigned to — a separate "Issue Assigned" email is what actually
+        // carries that, and it only fires here when the transfer changed
+        // the assignee (round-robin picked someone new, or restored someone
+        // different from who had it before leaving oldDept).
+        if (rrAssigneeId && rrAssigneeId !== issue.assigneeId) {
+          notifyIssueAssigned({
+            key: updatedIssue.key, summary: updatedIssue.summary, priority: updatedIssue.priority,
+            spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
+            status: { name: updatedIssue.status?.name ?? newStatusName, category: updatedIssue.status?.category ?? 'todo' },
+            assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
+            previousAssignee: issue.assignee,
+          }).catch(() => {});
+        }
       }
       fireConnectorEvent({
         event: 'issue.department_changed', timestamp: new Date().toISOString(),
@@ -4123,6 +4137,41 @@ async function _handleJiraPgApi(
         authorName: 'System', createdAt: new Date(),
       },
     });
+
+    // Notify the reporter + newly round-robined assignee about this
+    // cross-board department pass — this branch previously sent NO
+    // notification at all (no email, no in-app bell), so a reporter whose
+    // ticket got routed to a different board's queue never found out.
+    try {
+      const newAssigneeUser = rrAgent?.userId
+        ? await db.user.findUnique({ where: { id: rrAgent.userId } })
+        : null;
+      const targetStatusCategory = firstStatus?.category ?? 'todo';
+      notifyIssueUpdated({
+        key: newKey, summary: issue.summary, priority: issue.priority,
+        spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
+        status: { name: newStatusName, category: targetStatusCategory },
+        assignee: newAssigneeUser, reporter: issue.reporter,
+        updatedBy: authorUser,
+        changes: [{ field: 'Department', from: (issue as any).current_department || 'None', to: newDept }],
+      }).catch(() => {});
+      if (newAssigneeUser) {
+        notifyIssueAssigned({
+          key: newKey, summary: issue.summary, priority: issue.priority,
+          spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
+          status: { name: newStatusName, category: targetStatusCategory },
+          assignee: newAssigneeUser, reporter: issue.reporter,
+        }).catch(() => {});
+      }
+      const inAppIds = [issue.reporterId, newAssigneeUser?.id].filter((id): id is string => !!id);
+      if (inAppIds.length) {
+        notifyUsers(
+          inAppIds,
+          userId,
+          { type: 'DEPT_CHANGE', title: `Ticket ${newKey} created in ${targetSpace.key}`, message: `"${issue.summary}" was passed to ${newDept} on ${targetSpace.key} as ${newKey}.`, issueKey: newKey }
+        ).catch(() => {});
+      }
+    } catch { /* notification failures shouldn't block the transfer */ }
 
     return json({ ok: true, department: newDept, newKey, targetBoardKey: targetSpace.key, assignee: rrAgent, newStatus: newStatusName });
   }
@@ -4711,6 +4760,17 @@ async function _handleJiraPgApi(
                 assignee: refreshed.assignee, reporter: refreshed.reporter,
                 changedBy: changer,
               }).catch(() => {});
+              // This branch returns early right below, so it never reached the
+              // generic "Status changed?" block further down that normally
+              // sends the in-app bell notification -- a queue-scoped status
+              // change (e.g. picking "Waiting for Dev" from a queue's own
+              // dropdown) updated the email but left the bell silent for both
+              // reporter and assignee.
+              notifyUsers(
+                [refreshed.assigneeId, refreshed.reporterId],
+                userId,
+                { type: 'STATUS_CHANGED', title: `${refreshed.key} status → ${String(body.queueStatusName || '')}`, message: refreshed.summary, issueKey: refreshed.key }
+              ).catch(() => {});
               // current_department/dept_statuses/etc. are raw-SQL columns, not
               // part of the Prisma schema -- db.issue.findUnique above never
               // returns them, so without this merge the response would still
@@ -4760,7 +4820,7 @@ async function _handleJiraPgApi(
       } catch {}
     }
 
-    const updated = await db.issue.update({
+    let updated = await db.issue.update({
       where: { key },
       data: data as any,
       include: {
@@ -4803,6 +4863,18 @@ async function _handleJiraPgApi(
           );
           deptHandoffDone = true;
           console.log(`[DeptHandoff] ${issue.key}: ${handoffOldDept} → ${handoffTargetDept}`);
+          // performDeptHandoff just reassigned the ticket via raw SQL (restore
+          // or round-robin) — but `updated` above was fetched via Prisma BEFORE
+          // this ran, so it still shows whoever had the ticket prior to the
+          // handoff. Without this refetch, the notification block below
+          // (which reads `updated.assignee`/`updated.assigneeId`) emails and
+          // bell-notifies the WRONG (old) assignee instead of the person the
+          // handoff actually assigned it to.
+          const refetchedAfterHandoff = await db.issue.findUnique({
+            where: { key },
+            include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } } },
+          });
+          if (refetchedAfterHandoff) updated = refetchedAfterHandoff;
         } catch (handoffErr: any) {
           console.error(`[DeptHandoff ERROR] ${issue.key}:`, handoffErr?.message || handoffErr);
         }
@@ -4971,8 +5043,16 @@ async function _handleJiraPgApi(
       assignee: updated.assignee, reporter: updated.reporter,
     };
 
+    // Computed up front (rather than an if/else-if chain) so a single PATCH
+    // that changes BOTH status and assignee at once notifies for both --
+    // previously the assignee-changed branch was an "else if" off the
+    // status-changed check, so a combined update silently skipped the
+    // assignee notification entirely.
+    const statusChangedForNotif = body.statusId !== undefined && issue.statusId !== data.statusId;
+    const assigneeChangedForNotif = body.assigneeId !== undefined && issue.assigneeId !== data.assigneeId;
+
     // Status changed?
-    if (body.statusId !== undefined && issue.statusId !== data.statusId) {
+    if (statusChangedForNotif) {
       // If status moved to 'done' category, record worked-on for current assignee
       const newStRec = (issue.space?.statuses ?? []).find((s: any) => s.id === data.statusId);
       if (newStRec?.category === 'done' && updated.assigneeId) {
@@ -4999,7 +5079,7 @@ async function _handleJiraPgApi(
       await notifyWatchers(updated.key, userId, { title: `${updated.key} status → ${issueForNotif.status.name}`, message: updated.summary });
     }
     // Assignee changed?
-    else if (body.assigneeId !== undefined && issue.assigneeId !== data.assigneeId) {
+    if (assigneeChangedForNotif) {
       const prevAssignee = issue.assigneeId ? await db.user.findUnique({ where: { id: issue.assigneeId } }) : null;
       notifyIssueAssigned({ ...issueForNotif, previousAssignee: prevAssignee }).catch(() => {});
       // In-app: notify new assignee + reporter
@@ -5009,8 +5089,9 @@ async function _handleJiraPgApi(
         { type: 'ASSIGNED', title: `${updated.key} assigned to you`, message: updated.summary, issueKey: updated.key }
       );
     }
-    // General update (summary, description, priority, etc.)
-    else if (Object.keys(data).some(k => ['summary','description','priority','type','labels'].includes(k))) {
+    // General update (summary, description, priority, etc.) -- only when
+    // neither of the above already covered this PATCH.
+    if (!statusChangedForNotif && !assigneeChangedForNotif && Object.keys(data).some(k => ['summary','description','priority','type','labels'].includes(k))) {
       const changes: Array<{ field: string; from: string; to: string }> = [];
       if (body.summary !== undefined && body.summary !== issue.summary)
         changes.push({ field: 'Summary', from: String(issue.summary), to: String(body.summary) });

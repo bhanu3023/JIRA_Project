@@ -183,6 +183,12 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
         subject: opts.subject,
         body: { contentType: 'HTML', content: opts.html },
         toRecipients: [{ emailAddress: { address: recipient } }],
+        // Only affects how the sender shows up for recipients OUTSIDE this
+        // mailbox's own Microsoft 365 tenant (e.g. customers on another
+        // domain) — for internal-to-internal mail, Exchange resolves the
+        // sender's display name from the mailbox's own directory entry and
+        // ignores this field entirely, so this can't fix that case.
+        from: { emailAddress: { name: FROM_NAME, address: opts.from } },
       };
       // Thread the email into the original conversation
       if (opts.inReplyTo) {
@@ -433,6 +439,7 @@ export async function notifyStatusChanged(issue: {
 
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
   const isResolved = ['done'].includes(issue.newStatus.category);
+  const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const html = buildEmailHtml({
@@ -445,6 +452,7 @@ export async function notifyStatusChanged(issue: {
     eventColor:   isResolved ? '#10B981' : '#FF991F',
     fields: [
       { label: 'Status',      value: `${issue.oldStatus.name}  →  ${issue.newStatus.name}`, color: STATUS_COLOR[issue.newStatus.category] },
+      { label: 'Assigned to', value: assigneeName, color: '#0052CC' },
       { label: 'Changed by',  value: changedByName },
       { label: 'Priority',    value: issue.priority, color: PRIORITY_COLOR[issue.priority.toLowerCase()] },
     ],
