@@ -3543,6 +3543,11 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
   const [optimisticDept, setOptimisticDept] = React.useState<string | null>(null);
   const [deptToast, setDeptToast] = React.useState<{ dept: string; board: string; newKey: string; assignee: string; queueUrl?: string; fromDept?: string; fromSpaceKey?: string } | null>(null);
   const [pendingDept, setPendingDept] = React.useState<{ name: string; boardKey: string } | null>(null);
+  // Surfaces WHY a transfer failed (e.g. someone else's queue already moved
+  // it, or a network hiccup) -- previously the request just silently
+  // reverted the optimistic update with no explanation, which read as the
+  // department change "randomly not working."
+  const [deptError, setDeptError] = React.useState<string | null>(null);
 
   // When parent updates currentDepartment, clear the optimistic value
   React.useEffect(() => { setOptimisticDept(null); }, [currentDepartment]);
@@ -3623,6 +3628,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
     if (dept.name.toUpperCase() === (currentDepartment || '').toUpperCase()) { return; }
     setSaving(true);
     setShowDrop(false);
+    setDeptError(null);
     const prevDept = optimisticDept ?? currentDepartment;
     setOptimisticDept(dept.name);
     // Only set waiting status if not already in it (avoids redundant reload)
@@ -3658,13 +3664,26 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
         // Navigation on OK click handles the transition.
       } else {
         setOptimisticDept(prevDept);
+        let message = 'Could not change department — please try again.';
+        try {
+          const data = await res.json();
+          if (data?.error) message = data.error;
+        } catch { /* non-JSON error body */ }
+        setDeptError(message);
       }
     } catch {
       setOptimisticDept(prevDept);
+      setDeptError('Network error — could not reach the server. Please try again.');
     }
     await waitingStatusPromise;
     setSaving(false);
   };
+
+  React.useEffect(() => {
+    if (!deptError) return;
+    const t = setTimeout(() => setDeptError(null), 6000);
+    return () => clearTimeout(t);
+  }, [deptError]);
 
   // Wait until we know assignment status (null = still loading)
   if (spaceAssigned !== true) return null;
@@ -3699,6 +3718,17 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
           )}
           <ChevronDown size={10} className="text-gray-300 ml-auto flex-shrink-0" />
         </button>
+
+        {/* Department change error -- shown inline instead of failing silently */}
+        {deptError && (
+          <div className="mt-1.5 flex items-start gap-1.5 bg-red-50 border border-red-200 rounded-md px-2 py-1.5">
+            <AlertTriangle size={12} className="text-red-500 flex-shrink-0 mt-0.5" />
+            <span className="text-[11px] text-red-700 leading-snug flex-1">{deptError}</span>
+            <button onClick={() => setDeptError(null)} className="text-red-400 hover:text-red-600 flex-shrink-0">
+              <X size={12} />
+            </button>
+          </div>
+        )}
 
         {/* Department change success popup */}
         {deptToast && (
