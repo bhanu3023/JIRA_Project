@@ -247,7 +247,15 @@ export default function RichTextEditor({
         setMentionIdx(i => (i - 1 + mentionMatches.length) % mentionMatches.length);
         return;
       }
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' || e.key === ' ') {
+        // Space ends the @query the same way Enter does — the query regex
+        // (below, in checkMention) can't include a space in the match, so
+        // typing "@Bhanu" then a space always closed the dropdown right as
+        // the name finished, leaving plain unlinked "@Bhanu " text behind
+        // with no way to still turn it into a real tag short of deleting the
+        // space and clicking a match. Committing the highlighted match here
+        // instead means finishing a name the natural way (type it, hit
+        // space, keep typing the rest of the comment) actually tags them.
         e.preventDefault();
         insertMention(mentionMatches[mentionIdx]);
         return;
