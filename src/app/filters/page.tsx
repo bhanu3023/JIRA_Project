@@ -43,7 +43,7 @@ const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
 // Same fixed list the ticket's own Project Manager field picks from (CreateIssueModal.tsx,
 // issues/[issueKey]/page.tsx) — individual people, not the comma-joined combinations a
 // ticket ends up storing once multiple are picked (e.g. "Abhishikth, Abhishek").
-const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan'];
+const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan', 'Pranavi'];
 // Same fixed list the ticket's own Product Type field picks from (see
 // CreateIssueModal.tsx / issues/[issueKey]/page.tsx) — a free-text box here
 // required typing the value out exactly (case and all) to match anything,

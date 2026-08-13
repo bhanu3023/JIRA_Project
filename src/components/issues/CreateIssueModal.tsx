@@ -554,7 +554,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 <MultiSelectDropdown
                   value={form.projectManager}
                   onChange={v => update('projectManager', v)}
-                  options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan']}
+                  options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi']}
                   placeholder="Select project manager..."
                 />
               </div>
