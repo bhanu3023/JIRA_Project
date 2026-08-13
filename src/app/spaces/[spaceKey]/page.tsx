@@ -137,7 +137,6 @@ function SpaceDetailContent() {
     { id: 'dueDate',        label: 'Due Date',            width: '120px' },
     { id: 'labels',         label: 'Labels',              width: '130px' },
     { id: 'storyPoints',    label: 'Story Points',        width: '90px'  },
-    { id: 'type',           label: 'Type',                width: '100px' },
     { id: 'workType',       label: 'Work Type',           width: '130px' },
     { id: 'productType',    label: 'Product Type',        width: '130px' },
     { id: 'combination',    label: 'Combination',         width: '130px' },
@@ -470,12 +469,18 @@ function SpaceDetailContent() {
         Array.isArray(f.spaceIds) &&
         f.spaceIds.includes(currentSpace.id)
       );
-      setCustomFieldCols(spaceFields.map((f: any) => ({
-        id: `cf_${f.id}`,
-        label: f.name,
-        width: '110px',
-        fieldId: f.id,
-      })));
+      // Disambiguate custom fields whose name collides with a system column (or each
+      // other) so the table header never shows the same label twice with no way to
+      // tell which is which.
+      const staticLabels = new Set(STATIC_COLUMNS.map(c => c.label.toLowerCase()));
+      const seenLabels = new Set<string>();
+      setCustomFieldCols(spaceFields.map((f: any) => {
+        const baseLabel = String(f.name);
+        const key = baseLabel.toLowerCase();
+        const label = (staticLabels.has(key) || seenLabels.has(key)) ? `${baseLabel} (Field)` : baseLabel;
+        seenLabels.add(key);
+        return { id: `cf_${f.id}`, label, width: '110px', fieldId: f.id };
+      }));
       // Track field names enabled for this space (used to filter the "+ Fields" dropdown)
       setSpaceFieldLabels(new Set(spaceFields.map((f: any) => (f.name as string).toLowerCase().trim())));
     }).catch(() => {});
@@ -2319,7 +2324,6 @@ function SpaceDetailContent() {
                     if (id === 'dueDate') return <div key={id} className="px-2 text-[11px] whitespace-nowrap">{issue.dueDate ? <span className={`font-medium ${new Date(issue.dueDate) < new Date() ? 'text-red-500' : 'text-gray-500'}`}>{new Date(issue.dueDate).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span> : <span className="text-gray-300">—</span>}</div>;
                     if (id === 'labels') return <div key={id} className="px-2 flex flex-wrap gap-1">{(issue.labels||[]).length > 0 ? ((issue.labels as unknown) as string[]).slice(0,2).map((l:string) => <span key={l} className="text-[10px] bg-blue-50 text-blue-600 border border-blue-100 rounded px-1.5 py-0.5">{l}</span>) : <span className="text-[11px] text-gray-300">—</span>}</div>;
                     if (id === 'storyPoints') return <div key={id} className="px-2">{issue.storyPoints ? <span className="text-[11.5px] font-semibold text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{issue.storyPoints}</span> : <span className="text-[11px] text-gray-300">—</span>}</div>;
-                    if (id === 'type') return <div key={id} className="px-2 text-[11px] text-gray-600 capitalize">{issue.type || '—'}</div>;
                     if (id === 'workType') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).workType || <span className="text-gray-300">—</span>}</div>;
                     if (id === 'productType') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).productType || <span className="text-gray-300">—</span>}</div>;
                     if (id === 'combination') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).combination || <span className="text-gray-300">—</span>}</div>;
