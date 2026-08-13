@@ -44,6 +44,11 @@ const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
 // issues/[issueKey]/page.tsx) — individual people, not the comma-joined combinations a
 // ticket ends up storing once multiple are picked (e.g. "Abhishikth, Abhishek").
 const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan'];
+// Same fixed list the ticket's own Product Type field picks from (see
+// CreateIssueModal.tsx / issues/[issueKey]/page.tsx) — a free-text box here
+// required typing the value out exactly (case and all) to match anything,
+// which is why it looked broken; a handful of known values is a dropdown.
+const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others'];
 const PRIORITY_LABELS: Record<string, string> = {
   highest: 'Highest', high: 'High', medium: 'Medium', low: 'Low', lowest: 'Lowest',
 };
@@ -963,7 +968,7 @@ export default function FiltersPage() {
   const [selUpdated, setSelUpdated]       = useState('');
   const [selDueDate, setSelDueDate]       = useState('');
   const [selDepartment, setSelDepartment] = useState('');
-  const [selProductType, setSelProductType] = useState('');
+  const [selProductType, setSelProductType] = useState<string[]>([]);
   const [selCombination, setSelCombination] = useState('');
   const [selCustomerName, setSelCustomerName] = useState('');
   const [selClientName, setSelClientName] = useState('');
@@ -996,7 +1001,7 @@ export default function FiltersPage() {
         if (key === 'reporter')       setSelReporters([]);
         if (key === 'priority')       setSelPriorities([]);
         if (key === 'department')     setSelDepartment('');
-        if (key === 'productType')    setSelProductType('');
+        if (key === 'productType')    setSelProductType([]);
         if (key === 'combination')    setSelCombination('');
         if (key === 'customerName')   setSelCustomerName('');
         if (key === 'clientName')     setSelClientName('');
@@ -1067,7 +1072,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selDueDate || selDepartment ||
-    selProductType || selCombination || selCustomerName || selClientName || selProjectManager.length || selBreached,
+    selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selBreached,
   );
 
   // Builds the filter params both the live table and the CSV export send —
@@ -1128,7 +1133,7 @@ export default function FiltersPage() {
 
         // Extra text/field filters
         if (selDepartment)     params.department     = selDepartment;
-        if (selProductType)    params.productType    = selProductType;
+        if (selProductType.length) params.productType = selProductType.join(',');
         if (selCombination)    params.combination    = selCombination;
         if (selCustomerName)   params.customerName   = selCustomerName;
         if (selClientName)     params.clientName     = selClientName;
@@ -1234,7 +1239,7 @@ export default function FiltersPage() {
     setText(''); setSelSpaces([]); setSelQueue(''); setSelAssignees([]); setSelReporters([]);
     setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
-    setSelDepartment(''); setSelProductType('');
+    setSelDepartment(''); setSelProductType([]);
     setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager([]);
     setSelBreached('');
     setActiveExtras([]);
@@ -1623,7 +1628,12 @@ export default function FiltersPage() {
             )}
             {activeExtras.includes('productType') && (
               <div className="flex items-center gap-1">
-                <TextFilterBtn label="Product Type" value={selProductType} onChange={setSelProductType} />
+                <DropBtn
+                  label="Product Type"
+                  options={PRODUCT_TYPE_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selProductType}
+                  onChange={setSelProductType}
+                />
                 <button onClick={() => toggleExtra('productType')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
