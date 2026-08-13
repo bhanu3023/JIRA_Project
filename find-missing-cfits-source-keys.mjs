@@ -109,10 +109,20 @@ async function findMatch(row) {
   // place). A hard date range risked silently excluding the real match
   // before the summary filter ever got a chance to find it. Date is only
   // used below, as a tiebreaker if the summary match is ambiguous.
-  const jql = `project = CFITS AND summary ~ "\\"${summaryPhrase}\\""`;
+  // A quoted multi-word value with the `~` operator already does a
+  // phrase-style match in JQL -- no extra nested quotes needed (an earlier
+  // version of this wrapped the phrase in another layer of escaped quotes,
+  // which made Jira search for the LITERAL text `"phrase"` including the
+  // quote characters, matching nothing -- confirmed by testing the same
+  // query with and without the extra quoting directly against the API).
+  const jql = `project = CFITS AND summary ~ "${summaryPhrase}"`;
   let result;
   try {
-    result = await jiraPostWithRetry('/rest/api/3/search/jql', { jql, fields: ['summary', 'created'], maxResults: 25 });
+    // 50, not paginated further -- a generic short summary (e.g. "Testing")
+    // can match far more than that. If the real exact match isn't within
+    // the first 50, this safely reports "many candidates, none exact"
+    // (unresolved, nothing guessed) rather than silently missing it.
+    result = await jiraPostWithRetry('/rest/api/3/search/jql', { jql, fields: ['summary', 'created'], maxResults: 50 });
   } catch (e) {
     return { reason: `Jira search failed: ${e?.message || e}` };
   }
