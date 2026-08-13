@@ -970,8 +970,33 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     if (!policies.length) return [];
 
     const priority = (issue.priority || 'medium').toLowerCase();
-    const isResolved = issue.status?.category === 'done';
+    // The status badge shown to the user can come from EITHER the ticket's
+    // global status OR its per-department dept_statuses snapshot (see
+    // issueStat in the issue detail page) -- whichever one the UI is
+    // currently reading from. Checking only the global status here let a
+    // ticket that visibly shows "Resolved" (via dept_statuses, e.g. a
+    // queue-scoped status whose done-ness never made it back to the real
+    // statusId column) keep ticking its SLA overdue counter forever, even
+    // though it plainly reads as resolved everywhere else in the UI.
+    const deptStatuses: Record<string, any> = (issue as any).dept_statuses || {};
+    const deptStatusKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === issueDept);
+    const deptStatusCategory = deptStatusKey ? deptStatuses[deptStatusKey]?.category : undefined;
+    const isResolved = issue.status?.category === 'done' || deptStatusCategory === 'done';
     const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
+
+    // dept_sla_started_at is reset to NOW() on every department handoff --
+    // including a RETURN to a dept that already spent some of its SLA
+    // budget before being paused (moved away) earlier. Computing dueTime as
+    // "fresh start + the full goal duration" ignored that prior spend
+    // entirely, handing every dept a brand-new full countdown each time it
+    // got the ticket back -- the opposite of "continue," which is what a
+    // dept's SLA is supposed to do across a pause/resume cycle. Credit
+    // whatever this dept had already burned (dept_sla_log[dept].elapsed_ms,
+    // the same bookkeeping pauseDeptSLA/startDeptSLA already maintain) so
+    // the due time reflects the REMAINING budget, not a fresh one.
+    const deptSlaLog: Record<string, any> = (issue as any).dept_sla_log || {};
+    const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === issueDept);
+    const priorElapsedMs: number = deptLogKey ? (deptSlaLog[deptLogKey]?.elapsed_ms || 0) : 0;
 
     return policies.map((policy: any) => {
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
@@ -1002,7 +1027,11 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       const startedAt = (issue as any).dept_sla_started_at
         ? new Date((issue as any).dept_sla_started_at).toISOString()
         : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
-      const dueTime = new Date(new Date(startedAt).getTime() + durationMs).toISOString();
+      // Remaining budget = full goal minus whatever this dept already burned
+      // across earlier visits, so resuming here continues the countdown
+      // instead of restarting it at the full duration.
+      const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+      const dueTime = new Date(new Date(startedAt).getTime() + remainingBudgetMs).toISOString();
       // Paused SLAs are never breached — clock stopped
       const isBreached = !isResolved && !isPaused && new Date(dueTime) < new Date();
       return {
