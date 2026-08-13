@@ -580,8 +580,10 @@ function SpaceDetailContent() {
 
   const setFilter = (key: string, value: string) => {
     setFilters(f => value ? { ...f, [key]: value } : Object.fromEntries(Object.entries(f).filter(([k]) => k !== key)));
-    setOpenFilter(null);
     setCurrentPage(1); // reset pagination when filter changes
+    // Closing the panel is each call site's decision — single-select options close it
+    // explicitly via setOpenFilter(null); multi-select checkboxes deliberately don't,
+    // so the panel stays open to pick more than one value.
   };
   const clearFilter = (key: string) => { setFilters(f => Object.fromEntries(Object.entries(f).filter(([k]) => k !== key))); setCurrentPage(1); };
   const clearAllFilters = () => {
@@ -873,10 +875,16 @@ function SpaceDetailContent() {
       const issueDept = ((issue as any).current_department || '').toUpperCase();
       if (issueDept !== deptFilter.toUpperCase()) return false;
     }
+    // Type/Status/Priority/Label (and the "extra added" fields below) all support
+    // comma-separated multi-select — a filter value of "a,b" matches either.
+    const matchesMulti = (filterVal: string, issueVal: string) => {
+      const selected = filterVal.split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+      return selected.length === 0 || selected.includes((issueVal || '').toLowerCase());
+    };
     // Type filter
-    if (filters.type && (issue.type || '').toLowerCase() !== filters.type.toLowerCase()) return false;
+    if (filters.type && !matchesMulti(filters.type, issue.type || '')) return false;
     // Status filter
-    if (filters.status && (issue.status?.name || '') !== filters.status) return false;
+    if (filters.status && !matchesMulti(filters.status, issue.status?.name || '')) return false;
     // Assignee filter — match by email (member id ≠ user id in seeded data)
     if (filters.assignee) {
       if (filters.assignee === '__unassigned') { if (issue.assignee) return false; }
@@ -889,7 +897,7 @@ function SpaceDetailContent() {
       }
     }
     // Priority filter
-    if (filters.priority && (issue.priority || '').toLowerCase() !== filters.priority.toLowerCase()) return false;
+    if (filters.priority && !matchesMulti(filters.priority, issue.priority || '')) return false;
     // Reporter filter
     if (filters.reporter) {
       if (filters.reporter === '__current') {
@@ -898,12 +906,13 @@ function SpaceDetailContent() {
         if (issue.reporter?.id !== filters.reporter) return false;
       }
     }
-    // Label filter
+    // Label filter — match if the issue has ANY of the selected labels
     if (filters.label) {
       const issueLabels: string[] = Array.isArray(issue.labels)
         ? issue.labels.map((l: any) => (typeof l === 'string' ? l : l?.name || '')).filter(Boolean)
         : [];
-      if (!issueLabels.includes(filters.label)) return false;
+      const selectedLabels = filters.label.split(',').map(v => v.trim()).filter(Boolean);
+      if (!selectedLabels.some(l => issueLabels.includes(l))) return false;
     }
     // Created date filter (client-side fallback)
     if (filters.created && issue.createdAt) {
@@ -914,11 +923,7 @@ function SpaceDetailContent() {
       const ms = ranges[filters.created];
       if (ms && created < now - ms) return false;
     }
-    // Extra added filters — all support comma-separated multi-select
-    const matchesMulti = (filterVal: string, issueVal: string) => {
-      const selected = filterVal.split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
-      return selected.length === 0 || selected.includes((issueVal || '').toLowerCase());
-    };
+    // Extra added filters — reuse the same comma-separated multi-select matcher
     if (filters.workType)         { if (!matchesMulti(filters.workType,        (issue as any).workType        || '')) return false; }
     if (filters.productType)      { if (!matchesMulti(filters.productType,     (issue as any).productType     || '')) return false; }
     if (filters.combination)      { if (!matchesMulti(filters.combination,     (issue as any).combination     || '')) return false; }
@@ -1282,16 +1287,44 @@ function SpaceDetailContent() {
             const cat = filterCategory;
 
             if (cat === 'type') {
+              const selectedVals = filters.type ? filters.type.split(',').map((v: string) => v.trim()).filter(Boolean) : [];
+              const toggle = (val: string) => {
+                const next = selectedVals.includes(val) ? selectedVals.filter((v: string) => v !== val) : [...selectedVals, val];
+                if (next.length === 0) clearFilter('type'); else setFilter('type', next.join(','));
+              };
+              const allTypes: [string, string][] = [['epic','Epic'],['story','Story'],['task','Task'],['bug','Bug'],['subtask','Subtask']];
+              const tq = dropdownSearch.trim().toLowerCase();
+              const filteredTypes = allTypes.filter(([, lbl]) => lbl.toLowerCase().includes(tq));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {[['epic','Epic'],['story','Story'],['task','Task'],['bug','Bug'],['subtask','Subtask']].map(([val, lbl]) => (
-                    <button key={val} onClick={() => { setFilter('type', val); setOpenFilter(null); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.type === val ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                      <IssueTypeIcon type={val} size={14} />
-                      <span>{lbl}</span>
-                      {filters.type === val && <Check size={12} className="ml-auto text-blue-600" />}
-                    </button>
-                  ))}
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
+                    Type <span className="font-semibold text-gray-700">= (equals)</span>
+                  </div>
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Type…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {filteredTypes.length === 0
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredTypes.map(([val, lbl]) => {
+                          const checked = selectedVals.includes(val);
+                          return (
+                            <button key={val} onClick={() => toggle(val)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
+                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                              </span>
+                              <IssueTypeIcon type={val} size={14} />
+                              <span>{lbl}</span>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredTypes.length} of {allTypes.length}</div>
                 </div>
               );
             }
@@ -1316,15 +1349,46 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'status') {
+              const selectedVals = filters.status ? filters.status.split(',').map((v: string) => v.trim()) : [];
+              const toggle = (name: string) => {
+                const next = selectedVals.includes(name) ? selectedVals.filter((v: string) => v !== name) : [...selectedVals, name];
+                if (next.length === 0) clearFilter('status'); else setFilter('status', next.join(','));
+              };
+              const sq = dropdownSearch.trim().toLowerCase();
+              const filteredStatuses = statuses.filter((s: any) => s.name.toLowerCase().includes(sq));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {statuses.map((s: any) => (
-                    <button key={s.id} onClick={() => { setFilter('status', s.name); setOpenFilter(null); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.status === s.name ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                      <span>{s.name}</span>
-                      {filters.status === s.name && <Check size={12} className="ml-auto text-blue-600" />}
-                    </button>
-                  ))}
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
+                    Status <span className="font-semibold text-gray-700">= (equals)</span>
+                  </div>
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Status…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {filteredStatuses.length === 0
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredStatuses.map((s: any) => {
+                          const checked = selectedVals.includes(s.name);
+                          const color = s.color || '#6B7280';
+                          return (
+                            <button key={s.id} onClick={() => toggle(s.name)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50' : ''}`}>
+                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                              </span>
+                              <span className="text-[11.5px] font-medium px-2 py-0.5 rounded-full border truncate"
+                                style={{ backgroundColor: `${color}18`, color, borderColor: `${color}40` }}>
+                                {s.name}
+                              </span>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredStatuses.length} of {statuses.length}</div>
                 </div>
               );
             }
@@ -1386,16 +1450,43 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'priority') {
+              const selectedVals = filters.priority ? filters.priority.split(',').map((v: string) => v.trim()) : [];
+              const toggle = (val: string) => {
+                const next = selectedVals.includes(val) ? selectedVals.filter((v: string) => v !== val) : [...selectedVals, val];
+                if (next.length === 0) clearFilter('priority'); else setFilter('priority', next.join(','));
+              };
+              const pq = dropdownSearch.trim().toLowerCase();
+              const filteredPriorities = PRIORITIES.filter(p => p.label.toLowerCase().includes(pq));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {PRIORITIES.map(p => (
-                    <button key={p.value} onClick={() => { setFilter('priority', p.value); setOpenFilter(null); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.priority === p.value ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                      <PriorityIcon priority={p.value} size={14} />
-                      <span>{p.label}</span>
-                      {filters.priority === p.value && <Check size={12} className="ml-auto text-blue-600" />}
-                    </button>
-                  ))}
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
+                    Priority <span className="font-semibold text-gray-700">= (equals)</span>
+                  </div>
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Priority…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {filteredPriorities.length === 0
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredPriorities.map(p => {
+                          const checked = selectedVals.includes(p.value);
+                          return (
+                            <button key={p.value} onClick={() => toggle(p.value)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
+                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                              </span>
+                              <PriorityIcon priority={p.value} size={14} />
+                              <span>{p.label}</span>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredPriorities.length} of {PRIORITIES.length}</div>
                 </div>
               );
             }
@@ -1448,19 +1539,45 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'label') {
+              const selectedVals = filters.label ? filters.label.split(',').map((v: string) => v.trim()) : [];
+              const toggle = (lbl: string) => {
+                const next = selectedVals.includes(lbl) ? selectedVals.filter((v: string) => v !== lbl) : [...selectedVals, lbl];
+                if (next.length === 0) clearFilter('label'); else setFilter('label', next.join(','));
+              };
+              const lq = dropdownSearch.trim().toLowerCase();
+              const filteredLabels = allLabels.filter(l => l.toLowerCase().includes(lq));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {allLabels.length === 0
-                    ? <p className="px-3 py-4 text-[12.5px] text-gray-400 text-center">No labels</p>
-                    : allLabels.map(lbl => (
-                      <button key={lbl} onClick={() => { setFilter('label', lbl); setOpenFilter(null); }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.label === lbl ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                        <span className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />
-                        <span>{lbl}</span>
-                        {filters.label === lbl && <Check size={12} className="ml-auto text-blue-600" />}
-                      </button>
-                    ))
-                  }
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
+                    Label <span className="font-semibold text-gray-700">= (equals)</span>
+                  </div>
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Label…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {allLabels.length === 0
+                      ? <p className="px-3 py-4 text-[12.5px] text-gray-400 text-center">No labels</p>
+                      : filteredLabels.length === 0
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredLabels.map(lbl => {
+                          const checked = selectedVals.includes(lbl);
+                          return (
+                            <button key={lbl} onClick={() => toggle(lbl)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
+                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                              </span>
+                              <span className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />
+                              <span className="truncate">{lbl}</span>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  {allLabels.length > 0 && <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredLabels.length} of {allLabels.length}</div>}
                 </div>
               );
             }
@@ -1566,12 +1683,19 @@ function SpaceDetailContent() {
             return null;
           };
 
+          // Multi-select fields store comma-separated values — join formatted labels,
+          // or collapse to a count once there are more than a couple selected.
+          const joinMulti = (vals: string[], formatOne: (v: string) => string): string => {
+            if (vals.length <= 2) return vals.map(formatOne).join(', ');
+            return `${vals.length} selected`;
+          };
+
           // Filter chips for active filters
           const getChipLabel = (key: string, val: string): string => {
-            if (key === 'type') return val.charAt(0).toUpperCase() + val.slice(1);
+            if (key === 'type') return joinMulti(val.split(','), v => v.charAt(0).toUpperCase() + v.slice(1));
             if (key === 'department') return val;
-            if (key === 'status') return val;
-            if (key === 'priority') return getPriorityMeta(val).label;
+            if (key === 'status') return joinMulti(val.split(','), v => v);
+            if (key === 'priority') return joinMulti(val.split(','), v => getPriorityMeta(v).label);
             if (key === 'assignee') {
               if (val === '__unassigned') return 'Unassigned';
               if (val === '__current') return 'Current User';
@@ -1583,7 +1707,7 @@ function SpaceDetailContent() {
               const mb = allMembers.find((m: any) => m.id === val);
               return mb ? `${mb.firstName} ${mb.lastName}` : val;
             }
-            if (key === 'label') return val;
+            if (key === 'label') return joinMulti(val.split(','), v => v);
             if (key === 'created') return ({ today: 'Today', '7d': 'Last 7d', '30d': 'Last 30d', '90d': 'Last 90d' } as Record<string,string>)[val] || val;
             const def = ADDABLE_FILTER_DEFS.find(d => d.id === key);
             return def ? `${def.label}: ${val}` : val;
