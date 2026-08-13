@@ -562,7 +562,12 @@ function SpaceDetailContent() {
           // fixed page 1 / 100-row cap every other branch here uses, or anything
           // past the first 100 is silently unreachable.
           if (queueFilter === 'dept_all') {
-            params.excludeDone = 'true';
+            // Deliberately NOT excludeDone -- same "All Tickets" convention
+            // already used space-wide (see the all-open comment above): the
+            // literal "All Tickets — {dept}" label should mean all of them,
+            // not just the still-open ones. A migrated department where 99%
+            // of tickets are already Resolved/Closed was showing a single-
+            // digit count here and nowhere obvious to see the rest.
             params.page = String(currentPage);
             params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
@@ -1403,9 +1408,11 @@ function SpaceDetailContent() {
             // Department-wide queues — also paginated, so use the real backend
             // total rather than the current page's row count (which used to show
             // as e.g. "100 Open" even when the department actually had thousands).
+            // dept_all is no longer excludeDone-scoped (see the fetch effect above),
+            // so its count is a true total, not an "open" count like the other two.
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border text-[12px] font-medium bg-blue-50 text-blue-700 border-blue-200">
               <span className="font-bold text-[15px]">{(issueTotal ?? filteredIssues.length).toLocaleString()}</span>
-              <span>Open</span>
+              <span>{queueFilter === 'dept_all' ? 'Total' : 'Open'}</span>
             </div>
           ) : (
             // All Tickets / Assigned — show only filtered count
