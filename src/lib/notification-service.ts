@@ -183,6 +183,12 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
         subject: opts.subject,
         body: { contentType: 'HTML', content: opts.html },
         toRecipients: [{ emailAddress: { address: recipient } }],
+        // Only affects how the sender shows up for recipients OUTSIDE this
+        // mailbox's own Microsoft 365 tenant (e.g. customers on another
+        // domain) — for internal-to-internal mail, Exchange resolves the
+        // sender's display name from the mailbox's own directory entry and
+        // ignores this field entirely, so this can't fix that case.
+        from: { emailAddress: { name: FROM_NAME, address: opts.from } },
       };
       // Thread the email into the original conversation
       if (opts.inReplyTo) {
