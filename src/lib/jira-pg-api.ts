@@ -970,7 +970,18 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     if (!policies.length) return [];
 
     const priority = (issue.priority || 'medium').toLowerCase();
-    const isResolved = issue.status?.category === 'done';
+    // The status badge shown to the user can come from EITHER the ticket's
+    // global status OR its per-department dept_statuses snapshot (see
+    // issueStat in the issue detail page) -- whichever one the UI is
+    // currently reading from. Checking only the global status here let a
+    // ticket that visibly shows "Resolved" (via dept_statuses, e.g. a
+    // queue-scoped status whose done-ness never made it back to the real
+    // statusId column) keep ticking its SLA overdue counter forever, even
+    // though it plainly reads as resolved everywhere else in the UI.
+    const deptStatuses: Record<string, any> = (issue as any).dept_statuses || {};
+    const deptStatusKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === issueDept);
+    const deptStatusCategory = deptStatusKey ? deptStatuses[deptStatusKey]?.category : undefined;
+    const isResolved = issue.status?.category === 'done' || deptStatusCategory === 'done';
     const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
 
     return policies.map((policy: any) => {
