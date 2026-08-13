@@ -322,6 +322,8 @@ function SpaceDetailContent() {
   // Fixed-position coords for Assignee / Reporter (full-panel dropdowns)
   const [assigneeDropPos, setAssigneeDropPos] = useState<{ top: number; left: number } | null>(null);
   const [reporterDropPos, setReporterDropPos] = useState<{ top: number; left: number } | null>(null);
+  const [statusDropPos, setStatusDropPos] = useState<{ top: number; left: number } | null>(null);
+  const [typeDropPos, setTypeDropPos] = useState<{ top: number; left: number } | null>(null);
 
   // Combined columns: static + any custom fields assigned to this space
   const ALL_COLUMNS = [...STATIC_COLUMNS, ...customFieldCols];
@@ -1250,17 +1252,17 @@ function SpaceDetailContent() {
             (ALWAYS_AVAILABLE.has(d.id) || spaceFieldLabels.has(d.label.toLowerCase().trim()))
           );
 
-          // Count active filters for badge
+          // Assignee, Status, and Request type (Type) each get their own standalone
+          // button — like Jira's toolbar. Everything else lives under "More filters".
           const activeFilterCount = [
-            filters.type, filters.status, filters.priority, filters.assignee,
-            filters.reporter, filters.label, filters.created,
+            filters.priority, filters.reporter, filters.label, filters.created,
             deptFilter,
             ...addedFilterIds.filter(id => filters[id]),
           ].filter(Boolean).length;
 
-          // Build filter category list
+          // Full category list (used for label lookups regardless of which button opened it)
           const filterCats = [
-            { id: 'type', label: 'Type', icon: <SlidersHorizontal size={13} /> },
+            { id: 'type', label: 'Request type', icon: <SlidersHorizontal size={13} /> },
             ...(rrDepartments.length > 0 ? [{ id: 'department', label: 'Department', icon: <SlidersHorizontal size={13} /> }] : []),
             { id: 'status', label: 'Status', icon: <SlidersHorizontal size={13} /> },
             { id: 'assignee', label: 'Assignee', icon: <User size={13} /> },
@@ -1274,6 +1276,8 @@ function SpaceDetailContent() {
             }).filter(Boolean) as { id: string; label: string; icon: React.ReactNode; isExtra?: boolean }[],
             ...(availableToAdd.length > 0 ? [{ id: '__addFields', label: '+ More Fields', icon: <Plus size={13} /> }] : []),
           ];
+          // "More filters" left panel — everything except the fields with their own button
+          const moreFilterCats = filterCats.filter(c => !['type', 'status', 'assignee'].includes(c.id));
 
           // Helper: is a category active?
           const isCatActive = (catId: string) => {
@@ -1399,8 +1403,11 @@ function SpaceDetailContent() {
                 ? allMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
                 : allMembers;
               return (
-                <div className="flex flex-col max-h-[340px]">
-                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0">
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
+                    Assignee <span className="font-semibold text-gray-700">= (equals)</span>
+                  </div>
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0">
                     <div className="relative">
                       <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                       <input autoFocus type="text" value={assigneeSearch} onChange={e => setAssigneeSearch(e.target.value)}
@@ -1459,9 +1466,6 @@ function SpaceDetailContent() {
               const filteredPriorities = PRIORITIES.filter(p => p.label.toLowerCase().includes(pq));
               return (
                 <div className="flex flex-col max-h-[380px]">
-                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
-                    Priority <span className="font-semibold text-gray-700">= (equals)</span>
-                  </div>
                   <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
                     <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                     <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
@@ -1548,9 +1552,6 @@ function SpaceDetailContent() {
               const filteredLabels = allLabels.filter(l => l.toLowerCase().includes(lq));
               return (
                 <div className="flex flex-col max-h-[380px]">
-                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
-                    Label <span className="font-semibold text-gray-700">= (equals)</span>
-                  </div>
                   <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
                     <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                     <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
@@ -1724,15 +1725,68 @@ function SpaceDetailContent() {
           if (filters.created) chips.push({ key: 'created', val: filters.created });
           addedFilterIds.forEach(id => { if (filters[id]) chips.push({ key: id, val: filters[id] }); });
 
+          // Standalone single-panel button — one per quick-access field (Assignee,
+          // Status, Request type), matching Jira's toolbar instead of one mega-menu.
+          const QuickFilterButton = ({
+            catId, label, buttonRef, dropPos, setDropPos,
+          }: {
+            catId: string; label: string;
+            buttonRef: React.RefObject<HTMLButtonElement | null>;
+            dropPos: { top: number; left: number } | null;
+            setDropPos: (p: { top: number; left: number } | null) => void;
+          }) => {
+            const isOpen = openFilter === catId;
+            const active = isCatActive(catId);
+            return (
+              <div className="relative flex-shrink-0">
+                <button ref={buttonRef}
+                  onClick={() => {
+                    if (isOpen) { setOpenFilter(null); return; }
+                    const rect = buttonRef.current?.getBoundingClientRect();
+                    if (rect) setDropPos({ top: rect.bottom + 4, left: rect.left });
+                    setFilterCategory(catId);
+                    setOpenFilter(catId);
+                    setAssigneeSearch('');
+                    setDropdownSearch('');
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] rounded-md border transition-colors whitespace-nowrap
+                    ${isOpen || active
+                      ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
+                      : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'}`}>
+                  <span>{label}</span>
+                  <ChevronDown size={11} />
+                </button>
+                {isOpen && dropPos && (
+                  <>
+                    <div className="fixed inset-0 z-[9998]" onClick={() => setOpenFilter(null)} />
+                    <div className="fixed z-[9999] bg-white rounded-lg shadow-xl border border-gray-200"
+                      style={{ top: dropPos.top, left: dropPos.left, minWidth: 260 }}
+                      onMouseDown={e => e.stopPropagation()}>
+                      {renderRightPanel()}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          };
+
           return (
             <>
-              {/* Filter button */}
+              <QuickFilterButton catId="assignee" label="Assignee" buttonRef={assigneeFilterRef} dropPos={assigneeDropPos} setDropPos={setAssigneeDropPos} />
+              <QuickFilterButton catId="status" label="Status" buttonRef={statusFilterRef} dropPos={statusDropPos} setDropPos={setStatusDropPos} />
+              <QuickFilterButton catId="type" label="Request type" buttonRef={typeFilterRef} dropPos={typeDropPos} setDropPos={setTypeDropPos} />
+
+              {/* More filters button — everything else, still a two-panel category menu */}
               <div className="relative flex-shrink-0">
                 <button ref={addFilterRef}
                   onClick={() => {
                     if (openFilter === '__filterPanel') { setOpenFilter(null); return; }
                     const rect = addFilterRef.current?.getBoundingClientRect();
                     if (rect) setAddFilterDropPos({ top: rect.bottom + 4, left: rect.left });
+                    // Land on a category that actually lives in this menu
+                    if (!moreFilterCats.some(c => c.id === filterCategory)) {
+                      setFilterCategory(moreFilterCats[0]?.id || 'priority');
+                    }
                     setOpenFilter('__filterPanel');
                     setAssigneeSearch('');
                     setReporterSearch('');
@@ -1742,8 +1796,7 @@ function SpaceDetailContent() {
                     ${openFilter === '__filterPanel' || activeFilterCount > 0
                       ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
                       : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'}`}>
-                  <SlidersHorizontal size={13} className="flex-shrink-0" />
-                  <span>Filter</span>
+                  <span>More filters</span>
                   {activeFilterCount > 0 && (
                     <span className="ml-0.5 bg-blue-600 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center flex-shrink-0">
                       {activeFilterCount}
@@ -1765,7 +1818,7 @@ function SpaceDetailContent() {
                         <div className="px-3 pb-1 pt-0.5">
                           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Filters</p>
                         </div>
-                        {filterCats.map(cat => {
+                        {moreFilterCats.map(cat => {
                           const active = isCatActive(cat.id);
                           const isSelected = filterCategory === cat.id;
                           return (
@@ -1786,7 +1839,7 @@ function SpaceDetailContent() {
                       <div className="flex-1 min-w-[200px] max-w-[260px]">
                         <div className="px-3 py-2 border-b border-gray-100">
                           <div className="flex items-center justify-between">
-                            <p className="text-[11px] font-semibold text-gray-500 capitalize">{filterCats.find(c => c.id === filterCategory)?.label || ''}</p>
+                            <p className="text-[11px] font-semibold text-gray-500 capitalize">{moreFilterCats.find(c => c.id === filterCategory)?.label || ''}</p>
                             {isCatActive(filterCategory) && (
                               <button onClick={() => {
                                 if (filterCategory === 'department') setDeptFilter('');
