@@ -1984,8 +1984,20 @@ function SpaceDetailContent() {
                 const next = selectedVals.includes(name) ? selectedVals.filter((v: string) => v !== name) : [...selectedVals, name];
                 if (next.length === 0) clearFilter('status'); else setFilter('status', next.join(','));
               };
+              // Scope to the current queue's own configured workflow (same
+              // queueStatuses used by the inline per-row status dropdown)
+              // instead of the space's full status list — that list is every
+              // status from every department's workflow combined (50+ for a
+              // board with several queues), most of which this queue's own
+              // tickets can never actually be set to. Falls back to the full
+              // list outside a specific queue (All Requests, space-wide).
+              const scopedQueue: any = effectiveDept
+                ? allCustomQueues.find((q: any) => (q.name || '').toLowerCase() === effectiveDept.toLowerCase())
+                : null;
+              const scopedStatusList: any[] = scopedQueue?.queueStatuses || [];
+              const statusSource: any[] = scopedStatusList.length > 0 ? scopedStatusList : statuses;
               const sq = dropdownSearch.trim().toLowerCase();
-              const filteredStatuses = statuses.filter((s: any) => s.name.toLowerCase().includes(sq));
+              const filteredStatuses = statusSource.filter((s: any) => s.name.toLowerCase().includes(sq));
               return (
                 <div className="flex flex-col max-h-[380px]">
                   <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
@@ -2018,7 +2030,7 @@ function SpaceDetailContent() {
                         })
                     }
                   </div>
-                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredStatuses.length} of {statuses.length}</div>
+                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredStatuses.length} of {statusSource.length}</div>
                 </div>
               );
             }
