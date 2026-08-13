@@ -1510,18 +1510,20 @@ function SpaceDetailContent() {
         const BAR_H = 180;
         const perUser: any[] = deptSummaryData?.perUser || [];
 
-        // Pie slices for "tickets worked" share per user -- indexed by each
-        // user's rank in perUser (already sorted by ticketsWorked desc) so
-        // color assignment stays stable even as zero-activity members (no
-        // slice) are filtered out below.
+        // Pie slices for "current ticket load" share per user -- who's
+        // actually holding the most tickets right now, not who happened to
+        // pass/close the most in this date range. Indexed by each user's rank
+        // in perUser (already sorted by currentTotal desc) so color
+        // assignment stays stable even as zero-load members (no slice) are
+        // filtered out below.
         const USER_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'];
-        const totalWorked = perUser.reduce((s: number, u: any) => s + u.ticketsWorked, 0);
+        const totalWorked = perUser.reduce((s: number, u: any) => s + u.currentTotal, 0);
         let pieCumulative = 0;
         const pieSlices = perUser
           .map((u: any, idx: number) => ({ u, color: USER_COLORS[idx % USER_COLORS.length] }))
-          .filter(({ u }: any) => u.ticketsWorked > 0)
+          .filter(({ u }: any) => u.currentTotal > 0)
           .map(({ u, color }: any) => {
-            const pct = totalWorked > 0 ? (u.ticketsWorked / totalWorked) * 100 : 0;
+            const pct = totalWorked > 0 ? (u.currentTotal / totalWorked) * 100 : 0;
             const start = pieCumulative;
             pieCumulative += pct;
             return { userId: u.userId, color, pct, start, end: pieCumulative };
@@ -1662,14 +1664,16 @@ function SpaceDetailContent() {
                     <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-emerald-500 to-teal-600" />
                     <div>
                       <h3 className="text-[13.5px] font-bold text-gray-800">Per user</h3>
-                      <p className="text-[11.5px] text-gray-400 mt-0.5">Tickets each team member worked in this queue, in the selected range.</p>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">
+                        Total/Open/In Progress/SLA Breached are live counts for every ticket currently in this queue (older tickets included, regardless of range). "Worked (range)" is how many they passed, returned, or closed in the selected range.
+                      </p>
                     </div>
                   </div>
                   {perUser.length === 0 ? (
-                    <p className="text-[12.5px] text-gray-400 py-8 text-center">No queue members found, or no activity in this range.</p>
+                    <p className="text-[12.5px] text-gray-400 py-8 text-center">No queue members found.</p>
                   ) : (
                     <div className="flex gap-8 p-6">
-                      {/* Donut chart -- share of tickets worked per user in this range */}
+                      {/* Donut chart -- share of CURRENT ticket load per user */}
                       <div className="flex flex-col items-center gap-3 flex-shrink-0" style={{ width: 168 }}>
                         <div className="relative rounded-full flex items-center justify-center shadow-inner ring-1 ring-black/5"
                           style={{ width: 152, height: 152, background: pieGradient || '#EEF0F3' }}>
@@ -1679,15 +1683,18 @@ function SpaceDetailContent() {
                           </div>
                         </div>
                         {totalWorked === 0 && (
-                          <p className="text-[11px] text-gray-400 text-center">No activity in this range.</p>
+                          <p className="text-[11px] text-gray-400 text-center">No tickets currently in this queue.</p>
                         )}
                       </div>
                       <table className="w-full text-[12.5px]">
                         <thead>
                           <tr className="text-left text-[10.5px] font-semibold text-gray-400 uppercase tracking-wide">
                             <th className="pb-2.5">User</th>
-                            <th className="pb-2.5 text-right">Tickets Worked</th>
+                            <th className="pb-2.5 text-right">Total</th>
+                            <th className="pb-2.5 text-right">Open</th>
+                            <th className="pb-2.5 text-right">In Progress</th>
                             <th className="pb-2.5 text-right">SLA Breached</th>
+                            <th className="pb-2.5 text-right">Worked ({RANGE_OPTIONS.find((r) => r.id === summaryRange)?.label})</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1702,7 +1709,7 @@ function SpaceDetailContent() {
                                 className="border-t border-gray-50 cursor-pointer hover:bg-indigo-50/40 transition-colors">
                                 <td className="py-2.5 flex items-center gap-2.5">
                                   <span className="w-4 text-center flex-shrink-0">
-                                    {idx < 3 && u.ticketsWorked > 0
+                                    {idx < 3 && u.currentTotal > 0
                                       ? <Trophy size={13} className={RANK_COLORS[idx]} />
                                       : <span className="text-[10.5px] text-gray-300 font-medium">{idx + 1}</span>}
                                   </span>
@@ -1713,13 +1720,16 @@ function SpaceDetailContent() {
                                   <span className="text-gray-700 font-medium group-hover:text-indigo-600">{displayName}</span>
                                 </td>
                                 <td className="py-2.5 text-right">
-                                  <span className="font-bold text-gray-800">{u.ticketsWorked}</span>
+                                  <span className="font-bold text-gray-800">{u.currentTotal}</span>
                                 </td>
+                                <td className="py-2.5 text-right text-gray-600">{u.currentOpen}</td>
+                                <td className="py-2.5 text-right text-gray-600">{u.currentInProgress}</td>
                                 <td className="py-2.5 text-right">
                                   <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${u.slaBreached > 0 ? 'bg-rose-50 text-rose-600' : 'bg-gray-50 text-gray-400'}`}>
                                     {u.slaBreached}
                                   </span>
                                 </td>
+                                <td className="py-2.5 text-right text-gray-500">{u.ticketsWorked}</td>
                               </tr>
                             );
                           })}

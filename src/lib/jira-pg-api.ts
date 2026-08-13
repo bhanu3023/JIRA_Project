@@ -2393,10 +2393,19 @@ async function _handleJiraPgApi(
         if (row.jira_sla_breached || dueBreach) slaBreachedCount++;
       }
 
-      // Per-user breakdown -- every member of this queue, how many tickets
-      // they worked in it (from user_worked_on_tickets, same source the
-      // "Worked on" tab already uses) within the selected range, and how
-      // many of those are breached by the same rule as above.
+      // Per-user breakdown -- every member of this queue. Two different
+      // things, both needed:
+      //  - ticketsWorked/slaBreached (range-aware, from user_worked_on_tickets)
+      //    is throughput: how many tickets they passed/returned/closed in the
+      //    selected window. That table is ONLY written on those three events
+      //    -- never just because a ticket is sitting open/in-progress with
+      //      someone -- so a ticket nobody has transitioned yet (including an
+      //      old one from before this window) never shows up here, at ANY
+      //      range, even "All time". That silently hid exactly the tickets
+      //      people most need visibility into: their current backlog.
+      //  - current{Total,Open,InProgress,Waiting,SlaBreached} below fixes that
+      //    by reading live ticket ownership straight off `issues` (never
+      //    date-filtered -- it's "right now", not a historical window).
       let memberIds: string[] = [];
       try {
         const queueRows = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKeyParam]);
@@ -2443,10 +2452,44 @@ async function _handleJiraPgApi(
             byUser[uid] = { userId: uid, firstName: u.rows[0].firstName, lastName: u.rows[0].lastName, email: u.rows[0].email, avatarUrl: avatarRef(uid, u.rows[0].avatarUrl), ticketIds: new Set(), slaBreachedIds: new Set() };
           }
         }
-        perUser = Object.values(byUser).map((u: any) => ({
-          userId: u.userId, firstName: u.firstName, lastName: u.lastName, email: u.email, avatarUrl: u.avatarUrl,
-          ticketsWorked: u.ticketIds.size, slaBreached: u.slaBreachedIds.size,
-        })).sort((a: any, b: any) => b.ticketsWorked - a.ticketsWorked);
+
+        // Live current-state counts, keyed by the ticket's dept-scoped owner
+        // (falls back to the general assignee when a dept-specific one isn't
+        // set) -- deliberately NOT range-filtered, so an old ticket someone
+        // is still sitting on always counts.
+        const currentRes = await pool.query(
+          `SELECT i.department_assignee_id, i."assigneeId", i."dueDate", i.jira_sla_breached,
+                  s.name AS status_name, s.category AS status_category
+           FROM issues i
+           LEFT JOIN statuses s ON s.id = i."statusId"
+           WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)`,
+          [spaceId, dept]
+        );
+        const isWaitingCat = (name: string) => /wait|hold/i.test(name || '');
+        const currentByUser: Record<string, { total: number; open: number; inProgress: number; waiting: number; slaBreached: number }> = {};
+        for (const r of currentRes.rows) {
+          const owner: string | null = r.department_assignee_id || r.assigneeId;
+          if (!owner || !memberIds.includes(owner)) continue;
+          const bucket = (currentByUser[owner] ??= { total: 0, open: 0, inProgress: 0, waiting: 0, slaBreached: 0 });
+          const waiting = isWaitingCat(r.status_name);
+          const isDone = r.status_category === 'done';
+          bucket.total++;
+          if (waiting) bucket.waiting++;
+          else if (r.status_category === 'in_progress') bucket.inProgress++;
+          else if (!isDone) bucket.open++;
+          const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
+          if (!isDone && (r.jira_sla_breached || dueBreach)) bucket.slaBreached++;
+        }
+
+        perUser = Object.values(byUser).map((u: any) => {
+          const cur = currentByUser[u.userId] || { total: 0, open: 0, inProgress: 0, waiting: 0, slaBreached: 0 };
+          return {
+            userId: u.userId, firstName: u.firstName, lastName: u.lastName, email: u.email, avatarUrl: u.avatarUrl,
+            ticketsWorked: u.ticketIds.size, slaBreachedInRange: u.slaBreachedIds.size,
+            currentTotal: cur.total, currentOpen: cur.open, currentInProgress: cur.inProgress, currentWaiting: cur.waiting,
+            slaBreached: cur.slaBreached,
+          };
+        }).sort((a: any, b: any) => b.currentTotal - a.currentTotal);
       }
 
       return json({
