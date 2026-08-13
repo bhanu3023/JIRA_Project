@@ -4532,6 +4532,7 @@ async function _handleJiraPgApi(
         if (dept) {
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
           const oldQueueStatusName = deptStatuses[dept]?.name || 'Unknown';
+          const oldQueueStatusCategory = deptStatuses[dept]?.category || 'todo';
           deptStatuses[dept] = {
             id: String(body.queueStatusId),
             name: String(body.queueStatusName || ''),
@@ -4539,6 +4540,59 @@ async function _handleJiraPgApi(
             category: String(body.queueStatusCategory || 'todo'),
           };
           await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(deptStatuses), key]);
+
+          // Reopening -- the dept's OLD status was done (Resolved/Closed/etc.)
+          // and the newly picked one isn't. Resuming the SLA clock (not
+          // restarting it -- startDeptSLA preserves already-logged elapsed_ms
+          // and just marks it running again) is the mirror image of the
+          // pause that happens on close; without this, a resolved ticket's
+          // SLA stayed paused forever even after being reopened. Also syncs
+          // the global statusId to a real not-done status for the same
+          // reason the "done" sync below exists: dashboards, "excludeDone"
+          // filters, etc. all read the global column, not dept_statuses.
+          let queueStatusSyncedReopen = false;
+          if (oldQueueStatusCategory === 'done' && String(body.queueStatusCategory || 'todo') !== 'done') {
+            try {
+              const realStatuses = (issue.space as any)?.statuses || [];
+              const queueStName = String(body.queueStatusName || '').trim();
+              let matchedReal = realStatuses.find((s: any) => s.category !== 'done' && s.name.toLowerCase() === queueStName.toLowerCase());
+              if (!matchedReal && queueStName) {
+                const maxOrder = await pool.query(`SELECT COALESCE(MAX("order"), 0) AS m FROM statuses WHERE "spaceId"=$1`, [issue.spaceId]);
+                const newRealStatusId = rid();
+                await pool.query(
+                  `INSERT INTO statuses (id, name, category, color, "order", "spaceId") VALUES ($1,$2,$3,$4,$5,$6)`,
+                  [newRealStatusId, queueStName, String(body.queueStatusCategory || 'todo'), String(body.queueStatusColor || '#64748B'), (maxOrder.rows[0]?.m ?? 0) + 1, issue.spaceId]
+                );
+                matchedReal = { id: newRealStatusId };
+              }
+              matchedReal = matchedReal || realStatuses.find((s: any) => s.category !== 'done');
+              if (matchedReal) {
+                data.statusId = matchedReal.id;
+                queueStatusSyncedReopen = true;
+              }
+              await startDeptSLA(null, issue.id, dept);
+              console.log(`[SLA Resume] ${issue.key}: reopened in ${dept}`);
+              // This branch (like the "done" sync below) skips the early-return
+              // status-history insert further down, and never reaches the
+              // generic "Status (resolve names)" history block past this
+              // function either (both are gated on body.statusId, which stays
+              // undefined for a queue-scoped status) -- write it here instead,
+              // same shape as the early-return branch's own status entry.
+              const reopenChanger = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+              pool.query(
+                `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+                [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), reopenChanger ? `${reopenChanger.firstName} ${reopenChanger.lastName}`.trim() : 'Unknown', reopenChanger?.email || null]
+              ).catch(() => {});
+              notifyStatusChanged({
+                key: issue.key, summary: issue.summary, priority: issue.priority,
+                spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
+                oldStatus: { name: oldQueueStatusName, category: 'done' },
+                newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
+                assignee: issue.assignee, reporter: issue.reporter,
+                changedBy: reopenChanger,
+              }).catch(() => {});
+            } catch (e: any) { console.error('[SLA resume on reopen failed]', issue.key, e?.message || e); }
+          }
 
           if (String(body.queueStatusCategory || '') === 'done') {
             const realStatuses = (issue.space as any)?.statuses || [];
@@ -4566,7 +4620,7 @@ async function _handleJiraPgApi(
             }
           }
 
-          if (!queueStatusSyncedDone) {
+          if (!queueStatusSyncedDone && !queueStatusSyncedReopen) {
             // A queue-scoped "Waiting for X" status (e.g. picked from this
             // dept's own custom-queue status list) means the same thing as a
             // real global status of that name: hand the ticket to dept X, not
