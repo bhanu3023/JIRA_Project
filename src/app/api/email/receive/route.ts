@@ -67,6 +67,17 @@ async function sendGraphAutoReply(opts: {
   sk: string;
   messageId?: string;
 }) {
+  // Local/dev environments share the same production OAuth mailbox
+  // credentials with no separate test account — nothing else stops a local
+  // test from auto-replying to whoever "sent" the test email. Only the
+  // actual production deployment may send for real. This guards the direct
+  // Graph sendMail call below too, not just the sendAutoReply() fallbacks
+  // (which are already guarded in email-service.ts).
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[AutoReply] DEV MODE — would reply to ${opts.fromEmail} for ticket ${opts.issueKey} (not actually sent)`);
+    return;
+  }
+
   // Try Graph token first; if consent not granted, fall back to IMAP access token via SMTP
   let accessToken = await getGraphToken(opts.toAddress);
   let useSmtpFallback = false;
@@ -420,12 +431,13 @@ export async function POST(req: NextRequest) {
   let spaceKey = '';
   let emailDepartment: string | null = null;
 
-  // 1a. In-memory mock store
+  // 1a. In-memory mock store (fallback only — DB below takes priority)
+  let mockSpaceKey = '';
   try {
     const mockModule = await import('@/lib/jira-dev-mock');
     const { getEmailAddressSpaceKey, getEmailAddressRecord } = mockModule as any;
     if (typeof getEmailAddressSpaceKey === 'function') {
-      spaceKey = getEmailAddressSpaceKey(toAddress) || '';
+      mockSpaceKey = getEmailAddressSpaceKey(toAddress) || '';
     }
     if (typeof getEmailAddressRecord === 'function') {
       const rec = getEmailAddressRecord(toAddress);
@@ -433,40 +445,30 @@ export async function POST(req: NextRequest) {
     }
   } catch {}
 
-  // 1b. DB lookup — exact address match (works for any board configured via Settings → Email)
-  if (!spaceKey) {
-    try {
-      const { Pool } = await import('pg');
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
-      // Ensure table exists (with department column)
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS email_configs (
-          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-          space_key TEXT NOT NULL, address TEXT NOT NULL,
-          imap_host TEXT NOT NULL DEFAULT 'outlook.office365.com', imap_port INT NOT NULL DEFAULT 993,
-          smtp_host TEXT NOT NULL DEFAULT 'smtp.office365.com',   smtp_port INT NOT NULL DEFAULT 587,
-          password_enc TEXT, auto_reply BOOLEAN DEFAULT true,
-          auto_reply_text TEXT, department TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
-          UNIQUE(space_key, address)
-        )
-      `);
-      await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`);
-      const dbRow = await pool.query(
-        `SELECT space_key, department FROM email_configs WHERE LOWER(address) = $1 LIMIT 1`,
-        [toAddress]
-      );
-      await pool.end();
-      if (dbRow.rows[0]) {
-        spaceKey = dbRow.rows[0].space_key;
-        if (dbRow.rows[0].department) emailDepartment = dbRow.rows[0].department;
-        console.log(`[EmailReceive] Found space via DB config: ${spaceKey}${emailDepartment ? ` dept:${emailDepartment}` : ''}`);
-      }
-    } catch (e) {
-      console.error('[EmailReceive] DB lookup failed:', e);
+  // 1b. DB lookup — always runs, takes priority over mock store
+  try {
+    const { pgPool: pool } = await import('@/lib/pg-pool');
+    await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
+    const dbRow = await pool.query(
+      `SELECT space_key, department FROM email_configs WHERE LOWER(address) = $1 LIMIT 1`,
+      [toAddress]
+    );
+    if (dbRow.rows[0]) {
+      spaceKey = dbRow.rows[0].space_key;
+      if (dbRow.rows[0].department) emailDepartment = dbRow.rows[0].department;
+      console.log(`[EmailReceive] Found space via DB config: ${spaceKey}${emailDepartment ? ` dept:${emailDepartment}` : ''}`);
     }
+  } catch (e) {
+    console.error('[EmailReceive] DB lookup failed:', e);
   }
 
-  // 1c. Derive from email local-part as last resort (e.g. sops@domain → SOPS)
+  // 1c. Fall back to mock store if DB had no match
+  if (!spaceKey && mockSpaceKey) {
+    spaceKey = mockSpaceKey;
+    console.log(`[EmailReceive] Using mock store spaceKey: ${spaceKey}`);
+  }
+
+  // 1d. Derive from email local-part as last resort
   if (!spaceKey) {
     spaceKey = toAddress.split('@')[0].toUpperCase().replace(/[^A-Z0-9]/g, '');
     console.log(`[EmailReceive] Derived spaceKey from prefix: ${spaceKey}`);
@@ -480,8 +482,31 @@ export async function POST(req: NextRequest) {
 
   if (!space) {
     console.error(`[EmailWebhook] Space not found for key "${spaceKey}" (to: ${toAddress})`);
-    (globalThis as any).__lastWebhookResult = { ok: false };
-    return NextResponse.json({ ok: false, reason: `No space found for ${toAddress} (spaceKey: ${spaceKey})` });
+    // This lookup is deterministic on the recipient address — it will not
+    // start succeeding on its own, only if an admin deliberately configures
+    // a matching space later (rare). Marking it processed anyway (instead of
+    // the normal "leave unprocessed, retry next poll" behavior for transient
+    // failures) stops every poller cycle from re-fetching this same message
+    // — attachments and all — forever. Without this, every personal/business
+    // email in a polled inbox that will never map to a ticket space (payslips,
+    // Teams notifications, unrelated threads) got re-processed every single
+    // poll cycle across every mailbox, indefinitely — a continuously growing
+    // background load that was severe enough to stall the whole app.
+    if (messageId) {
+      const mid = messageId.trim();
+      const processedIds: Set<string> = (globalThis as any).__processedMsgIds || new Set();
+      processedIds.add(mid);
+      (globalThis as any).__processedMsgIds = processedIds;
+      try {
+        const { pgPool: pool } = await import('@/lib/pg-pool');
+        await pool.query(
+          `INSERT INTO processed_emails (message_id) VALUES ($1) ON CONFLICT (message_id) DO NOTHING`,
+          [mid]
+        );
+      } catch { /* non-critical */ }
+    }
+    (globalThis as any).__lastWebhookResult = { ok: false, permanent: true };
+    return NextResponse.json({ ok: false, permanent: true, reason: `No space found for ${toAddress} (spaceKey: ${spaceKey})` });
   }
 
   const sk = space.key; // use canonical key from DB
@@ -512,13 +537,11 @@ export async function POST(req: NextRequest) {
     const msgIdsToCheck = [inReplyTo, ...references.split(/\s+/)].map(s => s.trim()).filter(Boolean);
     if (msgIdsToCheck.length > 0) {
       try {
-        const { Pool } = await import('pg');
-        const p = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+        const { pgPool: p } = await import('@/lib/pg-pool');
         for (const mid of msgIdsToCheck) {
           const res = await p.query(`SELECT key FROM issues WHERE "emailthreadid" = $1 LIMIT 1`, [mid]);
           if (res.rows[0]) { existingTicketKey = res.rows[0].key; break; }
         }
-        await p.end();
       } catch { /* non-critical */ }
     }
   }
@@ -529,13 +552,11 @@ export async function POST(req: NextRequest) {
     const baseSubject = subject.replace(/^(re:\s*)+/i, '').replace(/\s*\[.*?\]\s*$/, '').trim();
     if (baseSubject) {
       try {
-        const { Pool } = await import('pg');
-        const p = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+        const { pgPool: p } = await import('@/lib/pg-pool');
         const res = await p.query(
           `SELECT i.key FROM issues i JOIN spaces s ON i."spaceId" = s.id WHERE s.key = $1 AND LOWER(i.summary) = LOWER($2) ORDER BY i."createdAt" DESC LIMIT 1`,
           [sk, baseSubject]
         );
-        await p.end();
         if (res.rows[0]) {
           existingTicketKey = res.rows[0].key;
           console.log(`[EmailWebhook] Subject match: "${baseSubject}" → ${existingTicketKey}`);
@@ -562,8 +583,26 @@ export async function POST(req: NextRequest) {
 
     const existingIssue = await db.issue.findUnique({ where: { key: existingTicketKey }, select: { id: true } });
     if (existingIssue) {
-      // Strip quoted/forwarded content — keep only the new reply text
-      const cleanBody = stripQuotedContent(body);
+      // For reply comments: extract plain text → run text-based quote stripper
+      // (more reliable than HTML parsing — Outlook's reply HTML structure varies,
+      // but the plain-text From:/Sent:/To:/Subject: block is always consistent)
+      let cleanBody: string;
+      const isHtml = /<[a-zA-Z]/.test(body);
+      if (isHtml) {
+        const plainText = body
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+          .replace(/\s{2,}/g, ' ').replace(/ \n/g, '\n').replace(/\n /g, '\n')
+          .trim();
+        const stripped = stripQuotedContent(plainText);
+        cleanBody = stripped.split(/\n\n+/)
+          .map(p => p.trim() ? `<p>${p.trim().replace(/\n/g, '<br/>')}</p>` : '')
+          .filter(Boolean).join('') || stripped;
+      } else {
+        cleanBody = stripQuotedContent(body);
+      }
       if (cleanBody) {
         await db.comment.create({
           data: {
@@ -595,10 +634,8 @@ export async function POST(req: NextRequest) {
     }
     // Also check persistent processed_emails table
     try {
-      const { Pool } = await import('pg');
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+      const { pgPool: pool } = await import('@/lib/pg-pool');
       const dup = await pool.query(`SELECT message_id FROM processed_emails WHERE message_id = $1 LIMIT 1`, [mid]);
-      await pool.end();
       if (dup.rows[0]) {
         processedIds.add(mid);
         (globalThis as any).__processedMsgIds = processedIds;
@@ -707,10 +744,17 @@ export async function POST(req: NextRequest) {
       customerName: senderDomain,
       clientName: senderDomain,
       labels: [],
-      ...(emailDepartment ? { current_department: emailDepartment } as any : {}),
     },
     include: { status: true, space: { select: { key: true, name: true } } },
   });
+
+  // Set current_department via raw SQL (field not in Prisma schema)
+  if (emailDepartment) {
+    try {
+      const { pgPool: p2 } = await import('@/lib/pg-pool');
+      await p2.query(`UPDATE issues SET current_department = $1 WHERE key = $2`, [emailDepartment, issue.key]);
+    } catch { /* non-critical */ }
+  }
 
   // If no assignee was found via RR, alert leads + shift leads
   if (!rrAssigneeId) {
@@ -750,16 +794,15 @@ export async function POST(req: NextRequest) {
     processedIds.add(mid);
     (globalThis as any).__processedMsgIds = processedIds;
     try {
-      const { Pool } = await import('pg');
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db' });
+      const { pgPool: pool } = await import('@/lib/pg-pool');
+      await pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS emailthreadid TEXT`).catch(() => {});
       // Save to issues table for thread detection
-      await pool.query(`UPDATE issues SET "emailthreadid" = $1 WHERE key = $2`, [mid, issueKey]);
+      await pool.query(`UPDATE issues SET emailthreadid = $1 WHERE key = $2`, [mid, issueKey]);
       // Save to persistent processed_emails table — survives ticket deletion & server restarts
       await pool.query(
         `INSERT INTO processed_emails (message_id) VALUES ($1) ON CONFLICT (message_id) DO NOTHING`,
         [mid]
       );
-      await pool.end();
     } catch { /* non-critical */ }
   }
 

@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { Pool } from 'pg';
+import { pgPool as pool } from '@/lib/pg-pool';
 import {
   startImapPoller,
   stopImapPoller,
@@ -18,7 +18,6 @@ import {
   type EmailConfig,
 } from '@/lib/email-service';
 
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db';
 
 export const runtime = 'nodejs';
 
@@ -90,6 +89,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'Password is required (or use OAuth).' }, { status: 400 });
   }
 
+  // testOnly=true: verify credentials and return without saving or starting poller
+  if (body.testOnly) {
+    if (isOAuth) return NextResponse.json({ ok: true, message: 'OAuth token is valid.' });
+    const imapTest = await testImapConnection(config.imap);
+    if (!imapTest.ok) {
+      return NextResponse.json({ ok: false, error: imapTest.error || 'IMAP connection failed. Check credentials.' });
+    }
+    return NextResponse.json({ ok: true, message: `Connected to ${config.imap.host}. ${imapTest.unread ?? 0} unread emails found.`, unread: imapTest.unread });
+  }
+
   // For OAuth connections, skip IMAP/SMTP tests (token already validated by OAuth server).
   // For password connections we also skip hard-failing — Microsoft 365 has disabled basic
   // auth for IMAP so the test always fails even with valid credentials. The poller itself
@@ -131,7 +140,6 @@ export async function POST(req: NextRequest) {
 
   // Persist config to DB so it survives server restarts
   try {
-    const pool = new Pool({ connectionString: DB_URL });
     await pool.query(`
       CREATE TABLE IF NOT EXISTS email_configs (
         id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -150,7 +158,7 @@ export async function POST(req: NextRequest) {
       )
     `);
     await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`);
-    const dept = (config as any).department || null;
+    const dept = body.department || (config as any).department || null;
     await pool.query(`
       INSERT INTO email_configs (space_key, address, imap_host, imap_port, smtp_host, smtp_port, password_enc, auto_reply, auto_reply_text, department)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
@@ -167,7 +175,6 @@ export async function POST(req: NextRequest) {
       isOAuth ? null : (config.imap.password || null),
       config.autoReply, config.autoReplyText, dept,
     ]);
-    await pool.end();
     console.log(`[EmailConnect] Saved config for ${config.address} → space ${config.spaceKey}`);
   } catch (e) {
     console.error('[EmailConnect] Failed to persist email config to DB:', e);
@@ -190,9 +197,7 @@ export async function DELETE(req: NextRequest) {
     stopImapPollerForEmail(email);
     // Remove from DB
     try {
-      const pool = new Pool({ connectionString: DB_URL });
       await pool.query('DELETE FROM email_configs WHERE address = $1', [email]);
-      await pool.end();
     } catch (e) {
       console.error('[EmailConnect] Failed to delete email config from DB:', e);
     }

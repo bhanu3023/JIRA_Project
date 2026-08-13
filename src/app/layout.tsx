@@ -1,18 +1,25 @@
 import './globals.css';
 import { Suspense } from 'react';
+import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import RootLayoutClient from '@/components/layout/RootLayoutClient';
 
 const inter = Inter({ subsets: ['latin'] });
 
+// A raw <title> JSX tag here (as this used to be) always wins over any child
+// route's generateMetadata, since Next's metadata system doesn't know about
+// it — no page could ever set its own title. Using the metadata export
+// instead makes this just the default, so a route like /issues/[issueKey]
+// can override just the title while still inheriting everything else here.
+export const metadata: Metadata = {
+  title: 'Neutara Technologies Ticketing',
+  description: 'Neutara Technologies Ticketing - Unified Support Platform',
+  icons: { icon: '/neutara-logo.png' },
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <head>
-        <title>Neutara Technologies Ticketing</title>
-        <meta name="description" content="Neutara Technologies Ticketing - Unified Support Platform" />
-        <link rel="icon" type="image/png" href="/neutara-logo.png" />
-      </head>
       <body className={`${inter.className} antialiased bg-gray-50 text-gray-900 min-h-screen overflow-x-hidden`}>
         <Suspense
           fallback={

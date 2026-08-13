@@ -83,6 +83,16 @@ export async function sendAutoReply(opts: {
   references?: string;
   outboundMessageId?: string;
 }) {
+  // Same guard as notification-service.ts's sendNotification — local/dev
+  // environments share the same production SMTP/OAuth mailbox credentials
+  // with no separate test account, so nothing else stops a local test from
+  // auto-replying to a real customer's email address. Only the actual
+  // production deployment may send for real.
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[EmailPoller] DEV MODE — would send auto-reply "${opts.subject}" to ${opts.to} (not actually sent)`);
+    return;
+  }
+
   const smtpAuth: any = opts.smtp.oauthAccessToken
     ? { type: 'OAuth2', user: opts.smtp.user, accessToken: opts.smtp.oauthAccessToken }
     : { user: opts.smtp.user, pass: opts.smtp.password };
@@ -446,9 +456,23 @@ export function sanitizeEmailHtml(html: string): string {
   h = h.replace(/\s+on\w+="[^"]*"/gi, '');
   h = h.replace(/\s+on\w+='[^']*'/gi, '');
 
-  // 5. Strip quoted-reply blocks
+  // 5. Strip quoted-reply blocks (plain text patterns embedded in HTML)
   h = h.replace(/(<div[^>]*>)?\s*[-_]{3,}\s*(Original Message|Forwarded Message)[\s\S]*/i, '');
   h = h.replace(/On .{5,80} wrote:[\s\S]*/i, '');
+
+  // 5b. Strip <blockquote> elements entirely (they contain the quoted thread)
+  // Use a loop to handle nesting: replace inner blockquotes first, then outer
+  let bqPrev = '';
+  while (bqPrev !== h) {
+    bqPrev = h;
+    h = h.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi, '');
+  }
+
+  // 5c. Strip Outlook's blue-line reply header divs
+  //     e.g. <div style="...border-top:solid #E1E1E1..."> or border-top:1pt solid
+  h = h.replace(/<div[^>]*style="[^"]*border(?:-top)?:[^"]*solid[^"]*"[^>]*>[\s\S]*$/i, '');
+  // Strip from the <hr> separator Outlook inserts before the quoted block
+  h = h.replace(/<hr[^>]*\/?>\s*<div[^>]*>[\s\S]*$/i, '');
 
   // 6. Strip Outlook reading-pane preview divs (x_ classes, divRplyFwdMsg, etc.)
   //    Use iterative replacement to handle deeply nested structures
@@ -648,10 +672,8 @@ export function startImapPoller(
   if (!(globalThis as any).__processedMsgIdsLoaded) {
     (globalThis as any).__processedMsgIdsLoaded = true;
     (async () => {
+      const { pgPool: pool } = await import('@/lib/pg-pool');
       try {
-        const { Pool } = await import('pg');
-        const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db';
-        const pool = new Pool({ connectionString: DB });
         await pool.query(`
           CREATE TABLE IF NOT EXISTS processed_emails (
             message_id TEXT PRIMARY KEY,
@@ -659,7 +681,6 @@ export function startImapPoller(
           )
         `);
         const res = await pool.query(`SELECT message_id FROM processed_emails`);
-        await pool.end();
         const ids = (globalThis as any).__processedMsgIds as Set<string>;
         res.rows.forEach((r: any) => { if (r.message_id) ids.add(r.message_id); });
         console.log(`[EmailPoller] Bootstrapped ${res.rows.length} processed message IDs from DB`);
@@ -671,10 +692,8 @@ export function startImapPoller(
 
   // ── Also ensure email_configs table has this entry ───────────────────────
   (async () => {
+    const { pgPool: pool } = await import('@/lib/pg-pool');
     try {
-      const { Pool } = await import('pg');
-      const DB = process.env.DATABASE_URL || 'postgresql://postgres:neutara123@localhost:5432/neutara_db';
-      const pool = new Pool({ connectionString: DB });
       await pool.query(`
         CREATE TABLE IF NOT EXISTS email_configs (
           id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -692,7 +711,6 @@ export function startImapPoller(
           imap_host=EXCLUDED.imap_host, smtp_host=EXCLUDED.smtp_host, auto_reply=EXCLUDED.auto_reply
       `, [config.spaceKey, config.imap.user, config.imap.host, config.imap.port,
           config.smtp?.host || 'smtp.office365.com', config.smtp?.port || 587, true]);
-      await pool.end();
       console.log(`[EmailPoller] Config persisted for ${config.imap.user} → space ${config.spaceKey}`);
     } catch (e) {
       console.error('[EmailPoller] Failed to persist email config:', e);
@@ -872,8 +890,11 @@ export function startImapPoller(
         console.log(`[EmailPoller] EWS email: "${subject}" from ${from}`);
         try {
           await onEmail({ from, to, cc: '', subject, body, messageId: msgId, inReplyTo: '', references: '', attachments: [] });
-          const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean } | undefined;
-          if (!webhookResult || webhookResult.ok !== false) {
+          // permanent:true (e.g. "no space found for this address") means retrying
+          // will never succeed — mark it processed instead of re-fetching this same
+          // message (and its attachments) every single poll cycle forever.
+          const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean; permanent?: boolean } | undefined;
+          if (!webhookResult || webhookResult.ok !== false || webhookResult.permanent) {
             processedIds.add(msgId);
           } else {
             console.warn(`[EmailPoller] EWS: webhook failed for "${subject}" — will retry`);
@@ -961,8 +982,11 @@ export function startImapPoller(
         console.log(`[EmailPoller] Graph email: "${subject}" from ${from} to ${to}`);
         try {
           await onEmail({ from, to, cc, subject, body, messageId: msgId, inReplyTo: '', references: '', attachments: [] });
-          const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean } | undefined;
-          if (!webhookResult || webhookResult.ok !== false) {
+          // permanent:true (e.g. "no space found for this address") means retrying
+          // will never succeed — mark it processed instead of re-fetching this same
+          // message (and its attachments) every single poll cycle forever.
+          const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean; permanent?: boolean } | undefined;
+          if (!webhookResult || webhookResult.ok !== false || webhookResult.permanent) {
             processedIds.add(msgId);
           } else {
             console.warn(`[EmailPoller] Graph: webhook failed for "${subject}" — will retry`);
@@ -1087,12 +1111,14 @@ export function startImapPoller(
 
           try {
             await onEmail({ from, to, cc, subject, body, messageId: msgId, inReplyTo, references, attachments });
-            // Only mark as processed if the webhook call SUCCEEDED (returned ok:true).
-            // If webhook failed (space not found, DB error etc.) we do NOT add to processedIds
-            // so the next poll will retry.
+            // Only mark as processed if the webhook call SUCCEEDED (returned ok:true)
+            // OR failed for a permanent reason (e.g. "no space found for this address"
+            // — a deterministic lookup that retrying will never fix). Genuinely
+            // transient failures (DB error etc.) still go unmarked so the next poll
+            // retries them.
             // onEmail calls fetch() internally — we check the response via a shared result slot.
-            const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean } | undefined;
-            const webhookOk = !webhookResult || webhookResult.ok !== false;
+            const webhookResult = (globalThis as any).__lastWebhookResult as { ok: boolean; permanent?: boolean } | undefined;
+            const webhookOk = !webhookResult || webhookResult.ok !== false || webhookResult.permanent;
             if (webhookOk) {
               processedIds.add(msgId);
               await client.messageFlagsAdd({ uid: msg.uid }, ['\\Seen']).catch(() => {});
@@ -1112,19 +1138,32 @@ export function startImapPoller(
     }
   }
 
-  pollOnce().catch(err => console.error('[EmailPoller] pollOnce unhandled error:', err));
-  const interval = setInterval(() => {
-    pollOnce().catch(err => console.error('[EmailPoller] pollOnce unhandled error:', err));
-  }, 30000);
-  pollerInterval = interval; // legacy shim
-
-  // Register in multi-poller map
-  globalThis.__imapPollers!.set(emailKey, {
+  // Stagger this mailbox's poll cycle instead of syncing to every other
+  // mailbox's interval. All pollers get started back-to-back at app boot
+  // (see the restart loop below), so without jitter every one of them fires
+  // in the same instant every 30s — with ~40 mailboxes that's a synchronized
+  // burst of Graph API calls + OAuth token refreshes + DB writes that can
+  // starve the shared connection pool / event loop long enough to stall
+  // unrelated requests (e.g. the Filters page's own query) landing in that
+  // window. A random initial delay spreads the 40 cycles across the full
+  // 30s period instead of piling them all onto the same tick.
+  const pollerEntry: PollerInstance = {
     config,
-    interval,
+    interval: null as any,
     running: true,
     spaceKey: config.spaceKey,
-  });
+  };
+  globalThis.__imapPollers!.set(emailKey, pollerEntry);
+
+  const jitterMs = Math.floor(Math.random() * 30000);
+  pollerEntry.interval = setTimeout(() => {
+    pollOnce().catch(err => console.error('[EmailPoller] pollOnce unhandled error:', err));
+    pollerEntry.interval = setInterval(() => {
+      pollOnce().catch(err => console.error('[EmailPoller] pollOnce unhandled error:', err));
+    }, 30000);
+    pollerInterval = pollerEntry.interval; // legacy shim
+  }, jitterMs) as any;
+  pollerInterval = pollerEntry.interval; // legacy shim
 }
 
 /** Stop poller for a specific email address */

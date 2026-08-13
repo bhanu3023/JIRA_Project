@@ -131,24 +131,191 @@ function buildEmailHtml(opts: {
 </html>`;
 }
 
+// ── Get a Graph-Mail-scoped token from the stored refresh token ───────────────
+// getValidAccessToken() returns an IMAP-scoped token (aud: outlook.office365.com)
+// which cannot call graph.microsoft.com/sendMail (403). We must explicitly
+// exchange the refresh token for a Graph-scoped token.
+async function getGraphMailToken(email: string): Promise<string | null> {
+  try {
+    const { getOAuthTokens } = await import('@/lib/oauth-service');
+    const tokens = getOAuthTokens(email);
+    if (!tokens?.refreshToken) return null;
+    const clientId     = process.env.MICROSOFT_CLIENT_ID;
+    const clientSecret = process.env.MICROSOFT_CLIENT_SECRET;
+    if (!clientId || !clientSecret) return null;
+    const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type:    'refresh_token',
+        client_id:     clientId,
+        client_secret: clientSecret,
+        refresh_token: tokens.refreshToken,
+        scope:         'https://graph.microsoft.com/Mail.Send offline_access email openid profile',
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      console.error(`[Notification] Graph token refresh failed for ${email}: ${res.status} ${err.slice(0, 200)}`);
+      return null;
+    }
+    const data = await res.json();
+    return data.access_token || null;
+  } catch (e: any) {
+    console.error('[Notification] getGraphMailToken error:', e?.message);
+    return null;
+  }
+}
+
+// ── Send via Microsoft Graph API (OAuth fallback when SMTP not configured) ─────
+async function sendViaGraph(opts: { from: string; to: string[]; subject: string; html: string; text: string; inReplyTo?: string }) {
+  try {
+    const { getOAuthTokens } = await import('@/lib/oauth-service');
+    const tokens = getOAuthTokens(opts.from);
+    if (!tokens) return false;
+    // Always get a Graph-Mail-scoped token — IMAP tokens (aud: outlook.office365.com)
+    // cannot call graph.microsoft.com/sendMail and return 403.
+    const accessToken = await getGraphMailToken(opts.from);
+    if (!accessToken) return false;
+
+    for (const recipient of opts.to) {
+      const message: any = {
+        subject: opts.subject,
+        body: { contentType: 'HTML', content: opts.html },
+        toRecipients: [{ emailAddress: { address: recipient } }],
+        // Only affects how the sender shows up for recipients OUTSIDE this
+        // mailbox's own Microsoft 365 tenant (e.g. customers on another
+        // domain) — for internal-to-internal mail, Exchange resolves the
+        // sender's display name from the mailbox's own directory entry and
+        // ignores this field entirely, so this can't fix that case.
+        from: { emailAddress: { name: FROM_NAME, address: opts.from } },
+      };
+      // Thread the email into the original conversation
+      if (opts.inReplyTo) {
+        message.internetMessageHeaders = [
+          { name: 'In-Reply-To', value: opts.inReplyTo },
+          { name: 'References',  value: opts.inReplyTo },
+        ];
+      }
+      const res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, saveToSentItems: false }),
+      });
+      if (res.ok || res.status === 202) {
+        console.log(`[Notification] Sent via Graph: ${opts.subject} → ${recipient}`);
+      } else {
+        const err = await res.text().catch(() => '');
+        console.error(`[Notification] Graph send failed for ${recipient}: ${res.status} ${err.slice(0, 200)}`);
+      }
+    }
+    return true;
+  } catch (e: any) {
+    console.error('[Notification] Graph send error:', e?.message);
+    return false;
+  }
+}
+
+// ── Find best sender email (any connected OAuth account) ───────────────────────
+async function getBestSenderEmail(): Promise<string | null> {
+  try {
+    const { getAllOAuthEmails } = await import('@/lib/oauth-service');
+    const emails = getAllOAuthEmails();
+    return emails[0] || null;
+  } catch { return null; }
+}
+
+// ── Look up the inbox email address for a space (e.g. L1board@cloudfuze.com for CUSTM) ──
+async function getInboxEmailForSpace(spaceKey: string): Promise<string | null> {
+  if (!spaceKey) return null;
+  try {
+    const { pgPool: pool } = await import('@/lib/pg-pool');
+    const row = await pool.query(
+      `SELECT address FROM email_configs WHERE LOWER(space_key) = LOWER($1) LIMIT 1`,
+      [spaceKey]
+    );
+    return row.rows[0]?.address || null;
+  } catch { return null; }
+}
+
+// ── Look up emailthreadid + inbox email for a ticket in one query ──────────────
+async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: string; inboxEmail?: string }> {
+  try {
+    const { pgPool: pool } = await import('@/lib/pg-pool');
+    const row = await pool.query(`
+      SELECT i.emailthreadid, ec.address AS inbox_email
+      FROM issues i
+      JOIN spaces s ON i."spaceId" = s.id
+      LEFT JOIN email_configs ec ON LOWER(ec.space_key) = LOWER(s.key)
+      WHERE i.key = $1
+      LIMIT 1
+    `, [issueKey]);
+    return {
+      emailthreadid: row.rows[0]?.emailthreadid || undefined,
+      inboxEmail:    row.rows[0]?.inbox_email    || undefined,
+    };
+  } catch { return {}; }
+}
+
 // ── Send helper ────────────────────────────────────────────────────────────────
-async function sendNotification(to: string[], subject: string, html: string, text: string) {
-  const transporter = getTransporter();
-  if (!transporter) return; // SMTP not configured — skip silently
+// Priority: (1) the ticket's own linked mailbox via Graph — lands in a
+// monitored inbox and threads correctly — (2) the single global SMTP
+// account, (3) any other connected OAuth account. Previously the global SMTP
+// branch always ran first (ignoring the ticket's own mailbox entirely) and
+// unconditionally `return`ed even when the send failed, so a broken/blocked
+// SMTP account (Microsoft 365 rejects legacy basic-auth SMTP for many
+// tenants) silently dropped the notification instead of falling back —
+// assignees and reporters got nothing, with no visible error.
+async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string) {
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
   if (!uniqueTo.length) return;
 
-  try {
-    await transporter.sendMail({
-      from:    `"${FROM_NAME}" <${FROM_EMAIL}>`,
-      to:      uniqueTo.join(', '),
-      subject,
-      html,
-      text,
-    });
-    console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')}`);
-  } catch (err: any) {
-    console.error(`[Notification] Failed to send "${subject}":`, err.message);
+  // Local/dev environments reuse the SAME production SMTP and OAuth mailbox
+  // credentials with no separate test account — there is nothing else
+  // stopping a local test run from emailing a real customer. That already
+  // happened once: a local test of the @mention notification path sent a
+  // real "mentioned you" email to a real customer's inbox. Only the actual
+  // production deployment (NODE_ENV=production) may send for real; every
+  // other environment logs what would have been sent instead of sending it.
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[Notification] DEV MODE — would send "${subject}" to ${uniqueTo.join(', ')} (not actually sent)`);
+    return;
+  }
+
+  if (fromEmail) {
+    const sentViaTicketInbox = await sendViaGraph({ from: fromEmail, to: uniqueTo, subject, html, text, inReplyTo });
+    if (sentViaTicketInbox) return;
+  }
+
+  const transporter = getTransporter();
+  if (transporter) {
+    try {
+      const mailOpts: any = {
+        from:    `"${FROM_NAME}" <${FROM_EMAIL}>`,
+        to:      uniqueTo.join(', '),
+        subject,
+        html,
+        text,
+      };
+      if (inReplyTo) {
+        mailOpts.inReplyTo = inReplyTo;
+        mailOpts.references = inReplyTo;
+      }
+      await transporter.sendMail(mailOpts);
+      console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')} via SMTP (${FROM_EMAIL})`);
+      return;
+    } catch (err: any) {
+      console.error(`[Notification] SMTP send failed for "${subject}", trying OAuth fallback:`, err.message);
+      // fall through instead of giving up — the notification still matters
+    }
+  }
+
+  const senderEmail = await getBestSenderEmail();
+  if (senderEmail) {
+    const sent = await sendViaGraph({ from: senderEmail, to: uniqueTo, subject, html, text, inReplyTo });
+    if (!sent) console.error(`[Notification] All send methods failed for "${subject}" to ${uniqueTo.join(', ')}`);
+  } else {
+    console.warn(`[Notification] Skipping "${subject}" — no working SMTP and no OAuth account connected`);
   }
 }
 
@@ -182,6 +349,7 @@ export async function notifyIssueCreated(issue: {
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const reporterName = issue.reporter ? `${issue.reporter.firstName} ${issue.reporter.lastName}`.trim() : 'Unknown';
   const displayKey = issue.cfKey || issue.key;
+  const inboxEmail = await getInboxEmailForSpace(issue.spaceKey);
 
   const html = buildEmailHtml({
     title:        'Issue Created',
@@ -192,7 +360,7 @@ export async function notifyIssueCreated(issue: {
     eventLabel:   'New Issue Created',
     eventColor:   '#0052CC',
     fields: [
-      { label: 'Ticket #', value: `${displayKey} (${issue.key})` },
+      { label: 'Ticket #', value: displayKey },
       { label: 'Type',     value: issue.type },
       { label: 'Priority', value: issue.priority, color: PRIORITY_COLOR[issue.priority.toLowerCase()] },
       { label: 'Status',   value: issue.status.name, color: STATUS_COLOR[issue.status.category] },
@@ -206,7 +374,9 @@ export async function notifyIssueCreated(issue: {
     to,
     `[${displayKey}] ${issue.summary}`,
     html,
-    `New issue created: ${displayKey} (${issue.key}) - ${issue.summary}\nAssignee: ${assigneeName}\nView: ${issueUrl(issue.key)}`,
+    `New issue created: ${displayKey} - ${issue.summary}\nAssignee: ${assigneeName}\nView: ${issueUrl(issue.key)}`,
+    undefined,
+    inboxEmail || undefined,
   );
 }
 
@@ -224,6 +394,7 @@ export async function notifyIssueAssigned(issue: {
 
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const prevName     = issue.previousAssignee ? `${issue.previousAssignee.firstName} ${issue.previousAssignee.lastName}`.trim() : 'Unassigned';
+  const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const html = buildEmailHtml({
     title:        'Issue Assigned',
@@ -247,6 +418,8 @@ export async function notifyIssueAssigned(issue: {
     `[${issue.key}] Assigned to ${assigneeName} - ${issue.summary}`,
     html,
     `${issue.key} has been assigned to ${assigneeName}.\nView: ${issueUrl(issue.key)}`,
+    emailthreadid,
+    inboxEmail,
   );
 }
 
@@ -257,13 +430,17 @@ export async function notifyStatusChanged(issue: {
   newStatus: { name: string; category: string };
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
-  changedBy?: { firstName?: string; lastName?: string } | null;
+  changedBy?: { email?: string | null; firstName?: string; lastName?: string } | null;
 }) {
-  const to = recipients(issue.assignee, issue.reporter);
+  const changerEmail = (issue.changedBy as any)?.email?.toLowerCase() || '';
+  // Don't notify the person who made the change (no self-spam)
+  const to = recipients(issue.assignee, issue.reporter).filter(e => e !== changerEmail);
   if (!to.length) return;
 
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
   const isResolved = ['done'].includes(issue.newStatus.category);
+  const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
+  const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const html = buildEmailHtml({
     title:        'Status Changed',
@@ -275,6 +452,7 @@ export async function notifyStatusChanged(issue: {
     eventColor:   isResolved ? '#10B981' : '#FF991F',
     fields: [
       { label: 'Status',      value: `${issue.oldStatus.name}  →  ${issue.newStatus.name}`, color: STATUS_COLOR[issue.newStatus.category] },
+      { label: 'Assigned to', value: assigneeName, color: '#0052CC' },
       { label: 'Changed by',  value: changedByName },
       { label: 'Priority',    value: issue.priority, color: PRIORITY_COLOR[issue.priority.toLowerCase()] },
     ],
@@ -290,6 +468,8 @@ export async function notifyStatusChanged(issue: {
     subject,
     html,
     `${issue.key} status changed: ${issue.oldStatus.name} → ${issue.newStatus.name}\nView: ${issueUrl(issue.key)}`,
+    emailthreadid,
+    inboxEmail,
   );
 }
 
@@ -301,37 +481,29 @@ export async function notifyCommentAdded(issue: {
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
   comment: { body: string; author?: { email?: string | null; firstName?: string; lastName?: string } | null };
 }) {
-  // Don't notify the commenter themselves
   const commenterEmail = (issue.comment.author?.email || '').toLowerCase();
-  const to = recipients(issue.assignee, issue.reporter)
-    .filter(e => e !== commenterEmail);
+  const reporterEmail  = (issue.reporter?.email || '').toLowerCase();
+  // Assignee gets notified unless they wrote the comment
+  const assigneeEmails = recipients(issue.assignee).filter(e => e !== commenterEmail);
+  // Reporter (customer) gets notified unless THEY wrote the comment (no echo back)
+  const reporterEmails = (reporterEmail && reporterEmail !== commenterEmail) ? [reporterEmail] : [];
+  const to = Array.from(new Set([...assigneeEmails, ...reporterEmails])).filter(Boolean);
   if (!to.length) return;
 
-  const authorName = issue.comment.author
-    ? `${issue.comment.author.firstName} ${issue.comment.author.lastName}`.trim()
-    : 'Someone';
+  const { emailthreadid: sourceMessageId, inboxEmail } = await getTicketThreadInfo(issue.key);
 
-  const html = buildEmailHtml({
-    title:        'Comment Added',
-    issueKey:     issue.key,
-    issueSummary: issue.summary,
-    spaceKey:     issue.spaceKey,
-    spaceName:    issue.spaceName,
-    eventLabel:   'New Comment',
-    eventColor:   '#3B82F6',
-    fields: [
-      { label: 'Commented by', value: authorName },
-      { label: 'Status',       value: issue.status.name },
-    ],
-    comment:   issue.comment.body.slice(0, 500) + (issue.comment.body.length > 500 ? '…' : ''),
-    actionUrl: issueUrl(issue.key),
-  });
+  // Send a plain reply email — just the comment text, no ticket template
+  // This looks like a normal email reply so the recipient can reply back
+  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">${issue.comment.body}</div>`;
+  const commentText = issue.comment.body.replace(/<[^>]+>/g, '');
 
   await sendNotification(
     to,
-    `[${issue.key}] ${authorName} commented - ${issue.summary}`,
-    html,
-    `${authorName} commented on ${issue.key}:\n\n${issue.comment.body}\n\nView: ${issueUrl(issue.key)}`,
+    `Re: [${issue.key}] ${issue.summary}`,
+    commentHtml,
+    commentText,
+    sourceMessageId,
+    inboxEmail,
   );
 }
 
@@ -348,6 +520,7 @@ export async function notifyIssueUpdated(issue: {
   if (!to.length) return;
 
   const updatedByName = issue.updatedBy ? `${issue.updatedBy.firstName} ${issue.updatedBy.lastName}`.trim() : 'Someone';
+  const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const changeFields = issue.changes.map(c => ({
     label: c.field,
@@ -374,6 +547,8 @@ export async function notifyIssueUpdated(issue: {
     `[${issue.key}] Updated by ${updatedByName} - ${issue.summary}`,
     html,
     `${issue.key} was updated by ${updatedByName}.\nView: ${issueUrl(issue.key)}`,
+    emailthreadid,
+    inboxEmail,
   );
 }
 
@@ -486,4 +661,46 @@ export async function notifyMentioned(opts: {
     html,
     `${opts.mentionedBy} mentioned you in ${opts.issueKey}:\n\n${opts.commentPreview}\n\nView: ${issueUrl(opts.issueKey)}`,
   );
+}
+
+export async function notifySLABreach(opts: {
+  issueKey: string;
+  issueSummary: string;
+  spaceKey: string;
+  spaceName: string;
+  slaName: string;
+  minsLeft: number;
+  assigneeEmails: string[];
+}) {
+  if (!opts.assigneeEmails.length) return;
+  const inboxEmail = await getInboxEmailForSpace(opts.spaceKey);
+  const isBreached = opts.minsLeft <= 0;
+  const timeLabel  = isBreached ? 'SLA Breached' : `SLA breaching in ${opts.minsLeft} min`;
+  const eventColor = isBreached ? '#EF4444' : '#F59E0B';
+
+  const html = buildEmailHtml({
+    title:        timeLabel,
+    issueKey:     opts.issueKey,
+    issueSummary: opts.issueSummary,
+    spaceKey:     opts.spaceKey,
+    spaceName:    opts.spaceName,
+    eventLabel:   isBreached ? '🔴 SLA BREACHED' : `⚠ SLA Warning — ${opts.minsLeft} min left`,
+    eventColor,
+    fields: [
+      { label: 'SLA Policy', value: opts.slaName },
+      { label: 'Board',      value: opts.spaceName },
+      { label: 'Status',     value: isBreached ? 'BREACHED' : `${opts.minsLeft} minutes remaining`, color: eventColor },
+    ],
+    actionUrl: issueUrl(opts.issueKey),
+  });
+
+  await sendNotification(
+    opts.assigneeEmails,
+    `[${opts.issueKey}] ${timeLabel}: ${opts.slaName} — ${opts.issueSummary}`,
+    html,
+    `${timeLabel} for ${opts.issueKey}.\nSLA: ${opts.slaName}\nView: ${issueUrl(opts.issueKey)}`,
+    undefined,
+    inboxEmail || undefined,
+  );
+  console.log(`[Notification] SLA breach alert for ${opts.issueKey} → ${opts.assigneeEmails.join(', ')}`);
 }

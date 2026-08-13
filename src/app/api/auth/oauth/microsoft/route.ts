@@ -14,24 +14,26 @@ export async function GET(req: NextRequest) {
 
   const clientId = process.env.MICROSOFT_CLIENT_ID;
   if (!clientId) {
-    // Redirect back with error
+    const mode = searchParams.get('mode') || 'email';
+    if (mode === 'login') {
+      return NextResponse.redirect(
+        new URL('/auth/login?oauth_error=MICROSOFT_CLIENT_ID+is+not+configured', req.url)
+      );
+    }
     const base = returnUrl.includes('?') ? returnUrl : `${returnUrl}?tab=email`;
     return NextResponse.redirect(
       new URL(`${base}&oauth_error=MICROSOFT_CLIENT_ID+is+not+configured+in+.env.local`, req.url)
     );
   }
 
-  // Behind a reverse proxy (nginx), req.url is localhost:port internally.
-  // Use x-forwarded headers to reconstruct the public URL, falling back to env var.
-  const fwdHost  = req.headers.get('x-forwarded-host');
-  const fwdProto = req.headers.get('x-forwarded-proto') || 'https';
-  const appUrl   = fwdHost
-    ? `${fwdProto}://${fwdHost}`
-    : (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin);
+  // Always use the configured public URL for redirectUri — must match Azure AD exactly.
+  // Never compute from request headers (x-forwarded-host can differ between proxy layers).
+  const appUrl      = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://neutaraticketing.cftools.live').replace(/\/$/, '');
   const redirectUri = `${appUrl}/api/auth/oauth/microsoft/callback`;
   const mode        = searchParams.get('mode') || 'email';
   const loginHint   = searchParams.get('loginHint') || '';
-  const state       = Buffer.from(JSON.stringify({ spaceKey, returnUrl, mode, loginHint, ts: Date.now() })).toString('base64url');
+  const department  = searchParams.get('department') || '';
+  const state       = Buffer.from(JSON.stringify({ spaceKey, returnUrl, mode, loginHint, department, ts: Date.now() })).toString('base64url');
 
-  return NextResponse.redirect(getMicrosoftAuthUrl(redirectUri, state, loginHint));
+  return NextResponse.redirect(getMicrosoftAuthUrl(redirectUri, state, loginHint, mode === 'login' ? 'login' : 'email'));
 }

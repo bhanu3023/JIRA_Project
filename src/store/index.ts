@@ -8,6 +8,22 @@ let authEpoch = 0;
 let loadSpacesInflight: Promise<void> | null = null;
 let loadNotificationsInflight: Promise<void> | null = null;
 
+// Queue results cache: key → {issues, total, page, ts}
+const issuesCache = new Map<string, { issues: any[]; total: number; page: number; ts: number }>();
+const CACHE_TTL = 30_000; // 30 seconds stale-while-revalidate
+
+// Tracks which queue is currently active so background fetches don't overwrite the display
+let activeQueueKey = '';
+
+// Tracks which issue key is currently the one the detail page wants displayed —
+// mirrors activeQueueKey's role above. loadIssue previously had no such guard:
+// clicking from one ticket into another (e.g. a subtask link) fires a new
+// loadIssue() call while a still-in-flight one for the PREVIOUS ticket can
+// resolve afterward and silently overwrite currentIssue with the wrong
+// ticket's data — the page then either shows the old ticket again or gets
+// stuck if the two calls's resolve order flips loading state back and forth.
+let activeIssueKey = '';
+
 interface AppState {
   // Auth
   user: User | null;
@@ -23,7 +39,7 @@ interface AppState {
   spaces: Space[];
   currentSpace: Space | null;
   loadSpaces: () => Promise<void>;
-  loadSpace: (key: string) => Promise<void>;
+  loadSpace: (key: string, force?: boolean) => Promise<void>;
   createSpace: (data: any) => Promise<void>;
 
   // Issues
@@ -32,6 +48,15 @@ interface AppState {
   issueTotal: number;
   issuePage: number;
   loadIssues: (params?: Record<string, string>) => Promise<void>;
+  prefetchIssues: (params?: Record<string, string>) => Promise<void>;
+  clearIssuesCache: (params?: Record<string, string>) => void;
+  // Bumped whenever an issue is created/mutated somewhere that doesn't know the
+  // exact params of whatever list view is currently on screen (e.g. the global
+  // header's Create button). List views depend on this in their fetch effect
+  // and re-fetch with THEIR OWN correct params — far safer than a caller
+  // guessing params and overwriting the display with a mismatched query.
+  issuesVersion: number;
+  bumpIssuesVersion: () => void;
   loadIssue: (key: string) => Promise<void>;
   createIssue: (data: any) => Promise<any>;
   updateIssue: (key: string, data: any) => Promise<void>;
@@ -130,9 +155,17 @@ export const useStore = create<AppState>((set, get) => ({
     });
     return loadSpacesInflight;
   },
-  loadSpace: async (key) => {
-    // Don't clear currentSpace before fetching — keeps old data visible instantly
-    // while fresh data loads, eliminating the blank-spinner flash on navigation.
+  loadSpace: async (key, force = false) => {
+    // Skip if already loaded for this key — avoids redundant network call on every
+    // re-render. Callers that just mutated this exact space (added/removed a member,
+    // changed a role, etc.) need `force` to actually refetch here, since the whole
+    // point of calling this is to see that change reflected — without it this was a
+    // silent no-op every time, because the space you just changed IS the one already
+    // loaded, so the member (or role, or department) you just changed never showed
+    // up until some unrelated navigation happened to trigger a real refetch.
+    if (!force && get().currentSpace?.key?.toUpperCase() === key?.toUpperCase()) return;
+    // Don't clear currentSpace before fetch — keep showing whatever was there so the
+    // page never blocks on a spinner just because the user switched boards
     const space = await api.getSpace(key);
     set({ currentSpace: space });
   },
@@ -146,24 +179,76 @@ export const useStore = create<AppState>((set, get) => ({
   currentIssue: null,
   issueTotal: 0,
   issuePage: 1,
+  issuesVersion: 0,
+  bumpIssuesVersion: () => set(s => ({ issuesVersion: s.issuesVersion + 1 })),
   loadIssues: async (params = {}) => {
-    set({ loading: true });
-    const data = await api.getIssues(params);
-    set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
+    const cacheKey = JSON.stringify(params);
+    // Mark this as the active queue — any in-flight fetch for a different key must not overwrite display
+    activeQueueKey = cacheKey;
+    const cached = issuesCache.get(cacheKey);
+    if (cached) {
+      // Show cached data instantly
+      set({ issues: cached.issues, issueTotal: cached.total, issuePage: cached.page, loading: false });
+      // If fresh enough, skip the network fetch
+      if (Date.now() - cached.ts < CACHE_TTL) return;
+      // Stale: revalidate in background — don't clear display
+    } else {
+      // No cache — clear stale issues immediately so user sees spinner, not the previous queue's data
+      set({ issues: [], issueTotal: 0, loading: true });
+    }
+    try {
+      const data = await api.getIssues(params);
+      issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
+      // Only update display data if this queue is still the active one,
+      // but ALWAYS clear loading so the spinner never gets stuck
+      if (activeQueueKey === cacheKey) {
+        set({ issues: data.issues, issueTotal: data.total, issuePage: data.page, loading: false });
+      } else {
+        set({ loading: false });
+      }
+    } catch (e) {
+      set({ loading: false }); // always clear loading on error
+      if (activeQueueKey === cacheKey) throw e;
+    }
+  },
+  // Warm the cache without ever touching store.issues — safe to call in background
+  prefetchIssues: async (params = {}) => {
+    const cacheKey = JSON.stringify(params);
+    const cached = issuesCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < CACHE_TTL) return; // already fresh
+    try {
+      const data = await api.getIssues(params);
+      issuesCache.set(cacheKey, { issues: data.issues, total: data.total, page: data.page, ts: Date.now() });
+      // deliberately NO set() — never overwrite display
+    } catch { /* prefetch failures are silent */ }
+  },
+  clearIssuesCache: (params) => {
+    if (params) {
+      issuesCache.delete(JSON.stringify(params));
+    } else {
+      issuesCache.clear();
+    }
   },
   loadIssue: async (key) => {
+    activeIssueKey = key;
     try {
       const issue = await api.getIssue(key);
-      set({ currentIssue: issue });
+      // Only apply this response if no newer loadIssue() call has superseded
+      // it in the meantime — otherwise a slow fetch for a ticket the user has
+      // already navigated away from can win the race and overwrite the
+      // ticket that's actually on screen now.
+      if (activeIssueKey === key) set({ currentIssue: issue });
     } catch {
-      set({ currentIssue: null });
+      if (activeIssueKey === key) set({ currentIssue: null });
     }
   },
   createIssue: async (data) => {
+    issuesCache.clear();
     const issue = await api.createIssue(data);
     return issue;
   },
   updateIssue: async (key, data) => {
+    issuesCache.clear();
     await api.updateIssue(key, data);
   },
   clearCurrentIssue: () => set({ currentIssue: null }),

@@ -10,6 +10,7 @@
 export type AppRole =
   | 'admin'
   | 'manager'
+  | 'migration_manager'
   | 'migration_engineer'
   | 'account_manager'
   | 'qa_engineer'
@@ -27,6 +28,7 @@ export const ROLE_LABELS: Record<string, string> = {
   manager:             'Manager',
   lead:                'Lead',
   shift_lead:          'Shift Lead',
+  migration_manager:   'Migration Manager',
   migration_engineer:  'Migration Engineer',
   account_manager:     'Account Manager',
   qa_engineer:         'QA Engineer',
@@ -43,6 +45,7 @@ export const ROLE_COLORS: Record<string, string> = {
   manager:             'bg-blue-100 text-blue-700',
   lead:                'bg-indigo-100 text-indigo-700',
   shift_lead:          'bg-teal-100 text-teal-700',
+  migration_manager:   'bg-sky-100 text-sky-700',
   migration_engineer:  'bg-orange-100 text-orange-700',
   account_manager:     'bg-cyan-100 text-cyan-700',
   qa_engineer:         'bg-amber-100 text-amber-700',
@@ -116,6 +119,15 @@ const PERMISSION_MAP: Record<string, Permissions> = {
 
   manager: {
     accessSettings: false, manageUsers: false,      manageSpaces: true,
+    manageWorkItems: false, viewBilling: false,       viewSystemLogs: false,
+    createIssues: true,     editAnyIssue: true,       editOwnIssue: true,
+    deleteIssues: false,    transitionIssues: true,   assignIssues: true,
+    setPriority: true,      addComments: true,        manageComments: true,
+    viewReports: true,      exportData: true,
+  },
+
+  migration_manager: {
+    accessSettings: false, manageUsers: false,      manageSpaces: false,
     manageWorkItems: false, viewBilling: false,       viewSystemLogs: false,
     createIssues: true,     editAnyIssue: true,       editOwnIssue: true,
     deleteIssues: false,    transitionIssues: true,   assignIssues: true,

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -26,7 +26,7 @@ import {
 const PRIVILEGED_ROLES = ['admin'];
 
 export default function Header() {
-  const { user, logout, notifications, unreadCount, loadNotifications, markAllNotificationsRead, spaces, loadIssues } = useStore(
+  const { user, logout, notifications, unreadCount, loadNotifications, markAllNotificationsRead, spaces, bumpIssuesVersion } = useStore(
     useShallow((s) => ({
       user: s.user,
       logout: s.logout,
@@ -35,7 +35,7 @@ export default function Header() {
       loadNotifications: s.loadNotifications,
       markAllNotificationsRead: s.markAllNotificationsRead,
       spaces: s.spaces,
-      loadIssues: s.loadIssues,
+      bumpIssuesVersion: s.bumpIssuesVersion,
     })),
   );
   const isPrivileged = PRIVILEGED_ROLES.includes(user?.role || '');
@@ -48,24 +48,47 @@ export default function Header() {
   const searchRef   = useRef<HTMLDivElement>(null);
   const inputRef    = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSeqRef = useRef(0);
 
   const [showNotifications, setShowNotifications] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
-  // Pick the first available space for the global Create modal
-  const defaultSpace = spaces[0];
+  // If the user is currently viewing a space/queue, the global Create button
+  // should default to that space + department instead of always the first
+  // space in the list — otherwise a ticket created while looking at e.g. the
+  // "Migration" queue silently lands with no department and never shows up
+  // there (it isn't visible from any department-filtered queue).
+  const spaceMatch = pathname?.match(/^\/spaces\/([^/]+)/);
+  const pathSpaceKey = spaceMatch ? decodeURIComponent(spaceMatch[1]).toUpperCase() : '';
+  const pathSpace = pathSpaceKey ? spaces.find((s: any) => s.key === pathSpaceKey) : undefined;
+  const defaultSpace = pathSpace || spaces[0];
   const defaultSpaceKey = defaultSpace?.key || '';
+
+  const queueParam = searchParams?.get('queue') || '';
+  const deptParam = searchParams?.get('dept') || '';
+  let headerInitialDept: string | undefined = deptParam || undefined;
+  if (!headerInitialDept && pathSpaceKey && queueParam.startsWith('cq_')) {
+    try {
+      const stored = localStorage.getItem(`custom_queues_${pathSpaceKey}`);
+      const queues = stored ? JSON.parse(stored) : [];
+      headerInitialDept = queues.find((q: any) => q.id === queueParam)?.name || undefined;
+    } catch { /* localStorage may be unavailable or stale — fall back to no default */ }
+  }
 
   useEffect(() => {
     loadNotifications();
     // Poll for new notifications every 30 seconds (real-time feel without WebSocket)
     const interval = setInterval(() => { loadNotifications(); }, 30000);
-    // Run monitor agent every 5 minutes (SLA breach warnings + duplicate detection)
-    api.triggerMonitorAgent().catch(() => {}); // run immediately on mount
-    const monitorInterval = setInterval(() => { api.triggerMonitorAgent().catch(() => {}); }, 5 * 60 * 1000);
-    return () => { clearInterval(interval); clearInterval(monitorInterval); };
+    // Monitor agent (SLA breach warnings + duplicate detection) used to be triggered
+    // from here too — every open tab ran its own copy every 5 minutes, so N staff with
+    // the app open meant N concurrent full scans hammering the shared DB pool. It now
+    // runs server-side once per process instead (see runMonitorAgentScan in
+    // jira-pg-api.ts), independent of how many tabs are open.
+    return () => { clearInterval(interval); };
   }, [loadNotifications]);
 
   const closeAll = () => {
@@ -73,12 +96,24 @@ export default function Header() {
     setShowUserMenu(false);
   };
 
-  // Close search dropdown when clicking outside
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchQuery('');
+    setSearchResults([]);
+    setActiveIdx(-1);
+    inputRef.current?.blur();
+  };
+
+  // Clicking outside used to only close the dropdown (setSearchOpen(false)),
+  // leaving the typed query sitting in the box with no results visible and no
+  // way to tell the search was still "active" — every OTHER way of dismissing
+  // the search (the X button, Escape, picking a result) fully resets it via
+  // closeSearch(). Use the same reset here so dismissing it is consistent
+  // regardless of how it happens.
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
-        setSearchOpen(false);
-        setActiveIdx(-1);
+        closeSearch();
       }
     };
     document.addEventListener('mousedown', handler);
@@ -86,19 +121,34 @@ export default function Header() {
   }, []);
 
   // Live search with debounce
+  const extractIssueKey = (input: string): string | null => {
+    const urlMatch = input.match(/\/issues\/([A-Za-z0-9_-]+(?:-[A-Za-z0-9]+)*)(?:\?|#|$)/);
+    if (urlMatch) return urlMatch[1];
+    const keyMatch = input.trim().match(/^(CF-\d+|[A-Z][A-Z0-9]+-\d+)$/i);
+    if (keyMatch) return keyMatch[1].toUpperCase();
+    return null;
+  };
+
   const handleSearchChange = useCallback((q: string) => {
     setSearchQuery(q);
     setActiveIdx(-1);
+    setSearchResults([]);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (!q.trim()) { setSearchResults([]); setSearchOpen(false); return; }
+    const issueKey = extractIssueKey(q.trim());
+    const searchTerm = issueKey || q.trim();
+    if (!searchTerm) { setSearchLoading(false); setSearchOpen(false); return; }
     setSearchLoading(true);
     setSearchOpen(true);
+    const seq = ++searchSeqRef.current;
     debounceRef.current = setTimeout(async () => {
       try {
-        const res = await api.search(q.trim());
+        const res = await api.search(searchTerm);
+        if (seq !== searchSeqRef.current) return; // stale response — newer query in flight
         setSearchResults((res.issues || []).slice(0, 8));
-      } catch { setSearchResults([]); }
-      setSearchLoading(false);
+      } catch {
+        if (seq === searchSeqRef.current) setSearchResults([]);
+      }
+      if (seq === searchSeqRef.current) setSearchLoading(false);
     }, 200);
   }, [spaces]);
 
@@ -111,26 +161,35 @@ export default function Header() {
       if (activeIdx >= 0 && searchResults[activeIdx]) {
         router.push(`/issues/${(searchResults[activeIdx] as any).cfKey ?? searchResults[activeIdx].key}`);
         closeSearch();
-      } else if (searchQuery.trim()) {
-        router.push(`/search?q=${encodeURIComponent(searchQuery)}`);
-        closeSearch();
+      } else {
+        const issueKey = extractIssueKey(searchQuery.trim());
+        if (issueKey) {
+          router.push(`/issues/${issueKey}`);
+          closeSearch();
+        } else if (searchQuery.trim()) {
+          router.push(`/search?q=${encodeURIComponent(searchQuery)}`);
+          closeSearch();
+        }
       }
     }
     if (e.key === 'Escape') closeSearch();
   };
 
-  const closeSearch = () => {
-    setSearchOpen(false);
-    setSearchQuery('');
-    setSearchResults([]);
-    setActiveIdx(-1);
-    inputRef.current?.blur();
-  };
-
   return (
     <>
 
-      <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-blue-900/30 bg-[#0129AC] px-5 shadow-md">
+      {/*
+        z-40, not z-30 -- z-index on a child (the notification/user-menu
+        dropdowns below, at z-50) only ranks it within ITS OWN ancestor's
+        stacking context, it doesn't escape it. The Filters page has its own
+        `sticky top-0 z-30` toolbar; tied with this header's old z-30, the
+        later one in DOM order (the page's toolbar) won the tie-break and
+        painted over the whole header layer, dropdowns included, no matter
+        their own z-index. z-40 sits safely above any same-page z-30 sticky
+        bar while staying below real modals (Create Task's z-50 backdrop,
+        the z-[9999] dropdowns elsewhere), so ordering there is unaffected.
+      */}
+      <header className="sticky top-0 z-40 flex h-14 items-center gap-3 border-b border-blue-900/30 bg-[#0129AC] px-5 shadow-md">
         {/* Live search bar */}
         <div ref={searchRef} className="relative flex-1 max-w-xs">
           <div className={`flex items-center gap-2 rounded border px-3 py-2 transition-all ${searchFocused ? 'border-white/40 bg-white/15' : 'border-white/10 bg-white/5'}`}>
@@ -246,7 +305,7 @@ export default function Header() {
           {showNotifications && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)} />
-              <div className="absolute right-0 top-full z-50 mt-2 max-h-96 w-80 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+              <div className="absolute right-0 top-full z-50 mt-2 max-h-96 w-80 snap-y snap-proximity overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
                 <div className="sticky top-0 flex items-center justify-between rounded-t-lg border-b border-gray-200 bg-white px-4 py-3">
                   <span className="text-[15px] font-semibold text-jira-dark">Notifications</span>
                   <button
@@ -265,7 +324,12 @@ export default function Header() {
                   notifications.slice(0, 50).map((n) => (
                     <div
                       key={n.id}
-                      className={`group relative border-b border-gray-100 px-4 py-3 transition-colors hover:bg-gray-50 ${!n.isRead ? 'bg-blue-50/50' : ''}`}
+                      // snap-start + scroll-mt so scrolling settles on a full item
+                      // instead of stopping mid-item with its title tucked behind
+                      // the sticky "Notifications" header above — scroll-mt offsets
+                      // the snap point by the header's own height so the item's
+                      // title lands just below it, not underneath it.
+                      className={`group relative snap-start scroll-mt-12 border-b border-gray-100 px-4 py-3 transition-colors hover:bg-gray-50 ${!n.isRead ? 'bg-blue-50/50' : ''}`}
                     >
                       <div className="flex items-start gap-2">
                         {/* Blue dot for unread */}
@@ -381,14 +445,16 @@ export default function Header() {
           spaceKey={defaultSpaceKey}
           statuses={(defaultSpace as any)?.statuses || []}
           members={(defaultSpace as any)?.members || []}
+          initialDept={headerInitialDept}
           onClose={() => setShowCreateModal(false)}
           onCreated={() => {
             setShowCreateModal(false);
-            // Refresh issues if currently on a space page
-            if (typeof window !== 'undefined') {
-              const match = window.location.pathname.match(/\/spaces\/([^/]+)/);
-              if (match) loadIssues({ spaceKey: match[1] });
-            }
+            // Don't call loadIssues here — this component doesn't know the exact
+            // params (dept/queue/filters/page) of whatever list view is on screen,
+            // and a mismatched query wipes the display to empty before overwriting
+            // it with unfiltered data. Bump the shared version instead so the
+            // mounted list view refetches with its own correct params.
+            bumpIssuesVersion();
           }}
         />
       )}

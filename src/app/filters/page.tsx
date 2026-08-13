@@ -1,7 +1,8 @@
 ﻿'use client';
 
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { useSearchParams } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -13,12 +14,14 @@ import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import {
   Search, Star, Plus, MoreHorizontal, Trash2, Edit2,
   Filter, X, ChevronDown, Check, Bookmark, SlidersHorizontal,
-  List, LayoutGrid,
+  List, LayoutGrid, Download,
 } from 'lucide-react';
+import { can } from '@/lib/permissions';
 
 /* ─── types ─── */
 interface FilterCriteria {
   spaces?: string[];
+  queue?: string;
   assignees?: string[];
   types?: string[];
   statuses?: string[];
@@ -32,12 +35,20 @@ interface SavedFilter {
   createdAt: string; updatedAt: string;
 }
 
-const ISSUE_TYPES = ['bug', 'task', 'story', 'epic', 'subtask', 'improvement', 'feature', 'test', 'incident', 'change_request'];
+const ISSUE_TYPES = ['bug', 'task', 'subtask'];
 const TYPE_LABELS: Record<string, string> = {
-  bug: 'Bug', task: 'Task', story: 'Story', epic: 'Epic', subtask: 'Subtask',
-  improvement: 'Improvement', feature: 'Feature', test: 'Test', incident: 'Incident', change_request: 'Change Request',
+  bug: 'Bug', task: 'Task', subtask: 'Subtask',
 };
 const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
+// Same fixed list the ticket's own Project Manager field picks from (CreateIssueModal.tsx,
+// issues/[issueKey]/page.tsx) — individual people, not the comma-joined combinations a
+// ticket ends up storing once multiple are picked (e.g. "Abhishikth, Abhishek").
+const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan'];
+// Same fixed list the ticket's own Product Type field picks from (see
+// CreateIssueModal.tsx / issues/[issueKey]/page.tsx) — a free-text box here
+// required typing the value out exactly (case and all) to match anything,
+// which is why it looked broken; a handful of known values is a dropdown.
+const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others'];
 const PRIORITY_LABELS: Record<string, string> = {
   highest: 'Highest', high: 'High', medium: 'Medium', low: 'Low', lowest: 'Lowest',
 };
@@ -56,6 +67,7 @@ function DropBtn({
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const ref = useRef<HTMLDivElement>(null);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -66,16 +78,44 @@ function DropBtn({
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
 
+  // dropPos was only ever computed once, at the moment the button was clicked — scrolling
+  // the page (or the results table) while the panel stayed open left it hanging wherever it
+  // first appeared instead of following the button. Recompute on every scroll/resize while
+  // open; capture:true on scroll so this also catches scrolling inside a nested container,
+  // not just the window itself (scroll events don't bubble, but they do fire in capture).
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => {
+      if (!ref.current) return;
+      const rect = ref.current.getBoundingClientRect();
+      setDropPos({ top: rect.bottom + 4, left: align === 'right' ? rect.right - 240 : rect.left });
+    };
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, [open, align]);
+
   const filtered = options.filter((o) => o.label.toLowerCase().includes(q.toLowerCase()));
   const toggle = (val: string) =>
     onChange(selected.includes(val) ? selected.filter((v) => v !== val) : [...selected, val]);
 
   const active = selected.length > 0;
 
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setDropPos({ top: rect.bottom + 4, left: align === 'right' ? rect.right - 240 : rect.left });
+    }
+    setOpen((v) => !v);
+  };
+
   return (
-    <div ref={ref} className="relative flex-shrink-0">
+    <div ref={ref} className="flex-shrink-0">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={handleToggle}
         className={cn(
           'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
           active
@@ -90,17 +130,17 @@ function DropBtn({
         <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
       </button>
 
-      {open && (
-        <div className={cn(
-          'absolute top-full mt-1 z-[200] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden',
-          align === 'right' ? 'right-0' : 'left-0',
-        )}>
+      {open && dropPos && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed z-[9999] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          onMouseDown={e => e.stopPropagation()}
+          style={{ top: dropPos.top, left: dropPos.left }}
+        >
           <div className="border-b border-gray-100 px-3 py-2">
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
               <input
-                autoFocus
-                value={q}
+                                value={q}
                 onChange={(e) => setQ(e.target.value)}
                 placeholder={`Search ${label.toLowerCase()}…`}
                 className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
@@ -135,7 +175,201 @@ function DropBtn({
               </button>
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+/** Queue filter — pick one or more spaces, or drill into a single space to filter by one of its custom queues */
+function SpaceQueueDropBtn({
+  spaces, selSpaces, onSpacesChange, selQueue, onQueueChange,
+}: {
+  spaces: any[];
+  selSpaces: string[];
+  onSpacesChange: (v: string[]) => void;
+  selQueue: string;
+  onQueueChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
+  // Multiple boards can be expanded at once — a Set, not a single key, so selecting
+  // one board doesn't collapse another board's already-open queue list.
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+  const [queuesByKey, setQueuesByKey] = useState<Record<string, { id: string; name: string }[]>>({});
+  const [loadingKey, setLoadingKey] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQ(''); }
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const filtered = spaces.filter((sp: any) => (sp.name || '').toLowerCase().includes(q.toLowerCase()));
+
+  const loadQueues = async (key: string) => {
+    if (queuesByKey[key]) return;
+    setLoadingKey(key);
+    try {
+      const rows = await api.request<any[]>(`custom-queues/${key}`);
+      setQueuesByKey((prev) => ({ ...prev, [key]: Array.isArray(rows) ? rows : [] }));
+    } catch {
+      setQueuesByKey((prev) => ({ ...prev, [key]: [] }));
+    }
+    setLoadingKey(null);
+  };
+
+  const toggleSpace = (key: string) => {
+    if (selQueue) onQueueChange('');
+    const isSelecting = !selSpaces.includes(key);
+    onSpacesChange(isSelecting ? [...selSpaces, key] : selSpaces.filter((v) => v !== key));
+    // Checking a space auto-expands its queues so there's no extra click to see them —
+    // other already-expanded boards stay open.
+    if (isSelecting) {
+      setExpandedKeys((prev) => new Set(prev).add(key));
+      loadQueues(key);
+    }
+  };
+
+  const expandSpace = (key: string) => {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+    if (!expandedKeys.has(key)) loadQueues(key);
+  };
+
+  // Picking a specific queue narrows the space selection to just its parent space,
+  // since department filtering only makes sense scoped to a single space.
+  const selectQueue = (spaceKey: string, queueName: string) => {
+    onSpacesChange([spaceKey]);
+    onQueueChange(selQueue === queueName ? '' : queueName);
+  };
+
+  const active = selSpaces.length > 0;
+  const label = selQueue ? `Queue: ${selQueue}` : active ? `Queue (${selSpaces.length})` : 'Queue';
+
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setDropPos({ top: rect.bottom + 4, left: rect.left });
+    }
+    setOpen((v) => !v);
+  };
+
+  return (
+    <div ref={ref} className="flex-shrink-0">
+      <button
+        onClick={handleToggle}
+        className={cn(
+          'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
+          active
+            ? 'border-blue-500 bg-blue-50 text-blue-700'
+            : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50',
+        )}
+      >
+        {label}
+        <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
+      </button>
+
+      {open && dropPos && typeof document !== 'undefined' && createPortal(
+        <div className="fixed z-[9999] w-64 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}
+          onMouseDown={e => e.stopPropagation()}>
+          <div className="border-b border-gray-100 px-3 py-2">
+            <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
+              <Search size={12} className="text-gray-400 flex-shrink-0" />
+              <input
+                                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search queue…"
+                className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
+              />
+            </div>
+          </div>
+          <div className="max-h-72 overflow-y-auto py-1">
+            {filtered.length === 0 ? (
+              <p className="px-4 py-3 text-[12px] text-gray-400 text-center">No results</p>
+            ) : (
+              filtered.map((sp: any) => {
+                const key = sp.key;
+                const isExpanded = expandedKeys.has(key);
+                const subQueues = queuesByKey[key] || [];
+                return (
+                  <div key={key}>
+                    <div className="flex w-full items-center gap-1.5 px-3 py-2 hover:bg-gray-50 transition-colors">
+                      <button
+                        onClick={() => toggleSpace(key)}
+                        className="flex flex-1 items-center gap-2.5 text-[12.5px] text-gray-700 text-left"
+                      >
+                        <div className={cn(
+                          'h-4 w-4 flex-shrink-0 rounded border flex items-center justify-center',
+                          selSpaces.includes(key) ? 'border-blue-600 bg-blue-600' : 'border-gray-300',
+                        )}>
+                          {selSpaces.includes(key) && <Check size={10} className="text-white" strokeWidth={3} />}
+                        </div>
+                        <span className="flex-1 truncate">{sp.name}</span>
+                      </button>
+                      <button
+                        onClick={() => expandSpace(key)}
+                        className="flex-shrink-0 rounded p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                        title="Show queues in this space"
+                      >
+                        <ChevronDown size={13} className={cn('transition-transform', isExpanded && 'rotate-180')} />
+                      </button>
+                    </div>
+                    {isExpanded && (
+                      <div className="ml-6 mb-1 border-l border-gray-100 pl-2">
+                        {loadingKey === key ? (
+                          <p className="px-2 py-1.5 text-[11.5px] text-gray-400">Loading queues…</p>
+                        ) : subQueues.length === 0 ? (
+                          <p className="px-2 py-1.5 text-[11.5px] text-gray-400">No queues in this space</p>
+                        ) : (
+                          subQueues.map((qu) => {
+                            const isSel = selQueue === qu.name && selSpaces.includes(key);
+                            return (
+                              <button
+                                key={qu.id}
+                                onClick={() => selectQueue(key, qu.name)}
+                                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-[12px] text-gray-600 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                              >
+                                <div className={cn(
+                                  'h-3.5 w-3.5 flex-shrink-0 rounded-full border-2 flex items-center justify-center',
+                                  isSel ? 'border-blue-600' : 'border-gray-300',
+                                )}>
+                                  {isSel && <div className="h-1.5 w-1.5 rounded-full bg-blue-600" />}
+                                </div>
+                                <span className="flex-1 truncate text-left">{qu.name}</span>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+          {(selSpaces.length > 0 || selQueue) && (
+            <div className="border-t border-gray-100 px-3 py-2">
+              <button
+                onClick={() => { onSpacesChange([]); onQueueChange(''); }}
+                className="text-[11.5px] text-blue-600 font-medium hover:text-blue-800"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -279,8 +513,16 @@ function DateDropBtn({
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
 
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
+
   // when opening, decode current value into draft
   const handleOpen = () => {
+    if (ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      setDropPos(align === 'right'
+        ? { top: r.bottom + 4, left: r.right - 288 }
+        : { top: r.bottom + 4, left: r.left });
+    }
     if (selected) {
       if (selected.startsWith('withinLast:')) {
         const [, n, u] = selected.split(':'); setMode('withinLast'); setWlN(n); setWlUnit(u);
@@ -351,11 +593,12 @@ function DateDropBtn({
         )}
       </button>
 
-      {open && (
-        <div className={cn(
-          'absolute top-full mt-1 z-[200] w-72 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden',
-          align === 'right' ? 'right-0' : 'left-0',
-        )}>
+      {open && dropPos && createPortal(
+        <div
+          onMouseDown={e => e.stopPropagation()}
+          className="fixed z-[9999] w-72 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}
+        >
           <div className="divide-y divide-gray-100 py-1">
 
             {/* Within the last */}
@@ -435,7 +678,8 @@ function DateDropBtn({
               Update
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -443,12 +687,88 @@ function DateDropBtn({
 
 // All available "extra" filter options that can be added to the bar from More filters
 const EXTRA_FILTER_OPTIONS = [
-  { id: 'reporter', label: 'Reporter',     group: 'People' },
-  { id: 'priority', label: 'Priority',     group: 'Issue' },
-  { id: 'label',    label: 'Label',        group: 'Issue' },
-  { id: 'created',  label: 'Created date', group: 'Date' },
-  { id: 'updated',  label: 'Updated date', group: 'Date' },
+  { id: 'reporter',       label: 'Reporter',        group: 'People' },
+  { id: 'projectManager', label: 'Project Manager', group: 'People' },
+  { id: 'priority',       label: 'Priority',        group: 'Issue' },
+  { id: 'department',     label: 'Department',      group: 'Issue' },
+  { id: 'productType',    label: 'Product Type',    group: 'Issue' },
+  { id: 'combination',    label: 'Combination',     group: 'Issue' },
+  { id: 'customerName',   label: 'Customer Name',   group: 'Issue' },
+  { id: 'clientName',     label: 'Client Name',     group: 'Issue' },
+  { id: 'created',        label: 'Created date',    group: 'Date' },
+  { id: 'updated',        label: 'Updated date',    group: 'Date' },
+  { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
 ];
+
+/* ─── Simple text filter button ─── */
+function TextFilterBtn({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
+  const [draft, setDraft] = useState(value);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { setDraft(value); }, [value]);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+  // Keep the panel glued to the button while scrolling instead of staying wherever
+  // it first appeared (see the identical fix + comment on DropBtn above).
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => {
+      if (!ref.current) return;
+      const r = ref.current.getBoundingClientRect();
+      setDropPos({ top: r.bottom + 4, left: r.left });
+    };
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, [open]);
+  const active = Boolean(value);
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      setDropPos({ top: r.bottom + 4, left: r.left });
+    }
+    setOpen(v => !v);
+  };
+  return (
+    <div ref={ref} className="relative flex-shrink-0">
+      <button onClick={handleToggle}
+        className={cn('flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
+          active ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50')}>
+        {active ? `${label}: ${value}` : label}
+        {active
+          ? <span onClick={(e) => { e.stopPropagation(); onChange(''); }} className="ml-0.5 text-blue-400 hover:text-blue-700 cursor-pointer"><X size={11} /></span>
+          : <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />}
+      </button>
+      {open && dropPos && createPortal(
+        <div
+          onMouseDown={e => e.stopPropagation()}
+          className="fixed z-[9999] w-56 rounded-lg border border-gray-200 bg-white shadow-2xl p-3"
+          style={{ top: dropPos.top, left: dropPos.left }}
+        >
+          <input value={draft} onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { onChange(draft); setOpen(false); } if (e.key === 'Escape') setOpen(false); }}
+            placeholder={`Filter by ${label.toLowerCase()}…`}
+            className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-[12.5px] outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+          <div className="flex gap-2 mt-2">
+            <button onClick={() => { onChange(draft); setOpen(false); }}
+              className="flex-1 rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-blue-700">Apply</button>
+            {value && <button onClick={() => { onChange(''); setDraft(''); setOpen(false); }}
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-[12px] text-gray-600 hover:bg-gray-50">Clear</button>}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
 
 /* ─── More filters dropdown — all filters are "add to bar" style ─── */
 function MoreFiltersBtn({
@@ -458,6 +778,7 @@ function MoreFiltersBtn({
   onToggleExtra: (key: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
   const [q, setQ] = useState('');
   const ref = useRef<HTMLDivElement>(null);
 
@@ -469,6 +790,14 @@ function MoreFiltersBtn({
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
+
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      setDropPos({ top: r.bottom + 4, left: r.right - 240 });
+    }
+    setOpen(v => !v);
+  };
 
   const qLow = q.trim().toLowerCase();
   const filtered = EXTRA_FILTER_OPTIONS.filter((o) =>
@@ -482,7 +811,7 @@ function MoreFiltersBtn({
   return (
     <div ref={ref} className="relative flex-shrink-0">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={handleToggle}
         className={cn(
           'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
           activeExtras.length > 0
@@ -497,14 +826,18 @@ function MoreFiltersBtn({
         <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
       </button>
 
-      {open && (
-        <div className="absolute right-0 top-full mt-1 z-[200] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden">
+      {open && dropPos && createPortal(
+        <div
+          onMouseDown={e => e.stopPropagation()}
+          className="fixed z-[9999] w-60 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}
+        >
           {/* search */}
           <div className="border-b border-gray-100 px-3 py-2">
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
               <Search size={12} className="text-gray-400 flex-shrink-0" />
               <input
-                autoFocus value={q} onChange={(e) => setQ(e.target.value)}
+                value={q} onChange={(e) => setQ(e.target.value)}
                 placeholder="Search filters…"
                 className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
               />
@@ -544,7 +877,75 @@ function MoreFiltersBtn({
               ))
             )}
           </div>
-        </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+/* ─── SLA Breached single-select button ─── */
+function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChange: (v: 'yes' | 'no' | '') => void }) {
+  const [open, setOpen] = useState(false);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const handleToggle = () => {
+    if (!open && ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setDropPos({ top: rect.bottom + 4, left: rect.left });
+    }
+    setOpen((v) => !v);
+  };
+
+  const active = Boolean(value);
+  const label = value === 'yes' ? 'SLA Breached: Yes' : value === 'no' ? 'SLA Breached: No' : 'SLA Breached';
+
+  return (
+    <div ref={ref} className="flex-shrink-0">
+      <button
+        onClick={handleToggle}
+        className={cn(
+          'flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
+          active ? 'border-red-400 bg-red-50 text-red-600' : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50',
+        )}
+      >
+        {label}
+        {active
+          ? <span onClick={(e) => { e.stopPropagation(); onChange(''); setOpen(false); }} className="ml-0.5 text-red-400 hover:text-red-600 cursor-pointer"><X size={11} /></span>
+          : <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />}
+      </button>
+      {open && dropPos && typeof document !== 'undefined' && createPortal(
+        <div className="fixed z-[9999] w-44 rounded-lg border border-gray-200 bg-white shadow-2xl overflow-hidden"
+          style={{ top: dropPos.top, left: dropPos.left }}
+          onMouseDown={e => e.stopPropagation()}>
+          <div className="py-1">
+            {([['yes', 'Yes — Breached', 'text-red-600', 'bg-red-50'], ['no', 'No — Not Breached', 'text-gray-700', 'bg-gray-50']] as const).map(([v, lbl, textCls, bgCls]) => (
+              <button key={v} onClick={() => { onChange(value === v ? '' : v); setOpen(false); }}
+                className={cn('flex w-full items-center gap-2.5 px-3 py-2.5 text-[12.5px] transition-colors hover:bg-gray-50', value === v && bgCls)}>
+                <div className={cn('h-4 w-4 flex-shrink-0 rounded border flex items-center justify-center', value === v ? 'border-blue-600 bg-blue-600' : 'border-gray-300')}>
+                  {value === v && <Check size={10} className="text-white" strokeWidth={3} />}
+                </div>
+                <span className={cn('font-medium', value === v ? textCls : 'text-gray-700')}>{lbl}</span>
+              </button>
+            ))}
+          </div>
+          {value && (
+            <div className="border-t border-gray-100 px-3 py-2">
+              <button onClick={() => { onChange(''); setOpen(false); }} className="text-[11.5px] text-blue-600 font-medium hover:text-blue-800">Clear</button>
+            </div>
+          )}
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -557,14 +958,22 @@ export default function FiltersPage() {
   /* filter bar state */
   const [text, setText]                   = useState('');
   const [selSpaces, setSelSpaces]         = useState<string[]>([]);
+  const [selQueue, setSelQueue]           = useState('');  // custom queue name within a single selected space
   const [selAssignees, setSelAssignees]   = useState<string[]>([]);  // stores member IDs
   const [selReporters, setSelReporters]   = useState<string[]>([]);  // stores member IDs
   const [selTypes, setSelTypes]           = useState<string[]>([]);
   const [selStatuses, setSelStatuses]     = useState<string[]>([]);
   const [selPriorities, setSelPriorities] = useState<string[]>([]);
-  const [selLabels, setSelLabels]         = useState<string[]>([]);
   const [selCreated, setSelCreated]       = useState('');
   const [selUpdated, setSelUpdated]       = useState('');
+  const [selDueDate, setSelDueDate]       = useState('');
+  const [selDepartment, setSelDepartment] = useState('');
+  const [selProductType, setSelProductType] = useState<string[]>([]);
+  const [selCombination, setSelCombination] = useState('');
+  const [selCustomerName, setSelCustomerName] = useState('');
+  const [selClientName, setSelClientName] = useState('');
+  const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
+  const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
 
   /* issues */
   const [issues, setIssues]   = useState<any[]>([]);
@@ -586,17 +995,50 @@ export default function FiltersPage() {
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
       if (prev.includes(key)) {
-        // remove from bar — also clear its value
-        if (key === 'created')  setSelCreated('');
-        if (key === 'updated')  setSelUpdated('');
-        if (key === 'reporter') setSelReporters([]);
-        if (key === 'priority') setSelPriorities([]);
-        if (key === 'label')    setSelLabels([]);
+        if (key === 'created')        setSelCreated('');
+        if (key === 'updated')        setSelUpdated('');
+        if (key === 'dueDate')        setSelDueDate('');
+        if (key === 'reporter')       setSelReporters([]);
+        if (key === 'priority')       setSelPriorities([]);
+        if (key === 'department')     setSelDepartment('');
+        if (key === 'productType')    setSelProductType([]);
+        if (key === 'combination')    setSelCombination('');
+        if (key === 'customerName')   setSelCustomerName('');
+        if (key === 'clientName')     setSelClientName('');
+        if (key === 'projectManager') setSelProjectManager([]);
         return prev.filter((k) => k !== key);
       }
       return [...prev, key];
     });
   };
+
+  // Hydrate filters from the URL once on mount — lets other pages (e.g. the
+  // personal dashboard) deep-link straight into a scoped ticket list here.
+  const urlParams = useSearchParams();
+  useEffect(() => {
+    const qpAssignee = urlParams?.get('assignee');
+    const qpReporter = urlParams?.get('reporter');
+    const qpStatus = urlParams?.get('status');
+    const qpPriority = urlParams?.get('priority');
+    const qpSpace = urlParams?.get('space');
+    const qpQueue = urlParams?.get('queue');
+    if (!qpAssignee && !qpReporter && !qpStatus && !qpPriority && !qpSpace) return;
+
+    if (qpAssignee) setSelAssignees(qpAssignee.split(','));
+    if (qpReporter) {
+      setSelReporters(qpReporter.split(','));
+      setActiveExtras((prev) => (prev.includes('reporter') ? prev : [...prev, 'reporter']));
+    }
+    if (qpStatus) setSelStatuses(qpStatus.split(','));
+    if (qpPriority) {
+      setSelPriorities(qpPriority.split(','));
+      setActiveExtras((prev) => (prev.includes('priority') ? prev : [...prev, 'priority']));
+    }
+    if (qpSpace) setSelSpaces([qpSpace]);
+    if (qpQueue) setSelQueue(qpQueue);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   /* derived */
   // When specific spaces are selected, only show statuses that belong to those spaces.
@@ -604,33 +1046,40 @@ export default function FiltersPage() {
   const filteredSpacesForStatus = selSpaces.length > 0
     ? spaces.filter((sp: any) => selSpaces.includes(sp.key))
     : spaces;
+  const ALLOWED_STATUSES = new Set(['open', 'in progress', 'waiting for dev', 'waiting for migration', 'waiting for qa', 'waiting for infra', 'resolved']);
   const availableStatuses: { value: string; label: string }[] = Array.from(
     new Map(
       filteredSpacesForStatus
         .flatMap((sp: any) => (sp.statuses || []))
+        .filter((s: any) => ALLOWED_STATUSES.has((s.name || '').toLowerCase()))
         .map((s: any) => [s.name, s])
     ).values()
   )
     .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
     .map((s: any) => ({ value: s.name, label: s.name }));
 
-  const allMembers: any[] = Array.from(
+  // Memoized: this feeds buildFilterParams' dependency array below. Without
+  // useMemo, this array got a brand-new reference every render, which broke
+  // buildFilterParams' own memoization, which broke fetchIssues' memoization,
+  // which re-ran the fetch effect on every render — and each fetch's state
+  // update triggered another render, looping forever (visible as the table
+  // repeatedly flashing "Loading..." then results, then "Loading..." again).
+  const allMembers: any[] = useMemo(() => Array.from(
     new Map(spaces.flatMap((sp: any) => (sp.members || []).map((m: any) => [m.id, m]))).values(),
-  );
+  ), [spaces]);
 
   const hasCriteria = Boolean(
-    text.trim() || selSpaces.length || selAssignees.length || selReporters.length ||
-    selTypes.length || selStatuses.length || selPriorities.length || selLabels.length ||
-    selCreated || selUpdated,
+    text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
+    selTypes.length || selStatuses.length || selPriorities.length ||
+    selCreated || selUpdated || selDueDate || selDepartment ||
+    selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selBreached,
   );
 
-  /* fetch issues — all filtering done server-side for accuracy */
-  const fetchIssues = useCallback(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(async () => {
-      setLoadingIssues(true);
-      try {
-        const params: Record<string, string> = { page: '1', limit: '1000' };
+  // Builds the filter params both the live table and the CSV export send —
+  // shared so the export always matches exactly what's currently on screen,
+  // not a second copy of this logic that could drift out of sync with it.
+  const buildFilterParams = useCallback((): Record<string, string> => {
+        const params: Record<string, string> = {};
 
         // Space(s) — always restrict to user's accessible spaces
         // If specific spaces are selected, use those; otherwise use ALL accessible spaces
@@ -643,6 +1092,9 @@ export default function FiltersPage() {
           // No specific filter: restrict to accessible spaces only (not all 25k+ issues)
           params.spaceKeys = accessibleSpaceKeys.join(',');
         }
+
+        // Queue (department) — only meaningful when scoped to exactly one space
+        if (selQueue && params.spaceKey) params.dept = selQueue;
 
         // Expand a member into all possible identifiers the mock can match against
         const expandMember = (id: string) => {
@@ -674,25 +1126,99 @@ export default function FiltersPage() {
         // Priority(ies)
         if (selPriorities.length) params.priority = selPriorities.join(',');
 
-        // Labels
-        if (selLabels.length) params.labels = selLabels.join(',');
-
         // Date ranges
         if (selCreated) params.createdRange = selCreated;
         if (selUpdated) params.updatedRange = selUpdated;
+        if (selDueDate) params.dueDateRange = selDueDate;
+
+        // Extra text/field filters
+        if (selDepartment)     params.department     = selDepartment;
+        if (selProductType.length) params.productType = selProductType.join(',');
+        if (selCombination)    params.combination    = selCombination;
+        if (selCustomerName)   params.customerName   = selCustomerName;
+        if (selClientName)     params.clientName     = selClientName;
+        // Joined with a delimiter that won't collide with commas already inside a
+        // stored value (e.g. "Abhishikth, Abhishek" naming two people as one value).
+        if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
+        if (selBreached) params.slaBreached = selBreached;
 
         // Text search
         if (text.trim()) params.q = text.trim();
 
+        return params;
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text]);
+
+  /* fetch issues — all filtering done server-side for accuracy */
+  const fetchIssues = useCallback(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      setLoadingIssues(true);
+      try {
+        // limit was 1000 — on an unfiltered view that's a ~2.7MB response (1000 full
+        // issue objects with nested status/assignee/reporter), which is what made this
+        // page take multiple seconds to load. 100 keeps a generous browsing window
+        // while cutting the payload by ~90%.
+        const params = { ...buildFilterParams(), page: '1', limit: '100' };
         const { issues: list, total: tot } = await api.getIssues(params);
         setIssues(list as any[]);
         setTotal(tot);
       } catch { setIssues([]); setTotal(0); }
       setLoadingIssues(false);
     }, 400);
-  }, [text, selSpaces, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selLabels, selCreated, selUpdated, spaces]);
+  }, [buildFilterParams]);
 
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
+
+  /* export current filter results to CSV — same params as the live table,
+     but the server's own max page size (2000) instead of the 100-row
+     browsing cap, so the export covers everything a saved/shared filter
+     would actually match, not just what's currently rendered. */
+  const [exporting, setExporting] = useState(false);
+  const csvCell = (value: unknown): string => {
+    const s = value == null ? '' : String(value);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const EXPORT_LIMIT = 2000; // server's own hard cap (Math.min(2000, ...) in the issues list handler)
+      const params = { ...buildFilterParams(), page: '1', limit: String(EXPORT_LIMIT) };
+      const { issues: rows, total: matchedTotal } = await api.getIssues(params);
+      const list = rows as any[];
+      const header = ['Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department', 'Created', 'Updated'];
+      const lines = [header.map(csvCell).join(',')];
+      for (const issue of list) {
+        lines.push([
+          issue.cfKey ?? issue.key,
+          issue.type ?? '',
+          issue.summary ?? '',
+          issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
+          issue.reporter ? `${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim() : '',
+          issue.status?.name ?? '',
+          issue.priority ?? '',
+          issue.sla_breached ? 'Yes' : 'No',
+          issue.current_department ?? '',
+          issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
+          issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
+        ].map(csvCell).join(','));
+      }
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `filtered-issues-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      if (matchedTotal > EXPORT_LIMIT) {
+        alert(`Exported the first ${EXPORT_LIMIT.toLocaleString()} of ${matchedTotal.toLocaleString()} matching issues. Narrow your filters to export everything.`);
+      }
+    } catch {
+      alert('Export failed. Please try again.');
+    }
+    setExporting(false);
+  };
 
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
@@ -710,9 +1236,12 @@ export default function FiltersPage() {
   useEffect(() => { loadSavedFilters(); }, []);
 
   const clearAll = () => {
-    setText(''); setSelSpaces([]); setSelAssignees([]); setSelReporters([]);
-    setSelTypes([]); setSelStatuses([]); setSelPriorities([]); setSelLabels([]);
-    setSelCreated(''); setSelUpdated('');
+    setText(''); setSelSpaces([]); setSelQueue(''); setSelAssignees([]); setSelReporters([]);
+    setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
+    setSelCreated(''); setSelUpdated(''); setSelDueDate('');
+    setSelDepartment(''); setSelProductType([]);
+    setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager([]);
+    setSelBreached('');
     setActiveExtras([]);
     setActiveFilterId(null);
   };
@@ -721,6 +1250,7 @@ export default function FiltersPage() {
     const c = f.criteria || {};
     setText(c.text || '');
     setSelSpaces(c.spaces || []);
+    setSelQueue((c as any).queue || '');
     setSelAssignees(c.assignees || []);
     setSelReporters((c as any).reporters || []);
     setSelTypes(c.types || []);
@@ -757,6 +1287,7 @@ export default function FiltersPage() {
   const currentCriteria: FilterCriteria & { reporters?: string[]; createdRange?: string; updatedRange?: string } = {
     ...(text.trim() ? { text: text.trim() } : {}),
     ...(selSpaces.length ? { spaces: selSpaces } : {}),
+    ...(selQueue ? { queue: selQueue } : {}),
     ...(selAssignees.length ? { assignees: selAssignees } : {}),
     ...(selReporters.length ? { reporters: selReporters } : {}),
     ...(selTypes.length ? { types: selTypes } : {}),
@@ -859,6 +1390,7 @@ export default function FiltersPage() {
                       const isActive  = activeFilterId === f.id;
                       const chips     = [
                         ...(f.criteria?.spaces || []).map((v: string) => spaces.find((s: any) => s.key === v)?.name || v),
+                        ...((f.criteria as any)?.queue ? [(f.criteria as any).queue] : []),
                         ...(f.criteria?.assignees || []).map((v: string) => memberName(v)),
                         ...((f.criteria as any)?.reporters || []).map((v: string) => memberName(v)),
                         ...(f.criteria?.types || []).map((v: string) => TYPE_LABELS[v] || v),
@@ -998,7 +1530,11 @@ export default function FiltersPage() {
       )}
 
       {/* ── Filter bar (only on All Work tab) ── */}
-      {!showSavedPanel && <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-visible">
+      {/* z-30, not the z-[100] this had before — that was higher than modals opened from
+          elsewhere in the app (e.g. Create Task's z-50 backdrop), so this sticky bar was
+          painting over the top of them. It only needs to stay above this page's own
+          scrolling table rows, not above app-wide modals. */}
+      {!showSavedPanel && <div className="sticky top-0 z-30 rounded-xl border border-gray-200 bg-white shadow-sm overflow-visible">
 
         {/* Row 1: fixed filters */}
         <div className="flex items-center gap-2 px-4 py-3 flex-wrap border-b border-gray-100">
@@ -1014,7 +1550,7 @@ export default function FiltersPage() {
             {text && <button onClick={() => setText('')}><X size={12} className="text-gray-400 hover:text-gray-600" /></button>}
           </div>
 
-          <DropBtn label="Space" options={spaces.map((sp: any) => ({ value: sp.key, label: sp.name }))} selected={selSpaces} onChange={setSelSpaces} />
+          <SpaceQueueDropBtn spaces={spaces} selSpaces={selSpaces} onSpacesChange={setSelSpaces} selQueue={selQueue} onQueueChange={setSelQueue} />
           <DropBtn
             label="Assignee"
             options={allMembers.map((m: any) => ({ value: m.id, label: `${m.firstName || ''} ${m.lastName || ''}`.trim() || m.email || m.id }))}
@@ -1024,12 +1560,24 @@ export default function FiltersPage() {
           <DropBtn label="Type" options={ISSUE_TYPES.map((t) => ({ value: t, label: TYPE_LABELS[t] || t }))} selected={selTypes} onChange={setSelTypes} />
           <DropBtn label="Status" options={availableStatuses} selected={selStatuses} onChange={setSelStatuses} />
 
+          {/* SLA Breached filter */}
+          <SlaBreachedBtn value={selBreached} onChange={setSelBreached} />
+
           <div className="flex items-center gap-2 ml-auto flex-shrink-0">
             {/* More filters — adds extras to row 2 */}
             <MoreFiltersBtn activeExtras={activeExtras} onToggleExtra={toggleExtra} />
             {hasCriteria && (
               <button onClick={clearAll} className="text-[12px] text-gray-400 hover:text-red-500 flex items-center gap-1 transition-colors whitespace-nowrap">
                 <X size={12} /> Clear
+              </button>
+            )}
+            {can(user?.role, 'exportData') && (
+              <button
+                onClick={handleExport}
+                disabled={exporting || issues.length === 0}
+                className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-[12.5px] font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+              >
+                <Download size={13} /> {exporting ? 'Exporting…' : 'Export'}
               </button>
             )}
             <button
@@ -1072,17 +1620,50 @@ export default function FiltersPage() {
                 </button>
               </div>
             )}
-            {activeExtras.includes('label') && (
+            {activeExtras.includes('department') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Department" value={selDepartment} onChange={setSelDepartment} />
+                <button onClick={() => toggleExtra('department')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('productType') && (
               <div className="flex items-center gap-1">
                 <DropBtn
-                  label="Label"
-                  options={Array.from(new Set(spaces.flatMap((sp: any) => sp.labels || []).map((l: any) => l.name || l))).map((l) => ({ value: l as string, label: l as string }))}
-                  selected={selLabels}
-                  onChange={setSelLabels}
+                  label="Product Type"
+                  options={PRODUCT_TYPE_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selProductType}
+                  onChange={setSelProductType}
                 />
-                <button onClick={() => toggleExtra('label')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors">
-                  <X size={11} />
-                </button>
+                <button onClick={() => toggleExtra('productType')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('combination') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Combination" value={selCombination} onChange={setSelCombination} />
+                <button onClick={() => toggleExtra('combination')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('customerName') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Customer Name" value={selCustomerName} onChange={setSelCustomerName} />
+                <button onClick={() => toggleExtra('customerName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('clientName') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Client Name" value={selClientName} onChange={setSelClientName} />
+                <button onClick={() => toggleExtra('clientName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('projectManager') && (
+              <div className="flex items-center gap-1">
+                <DropBtn
+                  label="Project Manager"
+                  options={PROJECT_MANAGER_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selProjectManager}
+                  onChange={setSelProjectManager}
+                />
+                <button onClick={() => toggleExtra('projectManager')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('created') && (
@@ -1099,14 +1680,14 @@ export default function FiltersPage() {
             )}
             {activeExtras.includes('updated') && (
               <div className="flex items-center gap-1">
-                <DateDropBtn
-                  label="Updated"
-                  selected={selUpdated}
-                  onChange={setSelUpdated}
-                />
-                <button onClick={() => toggleExtra('updated')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors">
-                  <X size={11} />
-                </button>
+                <DateDropBtn label="Updated" selected={selUpdated} onChange={setSelUpdated} />
+                <button onClick={() => toggleExtra('updated')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('dueDate') && (
+              <div className="flex items-center gap-1">
+                <DateDropBtn label="Due Date" selected={selDueDate} onChange={setSelDueDate} />
+                <button onClick={() => toggleExtra('dueDate')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
           </div>
@@ -1139,11 +1720,10 @@ export default function FiltersPage() {
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Key</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Work</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Assignee</th>
-                {activeExtras.includes('reporter') && (
-                  <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Reporter</th>
-                )}
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Reported By</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20 hidden md:table-cell">Priority</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">SLA Breached</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
               </tr>
             </thead>
@@ -1183,22 +1763,20 @@ export default function FiltersPage() {
                       <span className="text-[11.5px] text-gray-300">Unassigned</span>
                     )}
                   </td>
-                  {activeExtras.includes('reporter') && (
-                    <td className="px-2 py-2.5">
-                      {issue.reporter ? (
-                        <div className="flex items-center gap-1.5">
-                          <div className="h-6 w-6 flex-shrink-0 rounded-full bg-purple-500 flex items-center justify-center text-[9px] font-bold text-white">
-                            {`${issue.reporter.firstName?.[0] || ''}${issue.reporter.lastName?.[0] || ''}`.toUpperCase()}
-                          </div>
-                          <span className="text-[12px] text-gray-600 truncate">
-                            {`${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim()}
-                          </span>
+                  <td className="px-2 py-2.5">
+                    {issue.reporter ? (
+                      <div className="flex items-center gap-1.5">
+                        <div className="h-6 w-6 flex-shrink-0 rounded-full bg-purple-500 flex items-center justify-center text-[9px] font-bold text-white">
+                          {`${issue.reporter.firstName?.[0] || ''}${issue.reporter.lastName?.[0] || ''}`.toUpperCase()}
                         </div>
-                      ) : (
-                        <span className="text-[11.5px] text-gray-300">—</span>
-                      )}
-                    </td>
-                  )}
+                        <span className="text-[12px] text-gray-600 truncate">
+                          {`${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim()}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-[11.5px] text-gray-300">—</span>
+                    )}
+                  </td>
                   <td className="px-2 py-2.5">
                     <span
                       className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
@@ -1209,6 +1787,13 @@ export default function FiltersPage() {
                   </td>
                   <td className="px-2 py-2.5 hidden md:table-cell">
                     <PriorityIcon priority={issue.priority} size={14} />
+                  </td>
+                  <td className="px-2 py-2.5">
+                    {issue.sla_breached ? (
+                      <span className="inline-flex items-center rounded-full bg-red-100 border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-600">Yes</span>
+                    ) : (
+                      <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5 hidden lg:table-cell">
                     <span className="text-[11.5px] text-gray-400 whitespace-nowrap">
@@ -1266,3 +1851,4 @@ export default function FiltersPage() {
     </div>
   );
 }
+

@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -25,23 +25,35 @@ function useCountUp(target: number, duration = 1200) {
     };
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(tick);
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+    // requestAnimationFrame is throttled — and can be paused indefinitely —
+    // for a tab that isn't actively visible/focused. A stat card landing here
+    // right as the page loads in a background tab (a very ordinary thing to
+    // happen: switching away right after clicking a link, an occluded window,
+    // etc.) meant rAF might never fire even once, permanently stuck at 0 with
+    // no way to recover since the effect never re-fires once mounted.
+    // setTimeout still fires (throttled to at most ~1/sec in background tabs,
+    // but never fully suspended) so this guarantees the real value eventually
+    // lands regardless of whether the animation itself ever got to run.
+    const fallback = setTimeout(() => setDisplay(target), duration + 100);
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      clearTimeout(fallback);
+    };
   }, [target, duration]);
 
   return display;
 }
 import Link from 'next/link';
-import { typeIcons, timeAgo, cn } from '@/lib/utils';
+import { typeIcons, timeAgo, cn, resolveStatusColor } from '@/lib/utils';
 import { PriorityIcon } from '@/components/ui/PriorityIcon';
-import SpaceIcon from '@/components/ui/SpaceIcon';
 import DotLoader from '@/components/ui/DotLoader';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import {
-  ChevronRight, CheckCircle2, LayoutGrid, AlertCircle,
+  ChevronRight, CheckCircle2, AlertCircle,
   Zap, ArrowUpRight, Users, Plus
 } from 'lucide-react';
 
-type TabType = 'assigned' | 'worked_on' | 'viewed' | 'starred' | 'boards';
+type TabType = 'assigned' | 'worked_on' | 'viewed' | 'migration_reporters';
 
 type DashboardHighlight = 'stat-0' | 'stat-1' | 'stat-2' | 'stat-3' | 'spaces' | 'issues';
 
@@ -71,18 +83,19 @@ function StatCard({ label, value, icon, iconClass, id, selected, onToggle }: {
   );
 }
 
-function StatCards({ totalSpaces, openIssues, resolvedToday, teamMembers, highlightedBox, toggleHighlight }: {
-  totalSpaces: number; openIssues: number; resolvedToday: number; teamMembers: number;
+function StatCards({ totalSpaces, openIssues, resolvedToday, teamMembers, isAdmin, highlightedBox, toggleHighlight }: {
+  totalSpaces: number; openIssues: number; resolvedToday: number; teamMembers: number; isAdmin: boolean;
   highlightedBox: DashboardHighlight | null; toggleHighlight: (id: DashboardHighlight) => void;
 }) {
   const stats = [
     { label: 'Total Spaces',   value: totalSpaces,   icon: <Zap size={16} />,         iconClass: 'text-blue-500 bg-blue-50' },
     { label: 'Open Issues',    value: openIssues,    icon: <AlertCircle size={16} />,  iconClass: 'text-orange-500 bg-orange-50' },
     { label: 'Resolved',       value: resolvedToday, icon: <CheckCircle2 size={16} />, iconClass: 'text-green-500 bg-green-50' },
-    { label: 'Team Members',   value: teamMembers,   icon: <Users size={16} />,        iconClass: 'text-purple-500 bg-purple-50' },
+    // Org-wide member count is admin-only info
+    ...(isAdmin ? [{ label: 'Team Members', value: teamMembers, icon: <Users size={16} />, iconClass: 'text-purple-500 bg-purple-50' }] : []),
   ];
   return (
-    <div className="grid grid-cols-4 gap-4">
+    <div className={cn('grid gap-4', isAdmin ? 'grid-cols-4' : 'grid-cols-3')}>
       {stats.map((stat, i) => {
         const id = `stat-${i}` as DashboardHighlight;
         return (
@@ -118,23 +131,6 @@ export default function DashboardPage() {
       .then((d: any) => setResolvedTodayCount(d.total ?? 0))
       .catch(() => {});
   }, [user?.id]);
-  const [starredSpaceIds, setStarredSpaceIds] = useState<string[]>([]);
-
-  // Helper to read starred spaces from localStorage
-  const readStarred = () => {
-    try {
-      const key = `starred_spaces_${user?.id || 'default'}`;
-      return JSON.parse(localStorage.getItem(key) || '[]') as string[];
-    } catch { return []; }
-  };
-
-  // Load on mount + when user changes
-  useEffect(() => { setStarredSpaceIds(readStarred()); }, [user?.id]);
-
-  // Re-read whenever the Starred tab becomes active
-  useEffect(() => {
-    if (activeTab === 'starred') setStarredSpaceIds(readStarred());
-  }, [activeTab]);
   const [showWelcome, setShowWelcome] = useState(false);
   // Increments every time this page mounts → forces StatCards to remount and re-animate
   const [animKey, setAnimKey] = useState(0);
@@ -173,10 +169,16 @@ export default function DashboardPage() {
     if (user?.id) loadTabData(activeTab);
   }, [activeTab, user?.id]);
 
+  // Distinct reporters with at least one ticket currently in the Migration
+  // department — Migration Manager / admin only, see the tab below.
+  const [migrationReporters, setMigrationReporters] = useState<any[]>([]);
+  const canSeeMigrationReporters = user?.role === 'admin' || user?.role === 'migration_manager';
+
   const loadTabData = async (tab: TabType, forceRefresh = false) => {
     // Return cached data instantly if available and not forcing refresh
     if (!forceRefresh && tabCache.current[tab]) {
       if (tab === 'assigned') setAssignedIssues(tabCache.current[tab]!);
+      else if (tab === 'migration_reporters') setMigrationReporters(tabCache.current[tab]!);
       else setRecentIssues(tabCache.current[tab]!);
       return;
     }
@@ -205,6 +207,10 @@ export default function DashboardPage() {
         const ordered = keys.map(k => issueMap.get(k)).filter(Boolean) as any[];
         setRecentIssues(ordered);
         tabCache.current[tab] = ordered;
+      } else if (tab === 'migration_reporters' && canSeeMigrationReporters) {
+        const data = await api.request<{ reporters: any[] }>('/migration-reporters').catch(() => ({ reporters: [] }));
+        setMigrationReporters(data.reporters || []);
+        tabCache.current[tab] = data.reporters || [];
       } else {
         setRecentIssues([]);
       }
@@ -214,12 +220,23 @@ export default function DashboardPage() {
 
   const currentIssues = activeTab === 'assigned' ? assignedIssues : recentIssues;
 
+  // Worked On mixes hand-offs across every department a ticket passed
+  // through — filter down to just one queue's entries (e.g. only Migration
+  // or only Dev) instead of always showing everything at once.
+  const [workedOnDeptFilter, setWorkedOnDeptFilter] = useState('');
+  const workedOnDepts = useMemo(
+    () => Array.from(new Set(recentIssues.map((i: any) => i.dept).filter(Boolean))).sort(),
+    [recentIssues],
+  );
+  const displayedIssues = (activeTab === 'worked_on' && workedOnDeptFilter)
+    ? currentIssues.filter((i: any) => (i.dept || '').toLowerCase() === workedOnDeptFilter.toLowerCase())
+    : currentIssues;
+
   const tabs: { key: TabType; label: string; count?: number }[] = [
     { key: 'assigned', label: 'My Assigned Tickets', count: assignedIssues.length },
     { key: 'worked_on', label: 'Worked On' },
     { key: 'viewed', label: 'Viewed' },
-    { key: 'starred', label: 'Starred' },
-    { key: 'boards', label: 'Boards' },
+    ...(canSeeMigrationReporters ? [{ key: 'migration_reporters' as const, label: 'Migration Reporters' }] : []),
   ];
 
   const hour = new Date().getHours();
@@ -258,12 +275,14 @@ export default function DashboardPage() {
           </h1>
           <p className="mt-0.5 text-[13px] text-gray-500">Have a productive day!</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Link href="/spaces?create=true"
-            className="flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-[12.5px] font-medium text-gray-800 transition-colors hover:bg-gray-50">
-            <Plus size={13} /> New Space
-          </Link>
-        </div>
+        {user?.role === 'admin' && (
+          <div className="flex items-center gap-2">
+            <Link href="/spaces?create=true"
+              className="flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-[12.5px] font-medium text-gray-800 transition-colors hover:bg-gray-50">
+              <Plus size={13} /> New Space
+            </Link>
+          </div>
+        )}
       </div>
 
       {/* Stats row */}
@@ -273,6 +292,7 @@ export default function DashboardPage() {
         openIssues={openIssuesCount}
         resolvedToday={resolvedTodayCount}
         teamMembers={spaces.reduce((a, s) => a + (s.memberCount || 0), 0)}
+        isAdmin={user?.role === 'admin'}
         highlightedBox={highlightedBox}
         toggleHighlight={toggleHighlight}
       />
@@ -288,80 +308,101 @@ export default function DashboardPage() {
           )}
         >
           {/* Tabs */}
-          <div className="flex items-center overflow-x-auto border-b border-gray-200 bg-gray-50 px-4">
-            {tabs.map(tab => (
-              <button key={tab.key} onClick={() => setActiveTab(tab.key)}
-                className={`whitespace-nowrap border-b-2 px-3 py-3 text-[12.5px] font-medium transition-colors ${
-                  activeTab === tab.key
-                    ? 'border-blue-600 text-jira-dark'
-                    : 'border-transparent text-gray-500 hover:text-gray-900'
-                }`}>
-                {tab.label}
-                {tab.count !== undefined && (
-                  <span className={`ml-1.5 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold ${
-                    activeTab === tab.key ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-600'
-                  }`}>{tab.count}</span>
-                )}
-              </button>
-            ))}
+          <div className="flex items-center justify-between overflow-x-auto border-b border-gray-200 bg-gray-50 px-4">
+            <div className="flex items-center">
+              {tabs.map(tab => (
+                <button key={tab.key} onClick={() => setActiveTab(tab.key)}
+                  className={`whitespace-nowrap border-b-2 px-3 py-3 text-[12.5px] font-medium transition-colors ${
+                    activeTab === tab.key
+                      ? 'border-blue-600 text-jira-dark'
+                      : 'border-transparent text-gray-500 hover:text-gray-900'
+                  }`}>
+                  {tab.label}
+                  {tab.count !== undefined && (
+                    <span className={`ml-1.5 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold ${
+                      activeTab === tab.key ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-600'
+                    }`}>{tab.count}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            {/* Worked On mixes every department a ticket passed through into one
+                list — let it be scoped down to just one queue (e.g. Migration
+                or Dev) instead of always showing the mix. */}
+            {activeTab === 'worked_on' && workedOnDepts.length > 0 && (
+              <select
+                value={workedOnDeptFilter}
+                onChange={(e) => setWorkedOnDeptFilter(e.target.value)}
+                className="flex-shrink-0 rounded-md border border-gray-300 bg-white px-2 py-1.5 text-[12px] font-medium text-gray-700 outline-none focus:border-blue-500"
+              >
+                <option value="">All queues</option>
+                {workedOnDepts.map((d: string) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            )}
           </div>
 
-          {/* Tab content */}
-          <div className="min-h-[320px]">
+          {/* Tab content — capped height + its own scroll, so a long list
+              (e.g. ~200 Migration reporters) scrolls in place instead of
+              growing the whole page and pushing the header/stats/tabs
+              off-screen as you scroll down. */}
+          <div className="min-h-[320px] max-h-[560px] overflow-y-auto">
             {loading ? (
               <DotLoader className="py-20" />
-            ) : activeTab === 'boards' ? (
-              <div className="divide-y divide-gray-100">
-                {spaces.map(space => (
-                  <Link key={space.id} href={`/spaces/${space.key}/board`}
-                    className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-gray-50">
-                    <SpaceIcon icon={space.icon} spaceKey={space.key} spaceName={space.name} spaceType={space.type} size="md" />
-                    <div className="flex-1">
-                      <p className="text-[13px] font-medium text-gray-900 transition-colors group-hover:text-blue-600">{space.name} Board</p>
-                      <p className="text-[11px] text-gray-500">{space.type === 'scrum' ? 'Scrum' : space.type === 'kanban' ? 'Kanban' : 'Service desk'}</p>
-                    </div>
-                    <LayoutGrid size={14} className="text-gray-300" />
-                  </Link>
-                ))}
-              </div>
-            ) : activeTab === 'starred' ? (
-              (() => {
-                const starredList = spaces.filter(s => starredSpaceIds.includes(s.id));
-                return starredList.length > 0 ? (
-                  <div className="divide-y divide-gray-100">
-                    {starredList.map(space => (
-                      <Link key={space.id} href={`/spaces/${space.key}/board`}
-                        className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-gray-50">
-                        <SpaceIcon icon={space.icon} spaceKey={space.key} spaceName={space.name} spaceType={space.type} size="md" />
-                        <div className="flex-1">
-                          <p className="text-[13px] font-medium text-gray-900 transition-colors group-hover:text-blue-600">{space.name}</p>
-                          <p className="text-[11px] text-gray-500 capitalize">{space.type?.replace('_', ' ')}</p>
-                        </div>
-                        <LayoutGrid size={14} className="text-gray-300" />
-                      </Link>
+            ) : activeTab === 'migration_reporters' ? (
+              migrationReporters.length > 0 ? (
+                <table className="w-full">
+                  <thead className="sticky top-0 z-10">
+                    <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
+                      <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Reporter</th>
+                      <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Email</th>
+                      <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Migration Tickets</th>
+                      <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Last Activity</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {migrationReporters.map((r, idx) => (
+                      <tr key={r.id || `${r.name}-${idx}`} className="transition-colors hover:bg-gray-50">
+                        <td className="px-4 py-2.5">
+                          <Link
+                            href={r.id ? `/filters?reporter=${r.id}&department=Migration` : '#'}
+                            className={cn('text-[13px] font-medium', r.id ? 'text-blue-600 hover:text-blue-800' : 'text-gray-700')}
+                          >
+                            {r.name}
+                          </Link>
+                        </td>
+                        <td className="px-2 py-2.5 text-[12.5px] text-gray-600">{r.email || '—'}</td>
+                        <td className="px-2 py-2.5 text-[12.5px] text-gray-900 font-medium">{r.ticketCount}</td>
+                        <td className="whitespace-nowrap px-4 py-2.5 text-[11px] text-gray-500">
+                          {r.lastActivity ? timeAgo(r.lastActivity) : '—'}
+                        </td>
+                      </tr>
                     ))}
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center py-16 text-center">
-                    <CheckCircle2 size={32} className="mb-3 text-gray-300" />
-                    <p className="text-[13px] font-medium text-gray-500">No starred items</p>
-                    <p className="mt-1 text-[12px] text-gray-400">Star a space from the sidebar to see it here</p>
-                  </div>
-                );
-              })()
-            ) : currentIssues.length > 0 ? (
+                  </tbody>
+                </table>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <Users size={32} className="mb-3 text-gray-300" />
+                  <p className="text-[13px] font-medium text-gray-500">No reporters in the Migration queue right now</p>
+                </div>
+              )
+            ) : displayedIssues.length > 0 ? (
               <table className="w-full">
-                <thead>
+                <thead className="sticky top-0 z-10">
                   <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
                     <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Summary</th>
+                    {activeTab === 'worked_on' && (
+                      <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Queue</th>
+                    )}
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Status</th>
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-10">P</th>
                     <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">Updated</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {currentIssues.slice(0, 12).map(issue => {
+                  {displayedIssues.slice(0, 12).map(issue => {
                     return (
                       <tr key={issue.id} className="group transition-colors hover:bg-gray-50">
                         <td className="px-4 py-2.5">
@@ -377,9 +418,12 @@ export default function DashboardPage() {
                             {issue.summary}
                           </Link>
                         </td>
+                        {activeTab === 'worked_on' && (
+                          <td className="px-2 py-2.5 text-[11.5px] text-gray-600">{(issue as any).dept || '—'}</td>
+                        )}
                         <td className="px-2 py-2.5">
                           <span className="text-[11px] font-medium text-white px-2 py-0.5 rounded whitespace-nowrap"
-                            style={{ backgroundColor: issue.status?.color || '#6B7280' }}>
+                            style={{ backgroundColor: issue.status ? resolveStatusColor(issue.status) : '#6B7280' }}>
                             {issue.status?.name || 'Open'}
                           </span>
                         </td>
