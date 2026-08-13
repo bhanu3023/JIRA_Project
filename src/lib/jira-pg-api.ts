@@ -5131,7 +5131,7 @@ async function _handleJiraPgApi(
       if (newStRec?.category === 'done') {
         try {
           const deptRow = await pool.query(
-            `SELECT current_department, original_dept, dept_assignees FROM issues WHERE id=$1`,
+            `SELECT current_department, original_dept, dept_assignees, dept_statuses FROM issues WHERE id=$1`,
             [issue.id]
           );
           const resolvingDept: string = deptRow.rows[0]?.current_department || '';
@@ -5155,9 +5155,37 @@ async function _handleJiraPgApi(
             const deptAssignees: Record<string, any> = deptRow.rows[0]?.dept_assignees || {};
             const homeAssignee = deptAssignees[homeDept];
             const restoreAssigneeId: string | null = homeAssignee?.id || null;
+
+            // Restore whatever status this ticket showed in its home dept
+            // right before it was handed off -- opening it from home used to
+            // show the RESOLVING dept's terminal status (e.g. Dev's
+            // "Resolved") because this UPDATE never touched statusId at all,
+            // leaving whatever the resolve action just set. Home should see
+            // the same status it had before the handoff, so it can actually
+            // review the work and close it themselves rather than land back
+            // pre-marked done. The "Change Department" endpoint already
+            // saves this exact snapshot into dept_statuses[oldDept] on every
+            // manual handoff -- read it back here the same way that endpoint
+            // resolves a snapshot name to a real status row.
+            const deptStatuses: Record<string, any> = deptRow.rows[0]?.dept_statuses || {};
+            const homeStatusSnapshot = deptStatuses[homeDept];
+            let restoredStatusId: string | null = null;
+            if (homeStatusSnapshot?.name) {
+              const realMatch = await db.status.findFirst({
+                where: { spaceId: issue.spaceId, name: { equals: homeStatusSnapshot.name, mode: 'insensitive' } },
+                orderBy: { order: 'asc' },
+              });
+              if (realMatch) restoredStatusId = realMatch.id;
+            }
+            // Record what the ticket's status actually was on leaving the
+            // resolving dept, symmetric with how a manual transfer records
+            // the old dept's status -- so a future visit back to this dept
+            // sees accurate history instead of nothing.
+            deptStatuses[resolvingDept] = { id: newStRec.id, name: newStRec.name, category: newStRec.category, color: newStRec.color };
+
             await pool.query(
-              `UPDATE issues SET current_department=$1, "assigneeId"=$2, "updatedAt"=NOW() WHERE id=$3`,
-              [homeDept, restoreAssigneeId, issue.id]
+              `UPDATE issues SET current_department=$1, "assigneeId"=$2, "statusId"=COALESCE($4, "statusId"), dept_statuses=$5::jsonb, "updatedAt"=NOW() WHERE id=$3`,
+              [homeDept, restoreAssigneeId, issue.id, restoredStatusId, JSON.stringify(deptStatuses)]
             );
             await pool.query(
               `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept) VALUES ($1, $2, $3, $4)`,
