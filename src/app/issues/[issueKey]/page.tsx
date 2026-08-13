@@ -307,7 +307,7 @@ export default function IssueDetailPage() {
     if (/<[a-z][\s\S]*>/i.test(body)) {
       // HTML content — render directly, intercept all link clicks to force new tab
       return <div
-        className="text-[13px] text-gray-700 leading-relaxed [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
+        className="text-[13px] text-gray-700 leading-relaxed break-words [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
         dangerouslySetInnerHTML={{ __html: linkifyHtml(body) }}
         onClick={(e) => {
           const target = e.target as HTMLElement;
@@ -328,7 +328,7 @@ export default function IssueDetailPage() {
     // Plain text — auto-link URLs and highlight @mentions
     const linked = autoLinkText(body);
     const parts = linked.split(/(@\w[\w ]*)/g);
-    return <p className="text-[13px] text-gray-700 whitespace-pre-wrap leading-relaxed">{parts.map((part, i) =>
+    return <p className="text-[13px] text-gray-700 whitespace-pre-wrap break-words leading-relaxed">{parts.map((part, i) =>
       part.startsWith('@') ? (
         <span key={i} className="text-indigo-600 font-semibold bg-indigo-50 rounded px-0.5">{part}</span>
       ) : <span key={i} dangerouslySetInnerHTML={{ __html: part }} />
@@ -856,7 +856,7 @@ export default function IssueDetailPage() {
           <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
             className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
             {displayVal
-              ? <span className="text-gray-700 whitespace-pre-wrap">{displayVal}</span>
+              ? <span className="text-gray-700 whitespace-pre-wrap break-words">{displayVal}</span>
               : <span className="text-gray-400">None</span>}
           </button>
         )}
@@ -1356,7 +1356,7 @@ export default function IssueDetailPage() {
                 return (
                 /<[a-z][\s\S]*>/i.test(renderHtml) ? (
                 <div
-                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer
+                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer break-words
                     [&_h2]:font-bold [&_h2]:text-base [&_h2]:mt-2 [&_h2]:mb-1
                     [&_h3]:font-bold [&_h3]:text-sm  [&_h3]:mt-2 [&_h3]:mb-1
                     [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1
@@ -1391,7 +1391,7 @@ export default function IssueDetailPage() {
                 />
                 ) : (
                 <div
-                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer"
+                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer break-words"
                   dangerouslySetInnerHTML={{ __html: renderHtml }}
                   onClick={() => { setEditing('description'); setEditValue(issue.description || ''); }}
                 />
@@ -1883,7 +1883,7 @@ export default function IssueDetailPage() {
                       <button onClick={() => { setEditingCustomField('l2b_rootCause'); setCustomFieldEditValue((issue as any).rootCause || ''); }}
                         className="w-full text-left text-[13px] text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 transition-colors min-h-[32px]">
                         {(issue as any).rootCause
-                          ? <span className="whitespace-pre-wrap">{(issue as any).rootCause}</span>
+                          ? <span className="whitespace-pre-wrap break-words">{(issue as any).rootCause}</span>
                           : <span className="text-gray-400 italic">Click to add root cause…</span>}
                       </button>
                     )}
@@ -1916,7 +1916,7 @@ export default function IssueDetailPage() {
                       <button onClick={() => { setEditingCustomField('l2b_fixDescription'); setCustomFieldEditValue((issue as any).fixDescription || ''); }}
                         className="w-full text-left text-[13px] text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 transition-colors min-h-[32px]">
                         {(issue as any).fixDescription
-                          ? <span className="whitespace-pre-wrap">{(issue as any).fixDescription}</span>
+                          ? <span className="whitespace-pre-wrap break-words">{(issue as any).fixDescription}</span>
                           : <span className="text-gray-400 italic">Click to add fix description…</span>}
                       </button>
                     )}
@@ -2078,7 +2078,7 @@ export default function IssueDetailPage() {
                             <span className="font-semibold text-gray-700 text-[13px]">System</span>
                             <span className="text-gray-400 text-[11px]">{timeAgo(c.createdAt)}</span>
                           </div>
-                          <div className="text-[12.5px] text-gray-600 [&_img]:cursor-pointer" dangerouslySetInnerHTML={{ __html: c.body }}
+                          <div className="text-[12.5px] text-gray-600 break-words [&_img]:cursor-pointer" dangerouslySetInnerHTML={{ __html: c.body }}
                             onClick={(e) => { const t = e.target as HTMLElement; if (t.tagName === 'IMG') { const src = (t as HTMLImageElement).src; if (src) setLightboxSrc(src); } }} />
                         </div>
                       </div>
