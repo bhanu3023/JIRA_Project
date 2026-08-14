@@ -5959,8 +5959,15 @@ async function _handleJiraPgApi(
     let idx = 1;
     if (deptParam) { whereClauses.push(`LOWER(i.current_department) = LOWER($${idx++})`); params.push(deptParam); }
     else { whereClauses.push(`LOWER(i.current_department) = ANY($${idx++}::text[])`); params.push(DEPTS.map(d => d.toLowerCase())); }
+    // productType (Content/Message/Email Migration) is a Migration-specific
+    // categorization -- Dev tickets essentially never have it set at all
+    // (checked: 15,565 of 15,566 Dev tickets have productType = null).
+    // Requiring a match against the 3 fixed values by default silently
+    // excluded every single Dev ticket from this report, dept filter or
+    // not -- only apply this as a restriction when the caller explicitly
+    // picked one; "no filter" means no restriction, not "must be Migration
+    // content".
     if (productTypeParam) { whereClauses.push(`i."productType" = $${idx++}`); params.push(productTypeParam); }
-    else { whereClauses.push(`i."productType" = ANY($${idx++}::text[])`); params.push(PRODUCT_TYPES); }
     if (dateFrom) { whereClauses.push(`i."createdAt" >= $${idx++}`); params.push(new Date(dateFrom)); }
     if (dateTo) { whereClauses.push(`i."createdAt" <= $${idx++}`); params.push(new Date(new Date(dateTo).setHours(23, 59, 59, 999))); }
 
@@ -5971,7 +5978,7 @@ async function _handleJiraPgApi(
        FROM issues i
        LEFT JOIN statuses s ON s.id = i."statusId"
        WHERE ${whereClauses.join(' AND ')}
-       LIMIT 20000`,
+       LIMIT 100000`,
       params
     );
 

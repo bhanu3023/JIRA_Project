@@ -382,11 +382,88 @@ export default function ReportsPage() {
                     </div>
                   )}
 
+                  {/* By Department — Migration vs Dev overall, regardless of Product Type
+                      (Dev tickets essentially never have a Content/Message/Email
+                      categorization, so this is the only place its real totals show up). */}
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-100">
+                      <h3 className="text-[14px] font-semibold text-gray-700">By Department</h3>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">Migration vs. Dev, overall — includes every ticket regardless of Product Type.</p>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[12.5px]">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Department</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Assigned</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolved</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolution %</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">SLA %</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Breach %</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {['Migration', 'Dev'].map(dept => {
+                            const d = rsData.byDept?.[dept];
+                            return (
+                              <tr key={dept} className="hover:bg-gray-50">
+                                <td className="px-4 py-2.5 font-medium text-gray-700">{dept}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums">{d?.totalAssigned ?? 0}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums">{d?.totalResolved ?? 0}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums font-medium">{d?.resolutionPct ?? 0}%</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 font-medium">{d?.slaPct ?? 0}%</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-red-600 font-medium">{d?.breachPct ?? 0}%</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* By Product Type — Content/Message/Email combined across both depts
+                      (in practice, almost entirely Migration, since Dev doesn't use this field) */}
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-100">
+                      <h3 className="text-[14px] font-semibold text-gray-700">By Product Type</h3>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">Content vs. Message vs. Email, combined across departments.</p>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[12.5px]">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Product Type</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Assigned</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolved</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolution %</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">SLA %</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Breach %</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {['Content Migration', 'Message Migration', 'Email Migration'].map(pt => {
+                            const p = rsData.byProductType?.[pt];
+                            return (
+                              <tr key={pt} className="hover:bg-gray-50">
+                                <td className="px-4 py-2.5 font-medium text-gray-700">{pt.replace(' Migration', '')}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums">{p?.totalAssigned ?? 0}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums">{p?.totalResolved ?? 0}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums font-medium">{p?.resolutionPct ?? 0}%</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 font-medium">{p?.slaPct ?? 0}%</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-red-600 font-medium">{p?.breachPct ?? 0}%</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
                   {/* Breakdown matrix — always every Dept × Product Type combo, regardless of filters */}
                   <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-100">
                       <h3 className="text-[14px] font-semibold text-gray-700">Breakdown — Department × Product Type</h3>
-                      <p className="text-[11.5px] text-gray-400 mt-0.5">Always shows every combination, regardless of the filters above.</p>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">Always shows every combination, regardless of the filters above. Dev rows will show 0 here — that field isn't used for Dev tickets; see "By Department" above for its real totals.</p>
                     </div>
                     <div className="overflow-x-auto">
                       <table className="w-full text-[12.5px]">
