@@ -381,7 +381,7 @@ export async function notifyIssueCreated(issue: {
 }
 
 export async function notifyIssueAssigned(issue: {
-  key: string; summary: string; priority: string;
+  key: string; cfKey?: string | null; summary: string; priority: string;
   spaceKey: string; spaceName: string;
   status: { name: string; category: string };
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
@@ -394,11 +394,16 @@ export async function notifyIssueAssigned(issue: {
 
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
   const prevName     = issue.previousAssignee ? `${issue.previousAssignee.firstName} ${issue.previousAssignee.lastName}`.trim() : 'Unassigned';
+  // Every issue is shown to users ONLY by its CF-prefixed display key -- the
+  // internal `key` column is a backend implementation detail. issueUrl() and
+  // getTicketThreadInfo() still need the real internal key to route/query
+  // correctly; everything the recipient actually reads uses displayKey.
+  const displayKey = issue.cfKey || issue.key;
   const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const html = buildEmailHtml({
     title:        'Issue Assigned',
-    issueKey:     issue.key,
+    issueKey:     displayKey,
     issueSummary: issue.summary,
     spaceKey:     issue.spaceKey,
     spaceName:    issue.spaceName,
@@ -415,16 +420,16 @@ export async function notifyIssueAssigned(issue: {
 
   await sendNotification(
     to,
-    `[${issue.key}] Assigned to ${assigneeName} - ${issue.summary}`,
+    `[${displayKey}] Assigned to ${assigneeName} - ${issue.summary}`,
     html,
-    `${issue.key} has been assigned to ${assigneeName}.\nView: ${issueUrl(issue.key)}`,
+    `${displayKey} has been assigned to ${assigneeName}.\nView: ${issueUrl(issue.key)}`,
     emailthreadid,
     inboxEmail,
   );
 }
 
 export async function notifyStatusChanged(issue: {
-  key: string; summary: string; priority: string;
+  key: string; cfKey?: string | null; summary: string; priority: string;
   spaceKey: string; spaceName: string;
   oldStatus: { name: string; category: string };
   newStatus: { name: string; category: string };
@@ -440,11 +445,12 @@ export async function notifyStatusChanged(issue: {
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
   const isResolved = ['done'].includes(issue.newStatus.category);
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
+  const displayKey = issue.cfKey || issue.key;
   const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const html = buildEmailHtml({
     title:        'Status Changed',
-    issueKey:     issue.key,
+    issueKey:     displayKey,
     issueSummary: issue.summary,
     spaceKey:     issue.spaceKey,
     spaceName:    issue.spaceName,
@@ -460,21 +466,21 @@ export async function notifyStatusChanged(issue: {
   });
 
   const subject = isResolved
-    ? `[${issue.key}] Resolved - ${issue.summary}`
-    : `[${issue.key}] Status changed to "${issue.newStatus.name}" - ${issue.summary}`;
+    ? `[${displayKey}] Resolved - ${issue.summary}`
+    : `[${displayKey}] Status changed to "${issue.newStatus.name}" - ${issue.summary}`;
 
   await sendNotification(
     to,
     subject,
     html,
-    `${issue.key} status changed: ${issue.oldStatus.name} → ${issue.newStatus.name}\nView: ${issueUrl(issue.key)}`,
+    `${displayKey} status changed: ${issue.oldStatus.name} → ${issue.newStatus.name}\nView: ${issueUrl(issue.key)}`,
     emailthreadid,
     inboxEmail,
   );
 }
 
 export async function notifyCommentAdded(issue: {
-  key: string; summary: string;
+  key: string; cfKey?: string | null; summary: string;
   spaceKey: string; spaceName: string;
   status: { name: string; category: string };
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
@@ -490,6 +496,10 @@ export async function notifyCommentAdded(issue: {
   const to = Array.from(new Set([...assigneeEmails, ...reporterEmails])).filter(Boolean);
   if (!to.length) return;
 
+  const displayKey = issue.cfKey || issue.key;
+  // Threading uses the In-Reply-To/References headers built from
+  // emailthreadid (a real Message-ID), not the subject text, so changing the
+  // subject's key format here doesn't fork existing reply threads.
   const { emailthreadid: sourceMessageId, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   // Send a plain reply email — just the comment text, no ticket template
@@ -499,7 +509,7 @@ export async function notifyCommentAdded(issue: {
 
   await sendNotification(
     to,
-    `Re: [${issue.key}] ${issue.summary}`,
+    `Re: [${displayKey}] ${issue.summary}`,
     commentHtml,
     commentText,
     sourceMessageId,
@@ -508,7 +518,7 @@ export async function notifyCommentAdded(issue: {
 }
 
 export async function notifyIssueUpdated(issue: {
-  key: string; summary: string; priority: string;
+  key: string; cfKey?: string | null; summary: string; priority: string;
   spaceKey: string; spaceName: string;
   status: { name: string; category: string };
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
@@ -520,6 +530,7 @@ export async function notifyIssueUpdated(issue: {
   if (!to.length) return;
 
   const updatedByName = issue.updatedBy ? `${issue.updatedBy.firstName} ${issue.updatedBy.lastName}`.trim() : 'Someone';
+  const displayKey = issue.cfKey || issue.key;
   const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   const changeFields = issue.changes.map(c => ({
@@ -529,7 +540,7 @@ export async function notifyIssueUpdated(issue: {
 
   const html = buildEmailHtml({
     title:        'Issue Updated',
-    issueKey:     issue.key,
+    issueKey:     displayKey,
     issueSummary: issue.summary,
     spaceKey:     issue.spaceKey,
     spaceName:    issue.spaceName,
@@ -544,16 +555,16 @@ export async function notifyIssueUpdated(issue: {
 
   await sendNotification(
     to,
-    `[${issue.key}] Updated by ${updatedByName} - ${issue.summary}`,
+    `[${displayKey}] Updated by ${updatedByName} - ${issue.summary}`,
     html,
-    `${issue.key} was updated by ${updatedByName}.\nView: ${issueUrl(issue.key)}`,
+    `${displayKey} was updated by ${updatedByName}.\nView: ${issueUrl(issue.key)}`,
     emailthreadid,
     inboxEmail,
   );
 }
 
 export async function notifyIssueDeleted(issue: {
-  key: string; summary: string;
+  key: string; cfKey?: string | null; summary: string;
   spaceKey: string; spaceName: string;
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
@@ -563,10 +574,11 @@ export async function notifyIssueDeleted(issue: {
   if (!to.length) return;
 
   const deletedByName = issue.deletedBy ? `${issue.deletedBy.firstName} ${issue.deletedBy.lastName}`.trim() : 'Someone';
+  const displayKey = issue.cfKey || issue.key;
 
   const html = buildEmailHtml({
     title:        'Issue Deleted',
-    issueKey:     issue.key,
+    issueKey:     displayKey,
     issueSummary: issue.summary,
     spaceKey:     issue.spaceKey,
     spaceName:    issue.spaceName,
@@ -581,9 +593,9 @@ export async function notifyIssueDeleted(issue: {
 
   await sendNotification(
     to,
-    `[${issue.key}] Deleted - ${issue.summary}`,
+    `[${displayKey}] Deleted - ${issue.summary}`,
     html,
-    `${issue.key} was deleted by ${deletedByName}.`,
+    `${displayKey} was deleted by ${deletedByName}.`,
   );
 }
 

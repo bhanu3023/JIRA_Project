@@ -1724,9 +1724,17 @@ export async function runSlaBreachCheck(): Promise<number> {
         const timeToBreachMs = dueAt - now;
         // Warn if breach within 30 min (and not already breached)
         if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
+          // Every issue is shown to users only by its CF-prefixed display key
+          // -- row.key is the internal column. runMonitorAgentScan's own
+          // SLA_BREACH notifications already key off cf_key || key (both for
+          // display AND for this exact dedup lookup); this scanner used the
+          // raw internal key for both, so the two scanners' notification
+          // rows never matched each other and could double-notify the same
+          // breach on top of showing the wrong key.
+          const displayKey = row.cf_key || row.key;
           // Avoid duplicate notifications within 1 hour
           const already = await (db as any).notification.findFirst({
-            where: { issueKey: row.key, type: 'SLA_BREACH',
+            where: { issueKey: displayKey, type: 'SLA_BREACH',
               createdAt: { gte: new Date(now - 60 * 60 * 1000) } },
           });
           if (already) continue;
@@ -1740,9 +1748,9 @@ export async function runSlaBreachCheck(): Promise<number> {
           const minsLeft = Math.ceil(timeToBreachMs / 60_000);
           await notifyUsers(recipients, null, {
             type: 'SLA_BREACH',
-            title: `SLA breaching in ${minsLeft} min: ${row.key}`,
-            message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes. Issue: ${row.summary || row.key}`,
-            issueKey: row.key,
+            title: `SLA breaching in ${minsLeft} min: ${displayKey}`,
+            message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes. Issue: ${row.summary || displayKey}`,
+            issueKey: displayKey,
           });
           // Also send email notification to assignee, shift leads, and managers
           const allEmailUserIds = [row.assigneeId, ...leadIds, ...managerIds].filter(Boolean);
@@ -1755,8 +1763,8 @@ export async function runSlaBreachCheck(): Promise<number> {
           const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
           if (assigneeEmails.length && spaceRow) {
             notifySLABreach({
-              issueKey: row.key,
-              issueSummary: row.summary || row.key,
+              issueKey: displayKey,
+              issueSummary: row.summary || displayKey,
               spaceKey: spaceRow.key,
               spaceName: spaceRow.name,
               slaName: policy.name || 'SLA',
@@ -3813,6 +3821,7 @@ async function _handleJiraPgApi(
 
     // If ticket has no assignee, email leads + shift leads so they can pick it up
     const issueDept = (issue as any).current_department || null;
+    const displayKey = (issue as any).cf_key || issue.key;
     if (!issue.assigneeId) {
       try {
         const { notifyUnassignedTicket } = await import('@/lib/notification-service');
@@ -3821,7 +3830,7 @@ async function _handleJiraPgApi(
           const leadUsers = await db.user.findMany({ where: { id: { in: leadIds } }, select: { email: true } });
           const leadEmails = leadUsers.map((u: any) => u.email).filter(Boolean);
           notifyUnassignedTicket({
-            issueKey: issue.key,
+            issueKey: displayKey,
             issueSummary: issue.summary,
             spaceKey: issue.space?.key ?? sk,
             spaceName: issue.space?.name ?? sk,
@@ -3838,7 +3847,7 @@ async function _handleJiraPgApi(
     await notifyUsers(
       [issue.assigneeId, ...createdLeadIds],
       issue.reporterId,
-      { type: 'CREATED', title: `New issue: ${issue.key}`, message: issue.summary, issueKey: issue.key }
+      { type: 'CREATED', title: `New issue: ${displayKey}`, message: issue.summary, issueKey: displayKey }
     );
 
     // Recurring issue detection: notify if this issue was previously resolved
@@ -4163,12 +4172,16 @@ async function _handleJiraPgApi(
       // that to the user who just moved it.
       (async () => {
         try {
+          // Every ticket is shown to users only by its CF-prefixed display
+          // key -- `key` here is the internal column, never shown anywhere
+          // else in the app.
+          const displayKey = (issue as any).cf_key || key;
           // Notify reporter that ticket was sent to new dept
           if (issue.reporterId) {
             await notifyUsers(
               [issue.reporterId],
               userId,
-              { type: 'DEPT_CHANGE', title: `Ticket ${key} sent to ${newDept}`, message: `Your ticket "${issue.summary}" has been transferred to ${newDept}.`, issueKey: key }
+              { type: 'DEPT_CHANGE', title: `Ticket ${displayKey} sent to ${newDept}`, message: `Your ticket "${issue.summary}" has been transferred to ${newDept}.`, issueKey: displayKey }
             );
           }
           // Notify the RR-assigned agent
@@ -4176,7 +4189,7 @@ async function _handleJiraPgApi(
             await notifyUsers(
               [rrAssigneeId],
               userId,
-              { type: 'ASSIGNED', title: `Ticket assigned to you: ${key}`, message: `You have been assigned to "${issue.summary}" in the ${newDept} queue.`, issueKey: key }
+              { type: 'ASSIGNED', title: `Ticket assigned to you: ${displayKey}`, message: `You have been assigned to "${issue.summary}" in the ${newDept} queue.`, issueKey: displayKey }
             );
           }
           // Notify space members of the target dept (agents + leads/shift_leads in that dept)
@@ -4195,7 +4208,7 @@ async function _handleJiraPgApi(
             await notifyUsers(
               allDeptIds,
               userId,
-              { type: 'DEPT_ASSIGNED', title: `New ticket in ${newDept}: ${key}`, message: `Ticket "${issue.summary}" has arrived in the ${newDept} queue.`, issueKey: key }
+              { type: 'DEPT_ASSIGNED', title: `New ticket in ${newDept}: ${displayKey}`, message: `Ticket "${issue.summary}" has arrived in the ${newDept} queue.`, issueKey: displayKey }
             );
           }
           // SLA pause/resume — distinct from the DEPT_CHANGE/ASSIGNED notices
@@ -4207,14 +4220,14 @@ async function _handleJiraPgApi(
             await notifyUsers(
               [issue.assignee.id],
               userId,
-              { type: 'SLA_PAUSED', title: `SLA paused for ${key}`, message: `Ticket "${issue.summary}" moved out of ${oldDept} — its SLA clock has been paused.`, issueKey: key }
+              { type: 'SLA_PAUSED', title: `SLA paused for ${displayKey}`, message: `Ticket "${issue.summary}" moved out of ${oldDept} — its SLA clock has been paused.`, issueKey: displayKey }
             );
           }
           if (rrAssigneeId) {
             await notifyUsers(
               [rrAssigneeId],
               userId,
-              { type: 'SLA_RESUMED', title: `SLA running for ${key}`, message: `Ticket "${issue.summary}" has arrived in ${newDept} — its SLA clock is now running.`, issueKey: key }
+              { type: 'SLA_RESUMED', title: `SLA running for ${displayKey}`, message: `Ticket "${issue.summary}" has arrived in ${newDept} — its SLA clock is now running.`, issueKey: displayKey }
             );
           }
         } catch { /* ignore notification errors */ }
@@ -4270,7 +4283,7 @@ async function _handleJiraPgApi(
       // to know about (e.g. reporter's Migration ticket moving to Dev).
       if (updatedIssue) {
         notifyIssueUpdated({
-          key: updatedIssue.key, summary: updatedIssue.summary, priority: updatedIssue.priority,
+          key: updatedIssue.key, cfKey: extraCols.cf_key, summary: updatedIssue.summary, priority: updatedIssue.priority,
           spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
           status: { name: updatedIssue.status?.name ?? newStatusName, category: updatedIssue.status?.category ?? 'todo' },
           assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
@@ -4284,7 +4297,7 @@ async function _handleJiraPgApi(
         // different from who had it before leaving oldDept).
         if (rrAssigneeId && rrAssigneeId !== issue.assigneeId) {
           notifyIssueAssigned({
-            key: updatedIssue.key, summary: updatedIssue.summary, priority: updatedIssue.priority,
+            key: updatedIssue.key, cfKey: extraCols.cf_key, summary: updatedIssue.summary, priority: updatedIssue.priority,
             spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
             status: { name: updatedIssue.status?.name ?? newStatusName, category: updatedIssue.status?.category ?? 'todo' },
             assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
@@ -4333,7 +4346,8 @@ async function _handleJiraPgApi(
     const newId = rid();
 
     // If a ticket with this key already exists on target board, just update it
-    const existingOnTarget = await pool.query(`SELECT id FROM issues WHERE key = $1`, [newKey]);
+    const existingOnTarget = await pool.query(`SELECT id, cf_key FROM issues WHERE key = $1`, [newKey]);
+    let newCfKey: string | null = existingOnTarget.rows[0]?.cf_key ?? null;
     if (existingOnTarget.rows[0]) {
       // Already passed before Ã¢â‚¬â€ update assignee + status
       await pool.query(
@@ -4355,6 +4369,17 @@ async function _handleJiraPgApi(
           newDept,
         ]
       );
+      // This INSERT never allocated a CF-prefixed display key, unlike every
+      // other place a ticket gets created -- the cross-board ticket this
+      // creates showed only its bare internal key (e.g. "L2BOARD-5618") in
+      // every notification and history entry about it, never the CF- key
+      // shown everywhere else in the app.
+      try {
+        const maxRow = await pool.query(`SELECT MAX(CAST(SUBSTRING(cf_key FROM 4) AS INTEGER)) AS mx FROM issues WHERE cf_key LIKE 'CF-%'`);
+        const nextNum = (maxRow.rows[0]?.mx ?? 0) + 1;
+        newCfKey = `CF-${nextNum}`;
+        await pool.query(`UPDATE issues SET cf_key = $1 WHERE id = $2`, [newCfKey, newId]);
+      } catch { newCfKey = null; }
     }
 
     // Copy custom field values to new ticket
@@ -4399,11 +4424,13 @@ async function _handleJiraPgApi(
     await pool.query(`UPDATE issues SET "partnerKey"=$1 WHERE key=$2`, [key, newKey]);
 
     // History on ORIGINAL ticket: "Passed to Dev Ã¢â€ ' L2BOARD (new ticket: L2BOARD-5618)"
+    const displayKey = (issue as any).cf_key || key;
+    const newDisplayKey = newCfKey || newKey;
     await (db as any).issueHistory.create({
       data: {
         id: rid(), issueId: issue.id, field: 'department',
         oldValue: (issue as any).current_department || 'None',
-        newValue: `Passed to ${newDept} → ${targetSpace.key} (${newKey})`,
+        newValue: `Passed to ${newDept} → ${targetSpace.key} (${newDisplayKey})`,
         authorName, createdAt: new Date(),
       },
     });
@@ -4413,7 +4440,7 @@ async function _handleJiraPgApi(
       data: {
         id: rid(), issueId: newId, field: 'department',
         oldValue: 'Created',
-        newValue: `Passed from ${issue.space?.key || ''} (${key}) Ã‚Â· Assignee: ${assigneeName} (Round Robin)`,
+        newValue: `Passed from ${issue.space?.key || ''} (${displayKey}) · Assignee: ${assigneeName} (Round Robin)`,
         authorName: 'System', createdAt: new Date(),
       },
     });
@@ -4428,7 +4455,7 @@ async function _handleJiraPgApi(
         : null;
       const targetStatusCategory = firstStatus?.category ?? 'todo';
       notifyIssueUpdated({
-        key: newKey, summary: issue.summary, priority: issue.priority,
+        key: newKey, cfKey: newCfKey, summary: issue.summary, priority: issue.priority,
         spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
         status: { name: newStatusName, category: targetStatusCategory },
         assignee: newAssigneeUser, reporter: issue.reporter,
@@ -4437,7 +4464,7 @@ async function _handleJiraPgApi(
       }).catch(() => {});
       if (newAssigneeUser) {
         notifyIssueAssigned({
-          key: newKey, summary: issue.summary, priority: issue.priority,
+          key: newKey, cfKey: newCfKey, summary: issue.summary, priority: issue.priority,
           spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
           status: { name: newStatusName, category: targetStatusCategory },
           assignee: newAssigneeUser, reporter: issue.reporter,
@@ -4448,7 +4475,7 @@ async function _handleJiraPgApi(
         notifyUsers(
           inAppIds,
           userId,
-          { type: 'DEPT_CHANGE', title: `Ticket ${newKey} created in ${targetSpace.key}`, message: `"${issue.summary}" was passed to ${newDept} on ${targetSpace.key} as ${newKey}.`, issueKey: newKey }
+          { type: 'DEPT_CHANGE', title: `Ticket ${newDisplayKey} created in ${targetSpace.key}`, message: `"${issue.summary}" was passed to ${newDept} on ${targetSpace.key} as ${newDisplayKey}.`, issueKey: newDisplayKey }
         ).catch(() => {});
       }
     } catch { /* notification failures shouldn't block the transfer */ }
@@ -4790,15 +4817,16 @@ async function _handleJiraPgApi(
 
       // Notify: restored origin-dept assignee + reporter
       try {
-        const recallIssue = await db.issue.findUnique({ where: { key }, select: { reporterId: true, summary: true } });
+        const recallIssue = await db.issue.findUnique({ where: { key }, select: { reporterId: true, summary: true, cf_key: true } });
         const summary = recallIssue?.summary || key;
+        const displayKey = (recallIssue as any)?.cf_key || key;
         const notifyIds = [recallIssue?.reporterId, restoreAssigneeId].filter(Boolean) as string[];
         if (notifyIds.length) {
           await notifyUsers(notifyIds, userId, {
             type: 'DEPT_CHANGE',
-            title: `Ticket ${key} returned to ${homeDept}`,
+            title: `Ticket ${displayKey} returned to ${homeDept}`,
             message: `Ticket "${summary}" has been returned to the ${homeDept} queue. SLA has resumed.`,
-            issueKey: key
+            issueKey: displayKey
           });
         }
         // Also notify all origin-dept members
@@ -4810,9 +4838,9 @@ async function _handleJiraPgApi(
         if (homeMemberIds.length > 0) {
           await notifyUsers(homeMemberIds, userId, {
             type: 'DEPT_ASSIGNED',
-            title: `Ticket ${key} back in ${homeDept}`,
+            title: `Ticket ${displayKey} back in ${homeDept}`,
             message: `Ticket "${summary}" has returned to ${homeDept} queue. SLA is running.`,
-            issueKey: key
+            issueKey: displayKey
           });
         }
       } catch { /* non-critical */ }
@@ -4950,7 +4978,7 @@ async function _handleJiraPgApi(
                 [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), reopenChanger ? `${reopenChanger.firstName} ${reopenChanger.lastName}`.trim() : 'Unknown', reopenChanger?.email || null]
               ).catch(() => {});
               notifyStatusChanged({
-                key: issue.key, summary: issue.summary, priority: issue.priority,
+                key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
                 oldStatus: { name: oldQueueStatusName, category: 'done' },
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
@@ -5094,8 +5122,9 @@ async function _handleJiraPgApi(
                   [rid(), issue.id, 'department', queueHandoffOldDept || 'None', `Handed to ${queueHandoffTargetDept} — SLA started`, changer ? `${changer.firstName} ${changer.lastName}`.trim() : 'Unknown', changer?.email || null]
                 ).catch(() => {});
               }
+              const refreshedDisplayKey = (refreshed as any).cf_key || refreshed.key;
               notifyStatusChanged({
-                key: refreshed.key, summary: refreshed.summary, priority: refreshed.priority,
+                key: refreshed.key, cfKey: (refreshed as any).cf_key, summary: refreshed.summary, priority: refreshed.priority,
                 spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
                 oldStatus: { name: oldQueueStatusName, category: 'todo' },
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
@@ -5111,7 +5140,7 @@ async function _handleJiraPgApi(
               notifyUsers(
                 [refreshed.assigneeId, refreshed.reporterId],
                 userId,
-                { type: 'STATUS_CHANGED', title: `${refreshed.key} status → ${String(body.queueStatusName || '')}`, message: refreshed.summary, issueKey: refreshed.key }
+                { type: 'STATUS_CHANGED', title: `${refreshedDisplayKey} status → ${String(body.queueStatusName || '')}`, message: refreshed.summary, issueKey: refreshedDisplayKey }
               ).catch(() => {});
               // current_department/dept_statuses/etc. are raw-SQL columns, not
               // part of the Prisma schema -- db.issue.findUnique above never
@@ -5399,8 +5428,13 @@ async function _handleJiraPgApi(
     // Send notifications (fire-and-forget)
     const spaceKey = updated.space?.key ?? '';
     const spaceName = updated.space?.name ?? '';
+    // Every ticket is shown to users only by its CF-prefixed display key --
+    // `key` is the internal column. cfKey here flows into notifyStatusChanged/
+    // notifyIssueAssigned/notifyIssueUpdated below, which already know to
+    // prefer it over the raw key for anything user-facing.
+    const updatedDisplayKey = (updated as any).cf_key || updated.key;
     const issueForNotif = {
-      key: updated.key, summary: updated.summary, priority: updated.priority,
+      key: updated.key, cfKey: (updated as any).cf_key, summary: updated.summary, priority: updated.priority,
       spaceKey, spaceName,
       status: { name: updated.status?.name ?? 'Open', category: updated.status?.category ?? 'todo' },
       assignee: updated.assignee, reporter: updated.reporter,
@@ -5503,11 +5537,12 @@ async function _handleJiraPgApi(
             // Notify whoever now owns it back home, plus the reporter
             const notifyIds = [restoreAssigneeId, updated.reporterId].filter(Boolean) as string[];
             if (notifyIds.length) {
+              const updatedDisplayKey = (updated as any).cf_key || updated.key;
               await notifyUsers(notifyIds, userId, {
                 type: 'DEPT_CHANGE',
-                title: `Ticket ${updated.key} back in ${homeDept}`,
+                title: `Ticket ${updatedDisplayKey} back in ${homeDept}`,
                 message: `Ticket "${updated.summary}" was resolved in ${resolvingDept} and has returned to ${homeDept}.`,
-                issueKey: updated.key,
+                issueKey: updatedDisplayKey,
               });
             }
           }
@@ -5526,9 +5561,9 @@ async function _handleJiraPgApi(
       await notifyUsers(
         [updated.assigneeId, updated.reporterId],
         userId,
-        { type: 'STATUS_CHANGED', title: `${updated.key} status → ${issueForNotif.status.name}`, message: updated.summary, issueKey: updated.key }
+        { type: 'STATUS_CHANGED', title: `${updatedDisplayKey} status → ${issueForNotif.status.name}`, message: updated.summary, issueKey: updatedDisplayKey }
       );
-      await notifyWatchers(updated.key, userId, { title: `${updated.key} status → ${issueForNotif.status.name}`, message: updated.summary });
+      await notifyWatchers(updated.key, userId, { title: `${updatedDisplayKey} status → ${issueForNotif.status.name}`, message: updated.summary });
     }
     // Assignee changed?
     if (assigneeChangedForNotif) {
@@ -5538,7 +5573,7 @@ async function _handleJiraPgApi(
       await notifyUsers(
         [updated.assigneeId, updated.reporterId],
         userId,
-        { type: 'ASSIGNED', title: `${updated.key} assigned to you`, message: updated.summary, issueKey: updated.key }
+        { type: 'ASSIGNED', title: `${updatedDisplayKey} assigned to you`, message: updated.summary, issueKey: updatedDisplayKey }
       );
     }
     // General update (summary, description, priority, etc.) -- only when
@@ -5561,9 +5596,9 @@ async function _handleJiraPgApi(
         await notifyUsers(
           [updated.assigneeId, updated.reporterId],
           userId,
-          { type: 'UPDATED', title: `${updated.key} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', '), issueKey: updated.key }
+          { type: 'UPDATED', title: `${updatedDisplayKey} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', '), issueKey: updatedDisplayKey }
         );
-        await notifyWatchers(updated.key, userId, { title: `${updated.key} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', ') });
+        await notifyWatchers(updated.key, userId, { title: `${updatedDisplayKey} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', ') });
       }
     }
 
@@ -5640,7 +5675,7 @@ async function _handleJiraPgApi(
 
     // Notify
     notifyIssueDeleted({
-      key: issue.key, summary: issue.summary,
+      key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary,
       spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
       assignee: issue.assignee, reporter: issue.reporter,
       deletedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
@@ -5790,9 +5825,10 @@ async function _handleJiraPgApi(
     } catch (_e) {}
 
 
+    const issueDisplayKey = (issue as any).cf_key || issue.key;
     // Email: notify assignee + reporter (not the commenter)
     notifyCommentAdded({
-      key: issue.key, summary: issue.summary,
+      key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary,
       spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
       status: { name: issue.status?.name ?? 'Open', category: issue.status?.category ?? 'todo' },
       assignee: issue.assignee, reporter: issue.reporter,
@@ -5828,9 +5864,9 @@ async function _handleJiraPgApi(
     await notifyUsers(
       [issue.assigneeId, issue.reporterId, ...commentLeadIds],
       userId,
-      { type: 'COMMENTED', title: `New comment on ${issue.key}`, message: commentPreview, issueKey: issue.key }
+      { type: 'COMMENTED', title: `New comment on ${issueDisplayKey}`, message: commentPreview, issueKey: issueDisplayKey }
     );
-    await notifyWatchers(issue.key, userId, { title: `New comment on ${issue.key}`, message: commentPreview });
+    await notifyWatchers(issue.key, userId, { title: `New comment on ${issueDisplayKey}`, message: commentPreview });
 
     // Detect @mentions Ã¢â‚¬â€ extract data-userid from mention spans (most reliable)
     // Falls back to regex on plain text for non-rich-text comments
@@ -5871,8 +5907,8 @@ async function _handleJiraPgApi(
       // In-app notification
       await createNotification({
         userId: mentionedId, type: 'MENTIONED',
-        title: `${commenterName} mentioned you in ${issue.key}`,
-        message: mentionPreview, issueKey: issue.key,
+        title: `${commenterName} mentioned you in ${issueDisplayKey}`,
+        message: mentionPreview, issueKey: issueDisplayKey,
       });
       // Email notification
       if (mentionedUser.email) {
@@ -5880,7 +5916,7 @@ async function _handleJiraPgApi(
           mentionedEmail: mentionedUser.email,
           mentionedName: `${mentionedUser.firstName} ${mentionedUser.lastName}`.trim(),
           mentionedBy: commenterName,
-          issueKey: issue.key,
+          issueKey: issueDisplayKey,
           issueSummary: issue.summary,
           spaceKey: issue.space?.key ?? '',
           spaceName: issue.space?.name ?? '',
@@ -6841,7 +6877,17 @@ async function _handleJiraPgApi(
   // POST /issues/:key/watch  Ã¢â‚¬â€ start watching
   const watchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchMatch && method === 'POST') {
-    const key = watchMatch[1].toUpperCase();
+    let key = watchMatch[1].toUpperCase();
+    // Every other issue-scoped route resolves a CF-prefixed key to the real
+    // internal key before using it -- this one never did, so a watch
+    // registered from a "/issues/CF-.../watch" URL (i.e. any normal ticket
+    // page) got stored under the CF key, while notifyWatchers() always looks
+    // up by the internal key. Those watchers were never actually notified of
+    // anything, silently.
+    if (key.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
+      if (cfRow.rows[0]) key = cfRow.rows[0].key;
+    }
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     await (db as any).issueWatch.upsert({
       where: { issueKey_userId: { issueKey: key, userId } },
@@ -6854,7 +6900,11 @@ async function _handleJiraPgApi(
   // DELETE /issues/:key/watch  Ã¢â‚¬â€ stop watching
   const unwatchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (unwatchMatch && method === 'DELETE') {
-    const key = unwatchMatch[1].toUpperCase();
+    let key = unwatchMatch[1].toUpperCase();
+    if (key.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
+      if (cfRow.rows[0]) key = cfRow.rows[0].key;
+    }
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     await (db as any).issueWatch.deleteMany({ where: { issueKey: key, userId } });
     return json({ watching: false });
@@ -6863,7 +6913,11 @@ async function _handleJiraPgApi(
   // GET /issues/:key/watch  Ã¢â‚¬â€ check if watching
   const watchCheckMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchCheckMatch && method === 'GET') {
-    const key = watchCheckMatch[1].toUpperCase();
+    let key = watchCheckMatch[1].toUpperCase();
+    if (key.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
+      if (cfRow.rows[0]) key = cfRow.rows[0].key;
+    }
     if (!userId) return json({ watching: false, count: 0 });
     const [watch, count] = await Promise.all([
       (db as any).issueWatch.findUnique({ where: { issueKey_userId: { issueKey: key, userId } } }),
@@ -6914,25 +6968,33 @@ async function _handleJiraPgApi(
     let count = 0;
     for (const issue of overdue) {
       if (!issue.assigneeId) continue;
+      // Every issue is shown to users only by its CF-prefixed display key --
+      // runMonitorAgentScan's own DUE_DATE notifications already dedup and
+      // display via cf_key || key; using the raw internal key here (both for
+      // display AND this dedup lookup) meant the two never matched each
+      // other and could double-notify the same due date on top of showing
+      // the wrong key.
+      const displayKey = (issue as any).cf_key || issue.key;
       const already = await (db as any).notification.findFirst({
-        where: { userId: issue.assigneeId, issueKey: issue.key, type: 'DUE_DATE',
+        where: { userId: issue.assigneeId, issueKey: displayKey, type: 'DUE_DATE',
           createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
       });
       if (!already) {
         await createNotification({ userId: issue.assigneeId, type: 'DUE_DATE',
-          title: `Overdue: ${issue.key}`, message: issue.summary, issueKey: issue.key });
+          title: `Overdue: ${displayKey}`, message: issue.summary, issueKey: displayKey });
         count++;
       }
     }
     for (const issue of dueToday) {
       if (!issue.assigneeId) continue;
+      const displayKey = (issue as any).cf_key || issue.key;
       const already = await (db as any).notification.findFirst({
-        where: { userId: issue.assigneeId, issueKey: issue.key, type: 'DUE_DATE',
+        where: { userId: issue.assigneeId, issueKey: displayKey, type: 'DUE_DATE',
           createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
       });
       if (!already) {
         await createNotification({ userId: issue.assigneeId, type: 'DUE_DATE',
-          title: `Due today: ${issue.key}`, message: issue.summary, issueKey: issue.key });
+          title: `Due today: ${displayKey}`, message: issue.summary, issueKey: displayKey });
         count++;
       }
     }
