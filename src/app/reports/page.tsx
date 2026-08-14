@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
 import { BarChart3, TrendingUp, Users, Target, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle } from 'lucide-react';
@@ -9,7 +10,12 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGri
 export default function ReportsPage() {
   const { spaces, user } = useStore((s) => ({ spaces: s.spaces, user: s.user }));
   const canViewPerformance = user?.role === 'admin' || user?.role === 'manager';
-  const [tab, setTab] = useState('velocity');
+  // Lets a link like /reports?tab=resolution-sla&dept=Migration jump straight
+  // into the right view — e.g. from the Dashboard's "Migration Report" /
+  // "Dev Report" shortcuts, instead of everyone having to know to click
+  // Reports, then find the right tab, then set the filter themselves.
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState(() => searchParams.get('tab') || 'velocity');
   const [selectedSpace, setSelectedSpace] = useState('');
   const [velocity, setVelocity] = useState<any[]>([]);
   const [burndown, setBurndown] = useState<any>(null);
@@ -19,8 +25,8 @@ export default function ReportsPage() {
   const [dateTo, setDateTo] = useState('');
 
   // Resolution % / SLA % / SLA Breach % report — Migration/Dev x Content/Message/Email
-  const [rsDept, setRsDept] = useState('');        // '' = All (Migration + Dev combined)
-  const [rsProductType, setRsProductType] = useState(''); // '' = All (Content + Message + Email combined)
+  const [rsDept, setRsDept] = useState(() => searchParams.get('dept') || '');        // '' = All (Migration + Dev combined)
+  const [rsProductType, setRsProductType] = useState(() => searchParams.get('productType') || ''); // '' = All (Content + Message + Email combined)
   const [rsData, setRsData] = useState<any>(null);
   const [rsLoading, setRsLoading] = useState(false);
 

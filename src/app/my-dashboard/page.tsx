@@ -13,7 +13,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
 import {
-  Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown, Calendar,
+  Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown, Calendar, BarChart3,
 } from 'lucide-react';
 
 const DATE_RANGE_OPTIONS = [
@@ -357,6 +357,25 @@ export default function MyDashboardPage() {
               )}
               <QueueSelect label="Migration Queue" options={queueUsers.migration} value={viewedUserId} onChange={setViewedUserId} />
               <QueueSelect label="Dev Queue" options={queueUsers.dev} value={viewedUserId} onChange={setViewedUserId} />
+              {/* The two dropdowns above pick ONE person to view their personal
+                  dashboard as — they were never meant to show the department's
+                  own numbers, which is a completely different question people
+                  kept asking this page. These link straight to the actual
+                  Migration/Dev Resolution %, SLA %, and SLA Breach % report
+                  instead of leaving that undiscoverable behind Reports → a
+                  specific tab → a specific filter. */}
+              <Link
+                href="/reports?tab=resolution-sla&dept=Migration"
+                className="flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[13px] font-medium text-blue-700 hover:bg-blue-100"
+              >
+                <BarChart3 size={14} /> Migration Report
+              </Link>
+              <Link
+                href="/reports?tab=resolution-sla&dept=Dev"
+                className="flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[13px] font-medium text-blue-700 hover:bg-blue-100"
+              >
+                <BarChart3 size={14} /> Dev Report
+              </Link>
             </>
           )}
         </div>
