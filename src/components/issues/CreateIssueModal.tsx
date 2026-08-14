@@ -32,6 +32,14 @@ const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
   { id: 'qst_default_resolved', name: 'Resolved', category: 'done', color: '#10B981' } as WorkflowStatus,
 ];
 
+// Combination / Product Type / Project Manager are data-migration concepts
+// (a source/destination combo, which PM owns the migration) that only make
+// sense on the Migration/Dev support board — they were never meant to be
+// mandatory on every space in the app. IT Administration is a plain service
+// desk space with no migration concept at all, so these fields (and their
+// "required" validation) don't apply there.
+const NON_MIGRATION_SPACE_KEYS = new Set(['IA']);
+
 const WORK_TYPES = [
   { value: 'task',            label: 'Task' },
   { value: 'bug',             label: 'Bug' },
@@ -261,6 +269,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   // Pre-Sales tickets don't have a project manager assigned at creation time
   const isPreSalesQueue = form.department.trim().toLowerCase() === 'pre-sales';
+  const showMigrationFields = !NON_MIGRATION_SPACE_KEYS.has(selectedSpaceKey.toUpperCase());
 
   // Narrow the Status dropdown to the selected queue's own status list, same
   // as the issue detail page's department status dropdown already does —
@@ -339,9 +348,9 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingSummary        = !form.summary.trim();
     // Only require a queue when this space actually has queues to pick from
     const missingQueue          = queueOptions.length > 0 && !form.department;
-    const missingCombination    = form.combination.length === 0;
-    const missingProductType    = form.productType.length === 0;
-    const missingProjectManager = form.projectManager.length === 0 && !isPreSalesQueue;
+    const missingCombination    = showMigrationFields && form.combination.length === 0;
+    const missingProductType    = showMigrationFields && form.productType.length === 0;
+    const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !isPreSalesQueue;
 
     setSummaryError(missingSummary);
     setQueueError(missingQueue);
@@ -503,68 +512,72 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
               />
             </div>
 
-            {/* Combination */}
-            <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                Combination <span className="text-red-500">*</span>
-              </label>
-              <div className={combinationError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <MultiSelectDropdown
-                  value={form.combination}
-                  onChange={v => update('combination', v)}
-                  options={COMBINATION_OPTIONS}
-                  placeholder="Select combinations..."
-                />
-              </div>
-              {combinationError && (
-                <div className="flex items-center gap-1.5 mt-1.5">
-                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
-                  <p className="text-[12px] text-red-600 font-medium">Combination is required</p>
+            {showMigrationFields && (
+              <>
+                {/* Combination */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                    Combination <span className="text-red-500">*</span>
+                  </label>
+                  <div className={combinationError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                    <MultiSelectDropdown
+                      value={form.combination}
+                      onChange={v => update('combination', v)}
+                      options={COMBINATION_OPTIONS}
+                      placeholder="Select combinations..."
+                    />
+                  </div>
+                  {combinationError && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 font-medium">Combination is required</p>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Product Type */}
-            <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                Product Type <span className="text-red-500">*</span>
-              </label>
-              <div className={productTypeError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <MultiSelectDropdown
-                  value={form.productType}
-                  onChange={v => update('productType', v)}
-                  options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
-                  placeholder="Select product type..."
-                />
-              </div>
-              {productTypeError && (
-                <div className="flex items-center gap-1.5 mt-1.5">
-                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
-                  <p className="text-[12px] text-red-600 font-medium">Product Type is required</p>
+                {/* Product Type */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                    Product Type <span className="text-red-500">*</span>
+                  </label>
+                  <div className={productTypeError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                    <MultiSelectDropdown
+                      value={form.productType}
+                      onChange={v => update('productType', v)}
+                      options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
+                      placeholder="Select product type..."
+                    />
+                  </div>
+                  {productTypeError && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 font-medium">Product Type is required</p>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Project Manager */}
-            <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                Project Manager {!isPreSalesQueue && <span className="text-red-500">*</span>}
-              </label>
-              <div className={projectManagerError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <MultiSelectDropdown
-                  value={form.projectManager}
-                  onChange={v => update('projectManager', v)}
-                  options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi']}
-                  placeholder="Select project manager..."
-                />
-              </div>
-              {projectManagerError && (
-                <div className="flex items-center gap-1.5 mt-1.5">
-                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
-                  <p className="text-[12px] text-red-600 font-medium">Project Manager is required</p>
+                {/* Project Manager */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                    Project Manager {!isPreSalesQueue && <span className="text-red-500">*</span>}
+                  </label>
+                  <div className={projectManagerError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                    <MultiSelectDropdown
+                      value={form.projectManager}
+                      onChange={v => update('projectManager', v)}
+                      options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi']}
+                      placeholder="Select project manager..."
+                    />
+                  </div>
+                  {projectManagerError && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 font-medium">Project Manager is required</p>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              </>
+            )}
 
             {/* Dynamic custom fields */}
             {createIssueFields.length > 0 && (
