@@ -4817,6 +4817,21 @@ async function _handleJiraPgApi(
               // already was.
               resolvedAtChange = new Date();
               queueStatusSyncedDone = true;
+              // This branch (like the reopen one above) skips the early-return
+              // status-history insert further down, and never reaches the
+              // generic "Status (resolve names)" history block past this
+              // function either (both are gated on body.statusId, which stays
+              // undefined for a queue-scoped status) -- a promise this exact
+              // comment already made on the reopen branch above but never
+              // actually followed through on here, so resolving a ticket via
+              // a department's own queue status dropdown (the most common way
+              // tickets get closed in this app) left no trace at all in the
+              // History tab. Write it here, same shape as the reopen entry.
+              const doneChanger = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+              pool.query(
+                `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+                [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), doneChanger ? `${doneChanger.firstName} ${doneChanger.lastName}`.trim() : 'Unknown', doneChanger?.email || null]
+              ).catch(() => {});
             }
           }
 
