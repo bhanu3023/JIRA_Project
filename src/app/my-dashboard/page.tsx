@@ -303,12 +303,22 @@ export default function MyDashboardPage() {
     color: priorityColors[p.name] || '#94A3B8',
     href: filtersHref({ assignee: targetUserId, priority: p.name }),
   }));
+  // The Filters page already supports a live slaBreached=yes/no filter (same
+  // SLA check computed here) -- these donuts just never used it, so every
+  // segment (including "Breached") linked to the same generic "all my
+  // tickets" view no matter which slice you clicked. Only breached/not-yet-
+  // breached is filterable server-side (no separate near-breach/breaching-
+  // soon distinction exists there), so those two still fall back to the
+  // "not breached" filter -- still more accurate than "everything."
+  const slaBreachedHref = filtersHref({ assignee: targetUserId, slaBreached: 'yes' });
+  const slaNotBreachedHref = filtersHref({ assignee: targetUserId, slaBreached: 'no' });
   const slaStatusDonutData = Object.entries(slaStatus).map(([k, v]) => ({
-    name: SLA_STATUS_LABELS[k], value: v as number, color: SLA_STATUS_COLORS[k], href: myAssignedFallback,
+    name: SLA_STATUS_LABELS[k], value: v as number, color: SLA_STATUS_COLORS[k],
+    href: k === 'breached' ? slaBreachedHref : slaNotBreachedHref,
   }));
   const slaComplianceDonutData = [
-    { name: 'Within SLA', value: (data.slaTrackedCount || 0) - (slaStatus.breached || 0), color: '#22C55E', href: myAssignedFallback },
-    { name: 'Breached', value: slaStatus.breached || 0, color: '#EF4444', href: myAssignedFallback },
+    { name: 'Within SLA', value: (data.slaTrackedCount || 0) - (slaStatus.breached || 0), color: '#22C55E', href: slaNotBreachedHref },
+    { name: 'Breached', value: slaStatus.breached || 0, color: '#EF4444', href: slaBreachedHref },
   ];
 
   const barDataFor = (rows: { dept: string; label: string; spaceKey: string | null; count: number }[]) =>
@@ -411,12 +421,12 @@ export default function MyDashboardPage() {
         <StatTile
           label="SLA Running (With Me)" value={cards.slaRunning || 0}
           icon={<Hourglass size={17} className="text-indigo-600" />} iconClass="bg-indigo-50"
-          href={myAssignedFallback}
+          href={slaNotBreachedHref}
         />
         <StatTile
           label="SLA Breaching Soon" value={cards.slaBreachingSoon || 0}
           icon={<AlertTriangle size={17} className="text-red-600" />} iconClass="bg-red-50"
-          href={myAssignedFallback}
+          href={slaNotBreachedHref}
         />
       </div>
 

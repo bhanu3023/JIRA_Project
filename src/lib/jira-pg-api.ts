@@ -2590,6 +2590,15 @@ async function _handleJiraPgApi(
     const excludeDone   = url.searchParams.get('excludeDone') === 'true';
     const page  = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
     const limit = Math.min(2000, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10)));
+    // SLA breach isn't a real SQL column -- it's computed live, per issue,
+    // much further below. Read this early so the fetches below can skip
+    // their own DB-level pagination when it's set: filtering AFTER an
+    // already-paginated page only ever filtered whatever 50 rows happened
+    // to be fetched, and reported that filtered subset's own size as if it
+    // were the true total across the whole matching set.
+    const slaBreachedParamEarly = url.searchParams.get('slaBreached');
+    const needsSlaPrefilter = slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no';
+    const SLA_PREFILTER_CAP = 5000;
 
     // Bulk fetch by specific keys (for Viewed tab Ã¢â‚¬â€ single request instead of N calls)
     const keysParam = url.searchParams.get('keys');
@@ -2773,21 +2782,39 @@ async function _handleJiraPgApi(
     let issues: any[] = [];
     let deptMap: Record<string, any> = {};
     if (!deptParamEarly) {
-      [total, issues] = await Promise.all([
-        db.issue.count({ where: where as any }),
-        db.issue.findMany({
+      if (needsSlaPrefilter) {
+        // Can't paginate at the DB level on a field that isn't a real column --
+        // fetch a bounded candidate set instead; the SLA-breach block further
+        // below filters it fully, and pagination happens in JS after that.
+        issues = await db.issue.findMany({
           where: where as any,
           include: {
             status: true,
             assignee: true,
             reporter: true,
             space: { select: { key: true, name: true } },
-            },
+          },
           orderBy: { createdAt: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
-        }),
-      ]);
+          take: SLA_PREFILTER_CAP,
+        });
+        total = issues.length; // placeholder -- corrected after breach filtering below
+      } else {
+        [total, issues] = await Promise.all([
+          db.issue.count({ where: where as any }),
+          db.issue.findMany({
+            where: where as any,
+            include: {
+              status: true,
+              assignee: true,
+              reporter: true,
+              space: { select: { key: true, name: true } },
+              },
+            orderBy: { createdAt: 'desc' },
+            skip: (page - 1) * limit,
+            take: limit,
+          }),
+        ]);
+      }
 
       try {
         const issueKeys = issues.map((i: any) => i.key);
@@ -3257,22 +3284,26 @@ async function _handleJiraPgApi(
           )`
         : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
 
-      try {
-        const countParams: any[] = [allSpaceIds, deptParam];
-        if (deptSearchParam) countParams.push(deptSearchParam);
-        countParams.push(...deptExtraParams);
-        const countRow = await pool.query(
-          `SELECT COUNT(*)::int AS cnt
-           FROM issues i
-           LEFT JOIN statuses s ON i."statusId" = s.id
-           WHERE i."spaceId" = ANY($1::text[])
-             AND ${deptDeptMatchSql}
-           ${deptSearchClause}
-           ${deptExtraSql}`,
-          countParams
-        );
-        deptTotal = countRow.rows[0]?.cnt ?? 0;
-      } catch (err) { console.error('[dept count query failed]', err); deptTotal = 0; }
+      if (needsSlaPrefilter) {
+        deptTotal = 0; // placeholder -- corrected after breach filtering below
+      } else {
+        try {
+          const countParams: any[] = [allSpaceIds, deptParam];
+          if (deptSearchParam) countParams.push(deptSearchParam);
+          countParams.push(...deptExtraParams);
+          const countRow = await pool.query(
+            `SELECT COUNT(*)::int AS cnt
+             FROM issues i
+             LEFT JOIN statuses s ON i."statusId" = s.id
+             WHERE i."spaceId" = ANY($1::text[])
+               AND ${deptDeptMatchSql}
+             ${deptSearchClause}
+             ${deptExtraSql}`,
+            countParams
+          );
+          deptTotal = countRow.rows[0]?.cnt ?? 0;
+        } catch (err) { console.error('[dept count query failed]', err); deptTotal = 0; }
+      }
 
       try {
         const rowParams: any[] = [allSpaceIds, deptParam];
@@ -3280,7 +3311,11 @@ async function _handleJiraPgApi(
         rowParams.push(...deptExtraParams);
         const limitIdx = rowParams.length + 1;
         const offsetIdx = rowParams.length + 2;
-        rowParams.push(limit, (page - 1) * limit);
+        // Same "can't paginate a non-SQL field" reasoning as the non-dept
+        // branch above -- fetch a bounded candidate set instead of the real
+        // page when an SLA-breach filter is active, and let the shared
+        // filtering block further below paginate the actually-filtered result.
+        rowParams.push(needsSlaPrefilter ? SLA_PREFILTER_CAP : limit, needsSlaPrefilter ? 0 : (page - 1) * limit);
         // Sorting by updatedAt made an old ticket jump to page 1 the moment anyone
         // so much as commented on it, potentially bumping a genuinely new ticket
         // off the page -- pagination should be a stable "50 newest by creation
@@ -3411,7 +3446,14 @@ async function _handleJiraPgApi(
       });
       if (slaBreachedParam === 'yes' || slaBreachedParam === 'no') {
         enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParam === 'yes' ? i.sla_breached : !i.sla_breached);
+        // Now the TRUE total across the full (up to SLA_PREFILTER_CAP)
+        // candidate set fetched above, not just whatever page would have
+        // been fetched under normal DB-level pagination. Slice to the
+        // requested page here, since pagination couldn't happen at the DB
+        // level on a field that isn't a real column.
         deptTotal = enrichedIssues.length;
+        const sliceStart = (page - 1) * limit;
+        enrichedIssues = enrichedIssues.slice(sliceStart, sliceStart + limit);
       }
     } catch { /* sla breach is best-effort */ }
 

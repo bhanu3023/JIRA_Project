@@ -1022,7 +1022,13 @@ export default function FiltersPage() {
     const qpPriority = urlParams?.get('priority');
     const qpSpace = urlParams?.get('space');
     const qpQueue = urlParams?.get('queue');
-    if (!qpAssignee && !qpReporter && !qpStatus && !qpPriority && !qpSpace) return;
+    // Deep-linked from the Dashboard's SLA tiles/donut (e.g. "Breached 21" ->
+    // ?slaBreached=yes) -- buildFilterParams below already sends this same
+    // param outbound on every fetch, but nothing ever read it back in on
+    // load, so a link built with slaBreached=yes silently showed every one
+    // of that person's tickets instead of just the breached ones.
+    const qpSlaBreached = urlParams?.get('slaBreached');
+    if (!qpAssignee && !qpReporter && !qpStatus && !qpPriority && !qpSpace && !qpSlaBreached) return;
 
     if (qpAssignee) setSelAssignees(qpAssignee.split(','));
     if (qpReporter) {
@@ -1036,6 +1042,10 @@ export default function FiltersPage() {
     }
     if (qpSpace) setSelSpaces([qpSpace]);
     if (qpQueue) setSelQueue(qpQueue);
+    // SlaBreachedBtn lives directly in the main toolbar (not behind "More
+    // filters"), so unlike reporter/priority above there's no activeExtras
+    // entry to also flip for it to become visible.
+    if (qpSlaBreached === 'yes' || qpSlaBreached === 'no') setSelBreached(qpSlaBreached);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
