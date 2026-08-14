@@ -1001,7 +1001,23 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     // the due time reflects the REMAINING budget, not a fresh one.
     const deptSlaLog: Record<string, any> = (issue as any).dept_sla_log || {};
     const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === issueDept);
-    const priorElapsedMs: number = deptLogKey ? (deptSlaLog[deptLogKey]?.elapsed_ms || 0) : 0;
+    const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
+    // pauseDeptSLA always copies the CURRENT dept_sla_started_at into the log
+    // entry's own started_at at the moment it pauses -- so after pausing (or
+    // resolving) WITHOUT the ticket ever actually leaving this dept, the log
+    // entry's started_at exactly matches dept_sla_started_at, because it's a
+    // snapshot of the very same still-ongoing stint, not a separate earlier
+    // visit. Crediting its elapsed_ms as "prior debt" in that case double-
+    // counted the same elapsed time (once via startedAt itself, again as
+    // extra debt subtracted from durationMs), pulling the due time hours
+    // earlier than it really is -- a ticket resolved cleanly within its goal
+    // could read as breached. Only credit it when the log's started_at is
+    // genuinely different, i.e. from an earlier stint that a later dept
+    // re-entry (which DOES reset dept_sla_started_at) has since superseded.
+    const currentStartedRaw = (issue as any).dept_sla_started_at;
+    const isSameStint = deptLogEntry?.started_at && currentStartedRaw
+      && new Date(deptLogEntry.started_at).getTime() === new Date(currentStartedRaw).getTime();
+    const priorElapsedMs: number = (deptLogEntry && !isSameStint) ? (deptLogEntry.elapsed_ms || 0) : 0;
 
     return policies.map((policy: any) => {
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
