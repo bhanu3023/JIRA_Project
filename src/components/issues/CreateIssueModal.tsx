@@ -267,8 +267,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     ? spaceQueues.find(q => q.dept?.toLowerCase() === form.department.toLowerCase())
     : undefined;
 
-  // Pre-Sales tickets don't have a project manager assigned at creation time
-  const isPreSalesQueue = form.department.trim().toLowerCase() === 'pre-sales';
+  // Pre-Sales and QA tickets don't have a project manager assigned at creation time
+  const skipsProjectManager = ['pre-sales', 'qa'].includes(form.department.trim().toLowerCase());
   const showMigrationFields = !NON_MIGRATION_SPACE_KEYS.has(selectedSpaceKey.toUpperCase());
 
   // Narrow the Status dropdown to the selected queue's own status list, same
@@ -350,7 +350,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingQueue          = queueOptions.length > 0 && !form.department;
     const missingCombination    = showMigrationFields && form.combination.length === 0;
     const missingProductType    = showMigrationFields && form.productType.length === 0;
-    const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !isPreSalesQueue;
+    const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !skipsProjectManager;
 
     setSummaryError(missingSummary);
     setQueueError(missingQueue);
@@ -559,7 +559,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 {/* Project Manager */}
                 <div className="mb-4">
                   <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                    Project Manager {!isPreSalesQueue && <span className="text-red-500">*</span>}
+                    Project Manager {!skipsProjectManager && <span className="text-red-500">*</span>}
                   </label>
                   <div className={projectManagerError ? 'rounded-lg ring-2 ring-red-300' : ''}>
                     <MultiSelectDropdown
