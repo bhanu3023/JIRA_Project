@@ -21,6 +21,47 @@ function buildWeeklyChartData(weekly: any, metricKey: 'breachPct' | 'resolutionP
   });
 }
 
+// Team Analytics visual language — ported from the reference bhanu3023/Reports-
+// app's own public/css/style.css (--primary/--success/--danger and its
+// .priority-* badge classes), reused here as-is rather than Neutara's default
+// Tailwind palette, since the ask was to match that app's actual look.
+const TA_PRIORITY_BADGE: Record<string, string> = {
+  highest: 'bg-[#fee2e2] text-[#991b1b]',
+  high: 'bg-[#fed7aa] text-[#9a3412]',
+  medium: 'bg-[#fef3c7] text-[#92400e]',
+  low: 'bg-[#d1fae5] text-[#065f46]',
+  lowest: 'bg-[#e0e7ff] text-[#3730a3]',
+};
+function TaPriorityBadge({ priority }: { priority?: string | null }) {
+  const cls = TA_PRIORITY_BADGE[(priority || '').toLowerCase()] || 'bg-gray-100 text-gray-500';
+  return <span className={`inline-block px-2.5 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap ${cls}`}>{priority || '—'}</span>;
+}
+// Hand-built horizontal bar row (the reference app has no chart library at
+// all — every "By X" breakdown there is a plain CSS bar, not an SVG chart).
+function TaBarRow({ label, count, max }: { label: string; count: number; max: number }) {
+  const pct = max > 0 ? Math.max(count > 0 ? 2 : 0, (count / max) * 100) : 0;
+  return (
+    <div>
+      <div className="flex items-center justify-between text-[12.5px] mb-1">
+        <span className="text-[#2b2d42] truncate pr-2">{label}</span>
+        <span className="font-semibold text-[#2b2d42] tabular-nums">{count}</span>
+      </div>
+      <div className="h-2 bg-[#e5e7eb] rounded-full overflow-hidden">
+        <div className="h-full rounded-full bg-[#4361ee]" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+function TaStatCard({ label, value, color }: { label: string; value: React.ReactNode; color?: 'primary' | 'success' | 'danger' }) {
+  const colorHex = color === 'success' ? '#2ec4b6' : color === 'danger' ? '#e63946' : color === 'primary' ? '#4361ee' : '#2b2d42';
+  return (
+    <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] p-5">
+      <p className="text-[13px] text-[#6b7280] uppercase tracking-wide mb-2">{label}</p>
+      <p className="text-[28px] font-bold" style={{ color: colorHex }}>{value}</p>
+    </div>
+  );
+}
+
 export default function ReportsPage() {
   const { spaces, user } = useStore((s) => ({ spaces: s.spaces, user: s.user }));
   const canViewPerformance = user?.role === 'admin' || user?.role === 'manager';
@@ -668,7 +709,11 @@ export default function ReportsPage() {
           )
         )}
 
-        {/* Team Analytics */}
+        {/* Team Analytics — styled after the reference bhanu3023/Reports- app's
+            own look (light-gray page well, shadow-based cards instead of
+            borders, colored stat values, underline view-tabs, hand-built bar
+            rows, priority badges) rather than Neutara's default card style,
+            per an explicit request to match that app's UI. */}
         {tab === 'team-analytics' && (
           !canViewPerformance ? (
             <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
@@ -677,46 +722,46 @@ export default function ReportsPage() {
               <p className="text-[13px] text-gray-400 mt-1">Only admins and managers can view team analytics.</p>
             </div>
           ) : (
-            <div className="space-y-5">
-              {/* Sub-tabs */}
-              <div className="flex gap-2">
+            <div className="bg-[#f0f2f5] rounded-2xl p-5 space-y-5">
+              {/* View tabs — underline style, matching the reference app's .view-tab */}
+              <div className="flex gap-0 border-b-2 border-[#e5e7eb]">
                 {[
-                  { id: 'overview', label: 'Overview', icon: LayoutGrid },
-                  { id: 'aging', label: 'Aging Tickets', icon: Clock },
-                  { id: 'time-spent', label: 'Time Spent', icon: Timer },
+                  { id: 'overview', label: 'Overview' },
+                  { id: 'aging', label: 'Aging Tickets' },
+                  { id: 'time-spent', label: 'Time Spent' },
                 ].map(st => (
                   <button key={st.id} onClick={() => setTaSubTab(st.id as any)}
-                    className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12.5px] font-medium transition-colors ${taSubTab === st.id ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
-                    <st.icon size={13} /> {st.label}
+                    className={`px-5 py-2.5 -mb-0.5 text-[14px] font-medium border-b-2 transition-colors ${taSubTab === st.id ? 'text-[#4361ee] border-[#4361ee]' : 'text-[#6b7280] border-transparent hover:text-[#2b2d42]'}`}>
+                    {st.label}
                   </button>
                 ))}
               </div>
 
               {/* Filters */}
-              <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 flex flex-wrap items-start gap-5">
+              <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] px-5 py-4 flex flex-wrap items-start gap-5">
                 <div className="flex items-center gap-2">
-                  <label className="text-[12px] font-medium text-gray-500">Date field</label>
+                  <label className="text-[13px] text-[#6b7280]">Date field</label>
                   <select value={taDateType} onChange={e => setTaDateType(e.target.value as any)}
-                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    className="border border-[#e5e7eb] rounded-md px-3 py-1.5 text-[13px] text-[#2b2d42] bg-white focus:outline-none focus:border-[#4361ee] focus:ring-2 focus:ring-[#4361ee]/15">
                     <option value="created">Created date</option>
                     <option value="updated">Updated date</option>
                     <option value="none">None (open tickets only)</option>
                   </select>
                 </div>
                 <div className="flex-1 min-w-[240px]">
-                  <label className="text-[12px] font-medium text-gray-500 block mb-1.5">Department (all selected = all departments)</label>
+                  <label className="text-[13px] text-[#6b7280] block mb-1.5">Department (all selected = all departments)</label>
                   <div className="flex flex-wrap gap-1.5">
                     {taFilterOptions.depts.map(d => {
                       const active = taDepts.includes(d);
                       return (
                         <button key={d} onClick={() => setTaDepts(active ? taDepts.filter(x => x !== d) : [...taDepts, d])}
-                          className={`px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors ${active ? 'bg-blue-50 border-blue-300 text-blue-700' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-50'}`}>
+                          className={`px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors ${active ? 'bg-[#e6efff] border-[#bfdbfe] text-[#1d4ed8]' : 'bg-white border-[#e5e7eb] text-[#6b7280] hover:bg-gray-50'}`}>
                           {d}
                         </button>
                       );
                     })}
                     {taDepts.length > 0 && (
-                      <button onClick={() => setTaDepts([])} className="px-2.5 py-1 rounded-full text-[11.5px] font-medium text-red-500 border border-red-200 hover:bg-red-50">
+                      <button onClick={() => setTaDepts([])} className="px-2.5 py-1 rounded-full text-[11.5px] font-medium text-[#e63946] border border-[#f3c9cc] hover:bg-red-50">
                         Clear
                       </button>
                     )}
@@ -725,107 +770,91 @@ export default function ReportsPage() {
               </div>
 
               {taLoading ? (
-                <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
-                  <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+                <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] flex items-center justify-center py-20">
+                  <div className="w-8 h-8 border-4 border-[#4361ee]/25 border-t-[#4361ee] rounded-full animate-spin" />
                 </div>
               ) : taSubTab === 'overview' ? (
                 !taOverview ? (
-                  <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+                  <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] flex flex-col items-center justify-center py-20 text-center">
                     <LayoutGrid size={40} className="mb-3 text-gray-300" />
                     <p className="text-[15px] font-semibold text-gray-500">No data</p>
                   </div>
                 ) : (
                   <div className="space-y-5">
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                      <div className="bg-white rounded-xl border border-gray-200 p-5">
-                        <p className="text-[12.5px] font-medium text-gray-500 mb-2">Total Tickets</p>
-                        <p className="text-[26px] font-bold text-gray-900">{taOverview.totalTickets}</p>
-                      </div>
-                      <div className="bg-white rounded-xl border border-gray-200 p-5">
-                        <p className="text-[12.5px] font-medium text-gray-500 mb-2">Resolved</p>
-                        <p className="text-[26px] font-bold text-emerald-600">{taOverview.resolvedCount}</p>
-                      </div>
-                      <div className="bg-white rounded-xl border border-gray-200 p-5">
-                        <p className="text-[12.5px] font-medium text-gray-500 mb-2">Open</p>
-                        <p className="text-[26px] font-bold text-blue-600">{taOverview.openCount}</p>
-                      </div>
-                      <div className="bg-white rounded-xl border border-gray-200 p-5">
-                        <p className="text-[12.5px] font-medium text-gray-500 mb-2">SLA Breach %</p>
-                        <p className="text-[26px] font-bold text-red-600">{taOverview.slaBreachPct ?? '—'}{taOverview.slaBreachPct !== null ? '%' : ''}</p>
-                        <p className="text-[11px] text-gray-400 mt-1">of {taOverview.slaTrackedCount} tracked</p>
+                      <TaStatCard label="Total Tickets" value={taOverview.totalTickets} color="primary" />
+                      <TaStatCard label="Resolved" value={taOverview.resolvedCount} color="success" />
+                      <TaStatCard label="Open" value={taOverview.openCount} />
+                      <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] p-5">
+                        <p className="text-[13px] text-[#6b7280] uppercase tracking-wide mb-2">SLA Breach %</p>
+                        <p className="text-[28px] font-bold" style={{ color: (taOverview.slaBreachPct ?? 0) > 30 ? '#e63946' : '#2ec4b6' }}>
+                          {taOverview.slaBreachPct ?? '—'}{taOverview.slaBreachPct !== null ? '%' : ''}
+                        </p>
+                        <p className="text-[12px] text-[#6b7280] mt-1">of {taOverview.slaTrackedCount} tracked</p>
                       </div>
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-                      <div className="bg-white rounded-xl border border-gray-200 p-6">
-                        <h3 className="text-[14px] font-semibold text-gray-700 mb-4">By Status</h3>
-                        <div className="space-y-2">
+                      <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] p-5">
+                        <h3 className="text-[14px] font-semibold text-[#2b2d42] mb-4">By Status</h3>
+                        <div className="space-y-3">
                           {taOverview.byStatus.slice(0, 8).map((s: any) => (
-                            <div key={s.name} className="flex items-center justify-between text-[12.5px]">
-                              <span className="text-gray-600 truncate pr-2">{s.name}</span>
-                              <span className="font-semibold text-gray-800 tabular-nums">{s.count}</span>
-                            </div>
+                            <TaBarRow key={s.name} label={s.name} count={s.count} max={taOverview.byStatus[0]?.count || 1} />
                           ))}
                         </div>
                       </div>
-                      <div className="bg-white rounded-xl border border-gray-200 p-6">
-                        <h3 className="text-[14px] font-semibold text-gray-700 mb-4">By Priority</h3>
-                        <div className="space-y-2">
+                      <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] p-5">
+                        <h3 className="text-[14px] font-semibold text-[#2b2d42] mb-4">By Priority</h3>
+                        <div className="space-y-3">
                           {taOverview.byPriority.map((s: any) => (
-                            <div key={s.name} className="flex items-center justify-between text-[12.5px]">
-                              <span className="text-gray-600 capitalize truncate pr-2">{s.name}</span>
-                              <span className="font-semibold text-gray-800 tabular-nums">{s.count}</span>
-                            </div>
+                            <TaBarRow key={s.name} label={s.name} count={s.count} max={taOverview.byPriority[0]?.count || 1} />
                           ))}
                         </div>
                       </div>
-                      <div className="bg-white rounded-xl border border-gray-200 p-6">
-                        <h3 className="text-[14px] font-semibold text-gray-700 mb-4">By Department</h3>
-                        <div className="space-y-2">
+                      <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] p-5">
+                        <h3 className="text-[14px] font-semibold text-[#2b2d42] mb-4">By Department</h3>
+                        <div className="space-y-3">
                           {taOverview.byDept.map((s: any) => (
-                            <div key={s.name} className="flex items-center justify-between text-[12.5px]">
-                              <span className="text-gray-600 truncate pr-2">{s.name}</span>
-                              <span className="font-semibold text-gray-800 tabular-nums">{s.count}</span>
-                            </div>
+                            <TaBarRow key={s.name} label={s.name} count={s.count} max={taOverview.byDept[0]?.count || 1} />
                           ))}
                         </div>
                       </div>
                     </div>
 
-                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                      <div className="px-6 py-4 border-b border-gray-100">
-                        <h3 className="text-[14px] font-semibold text-gray-700">Member Performance</h3>
-                        <p className="text-[11.5px] text-gray-400 mt-0.5">Scoped to the filters above.</p>
+                    <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] overflow-hidden">
+                      <div className="px-5 py-4 border-b border-[#e5e7eb] flex items-center justify-between">
+                        <h3 className="text-[14px] font-semibold text-[#2b2d42]">Member Performance</h3>
+                        <span className="text-[13px] text-[#6b7280]">Scoped to the filters above.</span>
                       </div>
                       <div className="overflow-x-auto">
-                        <table className="w-full text-[12.5px]">
-                          <thead className="bg-gray-50">
+                        <table className="w-full text-[14px]">
+                          <thead>
                             <tr>
-                              <th className="px-5 py-3 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Member</th>
-                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Tickets</th>
-                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolved</th>
-                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Avg Resolution</th>
-                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">SLA Breach %</th>
+                              <th className="text-left px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">Member</th>
+                              <th className="text-right px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">Tickets</th>
+                              <th className="text-right px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">Resolved</th>
+                              <th className="text-right px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">Avg Resolution</th>
+                              <th className="text-right px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">SLA Breach %</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-gray-100">
+                          <tbody>
                             {taOverview.memberPerformance.map((m: any) => (
-                              <tr key={m.id} className="hover:bg-gray-50">
-                                <td className="px-5 py-3">
+                              <tr key={m.id} className="hover:bg-[#f9fafb]">
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0]">
                                   <div className="flex items-center gap-2.5">
-                                    <div className="w-7 h-7 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-[11px] font-bold flex-shrink-0">
+                                    <div className="w-7 h-7 rounded-full bg-[#e6efff] text-[#1d4ed8] flex items-center justify-center text-[11px] font-bold flex-shrink-0">
                                       {(m.name || '?').charAt(0).toUpperCase()}
                                     </div>
                                     <div>
-                                      <p className="text-[13px] font-medium text-gray-800">{m.name}</p>
-                                      <p className="text-[11px] text-gray-400">{m.email}</p>
+                                      <p className="text-[13.5px] font-medium text-[#2b2d42]">{m.name}</p>
+                                      <p className="text-[12px] text-[#6b7280]">{m.email}</p>
                                     </div>
                                   </div>
                                 </td>
-                                <td className="px-5 py-3 text-right tabular-nums">{m.ticketCount}</td>
-                                <td className="px-5 py-3 text-right tabular-nums">{m.resolvedCount}</td>
-                                <td className="px-5 py-3 text-right tabular-nums text-gray-500">{m.avgResolutionHrs !== null ? `${m.avgResolutionHrs}h` : '—'}</td>
-                                <td className="px-5 py-3 text-right tabular-nums font-medium text-red-600">{m.slaBreachPct !== null ? `${m.slaBreachPct}%` : '—'}</td>
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] text-right tabular-nums">{m.ticketCount}</td>
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] text-right tabular-nums">{m.resolvedCount}</td>
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] text-right tabular-nums text-[#6b7280]">{m.avgResolutionHrs !== null ? `${m.avgResolutionHrs}h` : '—'}</td>
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] text-right tabular-nums font-medium" style={{ color: (m.slaBreachPct ?? 0) > 0 ? '#e63946' : '#6b7280' }}>{m.slaBreachPct !== null ? `${m.slaBreachPct}%` : '—'}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -836,44 +865,41 @@ export default function ReportsPage() {
                 )
               ) : taSubTab === 'aging' ? (
                 !taAging ? (
-                  <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+                  <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] flex flex-col items-center justify-center py-20 text-center">
                     <Clock size={40} className="mb-3 text-gray-300" />
                     <p className="text-[15px] font-semibold text-gray-500">No data</p>
                   </div>
                 ) : (
                   <div className="space-y-5">
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      {taAging.buckets.map((b: any) => (
-                        <div key={b.key} className="bg-white rounded-xl border border-gray-200 p-5">
-                          <p className="text-[12.5px] font-medium text-gray-500 mb-2">{b.label}</p>
-                          <p className="text-[26px] font-bold text-gray-900">{b.count}</p>
-                        </div>
-                      ))}
+                      <TaStatCard label={taAging.buckets[0]?.label || '<= 1 day'} value={taAging.buckets[0]?.count ?? 0} color="success" />
+                      <TaStatCard label={taAging.buckets[1]?.label || '2-5 days'} value={taAging.buckets[1]?.count ?? 0} />
+                      <TaStatCard label={taAging.buckets[2]?.label || '> 5 days'} value={taAging.buckets[2]?.count ?? 0} color="danger" />
                     </div>
 
-                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                      <div className="px-6 py-4 border-b border-gray-100">
-                        <h3 className="text-[14px] font-semibold text-gray-700">By Member</h3>
+                    <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] overflow-hidden">
+                      <div className="px-5 py-4 border-b border-[#e5e7eb]">
+                        <h3 className="text-[14px] font-semibold text-[#2b2d42]">By Member</h3>
                       </div>
                       <div className="overflow-x-auto">
-                        <table className="w-full text-[12.5px]">
-                          <thead className="bg-gray-50">
+                        <table className="w-full text-[14px]">
+                          <thead>
                             <tr>
-                              <th className="px-5 py-3 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Member</th>
-                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">&le; 1 day</th>
-                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">2-5 days</th>
-                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">&gt; 5 days</th>
-                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Total Open</th>
+                              <th className="text-left px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">Member</th>
+                              <th className="text-right px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">&le; 1 day</th>
+                              <th className="text-right px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">2-5 days</th>
+                              <th className="text-right px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">&gt; 5 days</th>
+                              <th className="text-right px-3 py-2.5 bg-[#f9fafb] font-semibold text-[#6b7280] uppercase text-[12px] tracking-wide border-b border-[#e5e7eb]">Total Open</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-gray-100">
+                          <tbody>
                             {taAging.byMember.map((m: any) => (
-                              <tr key={m.id} className="hover:bg-gray-50">
-                                <td className="px-5 py-3 font-medium text-gray-700">{m.name}</td>
-                                <td className="px-5 py-3 text-right tabular-nums">{m.le1}</td>
-                                <td className="px-5 py-3 text-right tabular-nums">{m.d2to5}</td>
-                                <td className="px-5 py-3 text-right tabular-nums text-red-600 font-medium">{m.gt5}</td>
-                                <td className="px-5 py-3 text-right tabular-nums font-semibold">{m.total}</td>
+                              <tr key={m.id} className="hover:bg-[#f9fafb]">
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] font-medium text-[#2b2d42]">{m.name}</td>
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] text-right tabular-nums">{m.le1}</td>
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] text-right tabular-nums">{m.d2to5}</td>
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] text-right tabular-nums font-medium" style={{ color: m.gt5 > 0 ? '#e63946' : '#2b2d42' }}>{m.gt5}</td>
+                                <td className="px-3 py-2.5 border-b border-[#f0f0f0] text-right tabular-nums font-semibold">{m.total}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -881,107 +907,108 @@ export default function ReportsPage() {
                       </div>
                     </div>
 
-                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                      <div className="px-6 py-4 border-b border-gray-100">
-                        <h3 className="text-[14px] font-semibold text-gray-700">Open Tickets — Oldest First</h3>
+                    <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] overflow-hidden">
+                      <div className="px-5 py-4 border-b border-[#e5e7eb]">
+                        <h3 className="text-[14px] font-semibold text-[#2b2d42]">Open Tickets — Oldest First</h3>
                       </div>
                       <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
-                        <table className="w-full text-[12.5px]">
-                          <thead className="bg-gray-50 sticky top-0">
+                        <table className="w-full text-[13px] whitespace-nowrap">
+                          <thead>
                             <tr>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Key</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Summary</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Status</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Assignee</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Department</th>
-                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Age (days)</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Key</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Summary</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Priority</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Status</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Assignee</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Department</th>
+                              <th className="sticky top-0 z-[2] text-right px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Age (days)</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-gray-100">
+                          <tbody>
                             {taAging.tickets.slice(0, 200).map((t: any) => (
-                              <tr key={t.id} className="hover:bg-gray-50">
-                                <td className="px-4 py-2 font-medium text-blue-600">{t.cfKey || t.key}</td>
-                                <td className="px-4 py-2 text-gray-700 max-w-[320px] truncate">{t.summary}</td>
-                                <td className="px-4 py-2 text-gray-500">{t.status || '—'}</td>
-                                <td className="px-4 py-2 text-gray-500">{t.assignee || '—'}</td>
-                                <td className="px-4 py-2 text-gray-500">{t.department}</td>
-                                <td className="px-4 py-2 text-right tabular-nums font-medium">{t.ageDays}</td>
+                              <tr key={t.id} className="hover:bg-[#f5f7ff]">
+                                <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] font-semibold text-[#4361ee]">{t.cfKey || t.key}</td>
+                                <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#2b2d42] max-w-[320px] truncate">{t.summary}</td>
+                                <td className="px-2.5 py-1.5 border-b border-[#f0f0f0]"><TaPriorityBadge priority={t.priority} /></td>
+                                <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.status || '—'}</td>
+                                <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.assignee || '—'}</td>
+                                <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.department}</td>
+                                <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-right tabular-nums font-medium text-[#2b2d42]">{t.ageDays}</td>
                               </tr>
                             ))}
                           </tbody>
                         </table>
                       </div>
                       {taAging.tickets.length > 200 && (
-                        <p className="px-6 py-3 text-[11.5px] text-gray-400 border-t border-gray-100">Showing oldest 200 of {taAging.tickets.length} open tickets.</p>
+                        <p className="px-5 py-3 text-[12px] text-[#6b7280] border-t border-[#e5e7eb]">Showing oldest 200 of {taAging.tickets.length} open tickets.</p>
                       )}
                     </div>
                   </div>
                 )
               ) : (
                 !taTimeSpent ? (
-                  <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+                  <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] flex flex-col items-center justify-center py-20 text-center">
                     <Timer size={40} className="mb-3 text-gray-300" />
                     <p className="text-[15px] font-semibold text-gray-500">No data</p>
                   </div>
                 ) : (
                   <div className="space-y-5">
-                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-3.5 flex items-start gap-3">
-                      <AlertTriangle size={16} className="text-amber-500 flex-shrink-0 mt-0.5" />
-                      <p className="text-[12.5px] text-amber-800 leading-relaxed">
+                    <div className="bg-[#fef9c3] border border-[#fde047] rounded-lg px-5 py-3.5 flex items-start gap-3">
+                      <AlertTriangle size={16} className="text-[#a16207] flex-shrink-0 mt-0.5" />
+                      <p className="text-[12.5px] text-[#854d0e] leading-relaxed">
                         <span className="font-semibold">Hours spent = time actually in an "In Progress" status only</span> — time the ticket sat in To Do, Waiting for X, Pending with X, etc. is excluded, since that's time waiting on someone else, not work being done. Assignee / Department / Product Type reflect the ticket's current values, not a per-segment breakdown — a ticket that changed hands or departments shows its full In-Progress total attributed to where it stands now.{' '}
                         Rows marked <span className="font-semibold">No history</span> have zero logged status changes (mostly older Jira-migrated tickets) — their full age since creation is counted, since there's no record of exactly when they entered their current status.
                       </p>
                     </div>
 
-                    <div className="bg-white rounded-xl border border-gray-200 px-5 py-3.5 flex items-center gap-2">
-                      <Search size={15} className="text-gray-400 flex-shrink-0" />
+                    <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] px-4 py-2.5 flex items-center gap-2">
+                      <Search size={15} className="text-[#6b7280] flex-shrink-0" />
                       <input type="text" value={taTimeSpentSearch} onChange={e => setTaTimeSpentSearch(e.target.value)}
                         placeholder="Filter by key, summary, or assignee…"
-                        className="flex-1 text-[12.5px] text-gray-700 focus:outline-none" />
+                        className="flex-1 text-[13px] text-[#2b2d42] focus:outline-none" />
                     </div>
 
-                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                      <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-                        <div>
-                          <h3 className="text-[14px] font-semibold text-gray-700">Time Spent — Highest First</h3>
-                          <p className="text-[11.5px] text-gray-400 mt-0.5">Scoped to the filters above.</p>
-                        </div>
-                        <span className="text-[12px] text-gray-400">{taTimeSpent.totalMatched} of {taTimeSpent.totalTickets} tickets in scope</span>
+                    <div className="bg-white rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.06)] overflow-hidden">
+                      <div className="px-4 py-3 border-b border-[#e5e7eb] flex items-center justify-between">
+                        <h3 className="text-[14px] font-semibold text-[#2b2d42]">Time Spent — Highest First</h3>
+                        <span className="text-[13px] text-[#6b7280]">{taTimeSpent.totalMatched} of {taTimeSpent.totalTickets} tickets in scope</span>
                       </div>
-                      <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
-                        <table className="w-full text-[12.5px]">
-                          <thead className="bg-gray-50 sticky top-0">
+                      <div className="overflow-x-auto overflow-y-auto max-h-[560px]">
+                        <table className="w-full text-[13px] whitespace-nowrap">
+                          <thead>
                             <tr>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Key</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Summary</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Assignee</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Department</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Product Type</th>
-                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Status</th>
-                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Hours Spent</th>
+                              <th className="sticky left-0 top-0 z-[4] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb] border-r border-[#e5e7eb]">Key</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Summary</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Assignee</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Department</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Product Type</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Priority</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Status</th>
+                              <th className="sticky top-0 z-[2] text-right px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb] border-l border-[#e5e7eb]">Hours Spent</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-gray-100">
+                          <tbody>
                             {taTimeSpent.tickets
                               .slice(0, 300)
                               .map((t: any) => (
-                                <tr key={t.id} className="hover:bg-gray-50">
-                                  <td className="px-4 py-2 font-medium text-blue-600">{t.cfKey || t.key}</td>
-                                  <td className="px-4 py-2 text-gray-700 max-w-[280px] truncate">{t.summary}</td>
-                                  <td className="px-4 py-2 text-gray-500">{t.assignee}</td>
-                                  <td className="px-4 py-2 text-gray-500">{t.department}</td>
-                                  <td className="px-4 py-2 text-gray-500">{t.productType || '—'}</td>
-                                  <td className="px-4 py-2 text-gray-500">{t.status || '—'}</td>
-                                  <td className="px-4 py-2 text-right tabular-nums font-semibold text-gray-800">
+                                <tr key={t.id} className="hover:bg-[#f5f7ff]">
+                                  <td className="sticky left-0 z-[1] bg-white px-2.5 py-1.5 border-b border-[#f0f0f0] border-r border-[#e5e7eb] font-semibold text-[#4361ee]">{t.cfKey || t.key}</td>
+                                  <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#2b2d42] max-w-[280px] truncate">{t.summary}</td>
+                                  <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.assignee}</td>
+                                  <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.department}</td>
+                                  <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.productType || '—'}</td>
+                                  <td className="px-2.5 py-1.5 border-b border-[#f0f0f0]"><TaPriorityBadge priority={t.priority} /></td>
+                                  <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.status || '—'}</td>
+                                  <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] border-l border-[#e5e7eb] text-right tabular-nums font-semibold text-[#2b2d42]">
                                     {t.inProgressHrs}h
-                                    {t.noHistory && <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 text-amber-700 align-middle">No history</span>}
+                                    {t.noHistory && <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-[#fef3c7] text-[#92400e] align-middle">No history</span>}
                                   </td>
                                 </tr>
                               ))}
                           </tbody>
                         </table>
                       </div>
-                      <p className="px-6 py-3 text-[11.5px] text-gray-400 border-t border-gray-100">
+                      <p className="px-4 py-3 text-[12px] text-[#6b7280] border-t border-[#e5e7eb]">
                         Showing top {Math.min(300, taTimeSpent.tickets.length)} of {taTimeSpent.totalMatched}{taTimeSpentSearch ? ' matching the search' : ' in scope'}, sorted by hours spent{taTimeSpent.truncated ? ` (server-capped at ${taTimeSpent.cap})` : ''}.
                       </p>
                     </div>
