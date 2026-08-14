@@ -905,6 +905,24 @@ async function performDeptHandoff(
   );
   await startDeptSLA(null, issueId, targetDept);
 
+  // Callers already log their own "status changed to Waiting for X" /
+  // "handed to Y" entries for the picking dept's own action -- accurate, but
+  // silent on what actually happened to the ticket's real status once it
+  // landed (restoring targetDept's own snapshot, or carrying a done status
+  // straight through), same gap the manual "Change Department" endpoint had
+  // for its own equivalent silent statusId change. Only worth a separate
+  // entry when the ticket was actually done -- the plain "In Progress" arrival
+  // for a not-done ticket is already what the caller's own entry implies.
+  if (isDoneNow) {
+    try {
+      const historyChanger = userId ? await db.user.findUnique({ where: { id: userId }, select: { firstName: true, lastName: true, email: true } }) : null;
+      pool.query(
+        `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        [rid(), issueId, 'status', oldDeptStatusObj.name, newDeptStatusObj.name, historyChanger ? `${historyChanger.firstName} ${historyChanger.lastName}`.trim() : 'System', historyChanger?.email || null]
+      ).catch(() => {});
+    } catch { /* non-critical */ }
+  }
+
   if (oldDept) {
     pool.query(
       `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept, moved_by, moved_at) VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT DO NOTHING`,
@@ -4169,6 +4187,24 @@ async function _handleJiraPgApi(
             authorName: authorName2, createdAt: new Date(),
           },
         });
+        // The same UPDATE above also changes statusId whenever the arriving
+        // dept's status differs from what the ticket had leaving the old one
+        // (restoring newDept's own snapshot, carrying a done status through,
+        // or defaulting to Open/In Progress) -- previously only the
+        // department field got a history row, so a ticket resolved in QA and
+        // routed back to Migration showed the transfer in History but not
+        // that its status had also silently gone from "Resolved" back to
+        // whatever Migration's own status actually was.
+        if (newStatusId !== issue.statusId) {
+          await (db as any).issueHistory.create({
+            data: {
+              id: rid(), issueId: issue.id, field: 'status',
+              oldValue: oldDeptStatusObj.name,
+              newValue: newDeptStatusObj.name,
+              authorName: authorName2, createdAt: new Date(),
+            },
+          });
+        }
       } catch { /* non-critical */ }
 
       const updatedIssue = await db.issue.findUnique({
