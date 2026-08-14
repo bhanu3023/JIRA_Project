@@ -1194,6 +1194,262 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
   } catch { return []; }
 }
 
+// Shared data loader for the Team Analytics tab (ported from the standalone
+// "Reports-" app -- see the route handlers below for context). Every
+// sub-tab's endpoint calls this once and shapes the same enriched issue list
+// differently, instead of each re-running its own fetch+history-index pass.
+async function loadTeamAnalyticsScope(url: URL) {
+  const deptParam = url.searchParams.get('dept') || '';
+  const depts = deptParam && deptParam.toLowerCase() !== 'all'
+    ? deptParam.split(',').map((d) => d.trim()).filter(Boolean)
+    : null;
+  const dateType = url.searchParams.get('dateType') || 'created'; // 'created' | 'updated' | 'none'
+  const dateFrom = url.searchParams.get('dateFrom') || '';
+  const dateTo = url.searchParams.get('dateTo') || '';
+  const productTypeParam = url.searchParams.get('productType') || '';
+
+  const whereClauses: string[] = [`i.current_department IS NOT NULL`];
+  const params: any[] = [];
+  let idx = 1;
+  if (depts && depts.length) { whereClauses.push(`i.current_department = ANY($${idx++}::text[])`); params.push(depts); }
+  if (productTypeParam) { whereClauses.push(`i."productType" = $${idx++}`); params.push(productTypeParam); }
+
+  const toEnd = dateTo ? new Date(new Date(dateTo).setHours(23, 59, 59, 999)) : null;
+  const fromStart = dateFrom ? new Date(dateFrom) : null;
+  if (dateType === 'none') {
+    // "Open tickets that existed on or before `to`" -- mirrors the reference
+    // app's "None (open tickets)" date-type option; `from` doesn't apply to
+    // an open-ended snapshot like this.
+    whereClauses.push(`s.category != 'done'`);
+    if (toEnd) { whereClauses.push(`i."createdAt" <= $${idx++}`); params.push(toEnd); }
+  } else {
+    const dateCol = dateType === 'updated' ? `i."updatedAt"` : `i."createdAt"`;
+    if (fromStart) { whereClauses.push(`${dateCol} >= $${idx++}`); params.push(fromStart); }
+    if (toEnd) { whereClauses.push(`${dateCol} <= $${idx++}`); params.push(toEnd); }
+  }
+
+  const rows = await pool.query(
+    `SELECT i.id, i.key, i.cf_key, i.summary, i.priority, i.type, i."productType",
+            i."customerName", i."clientName", i."projectManager", i.current_department,
+            i."assigneeId", i."reporterId", i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
+            i."dueDate", i.jira_sla_breached,
+            s.name AS status_name, s.category AS status_category,
+            a."firstName" AS assignee_first, a."lastName" AS assignee_last, a.email AS assignee_email
+     FROM issues i
+     LEFT JOIN statuses s ON s.id = i."statusId"
+     LEFT JOIN users a ON a.id = i."assigneeId"
+     WHERE ${whereClauses.join(' AND ')}
+     LIMIT 100000`,
+    params
+  );
+  const issues = rows.rows;
+  const issueIds = issues.map((r: any) => r.id);
+
+  const historyRows = issueIds.length
+    ? await pool.query(
+        `SELECT "issueId", field, "oldValue", "newValue", "authorName", "createdAt"
+         FROM issue_history
+         WHERE "issueId" = ANY($1::text[]) AND field = ANY($2::text[])
+         ORDER BY "issueId", "createdAt" ASC`,
+        [issueIds, ['status', 'assignee', 'sla']]
+      )
+    : { rows: [] as any[] };
+
+  const statusHistByIssue: Record<string, any[]> = {};
+  const assigneeHistByIssue: Record<string, any[]> = {};
+  const slaBreachEventsByIssue: Record<string, any[]> = {};
+  for (const h of historyRows.rows) {
+    if (h.field === 'status') (statusHistByIssue[h.issueId] ??= []).push(h);
+    else if (h.field === 'assignee') (assigneeHistByIssue[h.issueId] ??= []).push(h);
+    // Logged by the periodic SLA monitor (runSlaBreachCheck) the first time
+    // it observes a ticket past its due time -- see line ~364 above. Poll-
+    // interval granularity, not to-the-second, but the only real breach-
+    // moment marker this app records.
+    else if (h.field === 'sla' && /breached/i.test(String(h.newValue || ''))) (slaBreachEventsByIssue[h.issueId] ??= []).push(h);
+  }
+
+  const spaceIds = Array.from(new Set(issues.map((r: any) => r.spaceId).filter(Boolean)));
+  const policiesBySpace: Record<string, any[]> = {};
+  if (spaceIds.length) {
+    const polRows = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`, [spaceIds]);
+    for (const p of polRows.rows) (policiesBySpace[p.spaceId] ??= []).push(p);
+  }
+
+  const now = Date.now();
+  const enriched = issues.map((row: any) => {
+    const statusHist = statusHistByIssue[row.id] || [];
+    const assigneeHist = assigneeHistByIssue[row.id] || [];
+    const createdMs = new Date(row.createdAt).getTime();
+    const isDone = row.status_category === 'done';
+
+    const firstAssigned = assigneeHist.find((h: any) => h.newValue);
+    const assignedTime = firstAssigned ? new Date(firstAssigned.createdAt) : null;
+    const firstInProgressEntry = statusHist.find((h: any) => h.newValue === 'In Progress');
+    const firstInProgress = firstInProgressEntry ? new Date(firstInProgressEntry.createdAt) : null;
+
+    // Hours spent in each status name, walking the sorted transition list;
+    // the open tail (still in the current status) counts up to resolvedAt
+    // for a done ticket, or up to now for one still open.
+    const statusTotals: Record<string, number> = {};
+    let cursor = createdMs;
+    let cursorStatus = statusHist[0]?.oldValue || row.status_name || 'Unknown';
+    for (const h of statusHist) {
+      const t = new Date(h.createdAt).getTime();
+      const hrs = (t - cursor) / 3_600_000;
+      if (hrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + hrs;
+      cursor = t;
+      cursorStatus = h.newValue;
+    }
+    const tailEnd = isDone && row.resolvedAt ? new Date(row.resolvedAt).getTime() : now;
+    const tailHrs = (tailEnd - cursor) / 3_600_000;
+    if (tailHrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + tailHrs;
+
+    // resolvedAt only gets stamped by this app's own PATCH handler -- a
+    // ticket resolved via the original Jira migration import never had one
+    // written (same gap documented in the resolution-sla endpoint above).
+    // Fall back to the first done-category status transition in history for
+    // those, so historical tickets still get a resolution time instead of
+    // being silently dropped from every resolution-time metric.
+    let resolvedAtComputed: Date | null = row.resolvedAt ? new Date(row.resolvedAt) : null;
+    if (!resolvedAtComputed && isDone) {
+      const firstDoneEntry = statusHist.find((h: any) => DONE_STATUS_NAME_HINTS.has(String(h.newValue || '').trim().toLowerCase()));
+      if (firstDoneEntry) resolvedAtComputed = new Date(firstDoneEntry.createdAt);
+    }
+    const resolvedHrs = resolvedAtComputed ? Math.max(0, (resolvedAtComputed.getTime() - createdMs) / 3_600_000) : null;
+
+    // Breach flag: the live computeSLAInstancesPure check when this ticket
+    // has a real resolvedAt and an applicable policy (same rule as the
+    // resolution-sla endpoint); otherwise fall back to the historical
+    // Jira-imported breach flag; otherwise unknown (excluded from breach%).
+    let isBreached: boolean | null = null;
+    if (row.resolvedAt) {
+      const policies = policiesBySpace[row.spaceId] || [];
+      const instances = computeSLAInstancesPure({ ...row, status: { name: row.status_name, category: row.status_category } }, policies, false);
+      if (instances.length) isBreached = instances.some((x: any) => x.isBreached);
+      else if (typeof row.jira_sla_breached === 'boolean') isBreached = row.jira_sla_breached;
+    } else if (typeof row.jira_sla_breached === 'boolean') {
+      isBreached = row.jira_sla_breached;
+    }
+
+    const assigneeName = row.assignee_first || row.assignee_last
+      ? `${row.assignee_first || ''} ${row.assignee_last || ''}`.trim()
+      : (row.assignee_email || null);
+
+    return {
+      ...row, isDone, assigneeName,
+      statusHist, assigneeHist, statusTotals,
+      assignedTime, firstInProgress,
+      resolvedAtComputed, resolvedHrs, isBreached,
+      slaBreachEvents: slaBreachEventsByIssue[row.id] || [],
+    };
+  });
+
+  return { issues: enriched, depts, dateType, dateFrom, dateTo, productType: productTypeParam };
+}
+
+// Status names seen across real (mostly Jira-migrated) data that this app's
+// own catalog doesn't classify as category:'done' but that clearly ARE
+// terminal -- used only as a fallback when a ticket has no real resolvedAt.
+const DONE_STATUS_NAME_HINTS = new Set(['done', 'resolved', 'closed', 'approved', 'complete', 'completed', 'cancelled', 'canceled', 'rejected']);
+
+function buildTeamAnalyticsOverview(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
+  const { issues } = scope;
+  const byStatus = taGroupByCount(issues, (r) => r.status_name);
+  const byPriority = taGroupByCount(issues, (r) => r.priority);
+  const byProductType = taGroupByCount(issues, (r) => r.productType);
+  const byDept = taGroupByCount(issues, (r) => r.current_department);
+
+  const byMonth: Record<string, number> = {};
+  for (const r of issues) {
+    const d = new Date(r.createdAt);
+    const label = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    byMonth[label] = (byMonth[label] || 0) + 1;
+  }
+
+  const resolved = issues.filter((r: any) => r.isDone);
+  const slaTracked = resolved.filter((r: any) => r.isBreached !== null);
+  const breached = slaTracked.filter((r: any) => r.isBreached);
+
+  const byMember: Record<string, any> = {};
+  for (const r of issues) {
+    if (!r.assigneeId) continue;
+    const m = (byMember[r.assigneeId] ??= {
+      id: r.assigneeId, name: r.assigneeName || 'Unknown', email: r.assignee_email || '',
+      ticketCount: 0, resolvedCount: 0, totalResolutionHrs: 0, resolutionSamples: 0,
+      slaTracked: 0, breached: 0,
+    });
+    m.ticketCount++;
+    if (r.isDone) {
+      m.resolvedCount++;
+      if (r.resolvedHrs !== null) { m.totalResolutionHrs += r.resolvedHrs; m.resolutionSamples++; }
+      if (r.isBreached !== null) { m.slaTracked++; if (r.isBreached) m.breached++; }
+    }
+  }
+  const memberPerformance = Object.values(byMember).map((m: any) => ({
+    id: m.id, name: m.name, email: m.email,
+    ticketCount: m.ticketCount, resolvedCount: m.resolvedCount,
+    avgResolutionHrs: m.resolutionSamples ? Math.round((m.totalResolutionHrs / m.resolutionSamples) * 10) / 10 : null,
+    slaBreachPct: m.slaTracked ? Math.round((m.breached / m.slaTracked) * 1000) / 10 : null,
+  })).sort((a: any, b: any) => b.ticketCount - a.ticketCount);
+
+  return {
+    totalTickets: issues.length,
+    resolvedCount: resolved.length,
+    openCount: issues.length - resolved.length,
+    slaBreachPct: slaTracked.length ? Math.round((breached.length / slaTracked.length) * 1000) / 10 : null,
+    slaTrackedCount: slaTracked.length,
+    byStatus, byPriority, byProductType, byDept, byMonth,
+    memberPerformance,
+    depts: Array.from(new Set(issues.map((r: any) => r.current_department).filter(Boolean))).sort(),
+    productTypes: Array.from(new Set(issues.map((r: any) => r.productType).filter(Boolean))).sort(),
+  };
+}
+
+function buildTeamAnalyticsAging(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
+  const open = scope.issues.filter((r: any) => !r.isDone);
+  const now = Date.now();
+  const BUCKETS = [
+    { key: 'le1', label: '<= 1 day', max: 1 },
+    { key: 'd2to5', label: '2-5 days', max: 5 },
+    { key: 'gt5', label: '> 5 days', max: Infinity },
+  ];
+  const bucketOf = (ageDays: number) => BUCKETS.find((b) => ageDays <= b.max)!.key;
+
+  const counts: Record<string, number> = { le1: 0, d2to5: 0, gt5: 0 };
+  const byMember: Record<string, any> = {};
+  const tickets: any[] = [];
+  for (const r of open) {
+    const ageDays = (now - new Date(r.createdAt).getTime()) / 86_400_000;
+    const bucket = bucketOf(ageDays);
+    counts[bucket]++;
+    tickets.push({
+      id: r.id, key: r.key, cfKey: r.cf_key, summary: r.summary, priority: r.priority,
+      status: r.status_name, assignee: r.assigneeName, department: r.current_department,
+      createdAt: r.createdAt, ageDays: Math.round(ageDays * 10) / 10, bucket,
+    });
+    if (r.assigneeId) {
+      const m = (byMember[r.assigneeId] ??= { id: r.assigneeId, name: r.assigneeName || 'Unknown', le1: 0, d2to5: 0, gt5: 0, total: 0 });
+      m[bucket]++; m.total++;
+    }
+  }
+
+  return {
+    totalOpen: open.length,
+    buckets: BUCKETS.map((b) => ({ key: b.key, label: b.label, count: counts[b.key] })),
+    byMember: Object.values(byMember).sort((a: any, b: any) => b.total - a.total),
+    tickets: tickets.sort((a, b) => b.ageDays - a.ageDays),
+  };
+}
+
+function taGroupByCount(rows: any[], getKey: (r: any) => string | null | undefined) {
+  const counts: Record<string, number> = {};
+  for (const r of rows) {
+    const k = (getKey(r) || '').trim() || '(none)';
+    counts[k] = (counts[k] || 0) + 1;
+  }
+  return Object.entries(counts).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+}
+
 function formatIssue(issue: any) {
   const statusObj = issue.status
     ? {
@@ -6413,6 +6669,27 @@ async function _handleJiraPgApi(
         ),
       },
     });
+  }
+
+  // Team Analytics -- ported from the standalone "Reports-" app, which pulled
+  // Jira Cloud data into its own SQLite DB and computed these metrics in
+  // memory over CSV rows. Re-implemented here directly against this app's own
+  // issues/issue_history tables (live data, including tickets created inside
+  // this app, not a periodically-refreshed copy). That app's "team" was an
+  // arbitrary named group of people; the closest concept here is
+  // current_department (Migration/Dev/QA/Infra/Pre-Sales/...), which every
+  // filter below groups by instead.
+  if (path.startsWith('reports/team-analytics') && method === 'GET') {
+    if (!isAdmin && currentUser?.role !== 'manager') return json({ error: 'Forbidden' }, 403);
+    const scope = await loadTeamAnalyticsScope(url);
+
+    if (path === 'reports/team-analytics/overview') {
+      return json(buildTeamAnalyticsOverview(scope));
+    }
+    if (path === 'reports/team-analytics/aging') {
+      return json(buildTeamAnalyticsAging(scope));
+    }
+    return json({ error: 'Not found' }, 404);
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Workflow Routes (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬

@@ -256,6 +256,16 @@ class ApiClient {
     const qs = p.toString();
     return this.request<any>(`/reports/resolution-sla${qs ? `?${qs}` : ''}`);
   }
+  getTeamAnalytics(sub: 'overview' | 'aging', params?: { dept?: string; dateType?: string; dateFrom?: string; dateTo?: string; productType?: string }) {
+    const p = new URLSearchParams();
+    if (params?.dept)        p.set('dept',        params.dept);
+    if (params?.dateType)    p.set('dateType',    params.dateType);
+    if (params?.dateFrom)    p.set('dateFrom',     params.dateFrom);
+    if (params?.dateTo)      p.set('dateTo',       params.dateTo);
+    if (params?.productType) p.set('productType', params.productType);
+    const qs = p.toString();
+    return this.request<any>(`/reports/team-analytics/${sub}${qs ? `?${qs}` : ''}`);
+  }
 
   // Custom Fields
   getCustomFields() { return this.request<any[]>('/custom-fields'); }

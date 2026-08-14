@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
-import { BarChart3, TrendingUp, Users, Target, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle } from 'lucide-react';
+import { BarChart3, TrendingUp, Users, Target, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle, LayoutGrid, Clock } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, LineChart, Line } from 'recharts';
 
 const WEEKLY_PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
@@ -44,6 +44,34 @@ export default function ReportsPage() {
   const [rsData, setRsData] = useState<any>(null);
   const [rsLoading, setRsLoading] = useState(false);
 
+  // Team Analytics — ported from the standalone Reports- app; ties into this
+  // app's own issues/issue_history, grouped by current_department.
+  const [taSubTab, setTaSubTab] = useState<'overview' | 'aging'>('overview');
+  const [taDepts, setTaDepts] = useState<string[]>([]); // [] = All
+  const [taDateType, setTaDateType] = useState<'created' | 'updated' | 'none'>('created');
+  const [taFilterOptions, setTaFilterOptions] = useState<{ depts: string[] }>({ depts: [] });
+  const [taOverview, setTaOverview] = useState<any>(null);
+  const [taAging, setTaAging] = useState<any>(null);
+  const [taLoading, setTaLoading] = useState(false);
+
+  useEffect(() => {
+    if (!canViewPerformance || tab !== 'team-analytics') return;
+    // Fetched once, unfiltered, purely to populate the dept checkbox list —
+    // using the filtered response's own `depts` would shrink the available
+    // options as soon as the user picked one, with no way back.
+    api.getTeamAnalytics('overview').then((d: any) => setTaFilterOptions({ depts: d.depts || [] })).catch(() => {});
+  }, [canViewPerformance, tab]);
+
+  useEffect(() => {
+    if (!canViewPerformance || tab !== 'team-analytics') return;
+    setTaLoading(true);
+    const params = { dept: taDepts.join(',') || undefined, dateType: taDateType, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined };
+    api.getTeamAnalytics(taSubTab, params)
+      .then((d: any) => { if (taSubTab === 'overview') setTaOverview(d); else setTaAging(d); })
+      .catch(() => { if (taSubTab === 'overview') setTaOverview(null); else setTaAging(null); })
+      .finally(() => setTaLoading(false));
+  }, [canViewPerformance, tab, taSubTab, taDepts, taDateType, dateFrom, dateTo]);
+
   useEffect(() => {
     if (!canViewPerformance) return;
     setPerfLoading(true);
@@ -82,6 +110,7 @@ export default function ReportsPage() {
     { id: 'burndown',    label: 'Burndown Chart',    icon: Target },
     { id: 'performance', label: 'User Performance',  icon: Users },
     { id: 'resolution-sla', label: 'Resolution & SLA', icon: ShieldCheck },
+    { id: 'team-analytics', label: 'Team Analytics', icon: LayoutGrid },
   ];
 
   return (
@@ -612,6 +641,259 @@ export default function ReportsPage() {
                     )}
                   </div>
                 </>
+              )}
+            </div>
+          )
+        )}
+
+        {/* Team Analytics */}
+        {tab === 'team-analytics' && (
+          !canViewPerformance ? (
+            <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+              <LayoutGrid size={40} className="mb-3 text-gray-300" />
+              <p className="text-[15px] font-semibold text-gray-500">Access restricted</p>
+              <p className="text-[13px] text-gray-400 mt-1">Only admins and managers can view team analytics.</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {/* Sub-tabs */}
+              <div className="flex gap-2">
+                {[
+                  { id: 'overview', label: 'Overview', icon: LayoutGrid },
+                  { id: 'aging', label: 'Aging Tickets', icon: Clock },
+                ].map(st => (
+                  <button key={st.id} onClick={() => setTaSubTab(st.id as any)}
+                    className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12.5px] font-medium transition-colors ${taSubTab === st.id ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+                    <st.icon size={13} /> {st.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Filters */}
+              <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 flex flex-wrap items-start gap-5">
+                <div className="flex items-center gap-2">
+                  <label className="text-[12px] font-medium text-gray-500">Date field</label>
+                  <select value={taDateType} onChange={e => setTaDateType(e.target.value as any)}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="created">Created date</option>
+                    <option value="updated">Updated date</option>
+                    <option value="none">None (open tickets only)</option>
+                  </select>
+                </div>
+                <div className="flex-1 min-w-[240px]">
+                  <label className="text-[12px] font-medium text-gray-500 block mb-1.5">Department (all selected = all departments)</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {taFilterOptions.depts.map(d => {
+                      const active = taDepts.includes(d);
+                      return (
+                        <button key={d} onClick={() => setTaDepts(active ? taDepts.filter(x => x !== d) : [...taDepts, d])}
+                          className={`px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors ${active ? 'bg-blue-50 border-blue-300 text-blue-700' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-50'}`}>
+                          {d}
+                        </button>
+                      );
+                    })}
+                    {taDepts.length > 0 && (
+                      <button onClick={() => setTaDepts([])} className="px-2.5 py-1 rounded-full text-[11.5px] font-medium text-red-500 border border-red-200 hover:bg-red-50">
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {taLoading ? (
+                <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
+                  <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+                </div>
+              ) : taSubTab === 'overview' ? (
+                !taOverview ? (
+                  <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+                    <LayoutGrid size={40} className="mb-3 text-gray-300" />
+                    <p className="text-[15px] font-semibold text-gray-500">No data</p>
+                  </div>
+                ) : (
+                  <div className="space-y-5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="bg-white rounded-xl border border-gray-200 p-5">
+                        <p className="text-[12.5px] font-medium text-gray-500 mb-2">Total Tickets</p>
+                        <p className="text-[26px] font-bold text-gray-900">{taOverview.totalTickets}</p>
+                      </div>
+                      <div className="bg-white rounded-xl border border-gray-200 p-5">
+                        <p className="text-[12.5px] font-medium text-gray-500 mb-2">Resolved</p>
+                        <p className="text-[26px] font-bold text-emerald-600">{taOverview.resolvedCount}</p>
+                      </div>
+                      <div className="bg-white rounded-xl border border-gray-200 p-5">
+                        <p className="text-[12.5px] font-medium text-gray-500 mb-2">Open</p>
+                        <p className="text-[26px] font-bold text-blue-600">{taOverview.openCount}</p>
+                      </div>
+                      <div className="bg-white rounded-xl border border-gray-200 p-5">
+                        <p className="text-[12.5px] font-medium text-gray-500 mb-2">SLA Breach %</p>
+                        <p className="text-[26px] font-bold text-red-600">{taOverview.slaBreachPct ?? '—'}{taOverview.slaBreachPct !== null ? '%' : ''}</p>
+                        <p className="text-[11px] text-gray-400 mt-1">of {taOverview.slaTrackedCount} tracked</p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+                      <div className="bg-white rounded-xl border border-gray-200 p-6">
+                        <h3 className="text-[14px] font-semibold text-gray-700 mb-4">By Status</h3>
+                        <div className="space-y-2">
+                          {taOverview.byStatus.slice(0, 8).map((s: any) => (
+                            <div key={s.name} className="flex items-center justify-between text-[12.5px]">
+                              <span className="text-gray-600 truncate pr-2">{s.name}</span>
+                              <span className="font-semibold text-gray-800 tabular-nums">{s.count}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-xl border border-gray-200 p-6">
+                        <h3 className="text-[14px] font-semibold text-gray-700 mb-4">By Priority</h3>
+                        <div className="space-y-2">
+                          {taOverview.byPriority.map((s: any) => (
+                            <div key={s.name} className="flex items-center justify-between text-[12.5px]">
+                              <span className="text-gray-600 capitalize truncate pr-2">{s.name}</span>
+                              <span className="font-semibold text-gray-800 tabular-nums">{s.count}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-xl border border-gray-200 p-6">
+                        <h3 className="text-[14px] font-semibold text-gray-700 mb-4">By Department</h3>
+                        <div className="space-y-2">
+                          {taOverview.byDept.map((s: any) => (
+                            <div key={s.name} className="flex items-center justify-between text-[12.5px]">
+                              <span className="text-gray-600 truncate pr-2">{s.name}</span>
+                              <span className="font-semibold text-gray-800 tabular-nums">{s.count}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                      <div className="px-6 py-4 border-b border-gray-100">
+                        <h3 className="text-[14px] font-semibold text-gray-700">Member Performance</h3>
+                        <p className="text-[11.5px] text-gray-400 mt-0.5">Scoped to the filters above.</p>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-[12.5px]">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-5 py-3 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Member</th>
+                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Tickets</th>
+                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolved</th>
+                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Avg Resolution</th>
+                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">SLA Breach %</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {taOverview.memberPerformance.map((m: any) => (
+                              <tr key={m.id} className="hover:bg-gray-50">
+                                <td className="px-5 py-3">
+                                  <div className="flex items-center gap-2.5">
+                                    <div className="w-7 h-7 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-[11px] font-bold flex-shrink-0">
+                                      {(m.name || '?').charAt(0).toUpperCase()}
+                                    </div>
+                                    <div>
+                                      <p className="text-[13px] font-medium text-gray-800">{m.name}</p>
+                                      <p className="text-[11px] text-gray-400">{m.email}</p>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="px-5 py-3 text-right tabular-nums">{m.ticketCount}</td>
+                                <td className="px-5 py-3 text-right tabular-nums">{m.resolvedCount}</td>
+                                <td className="px-5 py-3 text-right tabular-nums text-gray-500">{m.avgResolutionHrs !== null ? `${m.avgResolutionHrs}h` : '—'}</td>
+                                <td className="px-5 py-3 text-right tabular-nums font-medium text-red-600">{m.slaBreachPct !== null ? `${m.slaBreachPct}%` : '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                )
+              ) : (
+                !taAging ? (
+                  <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+                    <Clock size={40} className="mb-3 text-gray-300" />
+                    <p className="text-[15px] font-semibold text-gray-500">No data</p>
+                  </div>
+                ) : (
+                  <div className="space-y-5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      {taAging.buckets.map((b: any) => (
+                        <div key={b.key} className="bg-white rounded-xl border border-gray-200 p-5">
+                          <p className="text-[12.5px] font-medium text-gray-500 mb-2">{b.label}</p>
+                          <p className="text-[26px] font-bold text-gray-900">{b.count}</p>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                      <div className="px-6 py-4 border-b border-gray-100">
+                        <h3 className="text-[14px] font-semibold text-gray-700">By Member</h3>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-[12.5px]">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-5 py-3 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Member</th>
+                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">&le; 1 day</th>
+                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">2-5 days</th>
+                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">&gt; 5 days</th>
+                              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Total Open</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {taAging.byMember.map((m: any) => (
+                              <tr key={m.id} className="hover:bg-gray-50">
+                                <td className="px-5 py-3 font-medium text-gray-700">{m.name}</td>
+                                <td className="px-5 py-3 text-right tabular-nums">{m.le1}</td>
+                                <td className="px-5 py-3 text-right tabular-nums">{m.d2to5}</td>
+                                <td className="px-5 py-3 text-right tabular-nums text-red-600 font-medium">{m.gt5}</td>
+                                <td className="px-5 py-3 text-right tabular-nums font-semibold">{m.total}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                      <div className="px-6 py-4 border-b border-gray-100">
+                        <h3 className="text-[14px] font-semibold text-gray-700">Open Tickets — Oldest First</h3>
+                      </div>
+                      <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                        <table className="w-full text-[12.5px]">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Key</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Summary</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Status</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Assignee</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Department</th>
+                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Age (days)</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {taAging.tickets.slice(0, 200).map((t: any) => (
+                              <tr key={t.id} className="hover:bg-gray-50">
+                                <td className="px-4 py-2 font-medium text-blue-600">{t.cfKey || t.key}</td>
+                                <td className="px-4 py-2 text-gray-700 max-w-[320px] truncate">{t.summary}</td>
+                                <td className="px-4 py-2 text-gray-500">{t.status || '—'}</td>
+                                <td className="px-4 py-2 text-gray-500">{t.assignee || '—'}</td>
+                                <td className="px-4 py-2 text-gray-500">{t.department}</td>
+                                <td className="px-4 py-2 text-right tabular-nums font-medium">{t.ageDays}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {taAging.tickets.length > 200 && (
+                        <p className="px-6 py-3 text-[11.5px] text-gray-400 border-t border-gray-100">Showing oldest 200 of {taAging.tickets.length} open tickets.</p>
+                      )}
+                    </div>
+                  </div>
+                )
               )}
             </div>
           )
