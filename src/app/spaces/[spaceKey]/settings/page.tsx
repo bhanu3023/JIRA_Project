@@ -201,11 +201,16 @@ function PeopleSection({
   const memberEmails = new Set(
     (currentSpace.members || []).map((m: any) => (m.email || m.user?.email || '').toLowerCase())
   );
-  // Suspended/deactivated accounts shouldn't show up as addable — matching the
-  // "Active" / "Inactive" badge convention already used for queue agents above
-  // (isActive !== false, so accounts with no isActive field at all still count
-  // as active rather than being silently hidden).
-  const availableUsers = users.filter(u => !memberEmails.has((u.email || '').toLowerCase()) && u.isActive !== false);
+  // Suspended/deactivated accounts shouldn't show up as addable -- but a
+  // freshly-invited user who hasn't logged in yet ALSO has isActive=false
+  // (see the isActive/status backfill near the top of jira-pg-api.ts: invited
+  // stays isActive=false, distinct from a deliberately-suspended inactive
+  // account) and is exactly the kind of "recently added/updated user" someone
+  // would want to add to a space right after inviting them. Filtering on
+  // isActive alone hid both groups identically; check the actual status
+  // field instead so only genuinely suspended accounts (status === 'inactive')
+  // are excluded.
+  const availableUsers = users.filter(u => !memberEmails.has((u.email || '').toLowerCase()) && u.status !== 'inactive');
   const filteredUsers  = availableUsers.filter(u => {
     const q = memberSearch.toLowerCase();
     return !q
@@ -317,9 +322,8 @@ function PeopleSection({
                       value={role}
                       onChange={async (e) => {
                         const newRole = e.target.value;
-                        await fetch(`/api/spaces/${spaceKey}/members/${m.userId || m.id}`, {
+                        await api.request(`/spaces/${spaceKey}/members/${m.userId || m.id}`, {
                           method: 'PATCH',
-                          headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({ role: newRole }),
                         });
                         onReload();
@@ -341,9 +345,8 @@ function PeopleSection({
                           ))}
                         </select>
                         <button onClick={async () => {
-                          await fetch(`/api/spaces/${spaceKey}/members/${m.userId || m.id}`, {
+                          await api.request(`/spaces/${spaceKey}/members/${m.userId || m.id}`, {
                             method: 'PATCH',
-                            headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ department: editingDeptVal || null }),
                           });
                           setEditingDeptId(null);
@@ -382,12 +385,10 @@ function PeopleSection({
                               setResendingId(m.id);
                               setResendMsg(null);
                               try {
-                                const res = await fetch('/api/users/invite', {
+                                const data = await api.request<any>('/users/invite', {
                                   method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify({ email, firstName, lastName, role, invitedBy: 'Admin' }),
                                 });
-                                const data = await res.json();
                                 setResendMsg({ id: m.id, ok: data.emailSent, text: data.emailSent ? 'Invite sent!' : 'Not configured' });
                               } catch {
                                 setResendMsg({ id: m.id, ok: false, text: 'Failed to send' });
@@ -407,9 +408,8 @@ function PeopleSection({
                               if (!confirm(`Suspend ${firstName} ${lastName}? They will not be able to log in.`)) return;
                               setSuspendingId(m.id);
                               try {
-                                await fetch(`/api/jira-pg?path=users/${m.userId || m.id}`, {
+                                await api.request(`/users/${m.userId || m.id}`, {
                                   method: 'PATCH',
-                                  headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify({ isActive: false }),
                                 });
                                 onReload();
