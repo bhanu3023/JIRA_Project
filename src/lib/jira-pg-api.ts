@@ -75,6 +75,11 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIME
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`).catch(() => {});
+// Referenced throughout the codebase (formatIssue, the SLA breach check, the
+// ticket detail page's "Resolved ·" timestamp) as if it already existed, but
+// no migration ever actually created it -- every read of issue.resolvedAt
+// was silently undefined for every ticket that's ever existed in this app.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "resolvedAt" TIMESTAMPTZ`).catch(() => {});
 pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`).catch(() => {});
 pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
 pool.query(`ALTER TABLE space_members ADD COLUMN IF NOT EXISTS department VARCHAR(100)`).catch(() => {});
@@ -1032,8 +1037,17 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       // instead of restarting it at the full duration.
       const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
       const dueTime = new Date(new Date(startedAt).getTime() + remainingBudgetMs).toISOString();
-      // Paused SLAs are never breached — clock stopped
-      const isBreached = !isResolved && !isPaused && new Date(dueTime) < new Date();
+      // Paused SLAs are never breached — clock stopped. A resolved ticket is
+      // breached if it was ALREADY overdue at the moment it got resolved
+      // (resolvedAt is stamped on every done transition -- see the PATCH
+      // handler) -- not simply "never breached because it's done now". That
+      // used to erase every late resolution's breach entirely: mark a
+      // ticket Resolved 3 days after it was due and it read as a clean,
+      // on-time completion with no trace it had ever breached.
+      const resolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt) : null;
+      const isBreached = isResolved
+        ? (resolvedAt !== null && new Date(dueTime) < resolvedAt)
+        : (!isPaused && new Date(dueTime) < new Date());
       return {
         id: `sla_${policy.id}_${issue.key}`,
         policyId: policy.id,
@@ -1043,6 +1057,10 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
         isBreached,
         isPaused,
         isCompleted: isResolved,
+        // So the frontend can freeze the elapsed/progress display at the
+        // actual resolution moment instead of continuing to count up against
+        // "now" forever after the ticket is already done.
+        resolvedAt: resolvedAt ? resolvedAt.toISOString() : null,
         startedAt,
         goalDurationMs: durationMs,
         isNotified,
@@ -4387,7 +4405,7 @@ async function _handleJiraPgApi(
       // Raw columns Prisma's schema doesn't know about -- only needs `key`,
       // so it can run alongside everything else instead of after it.
       pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey" FROM issues WHERE key = $1 LIMIT 1`,
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt" FROM issues WHERE key = $1 LIMIT 1`,
         [key]
       ).catch(() => ({ rows: [] as any[] })),
       // Partner-ticket comment merge lookup -- also only needs `key`.
@@ -4678,6 +4696,12 @@ async function _handleJiraPgApi(
     // excludeDone filters) keeps treating the ticket as open forever, even
     // though the department that owns it just closed it.
     let queueStatusSyncedDone = false;
+    // resolvedAt is a raw column outside Prisma's schema (like current_department),
+    // so it can't go through db.issue.update's `data` object -- track the
+    // intended change here and apply it via a raw UPDATE right after that
+    // call actually runs. undefined = no change, Date = stamp resolution,
+    // null = clear it (reopened).
+    let resolvedAtChange: Date | null | undefined = undefined;
     if (body.queueStatusId) {
       try {
         const qRow = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE key=$1 LIMIT 1`, [key]);
@@ -4721,6 +4745,7 @@ async function _handleJiraPgApi(
               matchedReal = matchedReal || realStatuses.find((s: any) => s.category !== 'done');
               if (matchedReal) {
                 data.statusId = matchedReal.id;
+                resolvedAtChange = null;
                 queueStatusSyncedReopen = true;
               }
               await startDeptSLA(null, issue.id, dept);
@@ -4769,6 +4794,12 @@ async function _handleJiraPgApi(
             matchedReal = matchedReal || realStatuses.find((s: any) => s.category === 'done');
             if (matchedReal) {
               data.statusId = matchedReal.id;
+              // Stamp the actual resolution moment so the SLA check can tell
+              // whether this ticket was resolved before or after its due
+              // time -- without this, resolving always read as "on time"
+              // (see computeSLAInstancesPure) no matter how overdue it
+              // already was.
+              resolvedAtChange = new Date();
               queueStatusSyncedDone = true;
             }
           }
@@ -4869,6 +4900,22 @@ async function _handleJiraPgApi(
     // Status
     if (body.statusId !== undefined) {
       data.statusId = body.statusId === null ? null : String(body.statusId);
+      // Stamp (or clear) the actual resolution moment on every done/not-done
+      // transition -- computeSLAInstancesPure needs this to tell whether a
+      // ticket was resolved before or after its due time. Without it, a
+      // ticket that breached and was THEN resolved read as "resolved on
+      // time" (isCompleted forced isBreached false with no way to tell the
+      // two cases apart), silently erasing that it had ever breached.
+      if (data.statusId !== issue.statusId) {
+        // This handler's own `issue` fetch (above) only includes
+        // space.statuses, not the status relation itself -- look the
+        // current/new status category up from there instead.
+        const spaceStatuses = issue.space?.statuses ?? [];
+        const wasResolved = spaceStatuses.find((s: any) => s.id === issue.statusId)?.category === 'done';
+        const willBeResolved = spaceStatuses.find((s: any) => s.id === data.statusId)?.category === 'done';
+        if (willBeResolved && !wasResolved) resolvedAtChange = new Date();
+        else if (!willBeResolved && wasResolved) resolvedAtChange = null;
+      }
     }
 
     data.updatedAt = new Date();
@@ -4905,6 +4952,10 @@ async function _handleJiraPgApi(
         space: { select: { key: true, name: true } },
       },
     });
+
+    if (resolvedAtChange !== undefined) {
+      await pool.query(`UPDATE issues SET "resolvedAt"=$1 WHERE id=$2`, [resolvedAtChange, updated.id]).catch(() => {});
+    }
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Auto-record history for every changed field Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // ── Dept handoff on "Waiting for [Dept]" status change ──────────────
@@ -5279,6 +5330,19 @@ async function _handleJiraPgApi(
       }
     }
 
+    // None of these are part of Prisma's schema, so `updated` never carries
+    // them -- computeIssueSLAsFromDb silently fell back to issue.createdAt
+    // instead of the real dept-specific SLA start, and dropped every
+    // dept-scoped policy entirely (its dept-match check saw an empty
+    // current_department), for as long as this endpoint has existed. Merge
+    // them in the same way the GET /issues/:key handler already does.
+    try {
+      const r = await pool.query(
+        `SELECT current_department, dept_sla_started_at, dept_sla_log, "resolvedAt" FROM issues WHERE id=$1`,
+        [updated.id]
+      );
+      Object.assign(updated as any, r.rows[0] || {});
+    } catch { /* non-critical */ }
     const slaInstances = await computeIssueSLAsFromDb(updated);
 
     // Fire connector events (fire-and-forget)
