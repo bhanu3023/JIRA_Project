@@ -5014,8 +5014,22 @@ async function _handleJiraPgApi(
               // whether this ticket was resolved before or after its due
               // time -- without this, resolving always read as "on time"
               // (see computeSLAInstancesPure) no matter how overdue it
-              // already was.
-              resolvedAtChange = new Date();
+              // already was. Only stamp it on a genuine not-done -> done
+              // transition, matching the exact same rule the plain
+              // body.statusId path already applies (wasResolved/
+              // willBeResolved below) -- this branch previously restamped
+              // resolvedAt to right now every single time a done-category
+              // queue status got applied, even to a ticket that was ALREADY
+              // resolved (e.g. picking the same "Resolved" status again, or
+              // any other action that re-applies a done-category
+              // queue-scoped status while the ticket never left done).
+              // That silently overwrote a ticket's real, on-time resolution
+              // timestamp with whatever moment this unrelated action
+              // happened, making it read as breached/"resolved late" even
+              // though the actual work finished well before the due time.
+              if (oldQueueStatusCategory !== 'done') {
+                resolvedAtChange = new Date();
+              }
               queueStatusSyncedDone = true;
               // This branch (like the reopen one above) skips the early-return
               // status-history insert further down, and never reaches the
