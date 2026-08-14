@@ -804,7 +804,15 @@ async function performDeptHandoff(
   spaceId: string,
   productType: string | null,
   targetDept: string,
-  waitingStatusLabel: string,
+  // The ticket's status as it was right before THIS handoff -- must come from
+  // the caller's own pre-update fetch, not a fresh DB read done here. The
+  // direct-statusId caller already writes the new "Waiting for X" status to
+  // the row via db.issue.update() before this function ever runs, so a
+  // same-function re-query would only ever see that just-written transit
+  // status (category 'todo'/'in_progress'), never whatever the ticket
+  // actually was — permanently blinding the isDoneNow check below to a
+  // ticket that had just been resolved moments earlier in the same handoff.
+  priorStatus: { id: string; name: string; category: string; color: string } | null,
   fallbackStatusId: string | null,
   userId: string | null,
 ): Promise<string> {
@@ -842,14 +850,53 @@ async function performDeptHandoff(
     } catch { /* non-critical — falls through to unassigned */ }
   }
 
-  deptStatuses[oldDept] = { id: '', name: waitingStatusLabel, category: 'todo', color: '#F59E0B' };
-  const inProgressSt = await db.status.findFirst({ where: { spaceId, category: 'in_progress' }, orderBy: { order: 'asc' } })
-    || await db.status.findFirst({ where: { spaceId, name: { contains: 'progress', mode: 'insensitive' } }, orderBy: { order: 'asc' } });
-  const inProgressStatusObj = inProgressSt
-    ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
-    : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
-  deptStatuses[targetDept] = inProgressStatusObj;
-  const targetStatusId = inProgressSt?.id || fallbackStatusId;
+  // A ticket already marked done (e.g. resolved via this dept's own "Resolved"
+  // queue status) that then gets handed onward via a "Waiting for X" pick used
+  // to have its done state clobbered here: the OLD dept's record got a
+  // synthetic "Waiting for <targetDept>" label instead of its real status
+  // (discarding that it had been resolved), and the TARGET dept was always
+  // forced to "In Progress" no matter what -- so a ticket resolved in Dev and
+  // routed to Migration either showed Dev's raw "Resolved" (if Migration had
+  // no prior record) or a stale "Waiting for X" leftover from an earlier
+  // visit (if it did), never Migration's own actual status. Mirror the same
+  // isDoneNow/restoringOwnSnapshot rule the manual "Change Department"
+  // endpoint already uses: restore the target dept's own last-known status if
+  // it has one, or carry the done status straight through on a first
+  // arrival -- only defaulting to "In Progress" when the ticket isn't done.
+  const isDoneNow = priorStatus?.category === 'done';
+  const oldDeptStatusObj = priorStatus
+    ? { id: priorStatus.id, name: priorStatus.name, category: priorStatus.category, color: priorStatus.color }
+    : { id: '', name: 'Unknown', category: 'todo', color: '#6B7280' };
+
+  // Record the OLD dept's status exactly as it was right before the handoff --
+  // not the "Waiting for <targetDept>" transit marker, which discarded that
+  // info (same fix already applied to the manual endpoint's own oldDept
+  // recording, for the same "Sent/Watching needs to show what it actually
+  // was" reason).
+  deptStatuses[oldDept] = oldDeptStatusObj;
+
+  const restoringOwnSnapshot = isDoneNow && deptStatuses[targetDept] != null;
+  let newDeptStatusObj: any;
+  let targetStatusId: string | null;
+  if (restoringOwnSnapshot) {
+    newDeptStatusObj = deptStatuses[targetDept];
+    const realMatch = await db.status.findFirst({ where: { spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } }, orderBy: { order: 'asc' } });
+    targetStatusId = realMatch?.id || priorStatus?.id || null;
+  } else if (isDoneNow) {
+    // Target dept has never seen this ticket before while it's done -- that's
+    // not new work arriving, so carry the done status straight through rather
+    // than reopening it into "In Progress".
+    newDeptStatusObj = oldDeptStatusObj;
+    targetStatusId = priorStatus?.id || null;
+  } else {
+    const inProgressSt = await db.status.findFirst({ where: { spaceId, category: 'in_progress' }, orderBy: { order: 'asc' } })
+      || await db.status.findFirst({ where: { spaceId, name: { contains: 'progress', mode: 'insensitive' } }, orderBy: { order: 'asc' } });
+    newDeptStatusObj = inProgressSt
+      ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
+      : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+    targetStatusId = inProgressSt?.id || fallbackStatusId;
+  }
+  deptStatuses[targetDept] = newDeptStatusObj;
 
   await pauseDeptSLA(null, issueId, oldDept);
   await pool.query(
@@ -4891,9 +4938,10 @@ async function _handleJiraPgApi(
             if (waitMatchQueue) {
               queueHandoffTargetDept = waitMatchQueue[1].trim();
               try {
+                const priorStatusForQueueHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
                 queueHandoffOldDept = await performDeptHandoff(
                   issue.id, issue.spaceId, (issue as any).productType || null,
-                  queueHandoffTargetDept, String(body.queueStatusName || ''), null, userId,
+                  queueHandoffTargetDept, priorStatusForQueueHandoff, null, userId,
                 );
                 queueHandoffDone = true;
                 console.log(`[DeptHandoff] ${issue.key}: ${queueHandoffOldDept} → ${queueHandoffTargetDept} (via queue status)`);
@@ -5056,9 +5104,10 @@ async function _handleJiraPgApi(
       if (waitMatchHandoff) {
         handoffTargetDept = waitMatchHandoff[1].trim();
         try {
+          const priorStatusForHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
           handoffOldDept = await performDeptHandoff(
             issue.id, issue.spaceId, (issue as any).productType || null,
-            handoffTargetDept, newStatusNameForHandoff, data.statusId as string | null, userId,
+            handoffTargetDept, priorStatusForHandoff, data.statusId as string | null, userId,
           );
           deptHandoffDone = true;
           console.log(`[DeptHandoff] ${issue.key}: ${handoffOldDept} → ${handoffTargetDept}`);
