@@ -5031,6 +5031,38 @@ async function _handleJiraPgApi(
               } catch (handoffErr: any) {
                 console.error(`[DeptHandoff ERROR - queueStatus] ${issue.key}:`, handoffErr?.message || handoffErr);
               }
+            } else {
+              // A queue-scoped status that's neither done, a from-done reopen,
+              // nor a "Waiting for X" handoff -- e.g. picking a plain
+              // "In Progress" from this dept's own status list -- never
+              // touched the real global statusId at all, only
+              // dept_statuses[dept] above. That left the ticket's actual
+              // statusId silently stuck on whatever it was before (often
+              // still the space's default "To Do" from creation), disagreeing
+              // with what was actually shown on screen. The done/reopen sync
+              // branches already resolve-or-create a matching real status for
+              // exactly this reason; apply the same sync here so the global
+              // column never drifts from the dept-scoped label sitting on top
+              // of it -- including the NEXT time this dept's status gets read
+              // as a snapshot when the ticket leaves (that read comes from
+              // the real column, not dept_statuses).
+              try {
+                const realStatuses = (issue.space as any)?.statuses || [];
+                const queueStName = String(body.queueStatusName || '').trim();
+                let matchedReal = realStatuses.find((s: any) => s.category !== 'done' && s.name.toLowerCase() === queueStName.toLowerCase());
+                if (!matchedReal && queueStName) {
+                  const maxOrder = await pool.query(`SELECT COALESCE(MAX("order"), 0) AS m FROM statuses WHERE "spaceId"=$1`, [issue.spaceId]);
+                  const newRealStatusId = rid();
+                  await pool.query(
+                    `INSERT INTO statuses (id, name, category, color, "order", "spaceId") VALUES ($1,$2,$3,$4,$5,$6)`,
+                    [newRealStatusId, queueStName, String(body.queueStatusCategory || 'todo'), String(body.queueStatusColor || '#64748B'), (maxOrder.rows[0]?.m ?? 0) + 1, issue.spaceId]
+                  );
+                  matchedReal = { id: newRealStatusId };
+                }
+                if (matchedReal && matchedReal.id !== issue.statusId) {
+                  await pool.query(`UPDATE issues SET "statusId"=$1, "updatedAt"=NOW() WHERE id=$2`, [matchedReal.id, issue.id]);
+                }
+              } catch (e: any) { console.error('[Queue status global sync failed]', issue.key, e?.message || e); }
             }
 
             // Re-fetch AFTER the handoff (if any) so the response and the
