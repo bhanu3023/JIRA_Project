@@ -183,7 +183,7 @@ function PeopleSection({
 }) {
   const [showAddModal, setShowAddModal] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
-  const [selectedUser, setSelectedUser] = useState<any>(null);
+  const [selectedUsers, setSelectedUsers] = useState<any[]>([]);
   const [selectedRole, setSelectedRole] = useState('developer');
   const [selectedDept, setSelectedDept] = useState('');
   const [addingMember, setAddingMember] = useState(false);
@@ -201,19 +201,27 @@ function PeopleSection({
   const memberEmails = new Set(
     (currentSpace.members || []).map((m: any) => (m.email || m.user?.email || '').toLowerCase())
   );
-  const availableUsers = users.filter(u => !memberEmails.has((u.email || '').toLowerCase()));
+  // Suspended/deactivated accounts shouldn't show up as addable — matching the
+  // "Active" / "Inactive" badge convention already used for queue agents above
+  // (isActive !== false, so accounts with no isActive field at all still count
+  // as active rather than being silently hidden).
+  const availableUsers = users.filter(u => !memberEmails.has((u.email || '').toLowerCase()) && u.isActive !== false);
   const filteredUsers  = availableUsers.filter(u => {
     const q = memberSearch.toLowerCase();
     return !q
       || (u.firstName + ' ' + u.lastName).toLowerCase().includes(q)
       || (u.email || '').toLowerCase().includes(q);
   });
+  const selectedIds = new Set(selectedUsers.map(u => u.id));
+  const toggleUserSelect = (u: any) => {
+    setSelectedUsers(prev => prev.some(s => s.id === u.id) ? prev.filter(s => s.id !== u.id) : [...prev, u]);
+  };
 
   const DEPT_OPTIONS = ['', 'Migration', 'Dev', 'QA', 'Pre-Sales', 'Support'];
 
   const openModal = () => {
     setShowAddModal(true);
-    setSelectedUser(null);
+    setSelectedUsers([]);
     setMemberSearch('');
     setSelectedRole('developer');
     setSelectedDept('');
@@ -221,20 +229,26 @@ function PeopleSection({
   };
 
   const doAddMember = async () => {
-    if (!selectedUser) return;
+    if (!selectedUsers.length) return;
     setAddingMember(true);
     setAddMemberMsg('');
-    try {
-      await onAddMember(selectedUser.id, selectedRole, selectedDept);
-      setAddMemberMsg(`${selectedUser.firstName} ${selectedUser.lastName} added successfully.`);
-      setSelectedUser(null);
+    const toAdd = selectedUsers;
+    const results = await Promise.allSettled(toAdd.map(u => onAddMember(u.id, selectedRole, selectedDept)));
+    const failed = toAdd.filter((_, i) => results[i].status === 'rejected');
+    if (failed.length === 0) {
+      setAddMemberMsg(toAdd.length === 1
+        ? `${toAdd[0].firstName} ${toAdd[0].lastName} added successfully.`
+        : `${toAdd.length} members added successfully.`);
+      setSelectedUsers([]);
       setMemberSearch('');
       setTimeout(() => { setShowAddModal(false); setAddMemberMsg(''); }, 1200);
-    } catch {
-      setAddMemberMsg('Failed to add member. Please try again.');
-    } finally {
-      setAddingMember(false);
+    } else {
+      setSelectedUsers(failed); // keep only the ones that failed, so the user can retry just those
+      setAddMemberMsg(failed.length === toAdd.length
+        ? 'Failed to add member(s). Please try again.'
+        : `Added ${toAdd.length - failed.length} of ${toAdd.length}. ${failed.length} failed — please retry.`);
     }
+    setAddingMember(false);
   };
 
   return (
@@ -463,38 +477,48 @@ function PeopleSection({
 
               {/* Search */}
               <div>
-                <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">
-                  Search by name or email <span className="text-red-500">*</span>
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-[12px] font-semibold text-gray-700">
+                    Search by name or email <span className="text-red-500">*</span>
+                  </label>
+                  {selectedUsers.length > 0 && (
+                    <button type="button" onClick={() => setSelectedUsers([])}
+                      className="text-[11.5px] font-medium text-blue-600 hover:text-blue-700">
+                      Clear ({selectedUsers.length})
+                    </button>
+                  )}
+                </div>
                 <input
                   type="text"
                   autoFocus
                   placeholder="Search users..."
                   value={memberSearch}
-                  onChange={e => { setMemberSearch(e.target.value); setSelectedUser(null); }}
+                  onChange={e => setMemberSearch(e.target.value)}
                   className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400"
                 />
                 <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100 max-h-52 overflow-y-auto">
                   {filteredUsers.length === 0 ? (
                     <div className="px-4 py-5 text-center text-sm text-gray-400">
                       {availableUsers.length === 0
-                        ? 'All users are already members of this space.'
+                        ? 'All active users are already members of this space.'
                         : 'No users match your search.'}
                     </div>
                   ) : filteredUsers.map(u => {
-                    const isSel = selectedUser?.id === u.id;
+                    const isSel = selectedIds.has(u.id);
                     return (
                       <button key={u.id} type="button"
-                        onClick={() => setSelectedUser(isSel ? null : u)}
+                        onClick={() => toggleUserSelect(u)}
                         className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors ${isSel ? 'bg-blue-50' : ''}`}>
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${isSel ? 'bg-blue-600 text-white' : 'bg-gradient-to-br from-indigo-400 to-purple-500 text-white'}`}>
-                          {isSel ? <Check size={14} /> : getInitials(u.firstName, u.lastName)}
+                        <div className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${isSel ? 'border-blue-600 bg-blue-600' : 'border-gray-300 bg-white'}`}>
+                          {isSel && <Check size={11} className="text-white" strokeWidth={3} />}
+                        </div>
+                        <div className="w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 bg-gradient-to-br from-indigo-400 to-purple-500 text-white">
+                          {getInitials(u.firstName, u.lastName)}
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className={`text-[13px] font-semibold ${isSel ? 'text-blue-700' : 'text-gray-900'}`}>{u.firstName} {u.lastName}</p>
                           <p className="text-[11.5px] text-gray-400 truncate">{u.email}</p>
                         </div>
-                        {isSel && <Check size={15} className="text-blue-600 flex-shrink-0" />}
                       </button>
                     );
                   })}
@@ -541,19 +565,21 @@ function PeopleSection({
 
             {/* Modal footer */}
             <div className="flex items-center justify-between px-5 py-3.5 border-t border-gray-200 bg-gray-50 rounded-b-xl">
-              <p className="text-[12px] text-gray-500">
-                {selectedUser
-                  ? <><span className="text-gray-400">Adding:</span> <span className="font-semibold text-gray-700">{selectedUser.firstName} {selectedUser.lastName}</span></>
-                  : 'Select a user above'}
+              <p className="text-[12px] text-gray-500 truncate max-w-[220px]">
+                {selectedUsers.length === 0
+                  ? 'Select one or more users above'
+                  : selectedUsers.length === 1
+                    ? <><span className="text-gray-400">Adding:</span> <span className="font-semibold text-gray-700">{selectedUsers[0].firstName} {selectedUsers[0].lastName}</span></>
+                    : <><span className="font-semibold text-gray-700">{selectedUsers.length} users</span> <span className="text-gray-400">selected</span></>}
               </p>
               <div className="flex gap-2">
                 <button onClick={() => setShowAddModal(false)}
                   className="px-4 py-2 text-[12.5px] font-medium text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
                   Cancel
                 </button>
-                <button onClick={doAddMember} disabled={!selectedUser || addingMember}
+                <button onClick={doAddMember} disabled={!selectedUsers.length || addingMember}
                   className="px-4 py-2 text-[12.5px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-                  {addingMember ? 'Adding…' : 'Add member'}
+                  {addingMember ? 'Adding…' : selectedUsers.length > 1 ? `Add ${selectedUsers.length} members` : 'Add member'}
                 </button>
               </div>
             </div>
