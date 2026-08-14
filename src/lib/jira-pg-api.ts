@@ -2456,7 +2456,7 @@ async function _handleJiraPgApi(
          SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
                 i."createdAt", i."updatedAt", d.closed_at, d.dept_name,
                 s.name AS status_name, s.color AS status_color, s.category AS status_category,
-                i.dept_sla_log, i.dept_assignees,
+                i.dept_sla_log, i.dept_assignees, i.dept_statuses,
                 CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
                 a.id AS assignee_id
          FROM dedup d
@@ -2476,15 +2476,32 @@ async function _handleJiraPgApi(
       // A ticket someone worked in Dev before it moved on and got reassigned
       // elsewhere showed the new owner's name here instead of theirs. Prefer
       // the per-dept snapshot taken when the ticket left this dept.
+      //
+      // The exact same problem applied to status_name/color/category, just
+      // never fixed alongside it: they came straight from the LIVE statuses
+      // join on the ticket's current global statusId. Resolving a ticket in
+      // Dev, then handing it back to Migration (which restores Migration's
+      // own prior status, e.g. "In Progress" per computeSLAInstancesPure's
+      // dept-handoff rules) changed what this supposedly-historical "Worked
+      // on — Dev" row showed, even though Dev's own record of it never
+      // stopped being "Resolved". Prefer the per-dept status snapshot the
+      // same way, so this list reflects what Dev actually did, not whatever
+      // the ticket's global status happens to read right now.
       const issues = rows.rows.map((r: any) => {
         const deptAssignees: Record<string, any> = r.dept_assignees || {};
         const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
         const snap = snapKey ? deptAssignees[snapKey] : null;
-        const { dept_assignees, ...rest } = r;
+        const deptStatuses: Record<string, any> = r.dept_statuses || {};
+        const statusSnapKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
+        const statusSnap = statusSnapKey ? deptStatuses[statusSnapKey] : null;
+        const { dept_assignees, dept_statuses, ...rest } = r;
+        const withStatus = statusSnap
+          ? { ...rest, status_name: statusSnap.name, status_color: statusSnap.color, status_category: statusSnap.category }
+          : rest;
         if (snap && snap.id) {
-          return { ...rest, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
+          return { ...withStatus, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
         }
-        return rest;
+        return withStatus;
       });
       return json({ issues, total: parseInt(countRes.rows[0].count) });
     } catch (e: any) {
