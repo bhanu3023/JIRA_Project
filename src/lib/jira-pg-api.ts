@@ -889,12 +889,42 @@ async function performDeptHandoff(
     newDeptStatusObj = oldDeptStatusObj;
     targetStatusId = priorStatus?.id || null;
   } else {
-    const inProgressSt = await db.status.findFirst({ where: { spaceId, category: 'in_progress' }, orderBy: { order: 'asc' } })
-      || await db.status.findFirst({ where: { spaceId, name: { contains: 'progress', mode: 'insensitive' } }, orderBy: { order: 'asc' } });
-    newDeptStatusObj = inProgressSt
-      ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
-      : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
-    targetStatusId = inProgressSt?.id || fallbackStatusId;
+    // Not done: a dept the ticket has already visited before (isReturningToDept)
+    // means work resumes there, so "In Progress" fits -- but a dept seeing this
+    // ticket for the very first time hasn't had anyone touch it yet, and always
+    // forcing "In Progress" here (regardless of first-arrival vs returning) said
+    // work was already underway before anyone in the target dept had even seen
+    // the ticket. Same isReturningToDept split the manual "Change Department"
+    // endpoint already uses, reading the target dept's own queue-configured
+    // status list the same way that endpoint does, rather than a purely
+    // space-wide guess.
+    const isReturningToDept = deptStatuses[targetDept] != null;
+    let targetQueueStatuses: any[] = [];
+    try {
+      const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
+      for (const row of allQueueRows.rows) {
+        const queues: any[] = row.queues || [];
+        const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === targetDept.toLowerCase());
+        if (matchedQ?.queueStatuses?.length) { targetQueueStatuses = matchedQ.queueStatuses; break; }
+      }
+    } catch {}
+    if (isReturningToDept) {
+      const inProgressSt = targetQueueStatuses.find((s: any) => s.category === 'in_progress')
+        || targetQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'));
+      newDeptStatusObj = inProgressSt
+        ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
+        : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+    } else {
+      const firstTodoSt = targetQueueStatuses.find((s: any) => s.category === 'todo') || targetQueueStatuses[0];
+      newDeptStatusObj = firstTodoSt
+        ? { id: firstTodoSt.id, name: firstTodoSt.name, category: firstTodoSt.category, color: firstTodoSt.color }
+        : { id: '', name: 'Open', category: 'todo', color: '#6366F1' };
+    }
+    // newDeptStatusObj can carry a queue-scoped virtual id (qst_...) that isn't
+    // a real row in the statuses table -- resolve the equivalent real status by
+    // name for the global column, same as the restoringOwnSnapshot branch above.
+    const realMatch = await db.status.findFirst({ where: { spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } }, orderBy: { order: 'asc' } });
+    targetStatusId = realMatch?.id || fallbackStatusId;
   }
   deptStatuses[targetDept] = newDeptStatusObj;
 
