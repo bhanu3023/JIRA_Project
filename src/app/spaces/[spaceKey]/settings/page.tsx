@@ -488,6 +488,22 @@ function PeopleSection({
                     </button>
                   )}
                 </div>
+                {selectedUsers.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-2 p-2 bg-blue-50/60 border border-blue-100 rounded-lg">
+                    {selectedUsers.map(u => (
+                      <span key={u.id} className="inline-flex items-center gap-1.5 pl-1 pr-1.5 py-1 bg-white border border-blue-200 rounded-full text-[12px] font-medium text-gray-700 shadow-sm">
+                        <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 bg-gradient-to-br from-indigo-400 to-purple-500 text-white">
+                          {getInitials(u.firstName, u.lastName)}
+                        </span>
+                        {u.firstName} {u.lastName}
+                        <button type="button" onClick={() => toggleUserSelect(u)}
+                          className="text-gray-400 hover:text-red-500 transition-colors">
+                          <X size={12} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <input
                   type="text"
                   autoFocus
@@ -496,7 +512,7 @@ function PeopleSection({
                   onChange={e => setMemberSearch(e.target.value)}
                   className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400"
                 />
-                <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100 max-h-52 overflow-y-auto">
+                <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100 max-h-64 overflow-y-auto">
                   {filteredUsers.length === 0 ? (
                     <div className="px-4 py-5 text-center text-sm text-gray-400">
                       {availableUsers.length === 0
