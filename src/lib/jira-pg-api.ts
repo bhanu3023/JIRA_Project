@@ -1335,11 +1335,29 @@ async function loadTeamAnalyticsScope(url: URL) {
       ? `${row.assignee_first || ''} ${row.assignee_last || ''}`.trim()
       : (row.assignee_email || null);
 
+    // "Time spent" = hours actually in an In Progress-type status, NOT total
+    // wall-clock resolution time. The statuses table's own category field
+    // doesn't make this distinction usably -- checked against real data and
+    // found "Waiting for L2" / "Pending with QA" / "Waiting for Customer" all
+    // classified as category:'in-progress' right alongside the real "In
+    // Progress" status (departments model hand-off queue statuses as board
+    // columns, not as a separate "paused" category), so counting by category
+    // would silently include time a ticket spent waiting on another team --
+    // exactly what this metric is supposed to exclude. Matching the literal
+    // status NAME instead: "In Progress" accounts for 15,769 of the real
+    // status-history transitions in this dataset (by far the dominant name
+    // used for actual active work); "Work in progress" is a 3-occurrence
+    // legacy synonym. Every "Waiting for X" / "Pending with X" name is
+    // deliberately excluded.
+    const inProgressHrs = Math.round(
+      Object.entries(statusTotals).reduce((sum, [name, hrs]) => sum + (IN_PROGRESS_STATUS_NAMES.has(name.trim().toLowerCase()) ? hrs : 0), 0) * 10
+    ) / 10;
+
     return {
       ...row, isDone, assigneeName,
       statusHist, assigneeHist, statusTotals,
       assignedTime, firstInProgress,
-      resolvedAtComputed, resolvedHrs, isBreached,
+      resolvedAtComputed, resolvedHrs, isBreached, inProgressHrs,
       slaBreachEvents: slaBreachEventsByIssue[row.id] || [],
     };
   });
@@ -1351,6 +1369,10 @@ async function loadTeamAnalyticsScope(url: URL) {
 // own catalog doesn't classify as category:'done' but that clearly ARE
 // terminal -- used only as a fallback when a ticket has no real resolvedAt.
 const DONE_STATUS_NAME_HINTS = new Set(['done', 'resolved', 'closed', 'approved', 'complete', 'completed', 'cancelled', 'canceled', 'rejected']);
+
+// See the inProgressHrs comment above for why this is a name allowlist, not
+// a category check.
+const IN_PROGRESS_STATUS_NAMES = new Set(['in progress', 'work in progress']);
 
 function buildTeamAnalyticsOverview(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
   const { issues } = scope;
@@ -1439,6 +1461,46 @@ function buildTeamAnalyticsAging(scope: Awaited<ReturnType<typeof loadTeamAnalyt
     byMember: Object.values(byMember).sort((a: any, b: any) => b.total - a.total),
     tickets: tickets.sort((a, b) => b.ageDays - a.ageDays),
   };
+}
+
+// Per-ticket time-spent list -- assignee x department x productType x hours
+// actually spent In Progress (see the inProgressHrs comment in
+// loadTeamAnalyticsScope for why this isn't just total resolution time).
+// Flat, not aggregated, so a real ticket's number can be checked directly
+// against its own history instead of trusting a rolled-up total.
+const TA_TIME_SPENT_CAP = 5000;
+function buildTeamAnalyticsTimeSpent(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>, q?: string) {
+  // A text search is applied BEFORE the cap below, not after -- otherwise a
+  // specific low-hours ticket (most of them, by definition) could never be
+  // found once the in-scope count exceeds the cap, since it would already
+  // have been dropped before the caller's search term ever got applied.
+  const query = (q || '').trim().toLowerCase();
+  const base = query
+    ? scope.issues.filter((r: any) =>
+        (r.cf_key || '').toLowerCase().includes(query) ||
+        (r.key || '').toLowerCase().includes(query) ||
+        (r.summary || '').toLowerCase().includes(query) ||
+        (r.assigneeName || '').toLowerCase().includes(query))
+    : scope.issues;
+  const sorted = [...base].sort((a: any, b: any) => b.inProgressHrs - a.inProgressHrs);
+  const truncated = sorted.length > TA_TIME_SPENT_CAP;
+  const tickets = sorted.slice(0, TA_TIME_SPENT_CAP).map((r: any) => ({
+    id: r.id, key: r.key, cfKey: r.cf_key, summary: r.summary, priority: r.priority,
+    status: r.status_name, isDone: r.isDone,
+    assigneeId: r.assigneeId, assignee: r.assigneeName || 'Unassigned',
+    department: r.current_department, productType: r.productType || null,
+    inProgressHrs: r.inProgressHrs, createdAt: r.createdAt,
+    // A ticket with zero logged status transitions (mostly Jira-migrated
+    // tickets that arrived already in their current status, with no
+    // transition ever recorded in this app) has no way to know when it
+    // actually entered its current status -- its ENTIRE age gets counted,
+    // which can read as an extreme outlier (checked against real data:
+    // the #1 ticket by this metric has 0 history rows and is simply 269
+    // days old, sitting in "In Progress" since creation). Flagged so the UI
+    // can tell that apart from a ticket with real, tracked in-progress time.
+    noHistory: r.statusHist.length === 0,
+  }));
+  return { totalTickets: scope.issues.length, totalMatched: base.length, truncated, cap: TA_TIME_SPENT_CAP, tickets };
 }
 
 function taGroupByCount(rows: any[], getKey: (r: any) => string | null | undefined) {
@@ -6688,6 +6750,9 @@ async function _handleJiraPgApi(
     }
     if (path === 'reports/team-analytics/aging') {
       return json(buildTeamAnalyticsAging(scope));
+    }
+    if (path === 'reports/team-analytics/time-spent') {
+      return json(buildTeamAnalyticsTimeSpent(scope, url.searchParams.get('q') || undefined));
     }
     return json({ error: 'Not found' }, 404);
   }

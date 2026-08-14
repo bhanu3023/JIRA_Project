@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
-import { BarChart3, TrendingUp, Users, Target, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle, LayoutGrid, Clock } from 'lucide-react';
+import { BarChart3, TrendingUp, Users, Target, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle, LayoutGrid, Clock, Timer, Search } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, LineChart, Line } from 'recharts';
 
 const WEEKLY_PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
@@ -46,13 +46,24 @@ export default function ReportsPage() {
 
   // Team Analytics — ported from the standalone Reports- app; ties into this
   // app's own issues/issue_history, grouped by current_department.
-  const [taSubTab, setTaSubTab] = useState<'overview' | 'aging'>('overview');
+  const [taSubTab, setTaSubTab] = useState<'overview' | 'aging' | 'time-spent'>('overview');
   const [taDepts, setTaDepts] = useState<string[]>([]); // [] = All
   const [taDateType, setTaDateType] = useState<'created' | 'updated' | 'none'>('created');
   const [taFilterOptions, setTaFilterOptions] = useState<{ depts: string[] }>({ depts: [] });
   const [taOverview, setTaOverview] = useState<any>(null);
   const [taAging, setTaAging] = useState<any>(null);
+  const [taTimeSpent, setTaTimeSpent] = useState<any>(null);
+  const [taTimeSpentSearch, setTaTimeSpentSearch] = useState('');
+  const [taTimeSpentSearchDebounced, setTaTimeSpentSearchDebounced] = useState('');
   const [taLoading, setTaLoading] = useState(false);
+
+  // Debounced separately from the other Team Analytics filters so a search
+  // term doesn't fire one request per keystroke — the dept/date filters
+  // above stay immediate since those only change on a discrete click/select.
+  useEffect(() => {
+    const t = setTimeout(() => setTaTimeSpentSearchDebounced(taTimeSpentSearch), 400);
+    return () => clearTimeout(t);
+  }, [taTimeSpentSearch]);
 
   useEffect(() => {
     if (!canViewPerformance || tab !== 'team-analytics') return;
@@ -65,12 +76,23 @@ export default function ReportsPage() {
   useEffect(() => {
     if (!canViewPerformance || tab !== 'team-analytics') return;
     setTaLoading(true);
-    const params = { dept: taDepts.join(',') || undefined, dateType: taDateType, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined };
+    const params = {
+      dept: taDepts.join(',') || undefined, dateType: taDateType, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined,
+      q: taSubTab === 'time-spent' ? (taTimeSpentSearchDebounced || undefined) : undefined,
+    };
     api.getTeamAnalytics(taSubTab, params)
-      .then((d: any) => { if (taSubTab === 'overview') setTaOverview(d); else setTaAging(d); })
-      .catch(() => { if (taSubTab === 'overview') setTaOverview(null); else setTaAging(null); })
+      .then((d: any) => {
+        if (taSubTab === 'overview') setTaOverview(d);
+        else if (taSubTab === 'aging') setTaAging(d);
+        else setTaTimeSpent(d);
+      })
+      .catch(() => {
+        if (taSubTab === 'overview') setTaOverview(null);
+        else if (taSubTab === 'aging') setTaAging(null);
+        else setTaTimeSpent(null);
+      })
       .finally(() => setTaLoading(false));
-  }, [canViewPerformance, tab, taSubTab, taDepts, taDateType, dateFrom, dateTo]);
+  }, [canViewPerformance, tab, taSubTab, taDepts, taDateType, dateFrom, dateTo, taTimeSpentSearchDebounced]);
 
   useEffect(() => {
     if (!canViewPerformance) return;
@@ -661,6 +683,7 @@ export default function ReportsPage() {
                 {[
                   { id: 'overview', label: 'Overview', icon: LayoutGrid },
                   { id: 'aging', label: 'Aging Tickets', icon: Clock },
+                  { id: 'time-spent', label: 'Time Spent', icon: Timer },
                 ].map(st => (
                   <button key={st.id} onClick={() => setTaSubTab(st.id as any)}
                     className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12.5px] font-medium transition-colors ${taSubTab === st.id ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
@@ -811,7 +834,7 @@ export default function ReportsPage() {
                     </div>
                   </div>
                 )
-              ) : (
+              ) : taSubTab === 'aging' ? (
                 !taAging ? (
                   <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
                     <Clock size={40} className="mb-3 text-gray-300" />
@@ -891,6 +914,76 @@ export default function ReportsPage() {
                       {taAging.tickets.length > 200 && (
                         <p className="px-6 py-3 text-[11.5px] text-gray-400 border-t border-gray-100">Showing oldest 200 of {taAging.tickets.length} open tickets.</p>
                       )}
+                    </div>
+                  </div>
+                )
+              ) : (
+                !taTimeSpent ? (
+                  <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+                    <Timer size={40} className="mb-3 text-gray-300" />
+                    <p className="text-[15px] font-semibold text-gray-500">No data</p>
+                  </div>
+                ) : (
+                  <div className="space-y-5">
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-3.5 flex items-start gap-3">
+                      <AlertTriangle size={16} className="text-amber-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-[12.5px] text-amber-800 leading-relaxed">
+                        <span className="font-semibold">Hours spent = time actually in an "In Progress" status only</span> — time the ticket sat in To Do, Waiting for X, Pending with X, etc. is excluded, since that's time waiting on someone else, not work being done. Assignee / Department / Product Type reflect the ticket's current values, not a per-segment breakdown — a ticket that changed hands or departments shows its full In-Progress total attributed to where it stands now.{' '}
+                        Rows marked <span className="font-semibold">No history</span> have zero logged status changes (mostly older Jira-migrated tickets) — their full age since creation is counted, since there's no record of exactly when they entered their current status.
+                      </p>
+                    </div>
+
+                    <div className="bg-white rounded-xl border border-gray-200 px-5 py-3.5 flex items-center gap-2">
+                      <Search size={15} className="text-gray-400 flex-shrink-0" />
+                      <input type="text" value={taTimeSpentSearch} onChange={e => setTaTimeSpentSearch(e.target.value)}
+                        placeholder="Filter by key, summary, or assignee…"
+                        className="flex-1 text-[12.5px] text-gray-700 focus:outline-none" />
+                    </div>
+
+                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                      <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                        <div>
+                          <h3 className="text-[14px] font-semibold text-gray-700">Time Spent — Highest First</h3>
+                          <p className="text-[11.5px] text-gray-400 mt-0.5">Scoped to the filters above.</p>
+                        </div>
+                        <span className="text-[12px] text-gray-400">{taTimeSpent.totalMatched} of {taTimeSpent.totalTickets} tickets in scope</span>
+                      </div>
+                      <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+                        <table className="w-full text-[12.5px]">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Key</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Summary</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Assignee</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Department</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Product Type</th>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Status</th>
+                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Hours Spent</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {taTimeSpent.tickets
+                              .slice(0, 300)
+                              .map((t: any) => (
+                                <tr key={t.id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-2 font-medium text-blue-600">{t.cfKey || t.key}</td>
+                                  <td className="px-4 py-2 text-gray-700 max-w-[280px] truncate">{t.summary}</td>
+                                  <td className="px-4 py-2 text-gray-500">{t.assignee}</td>
+                                  <td className="px-4 py-2 text-gray-500">{t.department}</td>
+                                  <td className="px-4 py-2 text-gray-500">{t.productType || '—'}</td>
+                                  <td className="px-4 py-2 text-gray-500">{t.status || '—'}</td>
+                                  <td className="px-4 py-2 text-right tabular-nums font-semibold text-gray-800">
+                                    {t.inProgressHrs}h
+                                    {t.noHistory && <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 text-amber-700 align-middle">No history</span>}
+                                  </td>
+                                </tr>
+                              ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className="px-6 py-3 text-[11.5px] text-gray-400 border-t border-gray-100">
+                        Showing top {Math.min(300, taTimeSpent.tickets.length)} of {taTimeSpent.totalMatched}{taTimeSpentSearch ? ' matching the search' : ' in scope'}, sorted by hours spent{taTimeSpent.truncated ? ` (server-capped at ${taTimeSpent.cap})` : ''}.
+                      </p>
                     </div>
                   </div>
                 )
