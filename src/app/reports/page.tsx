@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
-import { BarChart3, TrendingUp, Users, Target, Calendar, X } from 'lucide-react';
+import { BarChart3, TrendingUp, Users, Target, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, LineChart, Line } from 'recharts';
 
 export default function ReportsPage() {
@@ -18,6 +18,12 @@ export default function ReportsPage() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
 
+  // Resolution % / SLA % / SLA Breach % report — Migration/Dev x Content/Message/Email
+  const [rsDept, setRsDept] = useState('');        // '' = All (Migration + Dev combined)
+  const [rsProductType, setRsProductType] = useState(''); // '' = All (Content + Message + Email combined)
+  const [rsData, setRsData] = useState<any>(null);
+  const [rsLoading, setRsLoading] = useState(false);
+
   useEffect(() => {
     if (!canViewPerformance) return;
     setPerfLoading(true);
@@ -26,6 +32,20 @@ export default function ReportsPage() {
       .catch(() => setPerformance([]))
       .finally(() => setPerfLoading(false));
   }, [canViewPerformance, selectedSpace, dateFrom, dateTo]);
+
+  useEffect(() => {
+    if (!canViewPerformance || tab !== 'resolution-sla') return;
+    setRsLoading(true);
+    api.getResolutionSla({
+      dept: rsDept || undefined,
+      productType: rsProductType || undefined,
+      dateFrom: dateFrom || undefined,
+      dateTo: dateTo || undefined,
+    })
+      .then((d: any) => setRsData(d))
+      .catch(() => setRsData(null))
+      .finally(() => setRsLoading(false));
+  }, [canViewPerformance, tab, rsDept, rsProductType, dateFrom, dateTo]);
 
   useEffect(() => {
     if (selectedSpace) {
@@ -41,6 +61,7 @@ export default function ReportsPage() {
     { id: 'velocity',    label: 'Sprint Velocity',  icon: TrendingUp },
     { id: 'burndown',    label: 'Burndown Chart',    icon: Target },
     { id: 'performance', label: 'User Performance',  icon: Users },
+    { id: 'resolution-sla', label: 'Resolution & SLA', icon: ShieldCheck },
   ];
 
   return (
@@ -275,6 +296,180 @@ export default function ReportsPage() {
                   </table>
                 </div>
               </div>
+            </div>
+          )
+        )}
+
+        {/* Resolution % / SLA % / SLA Breach % */}
+        {tab === 'resolution-sla' && (
+          !canViewPerformance ? (
+            <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+              <ShieldCheck size={40} className="mb-3 text-gray-300" />
+              <p className="text-[15px] font-semibold text-gray-500">Access restricted</p>
+              <p className="text-[13px] text-gray-400 mt-1">Only admins and managers can view this report.</p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {/* Filters */}
+              <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <label className="text-[12px] font-medium text-gray-500">Department</label>
+                  <select value={rsDept} onChange={e => setRsDept(e.target.value)}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">All (Migration + Dev)</option>
+                    <option value="Migration">Migration</option>
+                    <option value="Dev">Dev</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-[12px] font-medium text-gray-500">Product Type</label>
+                  <select value={rsProductType} onChange={e => setRsProductType(e.target.value)}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">All (Content + Message + Email)</option>
+                    <option value="Content Migration">Content</option>
+                    <option value="Message Migration">Message</option>
+                    <option value="Email Migration">Email</option>
+                  </select>
+                </div>
+              </div>
+
+              {rsLoading ? (
+                <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
+                  <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+                </div>
+              ) : !rsData ? (
+                <div className="bg-white rounded-xl border border-gray-200 flex flex-col items-center justify-center py-20 text-center">
+                  <ShieldCheck size={40} className="mb-3 text-gray-300" />
+                  <p className="text-[15px] font-semibold text-gray-500">No data</p>
+                </div>
+              ) : (
+                <>
+                  {/* Overall — respects the filters above */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="bg-white rounded-xl border border-gray-200 p-5">
+                      <div className="flex items-center gap-2 mb-2 text-gray-500">
+                        <CheckCircle2 size={16} className="text-blue-500" />
+                        <span className="text-[12.5px] font-medium">Resolution %</span>
+                      </div>
+                      <p className="text-[26px] font-bold text-gray-900">{rsData.overall.resolutionPct}%</p>
+                      <p className="text-[11.5px] text-gray-400 mt-1">{rsData.overall.totalResolved} resolved of {rsData.overall.totalAssigned} assigned</p>
+                    </div>
+                    <div className="bg-white rounded-xl border border-gray-200 p-5">
+                      <div className="flex items-center gap-2 mb-2 text-gray-500">
+                        <ShieldCheck size={16} className="text-emerald-500" />
+                        <span className="text-[12.5px] font-medium">SLA %</span>
+                      </div>
+                      <p className="text-[26px] font-bold text-emerald-600">{rsData.overall.slaPct}%</p>
+                      <p className="text-[11.5px] text-gray-400 mt-1">{rsData.overall.withinSla} within SLA of {rsData.overall.slaTracked} tracked</p>
+                    </div>
+                    <div className="bg-white rounded-xl border border-gray-200 p-5">
+                      <div className="flex items-center gap-2 mb-2 text-gray-500">
+                        <AlertTriangle size={16} className="text-red-500" />
+                        <span className="text-[12.5px] font-medium">SLA Breach %</span>
+                      </div>
+                      <p className="text-[26px] font-bold text-red-600">{rsData.overall.breachPct}%</p>
+                      <p className="text-[11.5px] text-gray-400 mt-1">{rsData.overall.breached} breached of {rsData.overall.slaTracked} tracked</p>
+                    </div>
+                  </div>
+
+                  {rsData.overall.slaTracked < rsData.overall.totalResolved && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-3.5 flex items-start gap-3">
+                      <AlertTriangle size={16} className="text-amber-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-[12.5px] text-amber-800 leading-relaxed">
+                        <span className="font-semibold">SLA % / Breach % only cover {rsData.overall.slaTracked} of {rsData.overall.totalResolved} resolved tickets.</span>{' '}
+                        The rest were resolved before this app started tracking exact resolution timestamps (mostly tickets migrated from the original Jira import) and have no reliable data to check against an SLA target, so they're left out rather than guessed at. Resolution % above is unaffected — it only needs assigned vs. resolved, not timing. This tracked count will grow as more tickets are resolved going forward.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Breakdown matrix — always every Dept × Product Type combo, regardless of filters */}
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-100">
+                      <h3 className="text-[14px] font-semibold text-gray-700">Breakdown — Department × Product Type</h3>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">Always shows every combination, regardless of the filters above.</p>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[12.5px]">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Department</th>
+                            <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Product Type</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Assigned</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolved</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolution %</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">SLA %</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Breach %</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {['Migration', 'Dev'].flatMap(dept => ['Content Migration', 'Message Migration', 'Email Migration'].map(pt => {
+                            const combo = rsData.byDeptProductType?.[`${dept}::${pt}`];
+                            return (
+                              <tr key={`${dept}::${pt}`} className="hover:bg-gray-50">
+                                <td className="px-4 py-2.5 font-medium text-gray-700">{dept}</td>
+                                <td className="px-4 py-2.5 text-gray-600">{pt.replace(' Migration', '')}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums">{combo?.totalAssigned ?? 0}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums">{combo?.totalResolved ?? 0}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums font-medium">{combo?.resolutionPct ?? 0}%</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 font-medium">{combo?.slaPct ?? 0}%</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-red-600 font-medium">{combo?.breachPct ?? 0}%</td>
+                              </tr>
+                            );
+                          }))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Per-user — respects the Department / Product Type filters above */}
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-100">
+                      <h3 className="text-[14px] font-semibold text-gray-700">Per User</h3>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">Scoped to the Department / Product Type filters above.</p>
+                    </div>
+                    {(!rsData.perUser || rsData.perUser.length === 0) ? (
+                      <p className="text-[12.5px] text-gray-400 py-8 text-center">No assigned tickets in this scope.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-[12.5px]">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase text-[11px] tracking-wide">User</th>
+                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Assigned</th>
+                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolved</th>
+                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Resolution %</th>
+                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">SLA %</th>
+                              <th className="px-4 py-2.5 text-right font-semibold text-gray-500 uppercase text-[11px] tracking-wide">Breach %</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {rsData.perUser.map((u: any) => (
+                              <tr key={u.id} className="hover:bg-gray-50">
+                                <td className="px-4 py-2.5">
+                                  <div className="flex items-center gap-2.5">
+                                    <div className="w-7 h-7 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-[11px] font-bold flex-shrink-0">
+                                      {(u.name || '?').charAt(0).toUpperCase()}
+                                    </div>
+                                    <div>
+                                      <p className="text-[13px] font-medium text-gray-800">{u.name}</p>
+                                      <p className="text-[11px] text-gray-400">{u.email}</p>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="px-4 py-2.5 text-right tabular-nums">{u.totalAssigned}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums">{u.totalResolved}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums font-medium">{u.resolutionPct}%</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 font-medium">{u.slaPct}%</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-red-600 font-medium">{u.breachPct}%</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           )
         )}

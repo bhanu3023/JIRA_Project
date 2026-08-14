@@ -247,6 +247,15 @@ class ApiClient {
     const qs = params.toString();
     return this.request<any[]>(`/reports/user-performance${qs ? `?${qs}` : ''}`);
   }
+  getResolutionSla(params?: { dept?: string; productType?: string; dateFrom?: string; dateTo?: string }) {
+    const p = new URLSearchParams();
+    if (params?.dept)        p.set('dept',        params.dept);
+    if (params?.productType) p.set('productType', params.productType);
+    if (params?.dateFrom)    p.set('dateFrom',     params.dateFrom);
+    if (params?.dateTo)      p.set('dateTo',       params.dateTo);
+    const qs = p.toString();
+    return this.request<any>(`/reports/resolution-sla${qs ? `?${qs}` : ''}`);
+  }
 
   // Custom Fields
   getCustomFields() { return this.request<any[]>('/custom-fields'); }

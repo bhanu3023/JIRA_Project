@@ -5934,6 +5934,145 @@ async function _handleJiraPgApi(
     return json(results);
   }
 
+  // GET /reports/resolution-sla?dept=&productType=&dateFrom=&dateTo= — Resolution %,
+  // SLA %, and SLA Breach % per the formulas:
+  //   Resolution % = Resolved / Assigned * 100
+  //   SLA %        = Resolved-within-SLA / Resolved * 100
+  //   Breach %     = Resolved-outside-SLA / Resolved * 100  (= 100 - SLA %)
+  // dept/productType are OPTIONAL scoping filters (when omitted, scoped to the
+  // fixed Migration/Dev depts and Content/Message/Email product types this
+  // report is for). A ticket is "within SLA" using the exact same live
+  // breach check as the ticket detail page (computeSLAInstancesPure, reusing
+  // its resolvedAt-vs-due-time comparison), not a separate/different rule.
+  if (path === 'reports/resolution-sla' && method === 'GET') {
+    if (!isAdmin && currentUser?.role !== 'manager') return json({ error: 'Forbidden' }, 403);
+    const deptParam = url.searchParams.get('dept') || '';
+    const productTypeParam = url.searchParams.get('productType') || '';
+    const dateFrom = url.searchParams.get('dateFrom');
+    const dateTo = url.searchParams.get('dateTo');
+
+    const DEPTS = ['Migration', 'Dev'];
+    const PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+
+    const whereClauses: string[] = [`i.current_department IS NOT NULL`];
+    const params: any[] = [];
+    let idx = 1;
+    if (deptParam) { whereClauses.push(`LOWER(i.current_department) = LOWER($${idx++})`); params.push(deptParam); }
+    else { whereClauses.push(`LOWER(i.current_department) = ANY($${idx++}::text[])`); params.push(DEPTS.map(d => d.toLowerCase())); }
+    if (productTypeParam) { whereClauses.push(`i."productType" = $${idx++}`); params.push(productTypeParam); }
+    else { whereClauses.push(`i."productType" = ANY($${idx++}::text[])`); params.push(PRODUCT_TYPES); }
+    if (dateFrom) { whereClauses.push(`i."createdAt" >= $${idx++}`); params.push(new Date(dateFrom)); }
+    if (dateTo) { whereClauses.push(`i."createdAt" <= $${idx++}`); params.push(new Date(new Date(dateTo).setHours(23, 59, 59, 999))); }
+
+    const rows = await pool.query(
+      `SELECT i.id, i.key, i.cf_key, i.priority, i."assigneeId", i."spaceId", i.current_department, i."productType",
+              i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i."updatedAt", i."createdAt",
+              s.name AS status_name, s.category AS status_category
+       FROM issues i
+       LEFT JOIN statuses s ON s.id = i."statusId"
+       WHERE ${whereClauses.join(' AND ')}
+       LIMIT 20000`,
+      params
+    );
+
+    const spaceIds = Array.from(new Set(rows.rows.map((r: any) => r.spaceId).filter(Boolean)));
+    const policiesBySpace: Record<string, any[]> = {};
+    if (spaceIds.length) {
+      const polRows = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`, [spaceIds]);
+      for (const p of polRows.rows) (policiesBySpace[p.spaceId] ??= []).push(p);
+    }
+    const assigneeIds = Array.from(new Set(rows.rows.map((r: any) => r.assigneeId).filter(Boolean)));
+    const usersRes = assigneeIds.length
+      ? await pool.query(`SELECT id, "firstName", "lastName", email FROM users WHERE id = ANY($1::text[])`, [assigneeIds])
+      : { rows: [] as any[] };
+    const userById: Record<string, any> = Object.fromEntries(usersRes.rows.map((u: any) => [u.id, u]));
+
+    type Bucket = { totalAssigned: number; totalResolved: number; withinSla: number; breached: number };
+    const mkBucket = (): Bucket => ({ totalAssigned: 0, totalResolved: 0, withinSla: 0, breached: 0 });
+    const overall = mkBucket();
+    const byDept: Record<string, Bucket> = {};
+    const byProductType: Record<string, Bucket> = {};
+    const byDeptProductType: Record<string, Bucket> = {};
+    const byUser: Record<string, Bucket & { name: string; email: string }> = {};
+
+    for (const row of rows.rows) {
+      const dept = row.current_department;
+      const ptype = row.productType || 'Unknown';
+      const isDone = row.status_category === 'done';
+      const deptBucket = (byDept[dept] ??= mkBucket());
+      const typeBucket = (byProductType[ptype] ??= mkBucket());
+      const comboBucket = (byDeptProductType[`${dept}::${ptype}`] ??= mkBucket());
+      let userBucket: (Bucket & { name: string; email: string }) | null = null;
+      if (row.assigneeId) {
+        const u = userById[row.assigneeId];
+        const name = u ? (`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email) : 'Unknown';
+        userBucket = (byUser[row.assigneeId] ??= { ...mkBucket(), name, email: u?.email || '' });
+      }
+      overall.totalAssigned++; deptBucket.totalAssigned++; typeBucket.totalAssigned++; comboBucket.totalAssigned++;
+      if (userBucket) userBucket.totalAssigned++;
+      if (!isDone) continue;
+      overall.totalResolved++; deptBucket.totalResolved++; typeBucket.totalResolved++; comboBucket.totalResolved++;
+      if (userBucket) userBucket.totalResolved++;
+
+      // resolvedAt only gets stamped by this app's own PATCH handler (added
+      // this session) -- a ticket resolved via the original Jira migration
+      // import never had one written, for any of its resolved tickets
+      // (checked against this exact dataset: 7,473 resolved Migration
+      // tickets, only 1 has a real resolvedAt). Tried falling back to
+      // updatedAt for those, but that produces a WORSE number, not a better
+      // one: these tickets took months to migrate, while the currently
+      // configured SLA policies are a few hours, so nearly all of them
+      // read as "breached" purely because the SLA target being checked
+      // almost certainly didn't exist yet when that historical work
+      // actually happened -- a fabricated signal, not a real one. Only
+      // count a ticket toward SLA%/Breach% when it has a REAL resolvedAt;
+      // everything else is included in Resolution% (which only needs
+      // assigned-vs-resolved, no timing) but excluded here, and the exact
+      // count of how many are excluded is surfaced to the caller so this
+      // doesn't quietly look like 100% either way.
+      if (!row.resolvedAt) continue;
+      const policies = policiesBySpace[row.spaceId] || [];
+      const instances = computeSLAInstancesPure(
+        { ...row, status: { name: row.status_name, category: row.status_category } },
+        policies,
+        false
+      );
+      if (!instances.length) continue; // no SLA policy applies -- excluded from the SLA%/Breach% denominator, same as "N/A"
+      const primary = instances.find((x: any) => x.deptName && x.deptName.toLowerCase() === String(dept || '').toLowerCase()) || instances[0];
+      const bump = (b: Bucket) => { if (primary.isBreached) b.breached++; else b.withinSla++; };
+      bump(overall); bump(deptBucket); bump(typeBucket); bump(comboBucket);
+      if (userBucket) bump(userBucket);
+    }
+
+    const pct = (n: number, d: number) => d > 0 ? Math.round((n / d) * 1000) / 10 : 0;
+    // withinSla + breached is the sample that actually HAS a real, trustworthy
+    // resolvedAt -- not the same as totalResolved (which includes every
+    // historical ticket with no resolution timestamp at all). Naming this out
+    // explicitly so the UI can show "N of M resolved tickets have tracked
+    // timing" instead of silently dividing by totalResolved and implying a
+    // sample size that doesn't exist yet.
+    const finalize = (b: Bucket) => {
+      const slaTracked = b.withinSla + b.breached;
+      return {
+        ...b,
+        slaTracked,
+        resolutionPct: pct(b.totalResolved, b.totalAssigned),
+        slaPct: pct(b.withinSla, slaTracked),
+        breachPct: pct(b.breached, slaTracked),
+      };
+    };
+
+    return json({
+      overall: finalize(overall),
+      byDept: Object.fromEntries(Object.entries(byDept).map(([k, v]) => [k, finalize(v)])),
+      byProductType: Object.fromEntries(Object.entries(byProductType).map(([k, v]) => [k, finalize(v)])),
+      byDeptProductType: Object.fromEntries(Object.entries(byDeptProductType).map(([k, v]) => [k, finalize(v)])),
+      perUser: Object.entries(byUser)
+        .map(([id, v]) => ({ id, ...finalize(v) }))
+        .sort((a, b) => b.totalAssigned - a.totalAssigned),
+    });
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ Workflow Routes (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   // GET /workflows?spaceKey=XXX  Ã¢â€ ' return "virtual" workflow for the space
