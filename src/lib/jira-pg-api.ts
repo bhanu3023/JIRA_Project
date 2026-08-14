@@ -6044,6 +6044,28 @@ async function _handleJiraPgApi(
     const byDeptProductType: Record<string, Bucket> = {};
     const byUser: Record<string, Bucket & { name: string; email: string }> = {};
 
+    // Weekly breakdown by product type (Content/Message/Email only -- Dev
+    // essentially never sets this field, same reason it's excluded from
+    // "By Product Type" above) -- powers the "SLA Breach %" / "Resolution %"
+    // grouped-bar-per-week charts. Weeks are anchored to createdAt, starting
+    // at the selected dateFrom (or, with no range picked, the last 3 full
+    // weeks ending today) so week boundaries always line up with the date
+    // range filter shown on the page.
+    const WEEKLY_PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const weekRangeEnd = dateTo ? new Date(new Date(dateTo).setHours(23, 59, 59, 999)) : new Date();
+    const weekRangeStart = dateFrom ? new Date(dateFrom) : new Date(weekRangeEnd.getTime() - 21 * DAY_MS);
+    const totalDays = Math.max(1, Math.ceil((weekRangeEnd.getTime() - weekRangeStart.getTime()) / DAY_MS));
+    const weekCount = Math.min(12, Math.max(1, Math.ceil(totalDays / 7)));
+    const weekLabels = Array.from({ length: weekCount }, (_, i) => `Wk${i + 1}`);
+    const weekRanges = Array.from({ length: weekCount }, (_, i) => {
+      const from = new Date(weekRangeStart.getTime() + i * 7 * DAY_MS);
+      const to = new Date(Math.min(weekRangeStart.getTime() + (i + 1) * 7 * DAY_MS - 1, weekRangeEnd.getTime()));
+      return { from: from.toISOString(), to: to.toISOString() };
+    });
+    const byWeekProductType: Record<string, Bucket[]> = {};
+    for (const pt of WEEKLY_PRODUCT_TYPES) byWeekProductType[pt] = weekLabels.map(() => mkBucket());
+
     for (const row of rows.rows) {
       const dept = row.current_department;
       const ptype = row.productType || 'Unknown';
@@ -6057,11 +6079,19 @@ async function _handleJiraPgApi(
         const name = u ? (`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email) : 'Unknown';
         userBucket = (byUser[row.assigneeId] ??= { ...mkBucket(), name, email: u?.email || '' });
       }
+      let weekBucket: Bucket | null = null;
+      if (WEEKLY_PRODUCT_TYPES.includes(row.productType) && row.createdAt) {
+        const createdMs = new Date(row.createdAt).getTime();
+        const weekIdx = Math.floor((createdMs - weekRangeStart.getTime()) / (7 * DAY_MS));
+        if (weekIdx >= 0 && weekIdx < weekCount) weekBucket = byWeekProductType[row.productType][weekIdx];
+      }
       overall.totalAssigned++; deptBucket.totalAssigned++; typeBucket.totalAssigned++; comboBucket.totalAssigned++;
       if (userBucket) userBucket.totalAssigned++;
+      if (weekBucket) weekBucket.totalAssigned++;
       if (!isDone) continue;
       overall.totalResolved++; deptBucket.totalResolved++; typeBucket.totalResolved++; comboBucket.totalResolved++;
       if (userBucket) userBucket.totalResolved++;
+      if (weekBucket) weekBucket.totalResolved++;
 
       // resolvedAt only gets stamped by this app's own PATCH handler (added
       // this session) -- a ticket resolved via the original Jira migration
@@ -6091,6 +6121,7 @@ async function _handleJiraPgApi(
       const bump = (b: Bucket) => { if (primary.isBreached) b.breached++; else b.withinSla++; };
       bump(overall); bump(deptBucket); bump(typeBucket); bump(comboBucket);
       if (userBucket) bump(userBucket);
+      if (weekBucket) bump(weekBucket);
     }
 
     const pct = (n: number, d: number) => d > 0 ? Math.round((n / d) * 1000) / 10 : 0;
@@ -6119,6 +6150,13 @@ async function _handleJiraPgApi(
       perUser: Object.entries(byUser)
         .map(([id, v]) => ({ id, ...finalize(v) }))
         .sort((a, b) => b.totalAssigned - a.totalAssigned),
+      weekly: {
+        weekLabels,
+        weekRanges,
+        byProductType: Object.fromEntries(
+          WEEKLY_PRODUCT_TYPES.map(pt => [pt, byWeekProductType[pt].map(finalize)])
+        ),
+      },
     });
   }
 

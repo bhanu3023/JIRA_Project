@@ -7,6 +7,20 @@ import { useStore } from '@/store';
 import { BarChart3, TrendingUp, Users, Target, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, LineChart, Line } from 'recharts';
 
+const WEEKLY_PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+const WEEK_COLORS = ['#1E40AF', '#93C5FD', '#2563EB', '#60A5FA', '#1D4ED8', '#BFDBFE'];
+const fmtWeekDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+function buildWeeklyChartData(weekly: any, metricKey: 'breachPct' | 'resolutionPct') {
+  if (!weekly) return [];
+  return WEEKLY_PRODUCT_TYPES.map(pt => {
+    const row: Record<string, any> = { name: pt.replace(' Migration', '').toUpperCase() };
+    const buckets = weekly.byProductType?.[pt] || [];
+    (weekly.weekLabels || []).forEach((label: string, i: number) => { row[label] = buckets[i]?.[metricKey] ?? 0; });
+    return row;
+  });
+}
+
 export default function ReportsPage() {
   const { spaces, user } = useStore((s) => ({ spaces: s.spaces, user: s.user }));
   const canViewPerformance = user?.role === 'admin' || user?.role === 'manager';
@@ -385,6 +399,52 @@ export default function ReportsPage() {
                         <span className="font-semibold">SLA % / Breach % only cover {rsData.overall.slaTracked} of {rsData.overall.totalResolved} resolved tickets.</span>{' '}
                         The rest were resolved before this app started tracking exact resolution timestamps (mostly tickets migrated from the original Jira import) and have no reliable data to check against an SLA target, so they're left out rather than guessed at. Resolution % above is unaffected — it only needs assigned vs. resolved, not timing. This tracked count will grow as more tickets are resolved going forward.
                       </p>
+                    </div>
+                  )}
+
+                  {/* Weekly trend — Content/Message/Email × week-within-range, matching
+                      the reference "L2 Board" style grouped bar charts. Weeks are anchored
+                      to the date-range filter above (or the last 3 weeks if none is set). */}
+                  {rsData.weekly && rsData.weekly.weekLabels?.length > 0 && (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                      <div className="bg-white rounded-xl border border-gray-200 p-6">
+                        <h3 className="text-[14px] font-semibold text-gray-700 text-center mb-0.5">SLA Breach %</h3>
+                        <p className="text-[11px] text-gray-400 text-center mb-4">
+                          {rsData.weekly.weekRanges.map((r: any, i: number) => `${rsData.weekly.weekLabels[i]}: ${fmtWeekDate(r.from)}–${fmtWeekDate(r.to)}`).join('   ·   ')}
+                        </p>
+                        <ResponsiveContainer width="100%" height={320}>
+                          <BarChart data={buildWeeklyChartData(rsData.weekly, 'breachPct')} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                            <XAxis dataKey="name" tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
+                            <YAxis unit="%" tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
+                            <Tooltip formatter={(v: any) => `${v}%`} contentStyle={{ borderRadius: 8, border: '1px solid #E5E7EB', fontSize: 12 }} />
+                            <Legend wrapperStyle={{ fontSize: 12, paddingTop: 12 }} />
+                            {rsData.weekly.weekLabels.map((label: string, i: number) => (
+                              <Bar key={label} dataKey={label} name={label} fill={WEEK_COLORS[i % WEEK_COLORS.length]} radius={[3, 3, 0, 0]}>
+                              </Bar>
+                            ))}
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <div className="bg-white rounded-xl border border-gray-200 p-6">
+                        <h3 className="text-[14px] font-semibold text-gray-700 text-center mb-0.5">Resolution %</h3>
+                        <p className="text-[11px] text-gray-400 text-center mb-4">
+                          {rsData.weekly.weekRanges.map((r: any, i: number) => `${rsData.weekly.weekLabels[i]}: ${fmtWeekDate(r.from)}–${fmtWeekDate(r.to)}`).join('   ·   ')}
+                        </p>
+                        <ResponsiveContainer width="100%" height={320}>
+                          <BarChart data={buildWeeklyChartData(rsData.weekly, 'resolutionPct')} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                            <XAxis dataKey="name" tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
+                            <YAxis unit="%" domain={[0, 110]} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
+                            <Tooltip formatter={(v: any) => `${v}%`} contentStyle={{ borderRadius: 8, border: '1px solid #E5E7EB', fontSize: 12 }} />
+                            <Legend wrapperStyle={{ fontSize: 12, paddingTop: 12 }} />
+                            {rsData.weekly.weekLabels.map((label: string, i: number) => (
+                              <Bar key={label} dataKey={label} name={label} fill={WEEK_COLORS[i % WEEK_COLORS.length]} radius={[3, 3, 0, 0]}>
+                              </Bar>
+                            ))}
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
                     </div>
                   )}
 
