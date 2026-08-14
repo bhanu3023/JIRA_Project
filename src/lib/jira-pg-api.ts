@@ -34,6 +34,20 @@ pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'acti
 pool.query(`UPDATE users SET status='active' WHERE status IS NULL OR status='' OR (status='active' AND "isActive"=true)`).catch(() => {});
 pool.query(`UPDATE users SET status='inactive' WHERE "isActive"=false AND status='active'`).catch(() => {});
 pool.query(`WITH first_dept AS (SELECT DISTINCT ON (issue_id) issue_id, from_dept FROM issue_dept_transitions WHERE from_dept != '' ORDER BY issue_id, moved_at ASC) UPDATE issues i SET original_dept = COALESCE((SELECT fd.from_dept FROM first_dept fd WHERE fd.issue_id = i.id), i.current_department) WHERE i.original_dept IS NULL`).catch(() => {});
+// Backfill: existing notification rows created before every call site was
+// fixed to use cf_key still show the internal key (e.g. "L1BOAR-15259") in
+// their title/message/issueKey -- new notifications are correct going
+// forward, but this one-time pass corrects what's already stored. Runs
+// every startup but is a no-op once caught up (the WHERE clause only
+// matches rows still on the internal key).
+pool.query(`
+  UPDATE notifications n
+  SET "issueKey" = i.cf_key,
+      title = REPLACE(n.title, n."issueKey", i.cf_key),
+      message = CASE WHEN n.message IS NOT NULL THEN REPLACE(n.message, n."issueKey", i.cf_key) ELSE n.message END
+  FROM issues i
+  WHERE i.key = n."issueKey" AND i.cf_key IS NOT NULL AND i.cf_key <> '' AND n."issueKey" IS DISTINCT FROM i.cf_key
+`).catch(() => {});
 
 // Ensure queue_closed_tickets exists at startup (needed by Sent/Watching query)
 pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`).catch(() => {});
