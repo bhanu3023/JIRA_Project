@@ -3915,13 +3915,28 @@ function Dropdown({ children, onClose, width = 'w-52', align = 'left-0' }: { chi
     const parent = anchorRef.current?.parentElement;
     if (parent) {
       const rect = parent.getBoundingClientRect();
+      // Tailwind width classes actually used for this component's `width`
+      // prop -- needed as real pixel values below since a class name alone
+      // can't be measured before the panel has actually rendered anywhere.
+      const WIDTH_PX: Record<string, number> = { 'w-44': 176, 'w-52': 208, 'w-56': 224, 'w-60': 240, 'w-72': 288 };
+      const widthPx = WIDTH_PX[width] ?? 288;
       const isRight = align === 'right-0';
+      let left = isRight ? rect.right - widthPx : rect.left;
+      // Clamp to the viewport. A left-aligned panel expands rightward from
+      // the trigger's own left edge with no bound -- fine for a trigger with
+      // room to its right, but the Assignee/Reporter properties sit in a
+      // narrow right-hand sidebar where the trigger itself is already close
+      // to the right edge, so a 288px-wide panel ran off the visible area
+      // entirely instead of just shifting left to stay on-screen.
+      const margin = 8;
+      left = Math.min(left, window.innerWidth - widthPx - margin);
+      left = Math.max(left, margin);
       setPos({
         top: rect.bottom + 4,
-        left: isRight ? rect.right - 224 : rect.left,
+        left,
       });
     }
-  }, [align]);
+  }, [align, width]);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
