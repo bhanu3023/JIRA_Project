@@ -5653,10 +5653,37 @@ async function _handleJiraPgApi(
 
   const issueLinksPost = path.match(/^issues\/([^/]+)\/links$/);
   if (issueLinksPost && method === 'POST') {
-    const sourceKey = issueLinksPost[1].toUpperCase();
+    let sourceKey = issueLinksPost[1].toUpperCase();
     const body = await readJson(req);
-    const targetKey = String(body.targetKey || '').toUpperCase();
+    let targetKey = String(body.targetKey || '').toUpperCase();
     if (!targetKey) return json({ error: 'targetKey required' }, 400);
+
+    // Every issue is shown to users ONLY by its CF-prefixed display key (URLs,
+    // breadcrumbs, search results, the ticket title itself) -- the "key"
+    // column here (sourceKey/targetKey) is the internal Prisma key underneath
+    // it, which the user never sees anywhere. The "Search issues" box's own
+    // dropdown returns the correct internal key when a result is clicked, but
+    // typing a CF-key directly and hitting Enter without picking a result
+    // (or a stale/typo'd URL param) sent that CF-key straight through as
+    // sourceKey/targetKey unresolved -- silently creating a link row that
+    // could never match a real issue on either side, so it just vanished
+    // instead of appearing (or erroring). Resolve CF- keys the same way
+    // every other route in this file already does before using them.
+    if (sourceKey.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [sourceKey]);
+      if (cfRow.rows[0]) sourceKey = cfRow.rows[0].key;
+    }
+    if (targetKey.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [targetKey]);
+      if (cfRow.rows[0]) targetKey = cfRow.rows[0].key;
+    }
+    const [sourceExists, targetExists] = await Promise.all([
+      pool.query(`SELECT 1 FROM issues WHERE key = $1 LIMIT 1`, [sourceKey]),
+      pool.query(`SELECT 1 FROM issues WHERE key = $1 LIMIT 1`, [targetKey]),
+    ]);
+    if (!sourceExists.rows[0]) return json({ error: `Issue ${issueLinksPost[1]} not found` }, 404);
+    if (!targetExists.rows[0]) return json({ error: `Issue ${body.targetKey} not found` }, 404);
+    if (sourceKey === targetKey) return json({ error: 'An issue cannot be linked to itself' }, 400);
 
     // Upsert so duplicate calls are safe
     const link = await db.issueLink.upsert({

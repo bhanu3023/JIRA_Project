@@ -1583,9 +1583,9 @@ export default function IssueDetailPage() {
                             ) : linkSearchResults.length === 0 ? (
                               <div className="px-4 py-3 text-[12px] text-gray-400">No issues found</div>
                             ) : linkSearchResults.map((r: any) => (
-                              <button key={r.key} onMouseDown={() => { setLinkTarget(r.key); setLinkSearchResults([]); setShowLinkDropdown(false); }}
+                              <button key={r.key} onMouseDown={() => { setLinkTarget(r.cfKey ?? r.key); setLinkSearchResults([]); setShowLinkDropdown(false); }}
                                 className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-blue-50 text-left transition-colors">
-                                <span className="font-mono text-[11px] font-bold text-blue-600 flex-shrink-0">{r.key}</span>
+                                <span className="font-mono text-[11px] font-bold text-blue-600 flex-shrink-0">{r.cfKey ?? r.key}</span>
                                 <span className="text-[12.5px] text-gray-700 truncate">{r.summary}</span>
                                 <span className="ml-auto text-[10px] text-white px-1.5 py-0.5 rounded flex-shrink-0"
                                   style={{ backgroundColor: r.status ? resolveStatusColor(r.status) : '#6B7280' }}>{r.status?.name}</span>
