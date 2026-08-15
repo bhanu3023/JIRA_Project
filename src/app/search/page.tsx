@@ -8,6 +8,7 @@ import { Search } from 'lucide-react';
 import { formatDate, getIssueStatus } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { PriorityIcon } from '@/components/ui/PriorityIcon';
+import DotLoader from '@/components/ui/DotLoader';
 
 function extractIssueKey(input: string): string | null {
   const urlMatch = input.match(/\/issues\/([A-Za-z0-9_-]+(?:-[A-Za-z0-9]+)*)(?:\?|#|$)/);
@@ -48,48 +49,42 @@ function SearchInner() {
     }
   };
 
+  // Re-runs whenever ?q= changes, not just once on mount -- this page has no
+  // search box of its own (see below), it only ever gets a new query via the
+  // header's search bar navigating here again with a different ?q=. With a
+  // mount-only effect, staying on this page and searching again from the
+  // header silently kept showing the FIRST query's stale results forever.
   useEffect(() => {
+    setQuery(issueKey || rawQuery);
     if (issueKey) {
       router.replace(`/issues/${issueKey}`);
       return;
     }
-    if (query) handleSearch(query);
-  }, []);
+    if (rawQuery) handleSearch(rawQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawQuery]);
 
   return (
     <div className="space-y-4">
-      {/* Search Bar */}
-      <div className="flex gap-2 max-w-2xl">
-        <div className="flex-1 relative">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            type="text"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handleSearch()}
-            className="w-full border border-gray-300 rounded-md pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="Search tickets..."
-            autoFocus
-          />
-        </div>
-        <button
-          onClick={() => handleSearch()}
-          disabled={loading}
-          className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50"
-        >
-          {loading ? 'Searching...' : 'Search'}
-        </button>
-      </div>
+      {/* No search box here by design -- the header's own "Search anything…"
+          bar is the single place to type a query; this page previously had a
+          second, separately-focused search input right below it, which read
+          as a second search bar popping up right after using the first one.
+          Refine the query from the header instead of here. */}
 
       {/* Results header */}
-      {searched && (
+      {searched && !loading && (
         <p className="text-sm text-gray-500">
           {total > 0 ? `${total} result${total === 1 ? '' : 's'} for "${query}"` : `No results for "${query}"`}
         </p>
       )}
 
+      {/* Without the removed search box's "Searching…" button label, loading
+          had no visible indicator at all -- the page just sat blank. */}
+      {loading && <DotLoader className="py-16" />}
+
       {/* Results Table */}
-      {results.length > 0 && (
+      {!loading && results.length > 0 && (
         <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
           <table className="w-full">
             <thead className="bg-gray-50 border-b border-gray-200">
