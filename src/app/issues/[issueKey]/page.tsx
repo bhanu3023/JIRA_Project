@@ -134,7 +134,18 @@ export default function IssueDetailPage() {
   const [detailsExpanded, setDetailsExpanded] = useState(true);
   const [slaExpanded, setSlaExpanded] = useState(true);
   const [slaNow, setSlaNow] = useState(() => Date.now());
-  const [sidebarWidth, setSidebarWidth] = useState(280);
+  // Wider default (was 280 -- cramped enough that Priority/Due Date/Product
+  // Type/etc. values wrapped awkwardly) and persisted across tickets/reloads
+  // via localStorage -- previously this reset to the default every single
+  // page load, so the sidebar's width looked inconsistent from one ticket
+  // view to the next depending on whether it happened to still be dragged
+  // wide from earlier in the same session.
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    if (typeof window === 'undefined') return 380;
+    const saved = Number(localStorage.getItem('issueSidebarWidth'));
+    return saved >= 200 && saved <= 500 ? saved : 380;
+  });
+  const latestSidebarWidthRef = useRef(sidebarWidth);
   const [watching, setWatching] = useState(false);
   const [watchCount, setWatchCount] = useState(0);
   const isDragging = useRef(false);
@@ -2191,6 +2202,7 @@ export default function IssueDetailPage() {
               const delta = dragStartX.current - ev.clientX;
               const newWidth = Math.min(500, Math.max(200, dragStartWidth.current + delta));
               setSidebarWidth(newWidth);
+              latestSidebarWidthRef.current = newWidth;
             };
             const onUp = () => {
               isDragging.current = false;
@@ -2198,6 +2210,7 @@ export default function IssueDetailPage() {
               document.body.style.userSelect = '';
               document.removeEventListener('mousemove', onMove);
               document.removeEventListener('mouseup', onUp);
+              try { localStorage.setItem('issueSidebarWidth', String(latestSidebarWidthRef.current)); } catch { /* non-critical */ }
             };
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup', onUp);
