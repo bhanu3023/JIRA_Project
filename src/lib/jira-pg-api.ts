@@ -2841,7 +2841,8 @@ async function _handleJiraPgApi(
         `WITH merged AS (${mergedSourceSql}),
          dedup AS (SELECT issue_id, MAX(closed_at) AS closed_at, MAX(dept_name) AS dept_name FROM merged GROUP BY issue_id)
          SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
-                i."createdAt", i."updatedAt", d.closed_at, d.dept_name,
+                i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at, i.jira_sla_breached,
+                d.closed_at, d.dept_name,
                 s.name AS status_name, s.color AS status_color, s.category AS status_category,
                 i.dept_sla_log, i.dept_assignees, i.dept_statuses,
                 CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
@@ -2857,6 +2858,21 @@ async function _handleJiraPgApi(
         `WITH merged AS (${mergedSourceSql}) SELECT COUNT(DISTINCT issue_id) FROM merged`,
         [spaceId, dept, targetUserId]
       );
+      // "Breached" on this list was always showing "No" for every ticket --
+      // the response never included any breach field at all, so the
+      // frontend's `issue.sla_breached ? 'Yes' : 'No'` check was reading
+      // `undefined` every time. Compute it the same way the resolution-sla
+      // report and Team Analytics do: live via computeSLAInstancesPure when
+      // there's a real resolvedAt and a matching policy (using THIS dept's
+      // own snapshot, not the ticket's current global department, since
+      // "Worked on — Dev" should judge breach from Dev's own perspective
+      // even after the ticket has since moved elsewhere), falling back to
+      // the historical jira_sla_breached flag otherwise.
+      const slaPoliciesRes = await pool.query(
+        `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
+        [spaceId]
+      );
+      const slaPolicies = slaPoliciesRes.rows;
       // "Worked on — Dev" showed the ticket's CURRENT global assignee, which is
       // whoever holds it now (possibly in a different dept after further
       // transfers) — not who was actually assigned while it sat in THIS dept.
@@ -2885,10 +2901,23 @@ async function _handleJiraPgApi(
         const withStatus = statusSnap
           ? { ...rest, status_name: statusSnap.name, status_color: statusSnap.color, status_category: statusSnap.category }
           : rest;
-        if (snap && snap.id) {
-          return { ...withStatus, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
+
+        let slaBreached = false;
+        if (r.resolvedAt) {
+          const instances = computeSLAInstancesPure(
+            { ...withStatus, current_department: r.dept_name, status: { name: withStatus.status_name, category: withStatus.status_category } },
+            slaPolicies,
+            false
+          );
+          slaBreached = instances.length ? instances.some((x: any) => x.isBreached) : (typeof r.jira_sla_breached === 'boolean' && r.jira_sla_breached);
+        } else if (typeof r.jira_sla_breached === 'boolean') {
+          slaBreached = r.jira_sla_breached;
         }
-        return withStatus;
+
+        if (snap && snap.id) {
+          return { ...withStatus, sla_breached: slaBreached, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
+        }
+        return { ...withStatus, sla_breached: slaBreached };
       });
       return json({ issues, total: parseInt(countRes.rows[0].count) });
     } catch (e: any) {
