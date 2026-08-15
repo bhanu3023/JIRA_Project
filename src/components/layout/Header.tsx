@@ -306,7 +306,11 @@ export default function Header() {
             <>
               <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)} />
               <div className="absolute right-0 top-full z-50 mt-2 max-h-96 w-80 snap-y snap-proximity overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
-                <div className="sticky top-0 flex items-center justify-between rounded-t-lg border-b border-gray-200 bg-white px-4 py-3">
+                {/* z-10 is load-bearing: without it, a scrolled notification item (later
+                    in DOM order than this header, so painted after it by default) renders
+                    ON TOP of this sticky header instead of underneath it -- its title text
+                    visibly bled above/through "Notifications" once the list was scrolled. */}
+                <div className="sticky top-0 z-10 flex items-center justify-between rounded-t-lg border-b border-gray-200 bg-white px-4 py-3">
                   <span className="text-[15px] font-semibold text-jira-dark">Notifications</span>
                   <button
                     onClick={() => markAllNotificationsRead()}
