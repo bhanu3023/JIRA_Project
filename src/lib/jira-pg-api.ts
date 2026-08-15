@@ -1484,22 +1484,7 @@ async function loadTeamAnalyticsScope(url: URL) {
     const firstInProgressEntry = statusHist.find((h: any) => h.newValue === 'In Progress');
     const firstInProgress = firstInProgressEntry ? new Date(firstInProgressEntry.createdAt) : null;
 
-    // Hours spent in each status name, walking the sorted transition list;
-    // the open tail (still in the current status) counts up to resolvedAt
-    // for a done ticket, or up to now for one still open.
-    const statusTotals: Record<string, number> = {};
-    let cursor = createdMs;
-    let cursorStatus = statusHist[0]?.oldValue || row.status_name || 'Unknown';
-    for (const h of statusHist) {
-      const t = new Date(h.createdAt).getTime();
-      const hrs = (t - cursor) / 3_600_000;
-      if (hrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + hrs;
-      cursor = t;
-      cursorStatus = h.newValue;
-    }
-    const tailEnd = isDone && row.resolvedAt ? new Date(row.resolvedAt).getTime() : now;
-    const tailHrs = (tailEnd - cursor) / 3_600_000;
-    if (tailHrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + tailHrs;
+    const { inProgressHrs } = computeInProgressHours(statusHist, row.createdAt, isDone, row.resolvedAt, row.status_name);
 
     // resolvedAt only gets stamped by this app's own PATCH handler -- a
     // ticket resolved via the original Jira migration import never had one
@@ -1532,27 +1517,9 @@ async function loadTeamAnalyticsScope(url: URL) {
       ? `${row.assignee_first || ''} ${row.assignee_last || ''}`.trim()
       : (row.assignee_email || null);
 
-    // "Time spent" = hours actually in an In Progress-type status, NOT total
-    // wall-clock resolution time. The statuses table's own category field
-    // doesn't make this distinction usably -- checked against real data and
-    // found "Waiting for L2" / "Pending with QA" / "Waiting for Customer" all
-    // classified as category:'in-progress' right alongside the real "In
-    // Progress" status (departments model hand-off queue statuses as board
-    // columns, not as a separate "paused" category), so counting by category
-    // would silently include time a ticket spent waiting on another team --
-    // exactly what this metric is supposed to exclude. Matching the literal
-    // status NAME instead: "In Progress" accounts for 15,769 of the real
-    // status-history transitions in this dataset (by far the dominant name
-    // used for actual active work); "Work in progress" is a 3-occurrence
-    // legacy synonym. Every "Waiting for X" / "Pending with X" name is
-    // deliberately excluded.
-    const inProgressHrs = Math.round(
-      Object.entries(statusTotals).reduce((sum, [name, hrs]) => sum + (IN_PROGRESS_STATUS_NAMES.has(name.trim().toLowerCase()) ? hrs : 0), 0) * 10
-    ) / 10;
-
     return {
       ...row, isDone, assigneeName,
-      statusHist, assigneeHist, statusTotals,
+      statusHist, assigneeHist,
       assignedTime, firstInProgress,
       resolvedAtComputed, resolvedHrs, isBreached, inProgressHrs,
       slaBreachEvents: slaBreachEventsByIssue[row.id] || [],
@@ -1570,6 +1537,41 @@ const DONE_STATUS_NAME_HINTS = new Set(['done', 'resolved', 'closed', 'approved'
 // See the inProgressHrs comment above for why this is a name allowlist, not
 // a category check.
 const IN_PROGRESS_STATUS_NAMES = new Set(['in progress', 'work in progress']);
+
+// Hours actually spent in an "In Progress"-type status, NOT total wall-clock
+// age or resolution time -- see the IN_PROGRESS_STATUS_NAMES comment above
+// for why this matches literal status names rather than the category field.
+// Walks the sorted status_history transition list (field:'status' rows,
+// oldest first); the open tail (still in the current status) counts up to
+// resolvedAt for a done ticket, or up to now for one still open. Shared by
+// Team Analytics' Time Spent view and GET /issues (opt-in via
+// includeTimeSpent) so both compute this identically.
+function computeInProgressHours(
+  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+  createdAt: Date | string,
+  isDone: boolean,
+  resolvedAt: Date | string | null,
+  currentStatusName: string | null,
+): { inProgressHrs: number; noHistory: boolean } {
+  const createdMs = new Date(createdAt).getTime();
+  const statusTotals: Record<string, number> = {};
+  let cursor = createdMs;
+  let cursorStatus = statusHist[0]?.oldValue || currentStatusName || 'Unknown';
+  for (const h of statusHist) {
+    const t = new Date(h.createdAt).getTime();
+    const hrs = (t - cursor) / 3_600_000;
+    if (hrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + hrs;
+    cursor = t;
+    cursorStatus = h.newValue;
+  }
+  const tailEnd = isDone && resolvedAt ? new Date(resolvedAt).getTime() : Date.now();
+  const tailHrs = (tailEnd - cursor) / 3_600_000;
+  if (tailHrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + tailHrs;
+  const inProgressHrs = Math.round(
+    Object.entries(statusTotals).reduce((sum, [name, hrs]) => sum + (IN_PROGRESS_STATUS_NAMES.has(name.trim().toLowerCase()) ? hrs : 0), 0) * 10
+  ) / 10;
+  return { inProgressHrs, noHistory: statusHist.length === 0 };
+}
 
 function buildTeamAnalyticsOverview(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
   const { issues } = scope;
@@ -3271,6 +3273,11 @@ async function _handleJiraPgApi(
     // together with a dept filter, since that table's dept column is what
     // scopes it; only applied in the dept-scoped branch below.
     const workedRange   = url.searchParams.get('workedRange');
+    // Opt-in: attaches inProgressHrs (hours actually spent in an "In
+    // Progress"-type status, not total ticket age) to every returned issue --
+    // requires an extra issue_history query, so only paid by callers that
+    // actually render it (the Filters page's "Time Spent" column).
+    const includeTimeSpentParam = url.searchParams.get('includeTimeSpent') === 'true';
     const excludeDone   = url.searchParams.get('excludeDone') === 'true';
     const page  = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
     const limit = Math.min(2000, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10)));
@@ -4196,6 +4203,24 @@ async function _handleJiraPgApi(
         enrichedIssues = enrichedIssues.slice(sliceStart, sliceStart + limit);
       }
     } catch { /* sla breach is best-effort */ }
+
+    if (includeTimeSpentParam && enrichedIssues.length) {
+      try {
+        const histIds = enrichedIssues.map((i: any) => i.id);
+        const histRows = await pool.query(
+          `SELECT "issueId", "oldValue", "newValue", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'status' ORDER BY "issueId", "createdAt" ASC`,
+          [histIds]
+        );
+        const histByIssue: Record<string, any[]> = {};
+        for (const h of histRows.rows) (histByIssue[h.issueId] ??= []).push(h);
+        enrichedIssues = enrichedIssues.map((i: any) => {
+          const statusHist = histByIssue[i.id] || [];
+          const isDone = i.status?.category === 'done';
+          const { inProgressHrs, noHistory } = computeInProgressHours(statusHist, i.createdAt, isDone, i.resolvedAt, i.status?.name || null);
+          return { ...i, inProgressHrs, noHistory };
+        });
+      } catch { /* time-spent is best-effort -- never block the list on it */ }
+    }
 
     return json({
       issues: enrichedIssues,
