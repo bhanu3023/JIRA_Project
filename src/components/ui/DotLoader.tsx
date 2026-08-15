@@ -1,22 +1,18 @@
 /**
- * DotLoader — three bouncing blue dots used as a loading indicator.
- * Uses inline style for animation-delay so Tailwind's `animate-bounce`
- * shorthand doesn't override it.
+ * DotLoader — thin spinning-ring loading indicator (kept the original name
+ * since it's imported across 9 files; only the visual changed, not the API).
+ * Replaced the old three-large-bouncing-dots animation, which read as
+ * playful/informal for an enterprise ticketing tool, with the same subtle
+ * spinner convention used by most professional web apps (GitHub, Linear,
+ * Jira itself).
  */
 export default function DotLoader({ className = '' }: { className?: string }) {
   return (
-    <div className={`flex items-center justify-center gap-2 ${className}`}>
-      <span
-        className="h-2.5 w-2.5 rounded-full bg-blue-500 animate-bounce"
-        style={{ animationDelay: '-0.3s' }}
-      />
-      <span
-        className="h-2.5 w-2.5 rounded-full bg-blue-500 animate-bounce"
-        style={{ animationDelay: '-0.15s' }}
-      />
-      <span
-        className="h-2.5 w-2.5 rounded-full bg-blue-500 animate-bounce"
-        style={{ animationDelay: '0s' }}
+    <div className={`flex items-center justify-center ${className}`}>
+      <div
+        className="h-6 w-6 rounded-full border-[2.5px] border-gray-200 border-t-blue-600 animate-spin"
+        role="status"
+        aria-label="Loading"
       />
     </div>
   );
