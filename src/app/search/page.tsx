@@ -114,7 +114,11 @@ function SearchInner() {
                       </Link>
                     </td>
                     <td className="px-4 py-2.5 text-sm text-gray-900 truncate max-w-md">{issue.summary}</td>
-                    <td className="px-4 py-2.5 text-xs text-gray-500">{issue.spaceKey}</td>
+                    {/* The raw internal space key (e.g. "TESTIN") means nothing to a
+                        user -- every other space reference in the app (nav sidebar,
+                        breadcrumbs) shows the friendly name ("CloudFuze Board"
+                        for that same key) instead. */}
+                    <td className="px-4 py-2.5 text-xs text-gray-500">{issue.spaceName || issue.spaceKey}</td>
                     <td className="px-4 py-2.5">
                       <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium text-white" style={{ backgroundColor: st.color }}>
                         {st.name}
