@@ -1334,6 +1334,31 @@ async function loadTeamAnalyticsScope(url: URL) {
   if (depts && depts.length) { whereClauses.push(`i.current_department = ANY($${idx++}::text[])`); params.push(depts); }
   if (productTypeParam) { whereClauses.push(`i."productType" = $${idx++}`); params.push(productTypeParam); }
 
+  // Queue-membership map (custom_queues.queues[].name -> memberIds), matched
+  // case-insensitively against current_department. Selecting a department
+  // should only surface tickets belonging to people who actually have access
+  // to that queue, not every ticket carrying the department label -- checked
+  // against real data and found MOST department labels (Infra, QA, Pre-Sales,
+  // SalesOps, etc.) have no configured queue at all, so those keep the old
+  // department-only match; only a department with a real queue config gets
+  // the additional assignee-membership restriction below.
+  let deptMemberSets: Record<string, Set<string>> | null = null;
+  if (depts && depts.length) {
+    const cq = await pool.query(`SELECT queues FROM custom_queues`);
+    const sets: Record<string, Set<string>> = {};
+    for (const row of cq.rows) {
+      const queues = Array.isArray(row.queues) ? row.queues : [];
+      for (const q of queues) {
+        const name = String(q?.name || '').trim().toLowerCase();
+        if (!name) continue;
+        const members: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+        const set = (sets[name] ??= new Set<string>());
+        for (const m of members) set.add(m);
+      }
+    }
+    deptMemberSets = sets;
+  }
+
   const toEnd = dateTo ? new Date(new Date(dateTo).setHours(23, 59, 59, 999)) : null;
   const fromStart = dateFrom ? new Date(dateFrom) : null;
   if (dateType === 'none') {
@@ -1362,7 +1387,14 @@ async function loadTeamAnalyticsScope(url: URL) {
      LIMIT 100000`,
     params
   );
-  const issues = rows.rows;
+  const issues = deptMemberSets
+    ? rows.rows.filter((r: any) => {
+        const deptKey = String(r.current_department || '').trim().toLowerCase();
+        const memberSet = deptMemberSets![deptKey];
+        if (!memberSet || !memberSet.size) return true; // no configured queue for this dept -- keep department-only match
+        return !!r.assigneeId && memberSet.has(r.assigneeId);
+      })
+    : rows.rows;
   const issueIds = issues.map((r: any) => r.id);
 
   const historyRows = issueIds.length
@@ -1610,6 +1642,7 @@ function buildTeamAnalyticsTimeSpent(scope: Awaited<ReturnType<typeof loadTeamAn
     assigneeId: r.assigneeId, assignee: r.assigneeName || 'Unassigned',
     department: r.current_department, productType: r.productType || null,
     inProgressHrs: r.inProgressHrs, createdAt: r.createdAt,
+    isBreached: r.isBreached,
     // A ticket with zero logged status transitions (mostly Jira-migrated
     // tickets that arrived already in their current status, with no
     // transition ever recorded in this app) has no way to know when it

@@ -772,6 +772,7 @@ export default function ReportsPage() {
                               <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Product Type</th>
                               <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Priority</th>
                               <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Status</th>
+                              <th className="sticky top-0 z-[2] text-left px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb]">Breached</th>
                               <th className="sticky top-0 z-[2] text-right px-2.5 py-2 bg-[#f0f2f5] font-semibold text-[#6b7280] uppercase text-[11px] tracking-wide border-b-2 border-[#e5e7eb] border-l border-[#e5e7eb]">Hours Spent</th>
                             </tr>
                           </thead>
@@ -787,6 +788,11 @@ export default function ReportsPage() {
                                   <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.productType || '—'}</td>
                                   <td className="px-2.5 py-1.5 border-b border-[#f0f0f0]"><TaPriorityBadge priority={t.priority} /></td>
                                   <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] text-[#6b7280]">{t.status || '—'}</td>
+                                  <td className="px-2.5 py-1.5 border-b border-[#f0f0f0]">
+                                    {t.isBreached === true && <span className="font-semibold text-red-600">Yes</span>}
+                                    {t.isBreached === false && <span className="font-medium text-green-600">No</span>}
+                                    {t.isBreached == null && <span className="text-[#9ca3af]">—</span>}
+                                  </td>
                                   <td className="px-2.5 py-1.5 border-b border-[#f0f0f0] border-l border-[#e5e7eb] text-right tabular-nums font-semibold text-[#2b2d42]">
                                     {t.inProgressHrs}h
                                     {t.noHistory && <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-[#fef3c7] text-[#92400e] align-middle">No history</span>}
