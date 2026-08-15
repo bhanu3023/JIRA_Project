@@ -6873,12 +6873,22 @@ async function _handleJiraPgApi(
       space: { select: { key: true, name: true } },
     };
 
+    // Every ticket's user-facing key is "CF-<number>" -- typing just the bare
+    // number (no "CF-" prefix) is a completely ordinary way to look one up,
+    // but cf_key never literally equals a bare number, so without this it
+    // never matched here and fell all the way through to the noisy `contains`
+    // scan below, mixing the one ticket meant in with unrelated tickets that
+    // happen to have that same digit sequence somewhere in their summary or
+    // description (e.g. a phone number, a date, an unrelated id).
+    const isNumericQuery = /^\d+$/.test(q);
+
     // Step 1: fetch exact + startsWith matches for CF key first (guaranteed to be in results)
     const exactMatches = await db.issue.findMany({
       where: {
         OR: [
           { cf_key: { equals: q, mode: 'insensitive' } },
           { key: { equals: q, mode: 'insensitive' } },
+          ...(isNumericQuery ? [{ cf_key: { equals: `CF-${q}`, mode: 'insensitive' as const } }] : []),
         ],
       },
       include: includeFields,
@@ -6890,8 +6900,40 @@ async function _handleJiraPgApi(
     // waiting on startsWith + the full-text `contains` scan across
     // summary/description on every issue in the space, which is the slow
     // part of this endpoint and pointless once the exact ticket is found.
+    // Also pulls in that ticket's own subtasks and linked work items (and
+    // nothing else) -- looking up one ticket by its exact number/key should
+    // surface the family it belongs to, not get diluted by unrelated
+    // substring matches.
     if (exactMatches.length > 0) {
-      return json({ issues: exactMatches.map(formatIssue), total: exactMatches.length, page: 1, totalPages: 1 });
+      const matchedKeys = exactMatches.map((i) => i.key);
+      const [subtasks, linksOut, linksIn] = await Promise.all([
+        db.issue.findMany({ where: { parentKey: { in: matchedKeys } }, include: includeFields }),
+        db.issueLink.findMany({ where: { sourceKey: { in: matchedKeys } } }),
+        db.issueLink.findMany({ where: { targetKey: { in: matchedKeys } } }),
+      ]);
+      const linkedKeys = new Set<string>();
+      for (const l of linksOut) linkedKeys.add(l.targetKey);
+      for (const l of linksIn) linkedKeys.add(l.sourceKey);
+      for (const k of matchedKeys) linkedKeys.delete(k);
+      const linkedIssues = linkedKeys.size
+        ? await db.issue.findMany({ where: { key: { in: Array.from(linkedKeys) } }, include: includeFields })
+        : [];
+      const seenIds = new Set<string>();
+      const combined: any[] = [];
+      for (const issue of [...exactMatches, ...subtasks, ...linkedIssues]) {
+        if (!seenIds.has(issue.id)) { seenIds.add(issue.id); combined.push(issue); }
+      }
+      return json({ issues: combined.map(formatIssue), total: combined.length, page: 1, totalPages: 1 });
+    }
+
+    // A purely numeric query with no exact ticket match is a lookup that
+    // came up empty, not a keyword to search for -- falling through to the
+    // broad `contains` scan below matched that same digit sequence wherever
+    // it happened to appear in any ticket's summary/description (a date, a
+    // phone number, an unrelated id), returning unrelated tickets instead of
+    // "no results" for a ticket number that simply doesn't exist.
+    if (isNumericQuery) {
+      return json({ issues: [], total: 0, page: 1, totalPages: 1 });
     }
 
     const startsWithMatches = await db.issue.findMany({
