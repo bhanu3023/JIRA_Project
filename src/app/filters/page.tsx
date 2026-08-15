@@ -6,7 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { timeAgo, cn } from '@/lib/utils';
+import { timeAgo, cn, getEffectiveIssueStatus } from '@/lib/utils';
 import Link from 'next/link';
 import { PriorityIcon } from '@/components/ui/PriorityIcon';
 import DotLoader from '@/components/ui/DotLoader';
@@ -1752,7 +1752,7 @@ export default function FiltersPage() {
                     <div className="flex items-center gap-1.5">
                       <IssueTypeIcon type={issue.type || 'task'} size={15} />
                       <Link
-                        href={`/issues/${issue.cfKey ?? issue.key}`}
+                        href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
                         className="font-mono text-[11.5px] font-semibold text-blue-600 hover:text-blue-800 whitespace-nowrap"
                       >
                         {issue.cfKey ?? issue.key}
@@ -1761,7 +1761,7 @@ export default function FiltersPage() {
                   </td>
                   <td className="px-2 py-2.5 max-w-0">
                     <Link
-                      href={`/issues/${issue.cfKey ?? issue.key}`}
+                      href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
                       className="block truncate text-[13px] text-gray-900 hover:text-blue-600 transition-colors"
                     >
                       {issue.summary}
@@ -1796,12 +1796,17 @@ export default function FiltersPage() {
                     )}
                   </td>
                   <td className="px-2 py-2.5">
-                    <span
-                      className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
-                      style={{ backgroundColor: issue.status?.color || '#6B7280' }}
-                    >
-                      {issue.status?.name || 'Open'}
-                    </span>
+                    {(() => {
+                      const effectiveStatus = getEffectiveIssueStatus(issue);
+                      return (
+                        <span
+                          className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
+                          style={{ backgroundColor: effectiveStatus.color || '#6B7280' }}
+                        >
+                          {effectiveStatus.name || 'Open'}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="px-2 py-2.5 hidden md:table-cell">
                     <PriorityIcon priority={issue.priority} size={14} />

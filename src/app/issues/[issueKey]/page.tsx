@@ -1,12 +1,12 @@
 ﻿'use client';
 
 import React, { useEffect, useState, useRef } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getIssueStatus, resolveStatusColor, getDeptColor } from '@/lib/utils';
+import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getEffectiveIssueStatus, resolveStatusColor, getDeptColor } from '@/lib/utils';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
 import RichTextEditor from '@/components/ui/RichTextEditor';
@@ -335,6 +335,8 @@ export default function IssueDetailPage() {
     )}</p>;
   };
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const cameFromList = searchParams?.get('ref') === 'filters';
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [uploadingAttachCount, setUploadingAttachCount] = useState(0);
@@ -1083,7 +1085,16 @@ export default function IssueDetailPage() {
   // ticket's queue. Navigate to a known destination instead: the queue this
   // ticket's department belongs to, list caching there means it renders from
   // cache instantly rather than re-fetching.
+  // Exception: when we know we arrived from the Filters page (its issue links
+  // carry ?ref=filters), that's real in-app history to go back to -- using
+  // the fixed dept-queue destination here instead silently discarded whatever
+  // Queue/date-range/etc. filters the user had selected, landing them on an
+  // unrelated unfiltered board.
   const handleBack = () => {
+    if (cameFromList) {
+      router.back();
+      return;
+    }
     const spaceKey = currentIssue?.spaceKey || issueKey.split('-').slice(0, -1).join('-');
     const dept = (currentIssue as any)?.current_department;
     if (spaceKey && dept) {
@@ -1117,15 +1128,9 @@ export default function IssueDetailPage() {
 
   const issue = currentIssue;
   // Use per-queue custom status from dept_statuses when the issue is in a queue
-  // and the stored status is a custom queue status (qst_... ID).
-  const rawDeptStatuses = (issue as any).dept_statuses || {};
-  const currentIssueDept = (issue as any).current_department;
-  const deptQueueSt = currentIssueDept ? rawDeptStatuses[currentIssueDept] : null;
-  // Show dept_statuses[currentDept] if it's a qst_ status OR a virtual status (id='') with a name.
-  // Virtual statuses appear when a ticket first arrives in a dept (e.g. "Waiting for Migration").
-  const issueStat = (deptQueueSt && typeof deptQueueSt.id === 'string' && (deptQueueSt.id.startsWith('qst_') || (deptQueueSt.id === '' && deptQueueSt.name)))
-    ? (deptQueueSt as any)
-    : getIssueStatus(issue);
+  // and the stored status is a custom queue status (qst_... ID) -- shared with
+  // every list view via getEffectiveIssueStatus so they all agree on what's shown.
+  const issueStat = getEffectiveIssueStatus(issue as any);
   const t = typeIcons[issue.type] || typeIcons.task;
 
   /** Real-time SLA breach value for "Time to First Response" / "Time to Resolution" custom fields */
