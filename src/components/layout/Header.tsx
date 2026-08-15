@@ -166,9 +166,26 @@ export default function Header() {
         if (issueKey) {
           router.push(`/issues/${issueKey}`);
           closeSearch();
-        } else if (searchQuery.trim()) {
-          router.push(`/search?q=${encodeURIComponent(searchQuery)}`);
-          closeSearch();
+        } else {
+          // Jira-like quick jump: typing just a ticket's number (e.g. "29441",
+          // no "CF-" prefix) and hitting Enter previously always fell through
+          // to a generic keyword search, even when that number was an exact,
+          // unambiguous match already sitting in the live results below --
+          // landing on a noisy results page instead of the one ticket meant.
+          // Only auto-jumps for a purely numeric query matched against an
+          // already-fetched result's own number, never guesses/constructs a
+          // key that might not exist.
+          const trimmedQuery = searchQuery.trim();
+          const exactNumberMatch = /^\d+$/.test(trimmedQuery)
+            ? searchResults.find((r: any) => String(r.cfKey ?? r.key ?? '').split('-').pop() === trimmedQuery)
+            : null;
+          if (exactNumberMatch) {
+            router.push(`/issues/${(exactNumberMatch as any).cfKey ?? exactNumberMatch.key}`);
+            closeSearch();
+          } else if (trimmedQuery) {
+            router.push(`/search?q=${encodeURIComponent(searchQuery)}`);
+            closeSearch();
+          }
         }
       }
     }
