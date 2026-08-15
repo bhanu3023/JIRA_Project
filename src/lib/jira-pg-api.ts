@@ -1675,8 +1675,8 @@ function formatIssue(issue: any) {
       return {
         id: lnk.id,
         type: lnk.linkType,
-        source: { key: sk, summary: lnk._sourceSummary ?? sk, type: 'task' },
-        target: { key: tk, summary: lnk._targetSummary ?? tk, type: 'task' },
+        source: { key: sk, cfKey: lnk._sourceCfKey ?? null, summary: lnk._sourceSummary ?? sk, type: 'task' },
+        target: { key: tk, cfKey: lnk._targetCfKey ?? null, summary: lnk._targetSummary ?? tk, type: 'task' },
       };
     }),
     children: [],
@@ -5088,13 +5088,33 @@ async function _handleJiraPgApi(
       : [];
     const summaryMap = new Map(linkedIssues.map(i => [i.key, i]));
 
+    // cf_key is a raw ALTER TABLE column Prisma doesn't know about (same gap
+    // as childCfKeyMap below) -- without this, "Linked work items" always
+    // showed the raw internal key (e.g. "L1BOAR-2164") instead of the CF-
+    // key every other section uses, and the frontend's `li.cfKey ?? li.key`
+    // fallback silently landed on the raw key every time.
+    const linkedCfKeys = linkedKeys.length
+      ? await pool.query<{ key: string; cf_key: string | null }>(
+          `SELECT key, cf_key FROM issues WHERE key = ANY($1::text[])`,
+          [linkedKeys]
+        )
+      : { rows: [] as { key: string; cf_key: string | null }[] };
+    const linkedCfKeyMap = new Map(linkedCfKeys.rows.map(r => [r.key, r.cf_key]));
+
+    // rawDeptData (this ticket's own cf_key) isn't assembled from rawDeptRow
+    // until later in this function -- read it straight off rawDeptRow here
+    // instead of waiting for that named variable.
+    const ownCfKey: string | null = rawDeptRow.rows[0]?.cf_key ?? null;
     const allLinks = deduped.map(l => {
       const otherKey = l.sourceKey === key ? l.targetKey : l.sourceKey;
       const otherSummary = summaryMap.get(otherKey)?.summary ?? otherKey;
+      const otherCfKey = linkedCfKeyMap.get(otherKey) ?? null;
       return {
         id: l.id, linkType: l.linkType, sourceKey: l.sourceKey, targetKey: l.targetKey,
         _sourceSummary: l.sourceKey === key ? issue.summary : otherSummary,
         _targetSummary: l.targetKey === key ? issue.summary : otherSummary,
+        _sourceCfKey: l.sourceKey === key ? ownCfKey : otherCfKey,
+        _targetCfKey: l.targetKey === key ? ownCfKey : otherCfKey,
       };
     });
 

@@ -1630,11 +1630,18 @@ export default function IssueDetailPage() {
                               className={`flex items-center gap-3 px-4 py-2.5 hover:bg-indigo-50/40 transition-colors group ${idx > 0 ? 'border-t border-gray-50' : ''}`}>
                               {/* Type icon */}
                               <span className="flex-shrink-0 text-base" style={{ color: lt.color }} title={li.type}>{lt.icon}</span>
-                              {/* Issue key */}
-                              <Link href={`/issues/${li.cfKey ?? li.key}`}
+                              {/* Issue key -- a plain <a>, not Next's <Link>, deliberately: clicking a
+                                  Link here to another /issues/[issueKey] route (the exact same dynamic
+                                  segment as the page already mounted on) silently did nothing at all --
+                                  no URL change, no network request, no error -- leaving the user stuck
+                                  on a page that looked unresponsive. A real anchor forces an actual
+                                  browser navigation, which reliably loads the target ticket every time,
+                                  at the minor cost of a full page load instead of an instant client
+                                  transition. */}
+                              <a href={`/issues/${li.cfKey ?? li.key}`}
                                 className="text-sm font-bold text-indigo-600 hover:text-indigo-800 hover:underline flex-shrink-0 transition-colors">
                                 {li.cfKey ?? li.key}
-                              </Link>
+                              </a>
                               {/* Summary */}
                               <span className="text-sm text-gray-700 flex-1 truncate">{li.summary}</span>
                               {/* Status badge */}
