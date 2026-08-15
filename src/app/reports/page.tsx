@@ -84,7 +84,7 @@ export default function ReportsPage() {
   // app's own issues/issue_history, grouped by current_department.
   const [taSubTab, setTaSubTab] = useState<'overview' | 'aging' | 'time-spent'>('overview');
   const [taDepts, setTaDepts] = useState<string[]>([]); // [] = All
-  const [taDateType, setTaDateType] = useState<'created' | 'updated' | 'none'>('created');
+  const [taDateType, setTaDateType] = useState<'created' | 'updated' | 'worked' | 'none'>('created');
   const [taFilterOptions, setTaFilterOptions] = useState<{ depts: string[] }>({ depts: [] });
   const [taOverview, setTaOverview] = useState<any>(null);
   const [taAging, setTaAging] = useState<any>(null);
@@ -533,6 +533,7 @@ export default function ReportsPage() {
                     className="border border-[#e5e7eb] rounded-md px-3 py-1.5 text-[13px] text-[#2b2d42] bg-white focus:outline-none focus:border-[#4361ee] focus:ring-2 focus:ring-[#4361ee]/15">
                     <option value="created">Created date</option>
                     <option value="updated">Updated date</option>
+                    <option value="worked">Worked on (real activity)</option>
                     <option value="none">None (open tickets only)</option>
                   </select>
                 </div>

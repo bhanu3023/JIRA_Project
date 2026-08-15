@@ -1323,7 +1323,7 @@ async function loadTeamAnalyticsScope(url: URL) {
   const depts = deptParam && deptParam.toLowerCase() !== 'all'
     ? deptParam.split(',').map((d) => d.trim()).filter(Boolean)
     : null;
-  const dateType = url.searchParams.get('dateType') || 'created'; // 'created' | 'updated' | 'none'
+  const dateType = url.searchParams.get('dateType') || 'created'; // 'created' | 'updated' | 'worked' | 'none'
   const dateFrom = url.searchParams.get('dateFrom') || '';
   const dateTo = url.searchParams.get('dateTo') || '';
   const productTypeParam = url.searchParams.get('productType') || '';
@@ -1331,7 +1331,12 @@ async function loadTeamAnalyticsScope(url: URL) {
   const whereClauses: string[] = [`i.current_department IS NOT NULL`];
   const params: any[] = [];
   let idx = 1;
-  if (depts && depts.length) { whereClauses.push(`i.current_department = ANY($${idx++}::text[])`); params.push(depts); }
+  // "worked" scopes by department through user_worked_on_tickets below instead
+  // of the plain current_department match -- a ticket someone worked while it
+  // sat in Dev, then handed off elsewhere, should still count as "Dev worked
+  // this" for that historical window even though current_department has since
+  // moved on.
+  if (depts && depts.length && dateType !== 'worked') { whereClauses.push(`i.current_department = ANY($${idx++}::text[])`); params.push(depts); }
   if (productTypeParam) { whereClauses.push(`i."productType" = $${idx++}`); params.push(productTypeParam); }
 
   // Queue-membership map (custom_queues.queues[].name -> memberIds), matched
@@ -1341,9 +1346,11 @@ async function loadTeamAnalyticsScope(url: URL) {
   // against real data and found MOST department labels (Infra, QA, Pre-Sales,
   // SalesOps, etc.) have no configured queue at all, so those keep the old
   // department-only match; only a department with a real queue config gets
-  // the additional assignee-membership restriction below.
+  // the additional assignee-membership restriction below. Not needed for
+  // "worked" -- that dateType already scopes by real recorded activity, not
+  // configured membership.
   let deptMemberSets: Record<string, Set<string>> | null = null;
-  if (depts && depts.length) {
+  if (depts && depts.length && dateType !== 'worked') {
     const cq = await pool.query(`SELECT queues FROM custom_queues`);
     const sets: Record<string, Set<string>> = {};
     for (const row of cq.rows) {
@@ -1367,6 +1374,18 @@ async function loadTeamAnalyticsScope(url: URL) {
     // an open-ended snapshot like this.
     whereClauses.push(`s.category != 'done'`);
     if (toEnd) { whereClauses.push(`i."createdAt" <= $${idx++}`); params.push(toEnd); }
+  } else if (dateType === 'worked') {
+    // "Actually worked" -- backed by user_worked_on_tickets, the same table
+    // the per-queue Summary view uses, written only on a real pass/return/
+    // close event (see the comment above that endpoint). Unlike created/
+    // updated, this can't be satisfied by a ticket merely sitting untouched
+    // in someone's queue since it was filed.
+    let workedClause = `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id`;
+    if (fromStart) { workedClause += ` AND w.worked_at >= $${idx++}`; params.push(fromStart); }
+    if (toEnd) { workedClause += ` AND w.worked_at <= $${idx++}`; params.push(toEnd); }
+    if (depts && depts.length) { workedClause += ` AND LOWER(w.dept) = ANY($${idx++}::text[])`; params.push(depts.map((d) => d.toLowerCase())); }
+    workedClause += `)`;
+    whereClauses.push(workedClause);
   } else {
     const dateCol = dateType === 'updated' ? `i."updatedAt"` : `i."createdAt"`;
     if (fromStart) { whereClauses.push(`${dateCol} >= $${idx++}`); params.push(fromStart); }
