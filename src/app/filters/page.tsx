@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -955,6 +955,7 @@ function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChang
 /* ─── main page ─── */
 export default function FiltersPage() {
   const { user, spaces } = useStore(useShallow((s) => ({ user: s.user, spaces: s.spaces })));
+  const router = useRouter();
 
   /* filter bar state */
   const [text, setText]                   = useState('');
@@ -1021,8 +1022,15 @@ export default function FiltersPage() {
     });
   };
 
-  // Hydrate filters from the URL once on mount — lets other pages (e.g. the
-  // personal dashboard) deep-link straight into a scoped ticket list here.
+  // Hydrate filters from the URL once on mount. Two sources feed this:
+  // (1) other pages (e.g. the personal dashboard) deep-linking straight into
+  //     a scoped ticket list here, using assignee/reporter/status/priority/
+  //     space/queue/slaBreached (singular names, kept for backward compat);
+  // (2) this page's OWN state, round-tripped through the URL by the sync
+  //     effect below -- opening a ticket and clicking "Back" returns to this
+  //     exact URL, but Next.js doesn't restore this component's in-memory
+  //     useState across that navigation, so without the URL round-trip every
+  //     filter the user had picked reset back to defaults on return.
   const urlParams = useSearchParams();
   useEffect(() => {
     const qpAssignee = urlParams?.get('assignee');
@@ -1037,7 +1045,6 @@ export default function FiltersPage() {
     // load, so a link built with slaBreached=yes silently showed every one
     // of that person's tickets instead of just the breached ones.
     const qpSlaBreached = urlParams?.get('slaBreached');
-    if (!qpAssignee && !qpReporter && !qpStatus && !qpPriority && !qpSpace && !qpSlaBreached) return;
 
     if (qpAssignee) setSelAssignees(qpAssignee.split(','));
     if (qpReporter) {
@@ -1055,8 +1062,94 @@ export default function FiltersPage() {
     // filters"), so unlike reporter/priority above there's no activeExtras
     // entry to also flip for it to become visible.
     if (qpSlaBreached === 'yes' || qpSlaBreached === 'no') setSelBreached(qpSlaBreached);
+
+    // Full self-persistence round-trip (written by the sync effect below,
+    // using its own distinct param names so it never collides with the
+    // external deep-link names read above).
+    const rSpaces          = urlParams?.get('rSpaces');
+    const rQueue           = urlParams?.get('rQueue');
+    const rAssignees       = urlParams?.get('rAssignees');
+    const rReporters       = urlParams?.get('rReporters');
+    const rTypes           = urlParams?.get('rTypes');
+    const rStatuses        = urlParams?.get('rStatuses');
+    const rPriorities      = urlParams?.get('rPriorities');
+    const rCreated         = urlParams?.get('rCreated');
+    const rUpdated         = urlParams?.get('rUpdated');
+    const rDueDate         = urlParams?.get('rDueDate');
+    const rWorked          = urlParams?.get('rWorked');
+    const rDepartment      = urlParams?.get('rDepartment');
+    const rProductType     = urlParams?.get('rProductType');
+    const rCombination     = urlParams?.get('rCombination');
+    const rCustomerName    = urlParams?.get('rCustomerName');
+    const rClientName      = urlParams?.get('rClientName');
+    const rProjectManager  = urlParams?.get('rProjectManager');
+    const rBreached        = urlParams?.get('rBreached');
+    const rQ               = urlParams?.get('rQ');
+    const rExtras          = urlParams?.get('rExtras');
+
+    if (rSpaces) setSelSpaces(rSpaces.split(','));
+    if (rQueue) setSelQueue(rQueue);
+    if (rAssignees) setSelAssignees(rAssignees.split(','));
+    if (rReporters) setSelReporters(rReporters.split(','));
+    if (rTypes) setSelTypes(rTypes.split(','));
+    if (rStatuses) setSelStatuses(rStatuses.split(','));
+    if (rPriorities) setSelPriorities(rPriorities.split(','));
+    if (rCreated) setSelCreated(rCreated);
+    if (rUpdated) setSelUpdated(rUpdated);
+    if (rDueDate) setSelDueDate(rDueDate);
+    if (rWorked) setSelWorked(rWorked);
+    if (rDepartment) setSelDepartment(rDepartment);
+    if (rProductType) setSelProductType(rProductType.split(','));
+    if (rCombination) setSelCombination(rCombination);
+    if (rCustomerName) setSelCustomerName(rCustomerName);
+    if (rClientName) setSelClientName(rClientName);
+    if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
+    if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
+    if (rQ) setText(rQ);
+    if (rExtras) setActiveExtras(rExtras.split(','));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Keeps the URL in sync with every filter selection (via replace, so it
+  // never grows browser history) -- this is what lets "Back" from a ticket
+  // actually restore the exact filters that were active, since this
+  // component's useState doesn't otherwise survive that navigation.
+  // Skips its own first invocation: on mount, this fires with the pre-
+  // hydration (default/empty) state before the effect above has applied
+  // whatever was in the URL, and writing that out first would blank the URL
+  // for an instant before the hydrated values overwrite it again.
+  const skippedFirstUrlSyncRef = useRef(false);
+  const restoreParams = useMemo(() => {
+    const p: Record<string, string> = {};
+    if (selSpaces.length) p.rSpaces = selSpaces.join(',');
+    if (selQueue) p.rQueue = selQueue;
+    if (selAssignees.length) p.rAssignees = selAssignees.join(',');
+    if (selReporters.length) p.rReporters = selReporters.join(',');
+    if (selTypes.length) p.rTypes = selTypes.join(',');
+    if (selStatuses.length) p.rStatuses = selStatuses.join(',');
+    if (selPriorities.length) p.rPriorities = selPriorities.join(',');
+    if (selCreated) p.rCreated = selCreated;
+    if (selUpdated) p.rUpdated = selUpdated;
+    if (selDueDate) p.rDueDate = selDueDate;
+    if (selWorked) p.rWorked = selWorked;
+    if (selDepartment) p.rDepartment = selDepartment;
+    if (selProductType.length) p.rProductType = selProductType.join(',');
+    if (selCombination) p.rCombination = selCombination;
+    if (selCustomerName) p.rCustomerName = selCustomerName;
+    if (selClientName) p.rClientName = selClientName;
+    if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
+    if (selBreached) p.rBreached = selBreached;
+    if (text.trim()) p.rQ = text.trim();
+    if (activeExtras.length) p.rExtras = activeExtras.join(',');
+    return p;
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text, activeExtras]);
+
+  useEffect(() => {
+    if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
+    const qs = new URLSearchParams(restoreParams).toString();
+    router.replace(qs ? `/filters?${qs}` : '/filters', { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restoreParams]);
 
 
   /* derived */
