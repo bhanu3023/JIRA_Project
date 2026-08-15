@@ -3687,8 +3687,10 @@ async function _handleJiraPgApi(
             const countRow = await pool.query(
               `SELECT COUNT(DISTINCT i.id)::int AS cnt
                FROM issues i
+               LEFT JOIN statuses s ON i."statusId" = s.id
                WHERE i."spaceId" = ANY($1::text[])
                  AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
+                 AND (s.category IS NULL OR s.category != 'done')
                  AND ${sentExistsClause}
                ${sentExtraSql}`,
               countParams
@@ -3715,6 +3717,7 @@ async function _handleJiraPgApi(
              LEFT JOIN users r ON i."reporterId" = r.id
              WHERE i."spaceId" = ANY($1::text[])
                AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
+               AND (s.category IS NULL OR s.category != 'done')
                AND ${sentExistsClause}
              ${sentExtraSql}
              ORDER BY i.id, i."updatedAt" DESC, i."createdAt" DESC
