@@ -95,6 +95,94 @@ pool.query(
   [JIRA_CONFIRMED_BREACHED_ISSUE_IDS]
 ).catch(() => {});
 
+// One-time cleanup: every space had multiple separate "To Do" status ROWS
+// (e.g. status_to_do, status_qa_todo, and a bare-UUID one all named "To Do"
+// in the same space) alongside a single "Open" status -- almost certainly
+// accidental duplicates from re-running setup/import at different times
+// rather than an intentional per-queue distinction, since tickets on them
+// were scattered across departments with no clean pattern. Requested fix:
+// no ticket should ever show "To Do" -- new tickets, and any already
+// sitting on one of these duplicates, should read "Open" instead.
+// Retargets in order (issues, then workflow transitions, then the status
+// rows themselves) so nothing is left dangling: WorkflowTransition's FK to
+// Status cascades on delete, so a transition still pointing at a "To Do"
+// row when it's dropped would silently vanish instead of continuing to
+// work from "Open". The NOT EXISTS guards avoid the unique
+// (spaceId, fromStatusId, toStatusId) constraint when Open already has an
+// equivalent transition. Matches by name, not hardcoded ids, so it applies
+// per-space generically and is a no-op once there's no "To Do" left to fix.
+pool.query(`
+  DO $$
+  DECLARE
+    rec RECORD;
+    open_id TEXT;
+  BEGIN
+    FOR rec IN SELECT DISTINCT "spaceId" FROM statuses WHERE LOWER(name) = 'to do' LOOP
+      SELECT id INTO open_id FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'open' ORDER BY id LIMIT 1;
+      IF open_id IS NOT NULL THEN
+        UPDATE issues SET "statusId" = open_id
+          WHERE "statusId" IN (SELECT id FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'to do');
+
+        UPDATE workflow_transitions wt SET "fromStatusId" = open_id
+          WHERE wt."spaceId" = rec."spaceId"
+            AND wt."fromStatusId" IN (SELECT id FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'to do')
+            AND NOT EXISTS (
+              SELECT 1 FROM workflow_transitions wt2
+              WHERE wt2."spaceId" = wt."spaceId" AND wt2."fromStatusId" = open_id AND wt2."toStatusId" = wt."toStatusId"
+            );
+
+        UPDATE workflow_transitions wt SET "toStatusId" = open_id
+          WHERE wt."spaceId" = rec."spaceId"
+            AND wt."toStatusId" IN (SELECT id FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'to do')
+            AND NOT EXISTS (
+              SELECT 1 FROM workflow_transitions wt2
+              WHERE wt2."spaceId" = wt."spaceId" AND wt2."toStatusId" = open_id AND wt2."fromStatusId" = wt."fromStatusId"
+            );
+
+        DELETE FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'to do';
+      END IF;
+    END LOOP;
+  END $$;
+`).catch(() => {});
+
+// Same "To Do" cleanup as above, but for the handful of tickets carrying a
+// "To Do" entry inside their OWN dept_statuses snapshot (the per-department
+// status memory restored when a ticket returns to a queue it left) --
+// display code that reads this snapshot (getEffectiveIssueStatus and the
+// dept-scoped issue list) still showed "To Do" on those specific tickets
+// even after the shared statuses rows above were removed, since this is a
+// separate per-ticket JSONB copy, not a foreign key into the statuses
+// table. dept_statuses is keyed by arbitrary department name (not a fixed
+// column), so this has to walk each affected row's keys in JS rather than
+// a single SQL statement; resolves each ticket's own space's real "Open"
+// status rather than hardcoding one id, so it stays correct if a
+// different space's "Open" status has a different id/color.
+(async () => {
+  try {
+    const affected = await pool.query(`SELECT id, "spaceId", dept_statuses FROM issues WHERE dept_statuses::text ILIKE '%"To Do"%'`);
+    const openBySpace: Record<string, { id: string; name: string; color: string; category: string } | null> = {};
+    for (const row of affected.rows) {
+      if (!(row.spaceId in openBySpace)) {
+        const os = await pool.query(`SELECT id, name, color, category FROM statuses WHERE "spaceId" = $1 AND LOWER(name) = 'open' ORDER BY id LIMIT 1`, [row.spaceId]);
+        openBySpace[row.spaceId] = os.rows[0] || null;
+      }
+      const openStatus = openBySpace[row.spaceId];
+      if (!openStatus) continue;
+      const deptStatuses: Record<string, any> = row.dept_statuses || {};
+      let changed = false;
+      for (const dept of Object.keys(deptStatuses)) {
+        if (deptStatuses[dept]?.name === 'To Do') {
+          deptStatuses[dept] = { id: openStatus.id, name: openStatus.name, color: openStatus.color, category: openStatus.category };
+          changed = true;
+        }
+      }
+      if (changed) {
+        await pool.query(`UPDATE issues SET dept_statuses = $1::jsonb WHERE id = $2`, [JSON.stringify(deptStatuses), row.id]);
+      }
+    }
+  } catch { /* best-effort */ }
+})();
+
 // Ensure queue_closed_tickets exists at startup (needed by Sent/Watching query)
 pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`).catch(() => {});
 
