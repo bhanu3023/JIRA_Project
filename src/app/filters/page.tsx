@@ -698,6 +698,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
+  { id: 'worked',         label: 'Worked (real activity, needs a Queue selected)', group: 'Date' },
 ];
 
 /* ─── Simple text filter button ─── */
@@ -967,6 +968,10 @@ export default function FiltersPage() {
   const [selCreated, setSelCreated]       = useState('');
   const [selUpdated, setSelUpdated]       = useState('');
   const [selDueDate, setSelDueDate]       = useState('');
+  // Only meaningful together with a single selected Queue -- backed by
+  // user_worked_on_tickets, so it counts a ticket once someone with access
+  // actually picked it up and worked it, not just whenever it was created.
+  const [selWorked, setSelWorked]         = useState('');
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
   const [selCombination, setSelCombination] = useState('');
@@ -1001,6 +1006,7 @@ export default function FiltersPage() {
         if (key === 'created')        setSelCreated('');
         if (key === 'updated')        setSelUpdated('');
         if (key === 'dueDate')        setSelDueDate('');
+        if (key === 'worked')         setSelWorked('');
         if (key === 'reporter')       setSelReporters([]);
         if (key === 'priority')       setSelPriorities([]);
         if (key === 'department')     setSelDepartment('');
@@ -1084,7 +1090,7 @@ export default function FiltersPage() {
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
-    selCreated || selUpdated || selDueDate || selDepartment ||
+    selCreated || selUpdated || selDueDate || selWorked || selDepartment ||
     selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selBreached,
   );
 
@@ -1148,6 +1154,10 @@ export default function FiltersPage() {
         if (selCreated) params.createdRange = selCreated;
         if (selUpdated) params.updatedRange = selUpdated;
         if (selDueDate) params.dueDateRange = selDueDate;
+        // Only meaningful together with a single selected Queue -- the backend
+        // only reads workedRange inside the dept-scoped branch (i.e. when
+        // params.dept is set), so this is a no-op without a Queue selected.
+        if (selWorked && params.dept) params.workedRange = selWorked;
 
         // Extra text/field filters
         if (selDepartment)     params.department     = selDepartment;
@@ -1164,7 +1174,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text]);
 
   /* fetch issues — all filtering done server-side for accuracy */
   const fetchIssues = useCallback(() => {
@@ -1706,6 +1716,15 @@ export default function FiltersPage() {
               <div className="flex items-center gap-1">
                 <DateDropBtn label="Due Date" selected={selDueDate} onChange={setSelDueDate} />
                 <button onClick={() => toggleExtra('dueDate')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('worked') && (
+              <div className="flex items-center gap-1">
+                <DateDropBtn label="Worked" selected={selWorked} onChange={setSelWorked} />
+                <button onClick={() => toggleExtra('worked')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+                {!selQueue && (
+                  <span className="text-[11px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Select a Queue for this to apply</span>
+                )}
               </div>
             )}
           </div>

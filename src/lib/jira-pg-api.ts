@@ -3240,6 +3240,11 @@ async function _handleJiraPgApi(
       : rawSearchQ;
     const createdRange  = url.searchParams.get('createdRange');
     const updatedRange  = url.searchParams.get('updatedRange');
+    // "Worked" -- backed by user_worked_on_tickets (see loadTeamAnalyticsScope's
+    // 'worked' dateType for the same table/reasoning) -- only meaningful
+    // together with a dept filter, since that table's dept column is what
+    // scopes it; only applied in the dept-scoped branch below.
+    const workedRange   = url.searchParams.get('workedRange');
     const excludeDone   = url.searchParams.get('excludeDone') === 'true';
     const page  = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
     const limit = Math.min(2000, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10)));
@@ -3835,7 +3840,7 @@ async function _handleJiraPgApi(
       // Assigned to me), where "All Tickets" is expected to mean literally
       // every ticket in the department, not just its configured members.
       const queueMembersOnlyParam = url.searchParams.get('queueMembersOnly') === 'true';
-      if (queueMembersOnlyParam) {
+      if (queueMembersOnlyParam && !workedRange) {
         try {
           const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
           const queues: any[] = cq.rows[0]?.queues || [];
@@ -3941,12 +3946,31 @@ async function _handleJiraPgApi(
       }
       const deptExtraSql = deptExtraClauses.map((c) => `AND ${c}`).join('\n');
 
+      // "Worked" range (see workedRange declaration above) -- built here, after
+      // deptExtraClauses' own params are finalized, so its parameter indices
+      // don't collide with theirs.
+      let workedRangeSql = '';
+      if (workedRange) {
+        const { from: workedFrom, to: workedTo } = parseDateRange(workedRange);
+        const workedFromIdx = deptParamIdx++;
+        const workedToIdx = deptParamIdx++;
+        deptExtraParams.push(workedFrom, workedTo);
+        workedRangeSql = ` AND w.worked_at >= $${workedFromIdx} AND w.worked_at <= $${workedToIdx}`;
+      }
+
       const deptDoneClause = deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : '';
       // Plain case: ticket must currently be in this dept (and, if requested,
       // currently open). History case: ALSO match if this user has ever been
       // credited with working this ticket while it was in this dept — covers
       // it having since been resolved or handed to another department.
-      const deptDeptMatchSql = historyAssigneeIdx
+      // Worked case (opt-in via workedRange, e.g. the Filters page's "Queue"
+      // + a "Worked" date filter): takes over the dept-match entirely, backed
+      // by user_worked_on_tickets -- a ticket worked while sitting in this
+      // dept counts for it even if it has since moved to another queue,
+      // matching Team Analytics' 'worked' dateType semantic.
+      const deptDeptMatchSql = workedRange
+        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})`
+        : historyAssigneeIdx
         ? `(
             (LOWER(i.current_department) = LOWER($2) AND i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) ${deptDoneClause})
             OR EXISTS (
