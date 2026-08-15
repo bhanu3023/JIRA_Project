@@ -3807,6 +3807,25 @@ async function _handleJiraPgApi(
       const deptExtraClauses: string[] = [];
       const deptExtraParams: any[] = [];
       let deptParamIdx = deptSearchParam ? 4 : 3;
+      // "Queue" filter on the main /filters page (opt-in via queueMembersOnly) --
+      // restricts to tickets whose assignee is an actual configured member of
+      // this department's queue, instead of every ticket merely labeled with
+      // the department. Scoped to this one caller via the flag rather than
+      // folded into deptDeptMatchSql for every caller, since this same branch
+      // also powers the department queue board pages (All Tickets/Unassigned/
+      // Assigned to me), where "All Tickets" is expected to mean literally
+      // every ticket in the department, not just its configured members.
+      const queueMembersOnlyParam = url.searchParams.get('queueMembersOnly') === 'true';
+      if (queueMembersOnlyParam) {
+        try {
+          const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
+          const queues: any[] = cq.rows[0]?.queues || [];
+          const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
+          const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+          deptExtraClauses.push(memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0');
+          if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
+        } catch { /* ignore -- no restriction if lookup fails */ }
+      }
       // When includeHistoryParam is set, the assignee match is folded into
       // deptDeptMatchSql below (current dept OR ever-worked-on-in-this-dept)
       // instead of a plain required AND clause here — a moved-on ticket's

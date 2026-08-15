@@ -1103,8 +1103,13 @@ export default function FiltersPage() {
           params.spaceKeys = accessibleSpaceKeys.join(',');
         }
 
-        // Queue (department) — only meaningful when scoped to exactly one space
-        if (selQueue && params.spaceKey) params.dept = selQueue;
+        // Queue (department) — only meaningful when scoped to exactly one space.
+        // queueMembersOnly restricts results to tickets assigned to that
+        // queue's actual configured members, not every ticket merely labeled
+        // with the department (the department queue board pages that share
+        // this same backend branch deliberately don't set this flag, since
+        // "All Tickets" there means every ticket in the department).
+        if (selQueue && params.spaceKey) { params.dept = selQueue; params.queueMembersOnly = 'true'; }
 
         // Expand a member into all possible identifiers the mock can match against
         const expandMember = (id: string) => {
