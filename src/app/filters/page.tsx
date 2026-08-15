@@ -989,8 +989,11 @@ export default function FiltersPage() {
   const [showSavedPanel, setShowSavedPanel]      = useState(false);
   const [menuId, setMenuId]                     = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId]   = useState<string | null>(null);
-  // which extra date filters are visible in the bar (added from More filters)
-  const [activeExtras, setActiveExtras]         = useState<string[]>([]);
+  // which extra date filters are visible in the bar (added from More filters).
+  // "created" starts visible by default -- a date range is a common enough
+  // filter that requiring a trip through "More filters" to find it every
+  // single time wasn't discoverable; it can still be removed via its own X.
+  const [activeExtras, setActiveExtras]         = useState<string[]>(['created']);
 
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
