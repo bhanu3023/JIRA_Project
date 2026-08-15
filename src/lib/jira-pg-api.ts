@@ -895,9 +895,10 @@ async function performDeptHandoff(
   // uses) instead of always landing unassigned.
   const savedForTarget = deptAssignees[targetDept];
   let handoffAssigneeId: string | null = null;
+  let handoffAssigneeName: string | null = null;
   if (savedForTarget?.id) {
     const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedForTarget.id]);
-    if (stillExists.rows.length) handoffAssigneeId = savedForTarget.id;
+    if (stillExists.rows.length) { handoffAssigneeId = savedForTarget.id; handoffAssigneeName = savedForTarget.displayName || null; }
     else delete deptAssignees[targetDept];
   }
   if (!handoffAssigneeId) {
@@ -905,6 +906,7 @@ async function performDeptHandoff(
       const rrAgent = await getNextAgent(spaceId, targetDept, productType);
       if (rrAgent) {
         handoffAssigneeId = rrAgent.userId;
+        handoffAssigneeName = rrAgent.name;
         deptAssignees[targetDept] = { id: rrAgent.userId, displayName: rrAgent.name };
       }
     } catch { /* non-critical — falls through to unassigned */ }
@@ -1009,6 +1011,28 @@ async function performDeptHandoff(
       pool.query(
         `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
         [rid(), issueId, 'status', oldDeptStatusObj.name, newDeptStatusObj.name, historyChanger ? `${historyChanger.firstName} ${historyChanger.lastName}`.trim() : 'System', historyChanger?.email || null]
+      ).catch(() => {});
+    } catch { /* non-critical */ }
+  }
+
+  // The restore-or-round-robin assignee logic above (lines ~893-911) silently
+  // changes issues.assigneeId on every handoff -- restoring whoever the target
+  // dept had before, or round-robining a new agent -- but nothing ever logged
+  // it, unlike a plain assignee-dropdown change (the only other place in this
+  // file that writes field:'assignee'). A ticket bouncing Migration -> Dev ->
+  // Migration correctly restored the right person under the hood (verified
+  // directly against real data), but its History tab showed no record of it
+  // ever happening in either direction -- exactly this gap, mirrored from the
+  // 'status' fix just above.
+  if (curAssigneeId !== handoffAssigneeId) {
+    try {
+      const historyChanger = userId ? await db.user.findUnique({ where: { id: userId }, select: { firstName: true, lastName: true, email: true } }) : null;
+      const oldAssigneeName = (oldDept && curAssigneeId && deptAssignees[oldDept]?.id === curAssigneeId)
+        ? deptAssignees[oldDept].displayName
+        : null;
+      pool.query(
+        `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        [rid(), issueId, 'assignee', oldAssigneeName, handoffAssigneeName, historyChanger ? `${historyChanger.firstName} ${historyChanger.lastName}`.trim() : 'System', historyChanger?.email || null]
       ).catch(() => {});
     } catch { /* non-critical */ }
   }
@@ -4687,6 +4711,24 @@ async function _handleJiraPgApi(
               id: rid(), issueId: issue.id, field: 'status',
               oldValue: oldDeptStatusObj.name,
               newValue: newDeptStatusObj.name,
+              authorName: authorName2, createdAt: new Date(),
+            },
+          });
+        }
+        // Same gap as the status entry just above, but for the restore-or-
+        // round-robin assignee logic (lines ~4533-4565): it silently changes
+        // issues.assigneeId on every transfer -- restoring whoever newDept
+        // had before, or round-robining someone new -- but nothing logged it,
+        // unlike a plain assignee-dropdown change (the only other place in
+        // this file writing field:'assignee'). A ticket bouncing between
+        // departments correctly got the right person back each time, but its
+        // History tab showed no record of that ever happening.
+        if (rrAssigneeId !== (issue.assigneeId ?? null)) {
+          await (db as any).issueHistory.create({
+            data: {
+              id: rid(), issueId: issue.id, field: 'assignee',
+              oldValue: issue.assignee ? (`${(issue.assignee as any).firstName ?? ''} ${(issue.assignee as any).lastName ?? ''}`.trim() || (issue.assignee as any).email) : null,
+              newValue: rrAgentName,
               authorName: authorName2, createdAt: new Date(),
             },
           });
