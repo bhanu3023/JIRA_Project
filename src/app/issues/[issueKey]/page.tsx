@@ -331,7 +331,11 @@ export default function IssueDetailPage() {
           if (anchor) {
             e.preventDefault();
             const href = anchor.getAttribute('href');
-            if (href && href !== '#') window.open(href, '_blank', 'noopener,noreferrer');
+            if (href && href !== '#') {
+              const filename = anchor.getAttribute('data-filename');
+              if (filename) openFilePreview(href, filename);
+              else window.open(href, '_blank', 'noopener,noreferrer');
+            }
           }
         }}
       />;
@@ -1032,6 +1036,22 @@ export default function IssueDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [previewAttach, setPreviewAttach] = useState<{url: string; name: string; mime: string} | null>(null);
 
+  // Opens the same inline preview modal the dedicated Attachments section
+  // uses (image vs iframe fallback, plus a Download button) for a file
+  // chip clicked inside Description or a comment -- those links previously
+  // always forced a new-tab navigation straight to the raw uploaded file
+  // instead of staying in the app. Derives mime from the extension the
+  // same way the Attachments list already does, since inline chips only
+  // carry a filename/url, not a stored mimeType.
+  const openFilePreview = (url: string, name: string) => {
+    const mime = /\.(png|jpe?g|gif|webp|svg)$/i.test(name)
+      ? `image/${name.split('.').pop()!.toLowerCase().replace('jpg', 'jpeg')}`
+      : /\.pdf$/i.test(name)
+      ? 'application/pdf'
+      : 'application/octet-stream';
+    setPreviewAttach({ url, name, mime });
+  };
+
   // Is current user an admin of this space?
   const isSpaceAdmin = React.useMemo(() => {
     if (!user) return false;
@@ -1392,7 +1412,13 @@ export default function IssueDetailPage() {
                       e.preventDefault();
                       const href = anchor.getAttribute('href');
                       if (href && href !== '#') {
-                        window.open(href, '_blank', 'noopener,noreferrer');
+                        // Uploaded file chip (RichTextEditor stamps data-filename on
+                        // these, never on a plain pasted/typed link) -- open the
+                        // shared in-app preview instead of navigating away to the
+                        // raw file URL in a new tab.
+                        const filename = anchor.getAttribute('data-filename');
+                        if (filename) openFilePreview(href, filename);
+                        else window.open(href, '_blank', 'noopener,noreferrer');
                       }
                       return;
                     }
@@ -1735,38 +1761,42 @@ export default function IssueDetailPage() {
                   );
                 })}
               </div>
+            </div>
+          )}
 
-              {/* Inline preview modal */}
-              {previewAttach && (
-                <div className="fixed inset-0 z-[300] flex flex-col bg-black/80" onClick={() => setPreviewAttach(null)}>
-                  <div className="flex items-center justify-between px-5 py-3 bg-gray-900 flex-shrink-0" onClick={e => e.stopPropagation()}>
-                    <div className="flex items-center gap-3">
-                      <Paperclip size={15} className="text-gray-400" />
-                      <span className="text-white text-sm font-medium truncate max-w-[400px]">{previewAttach.name}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <a href={previewAttach.url} download={previewAttach.name}
-                        className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors"
-                        onClick={e => e.stopPropagation()}>
-                        Download
-                      </a>
-                      <button onClick={() => setPreviewAttach(null)}
-                        className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors">
-                        ✕ Close
-                      </button>
-                    </div>
-                  </div>
-                  <div className="flex-1 overflow-hidden" onClick={e => e.stopPropagation()}>
-                    {previewAttach.mime.startsWith('image/') ? (
-                      <div className="w-full h-full flex items-center justify-center p-6">
-                        <img src={previewAttach.url} alt={previewAttach.name} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
-                      </div>
-                    ) : (
-                      <iframe src={previewAttach.url} className="w-full h-full border-0" title={previewAttach.name} />
-                    )}
-                  </div>
+          {/* Inline file preview modal -- shared by the dedicated Attachments
+              list above and any uploaded-file chip clicked inside Description
+              or a comment (see openFilePreview), so it has to render
+              regardless of whether this ticket has any dedicated attachments
+              of its own. */}
+          {previewAttach && (
+            <div className="fixed inset-0 z-[300] flex flex-col bg-black/80" onClick={() => setPreviewAttach(null)}>
+              <div className="flex items-center justify-between px-5 py-3 bg-gray-900 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                <div className="flex items-center gap-3">
+                  <Paperclip size={15} className="text-gray-400" />
+                  <span className="text-white text-sm font-medium truncate max-w-[400px]">{previewAttach.name}</span>
                 </div>
-              )}
+                <div className="flex items-center gap-2">
+                  <a href={previewAttach.url} download={previewAttach.name}
+                    className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors"
+                    onClick={e => e.stopPropagation()}>
+                    Download
+                  </a>
+                  <button onClick={() => setPreviewAttach(null)}
+                    className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors">
+                    ✕ Close
+                  </button>
+                </div>
+              </div>
+              <div className="flex-1 overflow-hidden" onClick={e => e.stopPropagation()}>
+                {previewAttach.mime.startsWith('image/') ? (
+                  <div className="w-full h-full flex items-center justify-center p-6">
+                    <img src={previewAttach.url} alt={previewAttach.name} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
+                  </div>
+                ) : (
+                  <iframe src={previewAttach.url} className="w-full h-full border-0" title={previewAttach.name} />
+                )}
+              </div>
             </div>
           )}
 
@@ -3555,6 +3585,14 @@ export default function IssueDetailPage() {
           className="fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4"
           onClick={() => setLightboxSrc(null)}
         >
+          <a
+            href={lightboxSrc}
+            download={decodeURIComponent(lightboxSrc.split('/').pop() || 'image')}
+            onClick={(e) => e.stopPropagation()}
+            className="absolute top-4 right-16 h-9 px-3 rounded-full bg-white/10 hover:bg-white/25 flex items-center text-white text-[13px] font-medium transition-colors"
+          >
+            Download
+          </a>
           <button
             onClick={() => setLightboxSrc(null)}
             className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/10 hover:bg-white/25 flex items-center justify-center text-white transition-colors"
