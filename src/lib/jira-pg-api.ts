@@ -28,6 +28,13 @@ async function getCachedUser(userId: string) {
 
 // Ensure original_dept column exists
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).catch(() => {});
+// POST /search's exact-match branch looks up an issue's subtasks by
+// parentKey (added alongside its linked-work-items lookup) -- that column
+// had no index at all, so on a large production issues table every search
+// hit for an exact ticket number/key triggered a full table scan just to
+// find its subtasks, not something the smaller local dataset this was
+// built and tested against ever surfaced.
+pool.query(`CREATE INDEX IF NOT EXISTS idx_issues_parentkey ON issues("parentKey")`).catch(() => {});
 // User invite status: 'invited' | 'active' | 'inactive'
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'`).catch(() => {});
 // Backfill: invited users (isActive=false, no prior login) stay 'invited'; active users get 'active'

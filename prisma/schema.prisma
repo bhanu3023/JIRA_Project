@@ -142,6 +142,7 @@ model Issue {
   @@index([priority])
   @@index([createdAt])
   @@index([updatedAt])
+  @@index([parentKey])
   @@map("issues")
 }
 
