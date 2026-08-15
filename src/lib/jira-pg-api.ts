@@ -49,6 +49,34 @@ pool.query(`
   WHERE i.key = n."issueKey" AND i.cf_key IS NOT NULL AND i.cf_key <> '' AND n."issueKey" IS DISTINCT FROM i.cf_key
 `).catch(() => {});
 
+// One-time correction for the "Time to resolution" SLA policy: it was
+// created pointing at a spaceId that doesn't match any real space in this
+// database, so it silently never applied to a single real ticket. The user
+// confirmed the real per-priority hours from the live Jira instance's Dev
+// queue (L2B/L3B) -- repoint it at the real space (TESTIN) and scope it to
+// Dev specifically, since Migration/QA/etc. have their own separate SLA
+// policies and there's no confirmed evidence their "Time to resolution"
+// targets are the same numbers. Guarded on dept_name IS NULL so this is a
+// no-op once applied (an admin could since retarget/rename it deliberately).
+pool.query(`
+  UPDATE sla_definitions
+  SET "spaceId" = 'pg_92q07qtnlz',
+      dept_name = 'Dev',
+      goals = '[
+        {"id":"1780317563879_g","jql":"type in (Task, Bug)","calendar":"24/7 Calendar (Default)","timeUnit":"hours","timeValue":"","isPriorityGroup":true,
+         "priorityRows":[
+           {"calendar":"24/7 Calendar (Default)","priority":"highest","timeUnit":"hours","timeValue":"6"},
+           {"calendar":"24/7 Calendar (Default)","priority":"high","timeUnit":"hours","timeValue":"8"},
+           {"calendar":"24/7 Calendar (Default)","priority":"medium","timeUnit":"hours","timeValue":"24"},
+           {"calendar":"24/7 Calendar (Default)","priority":"low","timeUnit":"hours","timeValue":"48"},
+           {"calendar":"24/7 Calendar (Default)","priority":"lowest","timeUnit":"hours","timeValue":"48"}
+         ]},
+        {"id":"1780317563879_g2","jql":"All remaining work items","calendar":"24/7 Calendar (Default)","timeUnit":"hours","timeValue":"80","isPriorityGroup":false}
+      ]'::jsonb,
+      "updatedAt" = NOW()
+  WHERE id = 'pg_athlc8237e' AND dept_name IS NULL
+`).catch(() => {});
+
 // Ensure queue_closed_tickets exists at startup (needed by Sent/Watching query)
 pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`).catch(() => {});
 
@@ -1083,6 +1111,25 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     });
     if (!policies.length) return [];
 
+    // When a department-specific policy shares its name with a space-wide
+    // one (dept_name null) -- e.g. both literally called "Time to
+    // resolution" -- prefer the department-specific one instead of
+    // returning both as separate instances. Without this, adding a
+    // department override for an existing space-wide metric silently
+    // doubled that metric's SLA badge on every ticket in that department.
+    // Mirrors the "prefer dept-specific policy, fall back to space-wide"
+    // rule computePausedDeptSLA already uses above, generalized to every
+    // name instead of picking one policy for the whole issue.
+    const policyByName = new Map<string, any>();
+    for (const p of policies) {
+      const key = (p.name || '').trim().toLowerCase();
+      const current = policyByName.get(key);
+      if (!current || (!!(p.dept_name || '').trim() && !(current.dept_name || '').trim())) {
+        policyByName.set(key, p);
+      }
+    }
+    const dedupedPolicies = Array.from(policyByName.values());
+
     const priority = (issue.priority || 'medium').toLowerCase();
     // The status badge shown to the user can come from EITHER the ticket's
     // global status OR its per-department dept_statuses snapshot (see
@@ -1128,7 +1175,7 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       && new Date(deptLogEntry.started_at).getTime() === new Date(currentStartedRaw).getTime();
     const priorElapsedMs: number = (deptLogEntry && !isSameStint) ? (deptLogEntry.elapsed_ms || 0) : 0;
 
-    return policies.map((policy: any) => {
+    return dedupedPolicies.map((policy: any) => {
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
       const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
       for (const goal of goals) {
