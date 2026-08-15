@@ -2110,7 +2110,9 @@ export default function IssueDetailPage() {
                             <div className="flex items-center flex-wrap gap-1 text-[13px] mb-1">
                               <span className="font-semibold text-gray-800">{a.user?.firstName || 'System'}</span>
                               {a.field === 'comment' ? (
-                                <span className="text-gray-500">added a comment</span>
+                                <span className="text-gray-500">
+                                  {a.newValue === '[deleted]' ? 'deleted a comment' : a.oldValue ? 'edited a comment' : 'added a comment'}
+                                </span>
                               ) : a.field === 'created' ? (
                                 <span className="text-gray-500">created this issue</span>
                               ) : a.field === 'sla' ? (
@@ -2139,8 +2141,9 @@ export default function IssueDetailPage() {
                                 )}
                               </div>
                             )}
-                            {/* Comment preview */}
-                            {a.field === 'comment' && a.newValue && (() => {
+                            {/* Comment preview -- skipped for a delete event, whose newValue
+                                is the literal marker "[deleted]", not real comment text */}
+                            {a.field === 'comment' && a.newValue && a.newValue !== '[deleted]' && (() => {
                               const plain = stripHtmlToText(a.newValue).trim();
                               return (
                                 <div className="text-[12px] text-gray-500 italic truncate max-w-sm">"{plain.slice(0, 120)}{plain.length > 120 ? '…' : ''}"</div>

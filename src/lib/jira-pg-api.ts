@@ -5564,6 +5564,11 @@ async function _handleJiraPgApi(
     if (body.customerName !== undefined) data.customerName = body.customerName === null ? null : String(body.customerName);
     if (body.clientName !== undefined) data.clientName = body.clientName === null ? null : String(body.clientName);
     if (body.projectManager !== undefined) data.projectManager = body.projectManager === null ? null : String(body.projectManager);
+    // Was read by POST /issues (creation) but never by this PATCH handler --
+    // the ticket detail page's due-date editor called this endpoint and got
+    // a 200 back with no error, but the edit was silently dropped every
+    // time; nothing was ever saved or logged.
+    if (body.dueDate !== undefined) data.dueDate = body.dueDate === null ? null : new Date(String(body.dueDate));
 
     // Assignee Ã¢â‚¬â€ accept assigneeId, assignee object, or assigneeEmail
     // Assignee -- accept assigneeId, assignee object, or assigneeEmail (email pre-resolved above in parallel)
@@ -6087,6 +6092,11 @@ async function _handleJiraPgApi(
       if (body.customerName !== undefined)     track('customer name',     (issue as any).customerName,     data.customerName as string);
       if (body.clientName !== undefined)       track('client name',       (issue as any).clientName,       data.clientName as string);
       if (body.projectManager !== undefined)   track('project manager',   (issue as any).projectManager,   data.projectManager as string);
+      if (body.dueDate !== undefined) {
+        const oldD = issue.dueDate ? new Date(issue.dueDate).toISOString().split('T')[0] : null;
+        const newD = data.dueDate ? new Date(data.dueDate as Date).toISOString().split('T')[0] : null;
+        track('due date', oldD, newD);
+      }
 
       // Labels (array Ã¢â€ ' comma string)
       if (body.labels !== undefined) {
@@ -6114,6 +6124,18 @@ async function _handleJiraPgApi(
         const oldN = oldA ? (`${oldA.firstName ?? ''} ${oldA.lastName ?? ''}`.trim() || oldA.email) : null;
         const newN = newA ? (`${newA.firstName ?? ''} ${newA.lastName ?? ''}`.trim() || newA.email) : null;
         histRecs.push({ issueId: issue.id, field: 'assignee', oldValue: oldN, newValue: newN, authorName, authorEmail, createdAt: now });
+      }
+
+      // Reporter (resolve display names) -- previously changed silently: a
+      // PATCH that set BOTH assignee and reporter in the same request only
+      // ever logged the assignee, since there was no track() call for this
+      // field at all.
+      if (data.reporterId !== undefined && issue.reporterId !== data.reporterId) {
+        const oldR = issue.reporterId ? await db.user.findUnique({ where: { id: issue.reporterId } }) : null;
+        const newR = data.reporterId ? await db.user.findUnique({ where: { id: data.reporterId as string } }) : null;
+        const oldRN = oldR ? (`${oldR.firstName ?? ''} ${oldR.lastName ?? ''}`.trim() || oldR.email) : null;
+        const newRN = newR ? (`${newR.firstName ?? ''} ${newR.lastName ?? ''}`.trim() || newR.email) : null;
+        histRecs.push({ issueId: issue.id, field: 'reporter', oldValue: oldRN, newValue: newRN, authorName, authorEmail, createdAt: now });
       }
 
       if (histRecs.length > 0) {
@@ -6410,8 +6432,8 @@ async function _handleJiraPgApi(
       if (cfRow.rows[0]) targetKey = cfRow.rows[0].key;
     }
     const [sourceExists, targetExists] = await Promise.all([
-      pool.query(`SELECT 1 FROM issues WHERE key = $1 LIMIT 1`, [sourceKey]),
-      pool.query(`SELECT 1 FROM issues WHERE key = $1 LIMIT 1`, [targetKey]),
+      pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [sourceKey]),
+      pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [targetKey]),
     ]);
     if (!sourceExists.rows[0]) return json({ error: `Issue ${issueLinksPost[1]} not found` }, 404);
     if (!targetExists.rows[0]) return json({ error: `Issue ${body.targetKey} not found` }, 404);
@@ -6423,6 +6445,22 @@ async function _handleJiraPgApi(
       create: { id: rid(), sourceKey, targetKey, linkType: String(body.linkType || 'relates') },
       update: {},
     });
+    // Logged on BOTH tickets -- a link is symmetric (creating it changed
+    // what each side's "Linked work items" shows), and previously logged on
+    // neither, so the History tab gave no trace a link was ever added.
+    try {
+      const linkAuthorName = currentUser
+        ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+        : 'Unknown';
+      const sourceDisplay = sourceExists.rows[0].cf_key || sourceKey;
+      const targetDisplay = targetExists.rows[0].cf_key || targetKey;
+      await (db as any).issueHistory.createMany({
+        data: [
+          { issueId: sourceExists.rows[0].id, field: 'link', oldValue: null, newValue: `Linked to ${targetDisplay} (${link.linkType})`, authorName: linkAuthorName, authorEmail: currentUser?.email ?? null, createdAt: new Date() },
+          { issueId: targetExists.rows[0].id, field: 'link', oldValue: null, newValue: `Linked to ${sourceDisplay} (${link.linkType})`, authorName: linkAuthorName, authorEmail: currentUser?.email ?? null, createdAt: new Date() },
+        ],
+      });
+    } catch { /* history tracking should never break the main response */ }
     return json(link);
   }
 
@@ -6430,7 +6468,25 @@ async function _handleJiraPgApi(
   if (issueLinkDel && method === 'DELETE') {
     const id = issueLinkDel[1];
     try {
+      const linkBefore = await db.issueLink.findUnique({ where: { id } });
       await db.issueLink.delete({ where: { id } });
+      if (linkBefore) {
+        try {
+          const [srcRow, tgtRow] = await Promise.all([
+            pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [linkBefore.sourceKey]),
+            pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [linkBefore.targetKey]),
+          ]);
+          const linkAuthorName = currentUser
+            ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+            : 'Unknown';
+          const srcDisplay = srcRow.rows[0]?.cf_key || linkBefore.sourceKey;
+          const tgtDisplay = tgtRow.rows[0]?.cf_key || linkBefore.targetKey;
+          const recs = [];
+          if (srcRow.rows[0]) recs.push({ issueId: srcRow.rows[0].id, field: 'link', oldValue: `Linked to ${tgtDisplay} (${linkBefore.linkType})`, newValue: null, authorName: linkAuthorName, authorEmail: currentUser?.email ?? null, createdAt: new Date() });
+          if (tgtRow.rows[0]) recs.push({ issueId: tgtRow.rows[0].id, field: 'link', oldValue: `Linked to ${srcDisplay} (${linkBefore.linkType})`, newValue: null, authorName: linkAuthorName, authorEmail: currentUser?.email ?? null, createdAt: new Date() });
+          if (recs.length) await (db as any).issueHistory.createMany({ data: recs });
+        } catch { /* history tracking should never break the main response */ }
+      }
     } catch {
       // already deleted
     }
@@ -6640,13 +6696,45 @@ async function _handleJiraPgApi(
   const commentById = path.match(/^comments\/([^/]+)$/);
   if (commentById) {
     const commentId = commentById[1];
+    // Strips HTML/entities down to a short readable preview -- same approach
+    // used for the comment-added notification preview above; a raw HTML
+    // comment body in a history row would read as unrendered markup.
+    const previewComment = (raw: string) => (raw || '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
     if (method === 'PATCH') {
       const body = await readJson(req);
+      // Comment edits previously replaced the body with no trace of the
+      // change -- fetch the prior body first so history has an old value to
+      // show, not just "something changed."
+      const before = await db.comment.findUnique({ where: { id: commentId } });
       const updated = await db.comment.update({
         where: { id: commentId },
         data: { body: String(body.body || ''), updatedAt: new Date() },
         include: { author: true },
       });
+      if (before && before.body !== updated.body) {
+        try {
+          const authorName = currentUser
+            ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+            : 'Unknown';
+          await (db as any).issueHistory.create({
+            data: {
+              issueId: before.issueId, field: 'comment',
+              oldValue: previewComment(before.body) || null,
+              newValue: previewComment(updated.body) || null,
+              authorName, authorEmail: currentUser?.email ?? null, createdAt: new Date(),
+            },
+          });
+        } catch { /* history tracking should never break the main response */ }
+      }
       return json({
         id: updated.id, body: updated.body,
         author: updated.author
@@ -6657,7 +6745,25 @@ async function _handleJiraPgApi(
       });
     }
     if (method === 'DELETE') {
+      // Same gap as edit above -- a deleted comment left no trace it had
+      // ever existed. Fetch it first so history can record what was removed.
+      const before = await db.comment.findUnique({ where: { id: commentId } });
       await db.comment.delete({ where: { id: commentId } });
+      if (before) {
+        try {
+          const authorName = currentUser
+            ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+            : 'Unknown';
+          await (db as any).issueHistory.create({
+            data: {
+              issueId: before.issueId, field: 'comment',
+              oldValue: previewComment(before.body) || null,
+              newValue: '[deleted]',
+              authorName, authorEmail: currentUser?.email ?? null, createdAt: new Date(),
+            },
+          });
+        } catch { /* history tracking should never break the main response */ }
+      }
       return json({ ok: true });
     }
   }
@@ -8058,6 +8164,17 @@ async function _handleJiraPgApi(
         const att = await (db as any).attachment.create({
           data: { issueId, filename: file.name, url, mimeType: file.type || null, size: file.size || null },
         });
+        try {
+          const uploaderName = currentUser
+            ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+            : 'Unknown';
+          await (db as any).issueHistory.create({
+            data: {
+              issueId, field: 'attachment', oldValue: null, newValue: `Added ${file.name}`,
+              authorName: uploaderName, authorEmail: currentUser?.email ?? null, createdAt: new Date(),
+            },
+          });
+        } catch { /* history tracking should never break the upload */ }
         return json({ id: att.id, url: att.url, originalName: att.filename, mimeType: att.mimeType, size: att.size, createdAt: att.createdAt });
       } catch (e: any) {
         console.error('[attachments] upload error:', e);
