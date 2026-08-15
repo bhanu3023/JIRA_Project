@@ -1383,7 +1383,33 @@ async function loadTeamAnalyticsScope(url: URL) {
     let workedClause = `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id`;
     if (fromStart) { workedClause += ` AND w.worked_at >= $${idx++}`; params.push(fromStart); }
     if (toEnd) { workedClause += ` AND w.worked_at <= $${idx++}`; params.push(toEnd); }
-    if (depts && depts.length) { workedClause += ` AND LOWER(w.dept) = ANY($${idx++}::text[])`; params.push(depts.map((d) => d.toLowerCase())); }
+    if (depts && depts.length) {
+      workedClause += ` AND LOWER(w.dept) = ANY($${idx++}::text[])`;
+      params.push(depts.map((d) => d.toLowerCase()));
+      // Only count work by someone who currently has access to that specific
+      // queue -- e.g. selecting "Dev" shouldn't credit a ticket to Dev's
+      // worked-count just because SOME person touched it while it briefly
+      // carried that department label; it must have been a real Dev-access
+      // person who did the work. Built as a dept(lowercased) -> memberIds
+      // jsonb map so each selected department is checked against its own
+      // configured list -- a department with no queue config at all (most
+      // of them; see the comment on deptMemberSets above) imposes no
+      // restriction, same "no config = no restriction" rule used elsewhere.
+      const cqW = await pool.query(`SELECT queues FROM custom_queues`);
+      const memberMap: Record<string, string[]> = {};
+      for (const row of cqW.rows) {
+        const queuesW = Array.isArray(row.queues) ? row.queues : [];
+        for (const q of queuesW) {
+          const name = String(q?.name || '').trim().toLowerCase();
+          if (!name) continue;
+          const members: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+          (memberMap[name] ??= []).push(...members);
+        }
+      }
+      workedClause += ` AND (NOT ($${idx}::jsonb ? LOWER(w.dept)) OR ($${idx}::jsonb -> LOWER(w.dept)) @> to_jsonb(w.user_id))`;
+      params.push(JSON.stringify(memberMap));
+      idx++;
+    }
     workedClause += `)`;
     whereClauses.push(workedClause);
   } else {
@@ -3956,6 +3982,24 @@ async function _handleJiraPgApi(
         const workedToIdx = deptParamIdx++;
         deptExtraParams.push(workedFrom, workedTo);
         workedRangeSql = ` AND w.worked_at >= $${workedFromIdx} AND w.worked_at <= $${workedToIdx}`;
+        // Only count work by someone who currently has access to this queue --
+        // e.g. selecting "Dev" shouldn't credit a ticket to Dev's worked-count
+        // just because SOME person touched it while it briefly carried that
+        // department label; it must have been a real Dev-access person who
+        // did the work. Same "no config = no restriction" rule as
+        // queueMembersOnly above -- a department with no queue config at all
+        // imposes no restriction here either.
+        try {
+          const cqW = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
+          const queuesW: any[] = cqW.rows[0]?.queues || [];
+          const qW = queuesW.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
+          const memberIdsW: string[] = Array.isArray(qW?.memberIds) ? qW.memberIds : [];
+          if (memberIdsW.length) {
+            const memberIdx = deptParamIdx++;
+            deptExtraParams.push(memberIdsW);
+            workedRangeSql += ` AND w.user_id = ANY($${memberIdx}::text[])`;
+          }
+        } catch { /* ignore -- no restriction if lookup fails */ }
       }
 
       const deptDoneClause = deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : '';
