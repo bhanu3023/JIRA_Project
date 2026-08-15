@@ -846,6 +846,36 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
   } catch { /* non-fatal */ }
 }
 
+// dept_assignees/dept_statuses are keyed by department name, but the
+// queueStatusId-triggered handoff below derives its targetDept by
+// regex-parsing a free-text "Waiting for X" status label a queue admin typed
+// into a plain text input (src/app/spaces/[spaceKey]/queue/[queueId]/
+// workflow/page.tsx) -- never validated against the canonical department
+// name list. A snapshot saved as deptAssignees["Dev"] (from the manual
+// Change Department dropdown, which always uses the canonical name) was
+// invisible to a later restore attempt keyed by "waiting for dev" -> "dev"
+// from a queue status typed in different casing, since plain object-key
+// access is case-sensitive -- the restore silently missed and fell through
+// to a fresh round-robin pick instead of the person who'd actually had it.
+// These helpers do a case-insensitive lookup for reads, and for writes reuse
+// whichever casing already exists for that department in THIS ticket's own
+// snapshot map (falling back to the given string only when the department
+// has never been recorded here at all), so a ticket's history stays
+// internally consistent regardless of which of the two casings triggered
+// the write.
+function deptMapGet(map: Record<string, any>, dept: string): any {
+  const key = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
+  return key ? map[key] : undefined;
+}
+function deptMapSet(map: Record<string, any>, dept: string, value: any): void {
+  const existingKey = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
+  map[existingKey || dept] = value;
+}
+function deptMapDelete(map: Record<string, any>, dept: string): void {
+  const existingKey = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
+  if (existingKey) delete map[existingKey];
+}
+
 /**
  * Moves an issue to targetDept, exactly like the "Change Department" dropdown
  * does: saves the current assignee under the old dept, restores (or
@@ -887,19 +917,19 @@ async function performDeptHandoff(
   if (oldDept && curAssigneeId) {
     const curAssignee = await db.user.findUnique({ where: { id: curAssigneeId }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
     if (curAssignee) {
-      deptAssignees[oldDept] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: avatarRef(curAssignee.id, curAssignee.avatarUrl) };
+      deptMapSet(deptAssignees, oldDept, { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: avatarRef(curAssignee.id, curAssignee.avatarUrl) });
     }
   }
   // Restore whoever was saved for this dept from a previous visit (same
   // restore-or-round-robin rule the "Change Department" dropdown already
   // uses) instead of always landing unassigned.
-  const savedForTarget = deptAssignees[targetDept];
+  const savedForTarget = deptMapGet(deptAssignees, targetDept);
   let handoffAssigneeId: string | null = null;
   let handoffAssigneeName: string | null = null;
   if (savedForTarget?.id) {
     const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedForTarget.id]);
     if (stillExists.rows.length) { handoffAssigneeId = savedForTarget.id; handoffAssigneeName = savedForTarget.displayName || null; }
-    else delete deptAssignees[targetDept];
+    else deptMapDelete(deptAssignees, targetDept);
   }
   if (!handoffAssigneeId) {
     try {
@@ -907,7 +937,7 @@ async function performDeptHandoff(
       if (rrAgent) {
         handoffAssigneeId = rrAgent.userId;
         handoffAssigneeName = rrAgent.name;
-        deptAssignees[targetDept] = { id: rrAgent.userId, displayName: rrAgent.name };
+        deptMapSet(deptAssignees, targetDept, { id: rrAgent.userId, displayName: rrAgent.name });
       }
     } catch { /* non-critical — falls through to unassigned */ }
   }
@@ -935,13 +965,13 @@ async function performDeptHandoff(
   // info (same fix already applied to the manual endpoint's own oldDept
   // recording, for the same "Sent/Watching needs to show what it actually
   // was" reason).
-  deptStatuses[oldDept] = oldDeptStatusObj;
+  deptMapSet(deptStatuses, oldDept, oldDeptStatusObj);
 
-  const restoringOwnSnapshot = isDoneNow && deptStatuses[targetDept] != null;
+  const restoringOwnSnapshot = isDoneNow && deptMapGet(deptStatuses, targetDept) != null;
   let newDeptStatusObj: any;
   let targetStatusId: string | null;
   if (restoringOwnSnapshot) {
-    newDeptStatusObj = deptStatuses[targetDept];
+    newDeptStatusObj = deptMapGet(deptStatuses, targetDept);
     const realMatch = await db.status.findFirst({ where: { spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } }, orderBy: { order: 'asc' } });
     targetStatusId = realMatch?.id || priorStatus?.id || null;
   } else if (isDoneNow) {
@@ -960,7 +990,7 @@ async function performDeptHandoff(
     // endpoint already uses, reading the target dept's own queue-configured
     // status list the same way that endpoint does, rather than a purely
     // space-wide guess.
-    const isReturningToDept = deptStatuses[targetDept] != null;
+    const isReturningToDept = deptMapGet(deptStatuses, targetDept) != null;
     let targetQueueStatuses: any[] = [];
     try {
       const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
@@ -988,7 +1018,7 @@ async function performDeptHandoff(
     const realMatch = await db.status.findFirst({ where: { spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } }, orderBy: { order: 'asc' } });
     targetStatusId = realMatch?.id || fallbackStatusId;
   }
-  deptStatuses[targetDept] = newDeptStatusObj;
+  deptMapSet(deptStatuses, targetDept, newDeptStatusObj);
 
   await pauseDeptSLA(null, issueId, oldDept);
   await pool.query(
@@ -1027,8 +1057,9 @@ async function performDeptHandoff(
   if (curAssigneeId !== handoffAssigneeId) {
     try {
       const historyChanger = userId ? await db.user.findUnique({ where: { id: userId }, select: { firstName: true, lastName: true, email: true } }) : null;
-      const oldAssigneeName = (oldDept && curAssigneeId && deptAssignees[oldDept]?.id === curAssigneeId)
-        ? deptAssignees[oldDept].displayName
+      const oldDeptSnapshot = oldDept ? deptMapGet(deptAssignees, oldDept) : null;
+      const oldAssigneeName = (curAssigneeId && oldDeptSnapshot?.id === curAssigneeId)
+        ? oldDeptSnapshot.displayName
         : null;
       pool.query(
         `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
@@ -4433,14 +4464,14 @@ async function _handleJiraPgApi(
       }
       const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
       if (oldDept && issue.assignee) {
-        deptAssignees[oldDept] = {
+        deptMapSet(deptAssignees, oldDept, {
           id: issue.assignee.id,
           email: (issue.assignee as any).email,
           firstName: (issue.assignee as any).firstName,
           lastName: (issue.assignee as any).lastName,
           displayName: `${(issue.assignee as any).firstName} ${(issue.assignee as any).lastName}`.trim(),
           avatarUrl: avatarRef(issue.assignee.id, (issue.assignee as any).avatarUrl),
-        };
+        });
       }
       // Deliberately NOT resetting deptAssignees[newDept] here. It already
       // holds whatever was saved from the LAST time this ticket was in
@@ -4457,7 +4488,7 @@ async function _handleJiraPgApi(
       const existingStatuses = await pool.query(`SELECT dept_statuses FROM issues WHERE key=$1`, [key]);
       const deptStatuses: Record<string, any> = existingStatuses.rows[0]?.dept_statuses || {};
       // Returning ticket (dept visited before) => In Progress; first arrival => Waiting for newDept
-      const isReturningToDept = deptStatuses[newDept] != null;
+      const isReturningToDept = deptMapGet(deptStatuses, newDept) != null;
 
       let newDeptQueueStatuses: any[] = [];
       try {
@@ -4480,11 +4511,11 @@ async function _handleJiraPgApi(
       // Migration landed showing Dev's "Resolved" with no way to tell what it
       // was doing before, and no natural point for Migration to actually
       // review and close it themselves.
-      const restoringOwnSnapshot = isDoneNow && deptStatuses[newDept] != null;
+      const restoringOwnSnapshot = isDoneNow && deptMapGet(deptStatuses, newDept) != null;
 
       let newDeptStatusObj: any;
       if (restoringOwnSnapshot) {
-        newDeptStatusObj = deptStatuses[newDept];
+        newDeptStatusObj = deptMapGet(deptStatuses, newDept);
       } else if (isDoneNow) {
         newDeptStatusObj = oldDeptStatusObj;
       } else if (isReturningToDept) {
@@ -4524,16 +4555,16 @@ async function _handleJiraPgApi(
       // not the "Waiting for <newDept>" transit marker, which discarded that info
       // (Sent/Watching needs to show what it was actually at before leaving).
       if (oldDept) {
-        deptStatuses[oldDept] = issue.status
+        deptMapSet(deptStatuses, oldDept, issue.status
           ? { id: issue.status.id, name: issue.status.name, category: issue.status.category, color: issue.status.color }
-          : oldDeptStatusObj;
+          : oldDeptStatusObj);
       }
-      deptStatuses[newDept] = newDeptStatusObj;
+      deptMapSet(deptStatuses, newDept, newDeptStatusObj);
 
       // Restore previously saved assignee for this dept, or round-robin to a new one
       let rrAssigneeId: string | null = null;
       let rrAgentName: string | null = null;
-      const savedAssigneeForNewDept = deptAssignees[newDept];
+      const savedAssigneeForNewDept = deptMapGet(deptAssignees, newDept);
       // dept_assignees is a point-in-time snapshot that can outlive the user it
       // points to -- if that account was since deleted (a real hard delete via
       // Settings > User Management, e.g. an offboarded employee), restoring it
@@ -4547,7 +4578,7 @@ async function _handleJiraPgApi(
       if (savedAssigneeForNewDept?.id) {
         const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedAssigneeForNewDept.id]);
         savedAssigneeStillExists = stillExists.rows.length > 0;
-        if (!savedAssigneeStillExists) delete deptAssignees[newDept];
+        if (!savedAssigneeStillExists) deptMapDelete(deptAssignees, newDept);
       }
       if (savedAssigneeForNewDept?.id && savedAssigneeStillExists) {
         // Dept was visited before -- restore the saved assignee
@@ -4559,7 +4590,7 @@ async function _handleJiraPgApi(
           if (rrAgent) {
             rrAssigneeId = rrAgent.userId;
             rrAgentName = rrAgent.name;
-            deptAssignees[newDept] = { id: rrAgent.userId, displayName: rrAgent.name };
+            deptMapSet(deptAssignees, newDept, { id: rrAgent.userId, displayName: rrAgent.name });
           }
         } catch { /* non-critical */ }
       }
@@ -4604,7 +4635,7 @@ async function _handleJiraPgApi(
           ).catch(() => {});
         }
         // When ticket returns to Dev (or any dept that has a saved assignee), also record worked-on for that dept
-        const devAssignee = deptAssignees[newDept];
+        const devAssignee = deptMapGet(deptAssignees, newDept);
         if (devAssignee?.id) {
           pool.query(
             `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'returned') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='returned', worked_at=NOW()`,
@@ -5412,14 +5443,14 @@ async function _handleJiraPgApi(
         const dept: string = qRow.rows[0]?.current_department;
         if (dept) {
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
-          const oldQueueStatusName = deptStatuses[dept]?.name || 'Unknown';
-          const oldQueueStatusCategory = deptStatuses[dept]?.category || 'todo';
-          deptStatuses[dept] = {
+          const oldQueueStatusName = deptMapGet(deptStatuses, dept)?.name || 'Unknown';
+          const oldQueueStatusCategory = deptMapGet(deptStatuses, dept)?.category || 'todo';
+          deptMapSet(deptStatuses, dept, {
             id: String(body.queueStatusId),
             name: String(body.queueStatusName || ''),
             color: String(body.queueStatusColor || '#64748B'),
             category: String(body.queueStatusCategory || 'todo'),
-          };
+          });
           await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(deptStatuses), key]);
 
           // Reopening -- the dept's OLD status was done (Resolved/Closed/etc.)
@@ -5697,11 +5728,11 @@ async function _handleJiraPgApi(
         if (currentDept) {
           const deptAssignees: Record<string, any> = rawIssue.rows[0]?.dept_assignees || {};
           if (data.assigneeId === null) {
-            deptAssignees[currentDept] = null;
+            deptMapSet(deptAssignees, currentDept, null);
           } else {
             const newAssignee = await db.user.findUnique({ where: { id: data.assigneeId as string }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
             if (newAssignee) {
-              deptAssignees[currentDept] = { id: newAssignee.id, email: newAssignee.email, firstName: newAssignee.firstName, lastName: newAssignee.lastName, displayName: `${newAssignee.firstName} ${newAssignee.lastName}`.trim(), avatarUrl: avatarRef(newAssignee.id, newAssignee.avatarUrl) };
+              deptMapSet(deptAssignees, currentDept, { id: newAssignee.id, email: newAssignee.email, firstName: newAssignee.firstName, lastName: newAssignee.lastName, displayName: `${newAssignee.firstName} ${newAssignee.lastName}`.trim(), avatarUrl: avatarRef(newAssignee.id, newAssignee.avatarUrl) });
             }
           }
           await pool.query(`UPDATE issues SET dept_assignees=$1::jsonb WHERE key=$2`, [JSON.stringify(deptAssignees), key]);
@@ -5989,7 +6020,7 @@ async function _handleJiraPgApi(
             // Move the ticket back to its origin dept, restoring whoever was
             // handling it there before it was passed along.
             const deptAssignees: Record<string, any> = deptRow.rows[0]?.dept_assignees || {};
-            const homeAssignee = deptAssignees[homeDept];
+            const homeAssignee = deptMapGet(deptAssignees, homeDept);
             const restoreAssigneeId: string | null = homeAssignee?.id || null;
 
             // Restore whatever status this ticket showed in its home dept
@@ -6004,7 +6035,7 @@ async function _handleJiraPgApi(
             // manual handoff -- read it back here the same way that endpoint
             // resolves a snapshot name to a real status row.
             const deptStatuses: Record<string, any> = deptRow.rows[0]?.dept_statuses || {};
-            const homeStatusSnapshot = deptStatuses[homeDept];
+            const homeStatusSnapshot = deptMapGet(deptStatuses, homeDept);
             let restoredStatusId: string | null = null;
             if (homeStatusSnapshot?.name) {
               const realMatch = await db.status.findFirst({
@@ -6017,7 +6048,7 @@ async function _handleJiraPgApi(
             // resolving dept, symmetric with how a manual transfer records
             // the old dept's status -- so a future visit back to this dept
             // sees accurate history instead of nothing.
-            deptStatuses[resolvingDept] = { id: newStRec.id, name: newStRec.name, category: newStRec.category, color: newStRec.color };
+            deptMapSet(deptStatuses, resolvingDept, { id: newStRec.id, name: newStRec.name, category: newStRec.category, color: newStRec.color });
 
             await pool.query(
               `UPDATE issues SET current_department=$1, "assigneeId"=$2, "statusId"=COALESCE($4, "statusId"), dept_statuses=$5::jsonb, "updatedAt"=NOW() WHERE id=$3`,
