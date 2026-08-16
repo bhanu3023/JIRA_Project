@@ -1109,22 +1109,14 @@ async function performDeptHandoff(
     newDeptStatusObj = deptMapGet(deptStatuses, targetDept);
     const realMatch = await db.status.findFirst({ where: { spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } }, orderBy: { order: 'asc' } });
     targetStatusId = realMatch?.id || priorStatus?.id || null;
-  } else if (isDoneNow) {
-    // Target dept has never seen this ticket before while it's done -- that's
-    // not new work arriving, so carry the done status straight through rather
-    // than reopening it into "In Progress".
-    newDeptStatusObj = oldDeptStatusObj;
-    targetStatusId = priorStatus?.id || null;
   } else {
-    // Not done: a dept the ticket has already visited before (isReturningToDept)
-    // means work resumes there, so "In Progress" fits -- but a dept seeing this
-    // ticket for the very first time hasn't had anyone touch it yet, and always
-    // forcing "In Progress" here (regardless of first-arrival vs returning) said
-    // work was already underway before anyone in the target dept had even seen
-    // the ticket. Same isReturningToDept split the manual "Change Department"
-    // endpoint already uses, reading the target dept's own queue-configured
-    // status list the same way that endpoint does, rather than a purely
-    // space-wide guess.
+    // Every department tracks its own status independently -- a status like
+    // Resolved belongs to whichever dept actually resolved it, not to a dept
+    // that's only now receiving the ticket. A dept the ticket has already
+    // visited before (isReturningToDept), OR a done ticket landing somewhere
+    // new (isDoneNow), both mean "this dept needs to actually start working
+    // it," so both get "In Progress" -- only a still-open ticket arriving at a
+    // dept for the very first time gets the untouched "Open" default.
     const isReturningToDept = deptMapGet(deptStatuses, targetDept) != null;
     let targetQueueStatuses: any[] = [];
     try {
@@ -1135,7 +1127,7 @@ async function performDeptHandoff(
         if (matchedQ?.queueStatuses?.length) { targetQueueStatuses = matchedQ.queueStatuses; break; }
       }
     } catch {}
-    if (isReturningToDept) {
+    if (isDoneNow || isReturningToDept) {
       const inProgressSt = targetQueueStatuses.find((s: any) => s.category === 'in_progress')
         || targetQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'));
       newDeptStatusObj = inProgressSt
@@ -1165,9 +1157,9 @@ async function performDeptHandoff(
   // Callers already log their own "status changed to Waiting for X" /
   // "handed to Y" entries for the picking dept's own action -- accurate, but
   // silent on what actually happened to the ticket's real status once it
-  // landed (restoring targetDept's own snapshot, or carrying a done status
-  // straight through), same gap the manual "Change Department" endpoint had
-  // for its own equivalent silent statusId change. Only worth a separate
+  // landed (restoring targetDept's own snapshot, or reopening into "In
+  // Progress"), same gap the manual "Change Department" endpoint had for its
+  // own equivalent silent statusId change. Only worth a separate
   // entry when the ticket was actually done -- the plain "In Progress" arrival
   // for a not-done ticket is already what the caller's own entry implies.
   if (isDoneNow) {
@@ -4802,25 +4794,23 @@ async function _handleJiraPgApi(
         }
       } catch {}
 
-      // Already Resolved/Closed AND landing in a dept that's never seen this
-      // ticket before (being routed on for review, or a final closure hop) --
-      // that's not "new work arriving," so carry the done status straight
-      // through rather than reopening it. But a dept this ticket has ALREADY
-      // visited is different: that dept has its own dept_statuses snapshot of
-      // what the ticket looked like on ITS side right before it left (e.g.
-      // Migration's "In Progress" before handing off to Dev) -- restore THAT
-      // instead. Otherwise a ticket resolved in Dev and handed back to
-      // Migration landed showing Dev's "Resolved" with no way to tell what it
-      // was doing before, and no natural point for Migration to actually
-      // review and close it themselves.
+      // Every department tracks its own status independently -- a status like
+      // Resolved belongs to whichever dept actually resolved it, not to a dept
+      // that's only now receiving the ticket. But a dept this ticket has
+      // ALREADY visited is different: that dept has its own dept_statuses
+      // snapshot of what the ticket looked like on ITS side right before it
+      // left (e.g. Migration's "In Progress" before handing off to Dev) --
+      // restore THAT instead of guessing.
       const restoringOwnSnapshot = isDoneNow && deptMapGet(deptStatuses, newDept) != null;
 
       let newDeptStatusObj: any;
       if (restoringOwnSnapshot) {
         newDeptStatusObj = deptMapGet(deptStatuses, newDept);
-      } else if (isDoneNow) {
-        newDeptStatusObj = oldDeptStatusObj;
-      } else if (isReturningToDept) {
+      } else if (isDoneNow || isReturningToDept) {
+        // A dept the ticket already visited (isReturningToDept) means work
+        // resumes there. A done ticket landing somewhere new (isDoneNow, not
+        // restoring) means that dept needs to actually start working it --
+        // neither should show as untouched, so both get "In Progress".
         const inProgressSt = newDeptQueueStatuses.find((s: any) => s.category === 'in_progress')
           || newDeptQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'))
           || newDeptQueueStatuses.find((s: any) => s.category === 'todo')
@@ -4843,9 +4833,7 @@ async function _handleJiraPgApi(
       // something invalid or defaulting to a status that doesn't match what
       // dept_statuses now shows.
       let newStatusId = issue.statusId;
-      if (isDoneNow && !restoringOwnSnapshot) {
-        newStatusId = issue.statusId;
-      } else {
+      {
         const realMatch = await db.status.findFirst({
           where: { spaceId: issue.spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } },
           orderBy: { order: 'asc' },
