@@ -717,7 +717,10 @@ function nowIso() {
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || 'NeutaraTech_SecureKey_2024_ab12f83079d8cadd0eb5678dc3d6aca6a5f65ed4d21646496093895b2ab4edfc';
-const SESSION_TTL_HOURS = 12;
+// 30 days -- a short-lived session forced users to re-authenticate with
+// Microsoft constantly (once every 12h) even though they never explicitly
+// logged out, unlike Jira which keeps a session alive for weeks.
+const SESSION_TTL_HOURS = 24 * 30;
 
 /** Sign a secure JWT token using jsonwebtoken */
 function encodeToken(userId: string, ip?: string, userAgent?: string): string {
