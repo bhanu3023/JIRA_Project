@@ -3277,6 +3277,7 @@ async function _handleJiraPgApi(
       } catch { /* no custom queue config */ }
 
       let perUser: any[] = [];
+      let perUserByProduct: Record<string, any[]> = {};
       if (memberIds.length) {
         const workedRes = await pool.query(
           `SELECT w.user_id, i.id AS issue_id, i.jira_sla_breached, i."dueDate", s.category AS status_category,
@@ -3319,7 +3320,7 @@ async function _handleJiraPgApi(
         // set) -- deliberately NOT range-filtered, so an old ticket someone
         // is still sitting on always counts.
         const currentRes = await pool.query(
-          `SELECT i.department_assignee_id, i."assigneeId", i."dueDate", i.jira_sla_breached,
+          `SELECT i.department_assignee_id, i."assigneeId", i."dueDate", i.jira_sla_breached, i."productType",
                   s.name AS status_name, s.category AS status_category
            FROM issues i
            LEFT JOIN statuses s ON s.id = i."statusId"
@@ -3328,6 +3329,13 @@ async function _handleJiraPgApi(
         );
         const isWaitingCat = (name: string) => /wait|hold/i.test(name || '');
         const currentByUser: Record<string, { total: number; open: number; inProgress: number; waiting: number; done: number; slaBreached: number }> = {};
+        // Same current-ticket-load breakdown as currentByUser above, but split
+        // by productType -- Jira runs Content/Message/Email migration as
+        // separate boards with their own dashboards, so "who's carrying the
+        // load" needs its own answer per product line, not just one number
+        // that blends all three together.
+        const PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+        const currentByUserByProduct: Record<string, Record<string, { total: number; done: number }>> = {};
         for (const r of currentRes.rows) {
           const owner: string | null = r.department_assignee_id || r.assigneeId;
           if (!owner || !memberIds.includes(owner)) continue;
@@ -3341,6 +3349,12 @@ async function _handleJiraPgApi(
           else bucket.open++;
           const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
           if (!isDone && (r.jira_sla_breached || dueBreach)) bucket.slaBreached++;
+
+          if (r.productType && PRODUCT_TYPES.includes(r.productType)) {
+            const ptBucket = ((currentByUserByProduct[r.productType] ??= {})[owner] ??= { total: 0, done: 0 });
+            ptBucket.total++;
+            if (isDone) ptBucket.done++;
+          }
         }
 
         perUser = Object.values(byUser).map((u: any) => {
@@ -3352,6 +3366,16 @@ async function _handleJiraPgApi(
             currentDone: cur.done, slaBreached: cur.slaBreached,
           };
         }).sort((a: any, b: any) => b.currentTotal - a.currentTotal);
+
+        perUserByProduct = Object.fromEntries(PRODUCT_TYPES.map((pt) => {
+          const bucket = currentByUserByProduct[pt] || {};
+          const rows = memberIds.map((uid) => {
+            const u = byUser[uid];
+            const b = bucket[uid] || { total: 0, done: 0 };
+            return { userId: uid, firstName: u?.firstName, lastName: u?.lastName, email: u?.email, currentTotal: b.total, currentDone: b.done };
+          }).sort((a, b) => b.currentTotal - a.currentTotal);
+          return [pt, rows];
+        }));
       }
 
       return json({
@@ -3361,6 +3385,7 @@ async function _handleJiraPgApi(
         statusBreakdown: Object.entries(statusMap).map(([name, v]) => ({ name, ...v })),
         priorityBreakdown: Object.entries(priorityMap).map(([priority, count]) => ({ priority, count })),
         perUser,
+        perUserByProduct,
       });
     } catch (e: any) {
       console.error('[dept-queue summary ERROR]', e?.message || e);

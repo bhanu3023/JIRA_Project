@@ -1523,51 +1523,50 @@ function SpaceDetailContent() {
 
         const BAR_H = 180;
         const perUser: any[] = deptSummaryData?.perUser || [];
+        const perUserByProduct: Record<string, any[]> = deptSummaryData?.perUserByProduct || {};
 
-        // Pie slices for "current ticket load" share per user -- who's
-        // actually holding the most tickets right now, not who happened to
-        // pass/close the most in this date range. Indexed by each user's rank
-        // in perUser (already sorted by currentTotal desc) so color
-        // assignment stays stable even as zero-load members (no slice) are
-        // filtered out below.
         const USER_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'];
-        const totalWorked = perUser.reduce((s: number, u: any) => s + u.currentTotal, 0);
-        let pieCumulative = 0;
-        const pieSlices = perUser
-          .map((u: any, idx: number) => ({ u, color: USER_COLORS[idx % USER_COLORS.length] }))
-          .filter(({ u }: any) => u.currentTotal > 0)
-          .map(({ u, color }: any) => {
-            const pct = totalWorked > 0 ? (u.currentTotal / totalWorked) * 100 : 0;
-            const start = pieCumulative;
-            pieCumulative += pct;
-            return { userId: u.userId, color, pct, start, end: pieCumulative };
-          });
-        const pieColorByUser: Record<string, string> = Object.fromEntries(pieSlices.map((s: any) => [s.userId, s.color]));
-        const pieGradient = pieSlices.length
-          ? `conic-gradient(${pieSlices.map((s: any) => `${s.color} ${s.start}% ${s.end}%`).join(', ')})`
-          : undefined;
 
-        // Same breakdown, but Resolved-only (status category 'done') -- Jira's
-        // dashboard shows this as a SEPARATE pie chart next to the all-status
-        // one (who's carrying open work vs. who's actually closed the most),
-        // not folded into a single chart. Independent color assignment/order
-        // (sorted by currentDone, not currentTotal) since the "who resolved
-        // the most" ranking can differ from "who's holding the most right now".
-        const totalResolved = perUser.reduce((s: number, u: any) => s + (u.currentDone || 0), 0);
-        let pieCumulativeResolved = 0;
-        const pieSlicesResolved = [...perUser]
-          .sort((a: any, b: any) => (b.currentDone || 0) - (a.currentDone || 0))
-          .map((u: any, idx: number) => ({ u, color: USER_COLORS[idx % USER_COLORS.length] }))
-          .filter(({ u }: any) => (u.currentDone || 0) > 0)
-          .map(({ u, color }: any) => {
-            const pct = totalResolved > 0 ? (u.currentDone / totalResolved) * 100 : 0;
-            const start = pieCumulativeResolved;
-            pieCumulativeResolved += pct;
-            return { userId: u.userId, color, pct, start, end: pieCumulativeResolved };
-          });
-        const pieGradientResolved = pieSlicesResolved.length
-          ? `conic-gradient(${pieSlicesResolved.map((s: any) => `${s.color} ${s.start}% ${s.end}%`).join(', ')})`
-          : undefined;
+        // Builds one pie chart's slices/gradient from a perUser-shaped array,
+        // ranked by whichever field this chart cares about ('currentTotal' for
+        // "All Status", 'currentDone' for "Resolved") -- each chart gets its
+        // OWN color assignment/order since who's carrying the most current
+        // load isn't necessarily who's resolved the most.
+        const buildAssigneeChart = (rows: any[], field: 'currentTotal' | 'currentDone') => {
+          const total = rows.reduce((s: number, u: any) => s + (u[field] || 0), 0);
+          let cumulative = 0;
+          const slices = [...rows]
+            .sort((a: any, b: any) => (b[field] || 0) - (a[field] || 0))
+            .map((u: any, idx: number) => ({ u, color: USER_COLORS[idx % USER_COLORS.length] }))
+            .filter(({ u }: any) => (u[field] || 0) > 0)
+            .map(({ u, color }: any) => {
+              const pct = total > 0 ? (u[field] / total) * 100 : 0;
+              const start = cumulative;
+              cumulative += pct;
+              return { userId: u.userId, color, pct, start, end: cumulative };
+            });
+          const gradient = slices.length ? `conic-gradient(${slices.map((s: any) => `${s.color} ${s.start}% ${s.end}%`).join(', ')})` : undefined;
+          return { total, slices, gradient };
+        };
+
+        const allChart      = buildAssigneeChart(perUser, 'currentTotal');
+        const resolvedChart = buildAssigneeChart(perUser, 'currentDone');
+        const pieColorByUser: Record<string, string> = Object.fromEntries(allChart.slices.map((s: any) => [s.userId, s.color]));
+        const totalWorked = allChart.total;
+
+        // Jira runs Content/Message/Email migration as separate boards with
+        // their own dashboards -- "who's carrying the load" needs its own
+        // Resolved/All-Status pair per product line, not just one chart that
+        // blends all three together.
+        const PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+        const assigneeGroups = [
+          { label: 'All Products', rows: perUser },
+          ...PRODUCT_TYPES.map((pt) => ({ label: pt, rows: perUserByProduct[pt] || [] })),
+        ].map((g) => ({
+          ...g,
+          resolved: buildAssigneeChart(g.rows, 'currentDone'),
+          all: buildAssigneeChart(g.rows, 'currentTotal'),
+        }));
 
         const STAT_CARDS = [
           { label: 'Total Issues', value: deptSummaryData?.totalIssues ?? 0, icon: ClipboardList,
@@ -1694,53 +1693,56 @@ function SpaceDetailContent() {
                   </div>
                 </div>
 
-                {/* Assignee Breakdown -- two pie charts (Resolved-only, and All
-                    Status), each with a colored legend of assignee: count,
-                    mirroring the pair of pie-chart gadgets a Jira dashboard
-                    shows for a queue's filter ("Resolved Status" / "All
-                    Status"). Separate from the detailed "Per user" table
-                    below, which stays for the extra Open/In-Progress/SLA/
-                    Worked columns Jira's chart gadget doesn't show. */}
-                {perUser.length > 0 && (
-                  <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm mt-5 overflow-hidden">
+                {/* Assignee Breakdown -- one card per product line (All
+                    Products, then Content/Message/Email Migration
+                    separately), each with two pie charts (Resolved-only, All
+                    Status) and a colored legend of assignee: count --
+                    mirroring the pair of pie-chart gadgets Jira shows per
+                    board/dashboard, since Content/Message/Email run as
+                    separate boards there too. Separate from the detailed
+                    "Per user" table below, which stays for the extra
+                    Open/In-Progress/SLA/Worked columns these charts don't
+                    show, and isn't split by product type. */}
+                {assigneeGroups.filter((g) => g.rows.length > 0).map((group) => (
+                  <div key={group.label} className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm mt-5 overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-50 flex items-center gap-2">
                       <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-fuchsia-500 to-purple-600" />
                       <div>
-                        <h3 className="text-[13.5px] font-bold text-gray-800">Assignee Breakdown</h3>
+                        <h3 className="text-[13.5px] font-bold text-gray-800">Assignee Breakdown <span className="text-gray-300 mx-1">·</span> {group.label}</h3>
                         <p className="text-[11.5px] text-gray-400 mt-0.5">Live ticket share per assignee, currently in the {deptParam} queue.</p>
                       </div>
                     </div>
                     <div className="flex divide-x divide-gray-50">
                       {[
-                        { title: 'Resolved Status', total: totalResolved, gradient: pieGradientResolved, slices: pieSlicesResolved, field: 'currentDone' as const, empty: 'No resolved tickets currently in this queue.' },
-                        { title: 'All Status', total: totalWorked, gradient: pieGradient, slices: pieSlices, field: 'currentTotal' as const, empty: 'No tickets currently in this queue.' },
-                      ].map((chart) => (
-                        <div key={chart.title} className="flex-1 min-w-0 p-6">
+                        { title: 'Resolved Status', chart: group.resolved, field: 'currentDone' as const, empty: 'No resolved tickets currently in this queue.' },
+                        { title: 'All Status', chart: group.all, field: 'currentTotal' as const, empty: 'No tickets currently in this queue.' },
+                      ].map((panel) => (
+                        <div key={panel.title} className="flex-1 min-w-0 p-6">
                           <div className="flex items-center gap-2 mb-4">
                             <PieChart size={14} className="text-gray-400" />
-                            <h4 className="text-[12.5px] font-semibold text-gray-700">{chart.title}</h4>
-                            <span className="text-[11px] text-gray-400">· {chart.total} issue{chart.total === 1 ? '' : 's'}</span>
+                            <h4 className="text-[12.5px] font-semibold text-gray-700">{panel.title}</h4>
+                            <span className="text-[11px] text-gray-400">· {panel.chart.total} issue{panel.chart.total === 1 ? '' : 's'}</span>
                           </div>
-                          {chart.total === 0 ? (
-                            <p className="text-[12px] text-gray-400 py-6">{chart.empty}</p>
+                          {panel.chart.total === 0 ? (
+                            <p className="text-[12px] text-gray-400 py-6">{panel.empty}</p>
                           ) : (
                             <div className="flex items-center gap-6">
                               <div className="relative rounded-full flex items-center justify-center shadow-inner ring-1 ring-black/5 flex-shrink-0"
-                                style={{ width: 120, height: 120, background: chart.gradient || '#EEF0F3' }}>
+                                style={{ width: 120, height: 120, background: panel.chart.gradient || '#EEF0F3' }}>
                                 <div className="rounded-full bg-white flex items-center justify-center shadow-md" style={{ width: 72, height: 72 }}>
-                                  <span className="text-[16px] font-extrabold text-gray-800">{chart.total}</span>
+                                  <span className="text-[16px] font-extrabold text-gray-800">{panel.chart.total}</span>
                                 </div>
                               </div>
                               <div className="flex-1 min-w-0 space-y-1.5 max-h-[140px] overflow-y-auto pr-1">
-                                {chart.slices.map((s: any) => {
-                                  const u = perUser.find((pu: any) => pu.userId === s.userId);
+                                {panel.chart.slices.map((s: any) => {
+                                  const u = group.rows.find((pu: any) => pu.userId === s.userId);
                                   if (!u) return null;
                                   const displayName = `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || 'Unknown';
                                   return (
                                     <div key={s.userId} className="flex items-center gap-2 text-[12px]">
                                       <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
                                       <span className="text-gray-600 truncate flex-1">{displayName}</span>
-                                      <span className="font-semibold text-gray-800">{u[chart.field]}</span>
+                                      <span className="font-semibold text-gray-800">{u[panel.field]}</span>
                                     </div>
                                   );
                                 })}
@@ -1751,7 +1753,7 @@ function SpaceDetailContent() {
                       ))}
                     </div>
                   </div>
-                )}
+                ))}
 
                 {/* Per-user breakdown */}
                 <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm mt-5 overflow-hidden">
@@ -1771,7 +1773,7 @@ function SpaceDetailContent() {
                       {/* Donut chart -- share of CURRENT ticket load per user */}
                       <div className="flex flex-col items-center gap-3 flex-shrink-0" style={{ width: 168 }}>
                         <div className="relative rounded-full flex items-center justify-center shadow-inner ring-1 ring-black/5"
-                          style={{ width: 152, height: 152, background: pieGradient || '#EEF0F3' }}>
+                          style={{ width: 152, height: 152, background: allChart.gradient || '#EEF0F3' }}>
                           <div className="rounded-full bg-white flex flex-col items-center justify-center shadow-md" style={{ width: 96, height: 96 }}>
                             <span className="text-[20px] font-extrabold text-gray-800 leading-none">{totalWorked}</span>
                             <span className="text-[9.5px] font-medium text-gray-400 uppercase tracking-wide mt-0.5">Tickets</span>
