@@ -190,6 +190,43 @@ pool.query(`
   } catch { /* best-effort */ }
 })();
 
+// One-time backfill for the same root cause the fix above (in the PATCH
+// /issues/:key handler) now prevents going forward: dept_statuses[current
+// department] was only ever refreshed on a department CHANGE (handoff /
+// manual Change Department / the custom-queue-status flow) -- a ticket
+// whose status changed via the ordinary status dropdown while staying in
+// the SAME department (e.g. resolved without ever leaving Dev) kept that
+// snapshot stuck at whatever it was before, even though the ticket's real
+// current status had moved on. Anywhere that snapshot is preferred over
+// the live status (the detail page's getEffectiveIssueStatus, and the
+// "Worked on" queue list) then showed that stale value. Detects staleness
+// by comparing the snapshot's remembered category against the live
+// status's actual category for that same department -- a mismatch there
+// can only mean the snapshot never got updated after the real status
+// changed.
+(async () => {
+  try {
+    const affected = await pool.query(`
+      SELECT i.id, i.current_department, i.dept_statuses,
+             s.id AS live_id, s.name AS live_name, s.color AS live_color, s.category AS live_category
+      FROM issues i
+      LEFT JOIN statuses s ON s.id = i."statusId"
+      WHERE i.dept_statuses IS NOT NULL AND i.dept_statuses::text != '{}'
+        AND i.current_department IS NOT NULL AND s.id IS NOT NULL
+    `);
+    for (const row of affected.rows) {
+      const deptStatuses: Record<string, any> = row.dept_statuses || {};
+      const key = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(row.current_department || '').toLowerCase());
+      if (!key) continue;
+      const snap = deptStatuses[key];
+      if (snap && snap.category !== row.live_category) {
+        deptStatuses[key] = { id: row.live_id, name: row.live_name, color: row.live_color, category: row.live_category };
+        await pool.query(`UPDATE issues SET dept_statuses = $1::jsonb WHERE id = $2`, [JSON.stringify(deptStatuses), row.id]);
+      }
+    }
+  } catch { /* best-effort */ }
+})();
+
 // Ensure queue_closed_tickets exists at startup (needed by Sent/Watching query)
 pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`).catch(() => {});
 
@@ -6070,6 +6107,35 @@ async function _handleJiraPgApi(
         } catch (handoffErr: any) {
           console.error(`[DeptHandoff ERROR] ${issue.key}:`, handoffErr?.message || handoffErr);
         }
+      }
+    }
+
+    // ── Keep dept_statuses[current department] in sync with plain status changes ──
+    // Only performDeptHandoff / the manual Change Department endpoint / the
+    // custom-queue-status flow ever refreshed dept_statuses -- all on a
+    // department CHANGE. A ticket resolved via the ordinary status dropdown
+    // while staying in the SAME department (the common case: Open -> In
+    // Progress -> Resolved, never leaving Dev) left dept_statuses[Dev] stuck
+    // at whatever it was before, even though the ticket's real current
+    // status had moved on. Anywhere that snapshot is preferred over the
+    // live status (getEffectiveIssueStatus on the detail page, and the
+    // "Worked on" queue list) then showed that stale value instead of the
+    // ticket's actual current status.
+    if (body.statusId !== undefined && issue.statusId !== data.statusId && !deptHandoffDone) {
+      try {
+        const newStForSync = (issue.space?.statuses ?? []).find((s: any) => s.id === data.statusId) as any
+          ?? (data.statusId ? await db.status.findUnique({ where: { id: String(data.statusId) } }) : null);
+        if (newStForSync) {
+          const syncRow = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE id=$1`, [issue.id]);
+          const syncDept: string = syncRow.rows[0]?.current_department || '';
+          if (syncDept) {
+            const syncDeptStatuses: Record<string, any> = syncRow.rows[0]?.dept_statuses || {};
+            deptMapSet(syncDeptStatuses, syncDept, { id: newStForSync.id, name: newStForSync.name, color: newStForSync.color, category: newStForSync.category });
+            await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb WHERE id=$2`, [JSON.stringify(syncDeptStatuses), issue.id]);
+          }
+        }
+      } catch (syncErr: any) {
+        console.error(`[dept_statuses sync ERROR] ${issue.key}:`, syncErr?.message || syncErr);
       }
     }
 
