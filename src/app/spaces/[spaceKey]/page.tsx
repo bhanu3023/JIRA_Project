@@ -1880,6 +1880,21 @@ function SpaceDetailContent() {
         {/* ── Unified Filter button ── */}
         {(() => {
           const allMembers = members.map((m: any) => m.user || m);
+          // The Assignee filter used to always list every member of the whole
+          // space, even while viewing one department's queue (e.g. Migration) --
+          // so it showed people from Dev, QA, etc. who have no access to this
+          // queue at all and could never actually be its assignee. Scope it down
+          // to that queue's own memberIds (same access-control list
+          // isUserAuthorizedForDeptQueue checks server-side) whenever a
+          // department is selected and has one configured; fall back to every
+          // space member otherwise (matches the fail-open behavior of that same
+          // server-side check when a dept has no queue config).
+          const deptQueueForAssignee = deptParam
+            ? allCustomQueues.find((q) => (q.name || '').toLowerCase() === deptParam.toLowerCase())
+            : undefined;
+          const assigneeFilterMembers = (deptQueueForAssignee?.memberIds?.length)
+            ? allMembers.filter((mb: any) => deptQueueForAssignee.memberIds.includes(mb.id))
+            : allMembers;
 
           // Assignee, Status, and Request type (Type) each get their own standalone
           // button — like Jira's toolbar. Everything else lives under "More filters".
@@ -2038,8 +2053,8 @@ function SpaceDetailContent() {
             if (cat === 'assignee') {
               const aq = assigneeSearch.trim().toLowerCase();
               const filtered = aq
-                ? allMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
-                : allMembers;
+                ? assigneeFilterMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
+                : assigneeFilterMembers;
               return (
                 <div className="flex flex-col max-h-[380px]">
                   <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
