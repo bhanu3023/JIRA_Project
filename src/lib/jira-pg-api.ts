@@ -3327,28 +3327,29 @@ async function _handleJiraPgApi(
           [spaceId, dept]
         );
         const isWaitingCat = (name: string) => /wait|hold/i.test(name || '');
-        const currentByUser: Record<string, { total: number; open: number; inProgress: number; waiting: number; slaBreached: number }> = {};
+        const currentByUser: Record<string, { total: number; open: number; inProgress: number; waiting: number; done: number; slaBreached: number }> = {};
         for (const r of currentRes.rows) {
           const owner: string | null = r.department_assignee_id || r.assigneeId;
           if (!owner || !memberIds.includes(owner)) continue;
-          const bucket = (currentByUser[owner] ??= { total: 0, open: 0, inProgress: 0, waiting: 0, slaBreached: 0 });
+          const bucket = (currentByUser[owner] ??= { total: 0, open: 0, inProgress: 0, waiting: 0, done: 0, slaBreached: 0 });
           const waiting = isWaitingCat(r.status_name);
           const isDone = r.status_category === 'done';
           bucket.total++;
-          if (waiting) bucket.waiting++;
+          if (isDone) bucket.done++;
+          else if (waiting) bucket.waiting++;
           else if (r.status_category === 'in_progress') bucket.inProgress++;
-          else if (!isDone) bucket.open++;
+          else bucket.open++;
           const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
           if (!isDone && (r.jira_sla_breached || dueBreach)) bucket.slaBreached++;
         }
 
         perUser = Object.values(byUser).map((u: any) => {
-          const cur = currentByUser[u.userId] || { total: 0, open: 0, inProgress: 0, waiting: 0, slaBreached: 0 };
+          const cur = currentByUser[u.userId] || { total: 0, open: 0, inProgress: 0, waiting: 0, done: 0, slaBreached: 0 };
           return {
             userId: u.userId, firstName: u.firstName, lastName: u.lastName, email: u.email, avatarUrl: u.avatarUrl,
             ticketsWorked: u.ticketIds.size, slaBreachedInRange: u.slaBreachedIds.size,
             currentTotal: cur.total, currentOpen: cur.open, currentInProgress: cur.inProgress, currentWaiting: cur.waiting,
-            slaBreached: cur.slaBreached,
+            currentDone: cur.done, slaBreached: cur.slaBreached,
           };
         }).sort((a: any, b: any) => b.currentTotal - a.currentTotal);
       }
