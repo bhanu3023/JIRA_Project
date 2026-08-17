@@ -37,8 +37,9 @@ const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
 // sense on the Migration/Dev support board — they were never meant to be
 // mandatory on every space in the app. IT Administration is a plain service
 // desk space with no migration concept at all, so these fields (and their
-// "required" validation) don't apply there.
-const NON_MIGRATION_SPACE_KEYS = new Set(['IA']);
+// "required" validation) don't apply there. SAT_Board (key "SB") is the same
+// kind of non-migration board, so it gets the same exemption.
+const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB']);
 
 const WORK_TYPES = [
   { value: 'task',            label: 'Task' },
