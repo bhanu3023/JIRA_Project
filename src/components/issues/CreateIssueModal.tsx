@@ -546,7 +546,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     <MultiSelectDropdown
                       value={form.productType}
                       onChange={v => update('productType', v)}
-                      options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
+                      options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others']}
                       placeholder="Select product type..."
                     />
                   </div>
@@ -581,7 +581,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     <MultiSelectDropdown
                       value={form.projectManager}
                       onChange={v => update('projectManager', v)}
-                      options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi']}
+                      options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Others']}
                       placeholder="Select project manager..."
                     />
                   </div>

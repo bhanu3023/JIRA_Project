@@ -43,12 +43,12 @@ const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
 // Same fixed list the ticket's own Project Manager field picks from (CreateIssueModal.tsx,
 // issues/[issueKey]/page.tsx) — individual people, not the comma-joined combinations a
 // ticket ends up storing once multiple are picked (e.g. "Abhishikth, Abhishek").
-const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan', 'Pranavi'];
+const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan', 'Pranavi', 'Others'];
 // Same fixed list the ticket's own Product Type field picks from (see
 // CreateIssueModal.tsx / issues/[issueKey]/page.tsx) — a free-text box here
 // required typing the value out exactly (case and all) to match anything,
 // which is why it looked broken; a handful of known values is a dropdown.
-const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others'];
+const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others', 'Others'];
 const PRIORITY_LABELS: Record<string, string> = {
   highest: 'Highest', high: 'High', medium: 'Medium', low: 'Low', lowest: 'Lowest',
 };
