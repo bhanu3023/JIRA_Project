@@ -1311,13 +1311,14 @@ export default function FiltersPage() {
       const params = { ...buildFilterParams(), page: '1', limit: String(EXPORT_LIMIT) };
       const { issues: rows, total: matchedTotal } = await api.getIssues(params);
       const list = rows as any[];
-      const header = ['Key', 'Type', 'Product Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department', 'Created', 'Updated'];
+      const header = ['Key', 'Type', 'Product Type', 'Project Manager', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department', 'Created', 'Updated'];
       const lines = [header.map(csvCell).join(',')];
       for (const issue of list) {
         lines.push([
           issue.cfKey ?? issue.key,
           issue.type ?? '',
           issue.productType ?? '',
+          issue.projectManager ?? '',
           issue.summary ?? '',
           issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
           issue.reporter ? `${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim() : '',
