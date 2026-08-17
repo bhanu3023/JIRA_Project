@@ -1329,8 +1329,8 @@ export default function FiltersPage() {
       const extraCols = activeExtras.filter((id) => EXPORT_EXTRA_COLUMNS[id]);
       const header = [
         'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department',
-        ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
         'Created', 'Updated',
+        ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
       const lines = [header.map(csvCell).join(',')];
       for (const issue of list) {
@@ -1344,9 +1344,9 @@ export default function FiltersPage() {
           issue.priority ?? '',
           issue.sla_breached ? 'Yes' : 'No',
           issue.current_department ?? '',
-          ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].getValue(issue)),
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
           issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
+          ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].getValue(issue)),
         ].map(csvCell).join(','));
       }
       const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
