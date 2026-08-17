@@ -890,6 +890,13 @@ export default function IssueDetailPage() {
       { name: 'Product Type',    key: 'productType'    },
       { name: 'Combination',     key: 'combination'    },
     ];
+    // Root Cause / Fix Description capture why a bug happened and what
+    // actually fixed it -- only meaningful for a ticket that's gone through
+    // Dev's own resolution workflow, so only required while it's currently
+    // in the Dev queue (not, say, a Migration ticket that's never touched Dev).
+    if (((issue as any)?.current_department || '').toLowerCase() === 'dev') {
+      alwaysRequired.push({ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' });
+    }
     for (const f of alwaysRequired) {
       const cfEntry = customFields.find(cf => cf.name?.toLowerCase() === f.name.toLowerCase());
       const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
