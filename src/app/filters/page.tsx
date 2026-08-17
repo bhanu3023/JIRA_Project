@@ -1304,6 +1304,21 @@ export default function FiltersPage() {
     const s = value == null ? '' : String(value);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
+  // Extra fields added to the filter bar via "More filters" (see
+  // EXTRA_FILTER_OPTIONS/activeExtras) that don't already have a fixed export
+  // column below -- reporter/priority/department/created/updated are always
+  // exported regardless of whether their chip is active, so they're excluded
+  // here to avoid a duplicate column. Whatever the user actually toggles on
+  // in the bar is what shows up as a column in the export, instead of a
+  // fixed list that silently omits whichever extra field they're using.
+  const EXPORT_EXTRA_COLUMNS: Record<string, { label: string; getValue: (issue: any) => string }> = {
+    productType:    { label: 'Product Type',    getValue: (i) => i.productType ?? '' },
+    projectManager: { label: 'Project Manager', getValue: (i) => i.projectManager ?? '' },
+    combination:    { label: 'Combination',     getValue: (i) => i.combination ?? '' },
+    customerName:   { label: 'Customer Name',   getValue: (i) => i.customerName ?? '' },
+    clientName:     { label: 'Client Name',     getValue: (i) => i.clientName ?? '' },
+    dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
+  };
   const handleExport = async () => {
     setExporting(true);
     try {
@@ -1311,14 +1326,17 @@ export default function FiltersPage() {
       const params = { ...buildFilterParams(), page: '1', limit: String(EXPORT_LIMIT) };
       const { issues: rows, total: matchedTotal } = await api.getIssues(params);
       const list = rows as any[];
-      const header = ['Key', 'Type', 'Product Type', 'Project Manager', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department', 'Created', 'Updated'];
+      const extraCols = activeExtras.filter((id) => EXPORT_EXTRA_COLUMNS[id]);
+      const header = [
+        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department',
+        ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
+        'Created', 'Updated',
+      ];
       const lines = [header.map(csvCell).join(',')];
       for (const issue of list) {
         lines.push([
           issue.cfKey ?? issue.key,
           issue.type ?? '',
-          issue.productType ?? '',
-          issue.projectManager ?? '',
           issue.summary ?? '',
           issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
           issue.reporter ? `${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim() : '',
@@ -1326,6 +1344,7 @@ export default function FiltersPage() {
           issue.priority ?? '',
           issue.sla_breached ? 'Yes' : 'No',
           issue.current_department ?? '',
+          ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].getValue(issue)),
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
           issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
         ].map(csvCell).join(','));
