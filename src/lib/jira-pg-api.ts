@@ -4540,6 +4540,7 @@ async function _handleJiraPgApi(
         ...(body.customerName !== undefined && { customerName: body.customerName ? String(body.customerName) : null }),
         ...(body.clientName !== undefined && { clientName: body.clientName ? String(body.clientName) : null }),
         ...(body.projectManager !== undefined && { projectManager: body.projectManager ? String(body.projectManager) : null }),
+        ...(body.productionTicket !== undefined && { productionTicket: body.productionTicket ? String(body.productionTicket) : null }),
       },
       include: {
         status: true,

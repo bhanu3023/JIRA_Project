@@ -212,7 +212,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [form, setForm] = useState({
     summary: '', description: '', type: 'task', priority: 'medium',
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
-    productType: [] as string[], projectManager: [] as string[],
+    productType: [] as string[], projectManager: [] as string[], productionTicket: '',
   });
   const [summaryError, setSummaryError] = useState(false);
   const [queueError, setQueueError]                 = useState(false);
@@ -386,6 +386,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         combination: form.combination.length > 0 ? form.combination.join(', ') : undefined,
         productType: form.productType.length > 0 ? form.productType.join(', ') : undefined,
         projectManager: form.projectManager.length > 0 ? form.projectManager.join(', ') : undefined,
+        productionTicket: form.productionTicket || undefined,
         ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
       });
       // Save custom field values
@@ -555,6 +556,20 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                       <p className="text-[12px] text-red-600 font-medium">Product Type is required</p>
                     </div>
                   )}
+                </div>
+
+                {/* Production Ticket */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Production Ticket</label>
+                  <select
+                    value={form.productionTicket}
+                    onChange={e => update('productionTicket', e.target.value)}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                  >
+                    <option value="">Select Production Ticket</option>
+                    <option value="Operational Support">Operational Support</option>
+                    <option value="Code Fixes">Code Fixes</option>
+                  </select>
                 </div>
 
                 {/* Project Manager */}
