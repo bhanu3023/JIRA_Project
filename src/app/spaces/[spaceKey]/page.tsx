@@ -385,6 +385,27 @@ function SpaceDetailContent() {
     return () => clearTimeout(t);
   }, [updating]);
   const [assigneeRequiredModal, setAssigneeRequiredModal] = useState(false);
+  const [missingFieldsModal, setMissingFieldsModal] = useState<string[] | null>(null);
+  // Same mandatory-before-resolve rule as the issue detail page's
+  // getMissingCoreFields -- duplicated here because this row's inline status
+  // dropdown lets a ticket be resolved directly from the list view without
+  // ever opening the detail page, which was bypassing that check entirely.
+  const getMissingCoreFieldsInline = (iss: any): string[] => {
+    const missing: string[] = [];
+    const required: { name: string; key: string }[] = [
+      { name: 'Project Manager', key: 'projectManager' },
+      { name: 'Product Type', key: 'productType' },
+      { name: 'Combination', key: 'combination' },
+    ];
+    if (String(iss.current_department || '').toLowerCase() === 'dev') {
+      required.push({ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' });
+    }
+    for (const f of required) {
+      const val = iss[f.key];
+      if (!val || String(val).trim() === '') missing.push(f.name);
+    }
+    return missing;
+  };
   const [loadError, setLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 50;
@@ -3239,6 +3260,14 @@ function SpaceDetailContent() {
                                     setAssigneeRequiredModal(true);
                                     return;
                                   }
+                                  if ((s as any).category === 'done') {
+                                    const missing = getMissingCoreFieldsInline(issue);
+                                    if (missing.length > 0) {
+                                      setOpenDropdown(null);
+                                      setMissingFieldsModal(missing);
+                                      return;
+                                    }
+                                  }
                                   if (isQueueStatus) {
                                     handleInlineQueueStatusUpdate(issue.key, ticketCurrentDept, s);
                                   } else {
@@ -3414,6 +3443,31 @@ function SpaceDetailContent() {
               </div>
               <p className="text-[13px] text-gray-600 mb-5">Please assign this ticket to someone before changing its status.</p>
               <button onClick={() => setAssigneeRequiredModal(false)}
+                className="w-full bg-amber-500 hover:bg-amber-600 text-white text-[13px] font-medium py-2 rounded-lg transition-colors">
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {missingFieldsModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40" onClick={() => setMissingFieldsModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-[380px] overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="h-1 bg-gradient-to-r from-amber-400 to-orange-500" />
+            <div className="px-6 py-5">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-9 h-9 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                </div>
+                <h3 className="text-[15px] font-semibold text-gray-900">Required fields missing</h3>
+              </div>
+              <p className="text-[13px] text-gray-600 mb-3">The following fields must be filled in before this ticket can be resolved:</p>
+              <ul className="space-y-1.5 mb-5">
+                {missingFieldsModal.map(f => (
+                  <li key={f} className="text-[13px] font-medium text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-1.5">{f}</li>
+                ))}
+              </ul>
+              <button onClick={() => setMissingFieldsModal(null)}
                 className="w-full bg-amber-500 hover:bg-amber-600 text-white text-[13px] font-medium py-2 rounded-lg transition-colors">
                 OK
               </button>
