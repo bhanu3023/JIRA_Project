@@ -28,6 +28,11 @@ async function getCachedUser(userId: string) {
 
 // Ensure original_dept column exists
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).catch(() => {});
+// deploy.sh never runs `prisma migrate deploy` (only `prisma generate` in the
+// Docker build), so a column added only via a Prisma migration file never
+// actually lands on the production table -- mirror it here so it reaches
+// prod on the next deploy regardless.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "productionTicket" TEXT`).catch(() => {});
 // POST /search's exact-match branch looks up an issue's subtasks by
 // parentKey (added alongside its linked-work-items lookup) -- that column
 // had no index at all, so on a large production issues table every search
@@ -1927,6 +1932,7 @@ function formatIssue(issue: any) {
     customerName: issue.customerName ?? null,
     clientName: issue.clientName ?? null,
     projectManager: issue.projectManager ?? null,
+    productionTicket: issue.productionTicket ?? null,
     comments,
     commentCount: comments.length,
     attachments: [],
@@ -2055,7 +2061,7 @@ const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> 
   QABOAR:  { jiraProject: 'QABOAR', spaceKey: 'QABOAR'   },
 };
 
-const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016';
+const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665';
 
 function extractJiraValue(raw: any): string | null {
   if (!raw) return null;
@@ -2213,6 +2219,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
           projectManager: extractJiraValue(f.customfield_11380) ?? existingIssue.projectManager,
           productType:    extractJiraValue(f.customfield_10203) ?? existingIssue.productType,
           combination:    extractJiraValue(f.customfield_10236) ?? existingIssue.combination,
+          productionTicket: extractJiraValue(f.customfield_10665) ?? existingIssue.productionTicket,
         },
       });
       issueId = existingIssue.id;
@@ -2233,6 +2240,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
           projectManager: extractJiraValue(f.customfield_11380),
           productType:    extractJiraValue(f.customfield_10203),
           combination:    extractJiraValue(f.customfield_10236),
+          productionTicket: extractJiraValue(f.customfield_10665),
         },
       });
       issueId = created.id;
@@ -5336,9 +5344,14 @@ async function _handleJiraPgApi(
     // indefinitely if Jira is slow, unreachable, or rate-limiting. Running it
     // in the background means this load won't show the freshly-synced fields,
     // but the next load will, and the page never hangs waiting on Jira.
+    // productionTicket is checked with its own OR, not folded into the
+    // all-null AND above -- a ticket already fully synced before this field
+    // existed has every other field populated, so the all-null check alone
+    // would never re-visit Jira to pick up just this newer one.
     if (
-      issue.customerName === null && issue.clientName === null &&
-      issue.projectManager === null && issue.productType === null && issue.combination === null
+      (issue.customerName === null && issue.clientName === null &&
+       issue.projectManager === null && issue.productType === null && issue.combination === null)
+      || issue.productionTicket === null
     ) {
       (async () => {
         try {
@@ -5364,6 +5377,7 @@ async function _handleJiraPgApi(
                   projectManager: extractJiraValue(f.customfield_11380),
                   productType:    extractJiraValue(f.customfield_10203),
                   combination:    extractJiraValue(f.customfield_10236),
+                  productionTicket: extractJiraValue(f.customfield_10665),
                 };
               }
             } else if (issue.summary) {
@@ -5389,6 +5403,7 @@ async function _handleJiraPgApi(
                     projectManager: extractJiraValue(f.customfield_11380),
                     productType:    extractJiraValue(f.customfield_10203),
                     combination:    extractJiraValue(f.customfield_10236),
+                    productionTicket: extractJiraValue(f.customfield_10665),
                   };
                 }
               }
@@ -5716,6 +5731,7 @@ async function _handleJiraPgApi(
     if (body.customerName !== undefined) data.customerName = body.customerName === null ? null : String(body.customerName);
     if (body.clientName !== undefined) data.clientName = body.clientName === null ? null : String(body.clientName);
     if (body.projectManager !== undefined) data.projectManager = body.projectManager === null ? null : String(body.projectManager);
+    if (body.productionTicket !== undefined) data.productionTicket = body.productionTicket === null ? null : String(body.productionTicket);
     // Was read by POST /issues (creation) but never by this PATCH handler --
     // the ticket detail page's due-date editor called this endpoint and got
     // a 200 back with no error, but the edit was silently dropped every
