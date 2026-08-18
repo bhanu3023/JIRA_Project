@@ -168,6 +168,78 @@ export default function RichTextEditor({
 
   const formatBlock = (tag: string) => exec('formatBlock', tag);
 
+  /* ── Deleting a selection that spans multiple blocks corrupts the
+   * surviving one ────────────────────────────────────────────────────────
+   * Selecting a whole "block" (e.g. a heading + its answer paragraph, as
+   * in a numbered template like "1. Issue Reported" / answer text — but
+   * this reproduces with plain paragraphs too, headings aren't special)
+   * and pressing Delete/Backspace lets the browser's native command run
+   * its own "smart merge" of the deletion boundary — which wraps the
+   * surviving block's text in a stray inline style span (carrying over
+   * formatting from whatever got deleted) and leaves the caret positioned
+   * inside that block's existing text. A heading then renders wrong (the
+   * span's inline style overrides the h2/h3 CSS) and the very next
+   * keystroke gets typed into that unrelated block instead of a new line
+   * — i.e. editing/removing one item visibly changes a completely
+   * different one.
+   *
+   * Only a selection that spans multiple top-level blocks is affected —
+   * same-block edits and single-cursor backspace-joins (the overwhelming
+   * majority of editing) are untouched. For that specific case, deletion
+   * is done via Range.deleteContents() (a plain DOM operation with none
+   * of the command's formatting-carryover behavior) and the caret is
+   * dropped into a fresh empty paragraph instead of wherever the native
+   * merge would have left it.
+   */
+  const handleBeforeInput = (e: InputEvent) => {
+    const inputType = e.inputType;
+    if (!inputType || !inputType.startsWith('delete')) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    const children = Array.from(editor.childNodes);
+
+    // A boundary directly inside the editor (container === editor) happens for
+    // any element-level selection — e.g. selecting a whole block by dragging
+    // across its edges, or Range.setStartBefore/After — not just nested text
+    // offsets, so it has to be resolved via its offset into editor.childNodes
+    // rather than by walking parentNode (which would just climb past the editor
+    // entirely and find nothing).
+    const topLevelIndexOf = (node: Node, offset: number, isEnd: boolean): number => {
+      if (node === editor) return isEnd ? offset - 1 : offset;
+      let n: Node | null = node;
+      while (n && n.parentNode !== editor) n = n.parentNode;
+      return n ? children.indexOf(n as ChildNode) : -1;
+    };
+    const startIdx = topLevelIndexOf(range.startContainer, range.startOffset, false);
+    const endIdx = topLevelIndexOf(range.endContainer, range.endOffset, true);
+    if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) return; // single-block edit — leave to native handling
+
+    e.preventDefault();
+    range.deleteContents();
+    const freshP = document.createElement('p');
+    freshP.innerHTML = '<br>';
+    range.insertNode(freshP);
+    const newRange = document.createRange();
+    newRange.setStart(freshP, 0);
+    newRange.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+    emit();
+  };
+
+  // React's synthetic onBeforeInput doesn't reliably fire for a native
+  // Delete/Backspace keypress on a contentEditable element, so this is
+  // wired as a real DOM listener instead.
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    el.addEventListener('beforeinput', handleBeforeInput);
+    return () => el.removeEventListener('beforeinput', handleBeforeInput);
+  }, [handleBeforeInput]);
+
   /* ── Detect @mention while typing ───────────────────────────────── */
   const checkMention = useCallback(() => {
     const sel = window.getSelection();
