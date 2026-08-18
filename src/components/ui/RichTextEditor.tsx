@@ -4,7 +4,7 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import {
   Bold, Italic, Underline, Strikethrough,
   List, ListOrdered, Code, Quote, Link2,
-  Image as ImageIcon, Minus, Paperclip, FolderUp,
+  Minus, Paperclip, FolderUp,
   Heading1, Heading2, Type,
 } from 'lucide-react';
 
@@ -47,7 +47,6 @@ export default function RichTextEditor({
   onUploadingChange,
 }: Props) {
   const editorRef  = useRef<HTMLDivElement>(null);
-  const imgRef     = useRef<HTMLInputElement>(null);
   const fileRef    = useRef<HTMLInputElement>(null);
   const folderRef  = useRef<HTMLInputElement>(null);
   const pendingUploads = useRef(0);
@@ -168,6 +167,158 @@ export default function RichTextEditor({
 
   const formatBlock = (tag: string) => exec('formatBlock', tag);
 
+  /* ── Deleting a selection that spans multiple blocks corrupts the
+   * surviving one, and locked template items must never be removable ─────
+   * Selecting a whole "block" (e.g. a heading + its answer paragraph, as
+   * in a numbered template like "1. Issue Reported" / answer text — but
+   * this reproduces with plain paragraphs too, headings aren't special)
+   * and pressing Delete/Backspace lets the browser's native command run
+   * its own "smart merge" of the deletion boundary — which wraps the
+   * surviving block's text in a stray inline style span (carrying over
+   * formatting from whatever got deleted) and leaves the caret positioned
+   * inside that block's existing text. A heading then renders wrong (the
+   * span's inline style overrides the h2/h3 CSS) and the very next
+   * keystroke gets typed into that unrelated block instead of a new line
+   * — i.e. editing/removing one item visibly changes a completely
+   * different one.
+   *
+   * Separately, an element carrying data-rte-locked (the Migration
+   * template's 9 numbered items — see CreateIssueModal) must never be
+   * removable at all: a "heading" survives completely untouched by any
+   * deletion; a "box" survives too, but has its content reset to the
+   * empty-answer placeholder rather than being left however the deletion
+   * would have cut it — either way the item's structure can't disappear.
+   *
+   * Only a selection that spans multiple top-level blocks is affected —
+   * same-block edits (the overwhelming majority of typing) are untouched
+   * and left to native handling, since deleting text within a single
+   * paragraph never touches another block's structure.
+   */
+  const PLACEHOLDER_HTML = '<em>Type your answer here…</em>';
+  const isLocked = (n: Node | null): n is HTMLElement =>
+    !!n && n instanceof HTMLElement && n.hasAttribute('data-rte-locked');
+
+  // Range boundary-point comparison treats "(parent, 0)" as strictly BEFORE
+  // "(parent's first child's text, 0)" even though there's zero content
+  // between them — descending a level always reads as "later" to
+  // compareBoundaryPoints. So detecting "cursor is at the very start/end of
+  // this ancestor's content" has to walk the ancestor chain directly instead:
+  // at every level up to (and including) the ancestor, there must be no
+  // preceding (or following, for "end") sibling at all.
+  const isAtEdgeOfAncestor = (node: Node, offset: number, ancestor: Node, edge: 'start' | 'end'): boolean => {
+    const len = node.nodeType === Node.TEXT_NODE ? (node.textContent?.length ?? 0) : node.childNodes.length;
+    if (edge === 'start' ? offset !== 0 : offset !== len) return false;
+    let n: Node | null = node;
+    while (n && n !== ancestor) {
+      if (edge === 'start' ? n.previousSibling : n.nextSibling) return false;
+      n = n.parentNode;
+    }
+    return n === ancestor;
+  };
+
+  const handleBeforeInput = (e: InputEvent) => {
+    const inputType = e.inputType;
+    if (!inputType || !inputType.startsWith('delete')) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+
+    // Collapsed Backspace/Delete right at a locked item's edge would merge it
+    // into its neighbor (losing its box/heading identity) without ever
+    // reaching the multi-block path below, since nothing is "selected" to
+    // delete — guard that directly. The cursor can be several levels below
+    // the locked element itself (e.g. inside the <em> placeholder's own text
+    // node), so this has to walk up to the nearest data-rte-locked ancestor.
+    if (sel.isCollapsed) {
+      const container = range.startContainer;
+      const startEl = container.nodeType === Node.ELEMENT_NODE ? (container as Element) : container.parentElement;
+      const lockedAncestor = startEl?.closest('[data-rte-locked]') as HTMLElement | null;
+      if (lockedAncestor) {
+        const edge = inputType === 'deleteContentBackward' ? 'start' : inputType === 'deleteContentForward' ? 'end' : null;
+        if (edge && isAtEdgeOfAncestor(container, range.startOffset, lockedAncestor, edge)) {
+          e.preventDefault();
+        }
+      }
+      return;
+    }
+
+    const children = Array.from(editor.childNodes);
+
+    // A boundary directly inside the editor (container === editor) happens for
+    // any element-level selection — e.g. selecting a whole block by dragging
+    // across its edges, or Range.setStartBefore/After — not just nested text
+    // offsets, so it has to be resolved via its offset into editor.childNodes
+    // rather than by walking parentNode (which would just climb past the editor
+    // entirely and find nothing).
+    const topLevelIndexOf = (node: Node, offset: number, isEnd: boolean): number => {
+      if (node === editor) return isEnd ? offset - 1 : offset;
+      let n: Node | null = node;
+      while (n && n.parentNode !== editor) n = n.parentNode;
+      return n ? children.indexOf(n as ChildNode) : -1;
+    };
+    const startIdx = topLevelIndexOf(range.startContainer, range.startOffset, false);
+    const endIdx = topLevelIndexOf(range.endContainer, range.endOffset, true);
+
+    const spanned = startIdx !== -1 && endIdx !== -1 ? children.slice(startIdx, endIdx + 1) : [];
+    const anyLocked = spanned.some(isLocked);
+    if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) {
+      // Single-block edit — ordinary editing *within* a locked box's own
+      // text (the whole point of having an answer box) must stay completely
+      // free; only a selection covering the box's *entire* content — which
+      // would otherwise leave it empty or let the block itself get wiped —
+      // needs guarding.
+      if (!anyLocked) return;
+      const node = children[startIdx];
+      const full = document.createRange();
+      full.selectNodeContents(node);
+      const fullySelected =
+        range.compareBoundaryPoints(Range.START_TO_START, full) <= 0 &&
+        range.compareBoundaryPoints(Range.END_TO_END, full) >= 0;
+      if (!fullySelected) return;
+    }
+
+    e.preventDefault();
+    const target = spanned.length ? spanned : (startIdx !== -1 ? [children[startIdx]] : []);
+    let caretNode: Node | null = null;
+    for (const node of target) {
+      if (isLocked(node)) {
+        if (node.getAttribute('data-rte-locked') === 'box') {
+          node.innerHTML = PLACEHOLDER_HTML;
+          if (!caretNode) caretNode = node;
+        }
+        // 'heading' nodes are left completely untouched.
+        continue;
+      }
+      node.parentNode?.removeChild(node);
+    }
+    if (!caretNode) {
+      const freshP = document.createElement('p');
+      freshP.innerHTML = '<br>';
+      const anchor = target.find(n => n.isConnected && n.parentNode === editor) ?? null;
+      if (anchor) editor.insertBefore(freshP, anchor.nextSibling);
+      else editor.appendChild(freshP);
+      caretNode = freshP;
+    }
+    const newRange = document.createRange();
+    newRange.selectNodeContents(caretNode);
+    newRange.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+    emit();
+  };
+
+  // React's synthetic onBeforeInput doesn't reliably fire for a native
+  // Delete/Backspace keypress on a contentEditable element, so this is
+  // wired as a real DOM listener instead.
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    el.addEventListener('beforeinput', handleBeforeInput);
+    return () => el.removeEventListener('beforeinput', handleBeforeInput);
+  }, [handleBeforeInput]);
+
   /* ── Detect @mention while typing ───────────────────────────────── */
   const checkMention = useCallback(() => {
     const sel = window.getSelection();
@@ -247,7 +398,15 @@ export default function RichTextEditor({
         setMentionIdx(i => (i - 1 + mentionMatches.length) % mentionMatches.length);
         return;
       }
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' || e.key === ' ') {
+        // Space ends the @query the same way Enter does — the query regex
+        // (below, in checkMention) can't include a space in the match, so
+        // typing "@Bhanu" then a space always closed the dropdown right as
+        // the name finished, leaving plain unlinked "@Bhanu " text behind
+        // with no way to still turn it into a real tag short of deleting the
+        // space and clicking a match. Committing the highlighted match here
+        // instead means finishing a name the natural way (type it, hit
+        // space, keep typing the rest of the comment) actually tags them.
         e.preventDefault();
         insertMention(mentionMatches[mentionIdx]);
         return;
@@ -544,10 +703,6 @@ export default function RichTextEditor({
     });
   };
 
-  const handleImgInput  = (e: React.ChangeEvent<HTMLInputElement>) => {
-    Array.from(e.target.files ?? []).forEach(f => f.type.startsWith('image/') ? insertImage(f) : insertFile(f));
-    e.target.value = '';
-  };
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     Array.from(e.target.files ?? []).forEach(f => f.type.startsWith('image/') ? insertImage(f) : insertFile(f));
     e.target.value = '';
@@ -649,7 +804,6 @@ export default function RichTextEditor({
         <TBtn title="Horizontal rule" onClick={() => exec('insertHorizontalRule')}><Minus size={13} /></TBtn>
         <Divider />
         <TBtn title="Insert link"  onClick={insertLink}><Link2 size={13} /></TBtn>
-        <TBtn title="Insert image" onClick={() => imgRef.current?.click()}><ImageIcon size={13} /></TBtn>
         <TBtn title="Attach file"   onClick={() => fileRef.current?.click()}><Paperclip size={13} /></TBtn>
         <TBtn title="Attach folder" onClick={() => folderRef.current?.click()}><FolderUp size={13} /></TBtn>
       </div>
@@ -780,7 +934,6 @@ export default function RichTextEditor({
       )}
 
       {/* Hidden inputs */}
-      <input ref={imgRef}  type="file" accept="image/*" multiple hidden onChange={handleImgInput} />
       <input ref={fileRef} type="file" accept="*/*"     multiple hidden onChange={handleFileInput} />
       {/* webkitdirectory isn't in React's DOM typings — spread it in untyped so
           the folder picker (not just multi-file select) actually opens. */}

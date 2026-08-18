@@ -2,11 +2,11 @@
 
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { timeAgo, cn } from '@/lib/utils';
+import { timeAgo, cn, getEffectiveIssueStatus } from '@/lib/utils';
 import Link from 'next/link';
 import { PriorityIcon } from '@/components/ui/PriorityIcon';
 import DotLoader from '@/components/ui/DotLoader';
@@ -43,12 +43,12 @@ const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
 // Same fixed list the ticket's own Project Manager field picks from (CreateIssueModal.tsx,
 // issues/[issueKey]/page.tsx) — individual people, not the comma-joined combinations a
 // ticket ends up storing once multiple are picked (e.g. "Abhishikth, Abhishek").
-const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan'];
+const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan', 'Pranavi', 'Others'];
 // Same fixed list the ticket's own Product Type field picks from (see
 // CreateIssueModal.tsx / issues/[issueKey]/page.tsx) — a free-text box here
 // required typing the value out exactly (case and all) to match anything,
 // which is why it looked broken; a handful of known values is a dropdown.
-const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others'];
+const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others', 'Others'];
 const PRIORITY_LABELS: Record<string, string> = {
   highest: 'Highest', high: 'High', medium: 'Medium', low: 'Low', lowest: 'Lowest',
 };
@@ -698,6 +698,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
+  { id: 'worked',         label: 'Worked (real activity, needs a Queue selected)', group: 'Date' },
 ];
 
 /* ─── Simple text filter button ─── */
@@ -954,6 +955,7 @@ function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChang
 /* ─── main page ─── */
 export default function FiltersPage() {
   const { user, spaces } = useStore(useShallow((s) => ({ user: s.user, spaces: s.spaces })));
+  const router = useRouter();
 
   /* filter bar state */
   const [text, setText]                   = useState('');
@@ -967,6 +969,10 @@ export default function FiltersPage() {
   const [selCreated, setSelCreated]       = useState('');
   const [selUpdated, setSelUpdated]       = useState('');
   const [selDueDate, setSelDueDate]       = useState('');
+  // Only meaningful together with a single selected Queue -- backed by
+  // user_worked_on_tickets, so it counts a ticket once someone with access
+  // actually picked it up and worked it, not just whenever it was created.
+  const [selWorked, setSelWorked]         = useState('');
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
   const [selCombination, setSelCombination] = useState('');
@@ -989,8 +995,11 @@ export default function FiltersPage() {
   const [showSavedPanel, setShowSavedPanel]      = useState(false);
   const [menuId, setMenuId]                     = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId]   = useState<string | null>(null);
-  // which extra date filters are visible in the bar (added from More filters)
-  const [activeExtras, setActiveExtras]         = useState<string[]>([]);
+  // which extra date filters are visible in the bar (added from More filters).
+  // "created" starts visible by default -- a date range is a common enough
+  // filter that requiring a trip through "More filters" to find it every
+  // single time wasn't discoverable; it can still be removed via its own X.
+  const [activeExtras, setActiveExtras]         = useState<string[]>(['created']);
 
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
@@ -998,6 +1007,7 @@ export default function FiltersPage() {
         if (key === 'created')        setSelCreated('');
         if (key === 'updated')        setSelUpdated('');
         if (key === 'dueDate')        setSelDueDate('');
+        if (key === 'worked')         setSelWorked('');
         if (key === 'reporter')       setSelReporters([]);
         if (key === 'priority')       setSelPriorities([]);
         if (key === 'department')     setSelDepartment('');
@@ -1012,8 +1022,15 @@ export default function FiltersPage() {
     });
   };
 
-  // Hydrate filters from the URL once on mount — lets other pages (e.g. the
-  // personal dashboard) deep-link straight into a scoped ticket list here.
+  // Hydrate filters from the URL once on mount. Two sources feed this:
+  // (1) other pages (e.g. the personal dashboard) deep-linking straight into
+  //     a scoped ticket list here, using assignee/reporter/status/priority/
+  //     space/queue/slaBreached (singular names, kept for backward compat);
+  // (2) this page's OWN state, round-tripped through the URL by the sync
+  //     effect below -- opening a ticket and clicking "Back" returns to this
+  //     exact URL, but Next.js doesn't restore this component's in-memory
+  //     useState across that navigation, so without the URL round-trip every
+  //     filter the user had picked reset back to defaults on return.
   const urlParams = useSearchParams();
   useEffect(() => {
     const qpAssignee = urlParams?.get('assignee');
@@ -1022,7 +1039,12 @@ export default function FiltersPage() {
     const qpPriority = urlParams?.get('priority');
     const qpSpace = urlParams?.get('space');
     const qpQueue = urlParams?.get('queue');
-    if (!qpAssignee && !qpReporter && !qpStatus && !qpPriority && !qpSpace) return;
+    // Deep-linked from the Dashboard's SLA tiles/donut (e.g. "Breached 21" ->
+    // ?slaBreached=yes) -- buildFilterParams below already sends this same
+    // param outbound on every fetch, but nothing ever read it back in on
+    // load, so a link built with slaBreached=yes silently showed every one
+    // of that person's tickets instead of just the breached ones.
+    const qpSlaBreached = urlParams?.get('slaBreached');
 
     if (qpAssignee) setSelAssignees(qpAssignee.split(','));
     if (qpReporter) {
@@ -1036,8 +1058,98 @@ export default function FiltersPage() {
     }
     if (qpSpace) setSelSpaces([qpSpace]);
     if (qpQueue) setSelQueue(qpQueue);
+    // SlaBreachedBtn lives directly in the main toolbar (not behind "More
+    // filters"), so unlike reporter/priority above there's no activeExtras
+    // entry to also flip for it to become visible.
+    if (qpSlaBreached === 'yes' || qpSlaBreached === 'no') setSelBreached(qpSlaBreached);
+
+    // Full self-persistence round-trip (written by the sync effect below,
+    // using its own distinct param names so it never collides with the
+    // external deep-link names read above).
+    const rSpaces          = urlParams?.get('rSpaces');
+    const rQueue           = urlParams?.get('rQueue');
+    const rAssignees       = urlParams?.get('rAssignees');
+    const rReporters       = urlParams?.get('rReporters');
+    const rTypes           = urlParams?.get('rTypes');
+    const rStatuses        = urlParams?.get('rStatuses');
+    const rPriorities      = urlParams?.get('rPriorities');
+    const rCreated         = urlParams?.get('rCreated');
+    const rUpdated         = urlParams?.get('rUpdated');
+    const rDueDate         = urlParams?.get('rDueDate');
+    const rWorked          = urlParams?.get('rWorked');
+    const rDepartment      = urlParams?.get('rDepartment');
+    const rProductType     = urlParams?.get('rProductType');
+    const rCombination     = urlParams?.get('rCombination');
+    const rCustomerName    = urlParams?.get('rCustomerName');
+    const rClientName      = urlParams?.get('rClientName');
+    const rProjectManager  = urlParams?.get('rProjectManager');
+    const rBreached        = urlParams?.get('rBreached');
+    const rQ               = urlParams?.get('rQ');
+    const rExtras          = urlParams?.get('rExtras');
+
+    if (rSpaces) setSelSpaces(rSpaces.split(','));
+    if (rQueue) setSelQueue(rQueue);
+    if (rAssignees) setSelAssignees(rAssignees.split(','));
+    if (rReporters) setSelReporters(rReporters.split(','));
+    if (rTypes) setSelTypes(rTypes.split(','));
+    if (rStatuses) setSelStatuses(rStatuses.split(','));
+    if (rPriorities) setSelPriorities(rPriorities.split(','));
+    if (rCreated) setSelCreated(rCreated);
+    if (rUpdated) setSelUpdated(rUpdated);
+    if (rDueDate) setSelDueDate(rDueDate);
+    if (rWorked) setSelWorked(rWorked);
+    if (rDepartment) setSelDepartment(rDepartment);
+    if (rProductType) setSelProductType(rProductType.split(','));
+    if (rCombination) setSelCombination(rCombination);
+    if (rCustomerName) setSelCustomerName(rCustomerName);
+    if (rClientName) setSelClientName(rClientName);
+    if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
+    if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
+    if (rQ) setText(rQ);
+    if (rExtras) setActiveExtras(rExtras.split(','));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Keeps the URL in sync with every filter selection (via replace, so it
+  // never grows browser history) -- this is what lets "Back" from a ticket
+  // actually restore the exact filters that were active, since this
+  // component's useState doesn't otherwise survive that navigation.
+  // Skips its own first invocation: on mount, this fires with the pre-
+  // hydration (default/empty) state before the effect above has applied
+  // whatever was in the URL, and writing that out first would blank the URL
+  // for an instant before the hydrated values overwrite it again.
+  const skippedFirstUrlSyncRef = useRef(false);
+  const restoreParams = useMemo(() => {
+    const p: Record<string, string> = {};
+    if (selSpaces.length) p.rSpaces = selSpaces.join(',');
+    if (selQueue) p.rQueue = selQueue;
+    if (selAssignees.length) p.rAssignees = selAssignees.join(',');
+    if (selReporters.length) p.rReporters = selReporters.join(',');
+    if (selTypes.length) p.rTypes = selTypes.join(',');
+    if (selStatuses.length) p.rStatuses = selStatuses.join(',');
+    if (selPriorities.length) p.rPriorities = selPriorities.join(',');
+    if (selCreated) p.rCreated = selCreated;
+    if (selUpdated) p.rUpdated = selUpdated;
+    if (selDueDate) p.rDueDate = selDueDate;
+    if (selWorked) p.rWorked = selWorked;
+    if (selDepartment) p.rDepartment = selDepartment;
+    if (selProductType.length) p.rProductType = selProductType.join(',');
+    if (selCombination) p.rCombination = selCombination;
+    if (selCustomerName) p.rCustomerName = selCustomerName;
+    if (selClientName) p.rClientName = selClientName;
+    if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
+    if (selBreached) p.rBreached = selBreached;
+    if (text.trim()) p.rQ = text.trim();
+    if (activeExtras.length) p.rExtras = activeExtras.join(',');
+    return p;
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text, activeExtras]);
+
+  useEffect(() => {
+    if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
+    const qs = new URLSearchParams(restoreParams).toString();
+    router.replace(qs ? `/filters?${qs}` : '/filters', { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restoreParams]);
 
 
   /* derived */
@@ -1071,7 +1183,7 @@ export default function FiltersPage() {
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
-    selCreated || selUpdated || selDueDate || selDepartment ||
+    selCreated || selUpdated || selDueDate || selWorked || selDepartment ||
     selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selBreached,
   );
 
@@ -1093,8 +1205,13 @@ export default function FiltersPage() {
           params.spaceKeys = accessibleSpaceKeys.join(',');
         }
 
-        // Queue (department) — only meaningful when scoped to exactly one space
-        if (selQueue && params.spaceKey) params.dept = selQueue;
+        // Queue (department) — only meaningful when scoped to exactly one space.
+        // queueMembersOnly restricts results to tickets assigned to that
+        // queue's actual configured members, not every ticket merely labeled
+        // with the department (the department queue board pages that share
+        // this same backend branch deliberately don't set this flag, since
+        // "All Tickets" there means every ticket in the department).
+        if (selQueue && params.spaceKey) { params.dept = selQueue; params.queueMembersOnly = 'true'; }
 
         // Expand a member into all possible identifiers the mock can match against
         const expandMember = (id: string) => {
@@ -1130,6 +1247,15 @@ export default function FiltersPage() {
         if (selCreated) params.createdRange = selCreated;
         if (selUpdated) params.updatedRange = selUpdated;
         if (selDueDate) params.dueDateRange = selDueDate;
+        // Only meaningful together with a single selected Queue -- the backend
+        // only reads workedRange inside the dept-scoped branch (i.e. when
+        // params.dept is set), so this is a no-op without a Queue selected.
+        if (selWorked && params.dept) params.workedRange = selWorked;
+
+        // Hours actually spent in an "In Progress"-type status per ticket --
+        // needs an extra issue_history query on the backend, so opt-in rather
+        // than always paid by every issues list fetch.
+        params.includeTimeSpent = 'true';
 
         // Extra text/field filters
         if (selDepartment)     params.department     = selDepartment;
@@ -1146,7 +1272,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text]);
 
   /* fetch issues — all filtering done server-side for accuracy */
   const fetchIssues = useCallback(() => {
@@ -1178,6 +1304,21 @@ export default function FiltersPage() {
     const s = value == null ? '' : String(value);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
+  // Extra fields added to the filter bar via "More filters" (see
+  // EXTRA_FILTER_OPTIONS/activeExtras) that don't already have a fixed export
+  // column below -- reporter/priority/department/created/updated are always
+  // exported regardless of whether their chip is active, so they're excluded
+  // here to avoid a duplicate column. Whatever the user actually toggles on
+  // in the bar is what shows up as a column in the export, instead of a
+  // fixed list that silently omits whichever extra field they're using.
+  const EXPORT_EXTRA_COLUMNS: Record<string, { label: string; getValue: (issue: any) => string }> = {
+    productType:    { label: 'Product Type',    getValue: (i) => i.productType ?? '' },
+    projectManager: { label: 'Project Manager', getValue: (i) => i.projectManager ?? '' },
+    combination:    { label: 'Combination',     getValue: (i) => i.combination ?? '' },
+    customerName:   { label: 'Customer Name',   getValue: (i) => i.customerName ?? '' },
+    clientName:     { label: 'Client Name',     getValue: (i) => i.clientName ?? '' },
+    dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
+  };
   const handleExport = async () => {
     setExporting(true);
     try {
@@ -1185,7 +1326,12 @@ export default function FiltersPage() {
       const params = { ...buildFilterParams(), page: '1', limit: String(EXPORT_LIMIT) };
       const { issues: rows, total: matchedTotal } = await api.getIssues(params);
       const list = rows as any[];
-      const header = ['Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department', 'Created', 'Updated'];
+      const extraCols = activeExtras.filter((id) => EXPORT_EXTRA_COLUMNS[id]);
+      const header = [
+        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department',
+        'Created', 'Updated',
+        ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
+      ];
       const lines = [header.map(csvCell).join(',')];
       for (const issue of list) {
         lines.push([
@@ -1200,6 +1346,7 @@ export default function FiltersPage() {
           issue.current_department ?? '',
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
           issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
+          ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].getValue(issue)),
         ].map(csvCell).join(','));
       }
       const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
@@ -1690,6 +1837,15 @@ export default function FiltersPage() {
                 <button onClick={() => toggleExtra('dueDate')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
+            {activeExtras.includes('worked') && (
+              <div className="flex items-center gap-1">
+                <DateDropBtn label="Worked" selected={selWorked} onChange={setSelWorked} />
+                <button onClick={() => toggleExtra('worked')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+                {!selQueue && (
+                  <span className="text-[11px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Select a Queue for this to apply</span>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>}
@@ -1724,6 +1880,7 @@ export default function FiltersPage() {
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20 hidden md:table-cell">Priority</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">SLA Breached</th>
+                <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24 hidden md:table-cell">Time Spent</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
               </tr>
             </thead>
@@ -1734,7 +1891,7 @@ export default function FiltersPage() {
                     <div className="flex items-center gap-1.5">
                       <IssueTypeIcon type={issue.type || 'task'} size={15} />
                       <Link
-                        href={`/issues/${issue.cfKey ?? issue.key}`}
+                        href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
                         className="font-mono text-[11.5px] font-semibold text-blue-600 hover:text-blue-800 whitespace-nowrap"
                       >
                         {issue.cfKey ?? issue.key}
@@ -1743,7 +1900,7 @@ export default function FiltersPage() {
                   </td>
                   <td className="px-2 py-2.5 max-w-0">
                     <Link
-                      href={`/issues/${issue.cfKey ?? issue.key}`}
+                      href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
                       className="block truncate text-[13px] text-gray-900 hover:text-blue-600 transition-colors"
                     >
                       {issue.summary}
@@ -1778,12 +1935,17 @@ export default function FiltersPage() {
                     )}
                   </td>
                   <td className="px-2 py-2.5">
-                    <span
-                      className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
-                      style={{ backgroundColor: issue.status?.color || '#6B7280' }}
-                    >
-                      {issue.status?.name || 'Open'}
-                    </span>
+                    {(() => {
+                      const effectiveStatus = getEffectiveIssueStatus(issue);
+                      return (
+                        <span
+                          className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
+                          style={{ backgroundColor: effectiveStatus.color || '#6B7280' }}
+                        >
+                          {effectiveStatus.name || 'Open'}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="px-2 py-2.5 hidden md:table-cell">
                     <PriorityIcon priority={issue.priority} size={14} />
@@ -1794,6 +1956,14 @@ export default function FiltersPage() {
                     ) : (
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
                     )}
+                  </td>
+                  <td className="px-2 py-2.5 text-right hidden md:table-cell">
+                    <span className="text-[11.5px] text-gray-600 tabular-nums font-medium whitespace-nowrap">
+                      {typeof issue.inProgressHrs === 'number' ? `${issue.inProgressHrs}h` : '—'}
+                      {issue.noHistory && (
+                        <span className="ml-1 inline-flex items-center px-1 py-0.5 rounded-full text-[9px] font-medium bg-amber-50 text-amber-700 align-middle">No history</span>
+                      )}
+                    </span>
                   </td>
                   <td className="px-4 py-2.5 hidden lg:table-cell">
                     <span className="text-[11.5px] text-gray-400 whitespace-nowrap">

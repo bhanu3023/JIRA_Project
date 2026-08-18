@@ -72,9 +72,18 @@ class ApiClient {
       res = await fetch(url, {
         ...options,
         headers,
+        // No timeout here at all previously meant a stalled request (a slow
+        // query under real load, a dropped connection that never errors)
+        // left the caller's promise pending forever -- e.g. the issue detail
+        // page's "Loading issue..." spinner had nothing to ever clear it.
+        // Respect a caller-supplied signal if one is already passed in.
+        signal: options.signal ?? AbortSignal.timeout(20000),
       });
-    } catch {
+    } catch (e: any) {
       const target = endpoint.startsWith('/') ? `${API_URL}${endpoint}` : `${API_URL}/${endpoint}`;
+      if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+        throw new Error(`Request timed out (${target}). The server took too long to respond -- please try again.`);
+      }
       const hint =
         API_URL.includes('localhost:4000') || API_URL.includes('127.0.0.1:4000')
           ? ' Start the Jira API on port 4000, or unset NEXT_PUBLIC_API_URL to use the embedded /api mock from this Next app.'
@@ -156,6 +165,9 @@ class ApiClient {
   createIssue(data: any) { return this.request<any>('/issues', { method: 'POST', body: JSON.stringify(data) }); }
   updateIssue(key: string, data: any) { return this.request<any>(`/issues/${key}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteIssue(key: string) { return this.request<any>(`/issues/${key}`, { method: 'DELETE' }); }
+  getDeletedIssues() { return this.request<any>('/deleted-issues'); }
+  restoreDeletedIssue(id: string) { return this.request<any>(`/deleted-issues/${id}/restore`, { method: 'POST' }); }
+  purgeDeletedIssue(id: string) { return this.request<any>(`/deleted-issues/${id}`, { method: 'DELETE' }); }
   addComment(key: string, data: any) { return this.request<any>(`/issues/${key}/comments`, { method: 'POST', body: JSON.stringify(data) }); }
   updateComment(commentId: string, data: { body: string }) { return this.request<any>(`/comments/${commentId}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteComment(commentId: string) { return this.request<any>(`/comments/${commentId}`, { method: 'DELETE' }); }
@@ -246,6 +258,26 @@ class ApiClient {
     if (dateTo)    params.set('dateTo',    dateTo);
     const qs = params.toString();
     return this.request<any[]>(`/reports/user-performance${qs ? `?${qs}` : ''}`);
+  }
+  getResolutionSla(params?: { dept?: string; productType?: string; dateFrom?: string; dateTo?: string }) {
+    const p = new URLSearchParams();
+    if (params?.dept)        p.set('dept',        params.dept);
+    if (params?.productType) p.set('productType', params.productType);
+    if (params?.dateFrom)    p.set('dateFrom',     params.dateFrom);
+    if (params?.dateTo)      p.set('dateTo',       params.dateTo);
+    const qs = p.toString();
+    return this.request<any>(`/reports/resolution-sla${qs ? `?${qs}` : ''}`);
+  }
+  getTeamAnalytics(sub: 'overview' | 'aging' | 'time-spent', params?: { dept?: string; dateType?: string; dateFrom?: string; dateTo?: string; productType?: string; q?: string }) {
+    const p = new URLSearchParams();
+    if (params?.dept)        p.set('dept',        params.dept);
+    if (params?.dateType)    p.set('dateType',    params.dateType);
+    if (params?.dateFrom)    p.set('dateFrom',     params.dateFrom);
+    if (params?.dateTo)      p.set('dateTo',       params.dateTo);
+    if (params?.productType) p.set('productType', params.productType);
+    if (params?.q)           p.set('q',           params.q);
+    const qs = p.toString();
+    return this.request<any>(`/reports/team-analytics/${sub}${qs ? `?${qs}` : ''}`);
   }
 
   // Custom Fields

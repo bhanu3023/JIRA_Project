@@ -682,9 +682,7 @@ export default function Sidebar() {
             />
             <GlobalNavItem href="/filters" icon={<List size={15} />} label="Filters" active={pathname === '/filters'} />
             <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
-            {isPrivileged && (
-              <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
-            )}
+            <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
           </div>
 
           <div className="mx-4 my-4 h-px bg-gray-200" />
@@ -856,8 +854,13 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
   const { user, currentIssue } = useStore(useShallow((s) => ({ user: s.user, currentIssue: s.currentIssue })));
   const searchParams = useSearchParams();
   const router = useRouter();
-  const canManageSpace = isManager(user?.role);
   const [spaceMemberRole, setSpaceMemberRole] = useState<string>('');
+  // A user with no site-wide manager/admin role should still get full manage
+  // access to a space they've specifically been made "admin" of (matching
+  // Jira's project-level Administrator role) -- previously this only ever
+  // checked the user's global role, so a per-space "admin" assignment on the
+  // Members tab had no actual effect on what that user could do here.
+  const canManageSpace = isManager(user?.role) || spaceMemberRole === 'admin';
 
   // Fetch RR config to determine shift lead status + space member role.
   // Routed through api.request so this coalesces with the page's own identical

@@ -17,7 +17,7 @@ import {
   LayoutGrid, Settings, ChevronDown, Check, User,
   Search, CheckCircle2, ClipboardList, X, Tag, Calendar, UserCheck,
   Briefcase, Package, Layers, Monitor, Clock, AlertCircle, Building2, SlidersHorizontal, RefreshCw, BarChart2,
-  ChevronRight, Inbox as InboxIcon, AlertTriangle, Trophy
+  ChevronRight, Inbox as InboxIcon, AlertTriangle, Trophy, PieChart
 } from 'lucide-react';
 
 // ── Addable filter field definitions ─────────────────────────────────────────
@@ -152,7 +152,6 @@ function SpaceDetailContent() {
     { id: 'breached',       label: 'Breached',            width: '90px'  },
     { id: 'labels',         label: 'Labels',              width: '130px' },
     { id: 'storyPoints',    label: 'Story Points',        width: '90px'  },
-    { id: 'type',           label: 'Type',                width: '100px' },
     { id: 'workType',       label: 'Work Type',           width: '130px' },
     { id: 'productType',    label: 'Product Type',        width: '130px' },
     { id: 'combination',    label: 'Combination',         width: '130px' },
@@ -328,12 +327,18 @@ function SpaceDetailContent() {
           Array.isArray(f.spaceIds) &&
           f.spaceIds.includes(spaceId)
         );
-        setCustomFieldCols(spaceFields.map((f: any) => ({
-          id: `cf_${f.id}`,
-          label: f.name,
-          width: '110px',
-          fieldId: f.id,
-        })));
+        // Disambiguate custom fields whose name collides with a system column (or each
+        // other) so the table header never shows the same label twice with no way to
+        // tell which is which.
+        const staticLabels = new Set(STATIC_COLUMNS.map(c => c.label.toLowerCase()));
+        const seenLabels = new Set<string>();
+        setCustomFieldCols(spaceFields.map((f: any) => {
+          const baseLabel = String(f.name);
+          const key = baseLabel.toLowerCase();
+          const label = (staticLabels.has(key) || seenLabels.has(key)) ? `${baseLabel} (Field)` : baseLabel;
+          seenLabels.add(key);
+          return { id: `cf_${f.id}`, label, width: '110px', fieldId: f.id };
+        }));
       }
       // 2. RR config — add any not already in list
       if (rrRes.status === 'fulfilled' && rrRes.value?.config?.departments?.length) {
@@ -380,6 +385,27 @@ function SpaceDetailContent() {
     return () => clearTimeout(t);
   }, [updating]);
   const [assigneeRequiredModal, setAssigneeRequiredModal] = useState(false);
+  const [missingFieldsModal, setMissingFieldsModal] = useState<string[] | null>(null);
+  // Same mandatory-before-resolve rule as the issue detail page's
+  // getMissingCoreFields -- duplicated here because this row's inline status
+  // dropdown lets a ticket be resolved directly from the list view without
+  // ever opening the detail page, which was bypassing that check entirely.
+  const getMissingCoreFieldsInline = (iss: any): string[] => {
+    const missing: string[] = [];
+    const required: { name: string; key: string }[] = [
+      { name: 'Project Manager', key: 'projectManager' },
+      { name: 'Product Type', key: 'productType' },
+      { name: 'Combination', key: 'combination' },
+    ];
+    if (String(iss.current_department || '').toLowerCase() === 'dev') {
+      required.push({ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' });
+    }
+    for (const f of required) {
+      const val = iss[f.key];
+      if (!val || String(val).trim() === '') missing.push(f.name);
+    }
+    return missing;
+  };
   const [loadError, setLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 50;
@@ -472,6 +498,8 @@ function SpaceDetailContent() {
   // Fixed-position coords for Assignee / Reporter (full-panel dropdowns)
   const [assigneeDropPos, setAssigneeDropPos] = useState<{ top: number; left: number } | null>(null);
   const [reporterDropPos, setReporterDropPos] = useState<{ top: number; left: number } | null>(null);
+  const [statusDropPos, setStatusDropPos] = useState<{ top: number; left: number } | null>(null);
+  const [typeDropPos, setTypeDropPos] = useState<{ top: number; left: number } | null>(null);
 
   // Combined columns: static + any custom fields assigned to this space
   const ALL_COLUMNS = [...STATIC_COLUMNS, ...customFieldCols];
@@ -555,7 +583,12 @@ function SpaceDetailContent() {
           // fixed page 1 / 100-row cap every other branch here uses, or anything
           // past the first 100 is silently unreachable.
           if (queueFilter === 'dept_all') {
-            params.excludeDone = 'true';
+            // Deliberately NOT excludeDone -- same "All Tickets" convention
+            // already used space-wide (see the all-open comment above): the
+            // literal "All Tickets — {dept}" label should mean all of them,
+            // not just the still-open ones. A migrated department where 99%
+            // of tickets are already Resolved/Closed was showing a single-
+            // digit count here and nowhere obvious to see the rest.
             params.page = String(currentPage);
             params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
@@ -568,14 +601,16 @@ function SpaceDetailContent() {
             params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
           }
-          // Dept sub-queue: assigned to me in dept — includeHistory keeps a
-          // ticket showing here (with its real current status/department)
-          // after it's resolved or handed to another department, instead of
-          // it just disappearing once it's no longer open-and-assigned-to-me.
+          // Dept sub-queue: assigned to me in dept — strictly current and
+          // still-open. A ticket leaves this list the moment it's resolved
+          // (it belongs in "Worked on" instead, see dept_closed) or handed
+          // to another department (it belongs in "Sent / Watching" instead).
+          // Used to also pass includeHistory to keep resolved/moved tickets
+          // showing here too — dropped since that meant a resolved ticket
+          // could show under BOTH "Assigned to me" and "Worked on" at once.
           if (queueFilter === 'dept_assigned') {
             if (user?.id) params.assignee = user.id;
             params.excludeDone = 'true';
-            params.includeHistory = 'true';
             params.page = String(currentPage);
             params.limit = String(PAGE_SIZE);
             if (deptParam) params.dept = deptParam;
@@ -818,8 +853,10 @@ function SpaceDetailContent() {
 
   const setFilter = (key: string, value: string) => {
     setFilters(f => value ? { ...f, [key]: value } : Object.fromEntries(Object.entries(f).filter(([k]) => k !== key)));
-    setOpenFilter(null);
     setCurrentPage(1); // reset pagination when filter changes
+    // Closing the panel is each call site's decision — single-select options close it
+    // explicitly via setOpenFilter(null); multi-select checkboxes deliberately don't,
+    // so the panel stays open to pick more than one value.
   };
   const clearFilter = (key: string) => { setFilters(f => Object.fromEntries(Object.entries(f).filter(([k]) => k !== key))); setCurrentPage(1); };
   const clearAllFilters = () => {
@@ -961,8 +998,10 @@ function SpaceDetailContent() {
       const params: Record<string, string> = { spaceKey, page: '1', limit: '100' };
       if (queueFilter === 'sent-watching') {
         if (deptParam) params.sentDept = deptParam;
-      } else if (queueFilter === 'dept_all' || queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
+      } else if (queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
         params.excludeDone = 'true';
+        if (deptParam) params.dept = deptParam;
+      } else if (queueFilter === 'dept_all') {
         if (deptParam) params.dept = deptParam;
       } else if (queueFilter === 'assigned' || queueFilter === 'unassigned') {
         params.excludeDone = 'true';
@@ -1165,10 +1204,13 @@ function SpaceDetailContent() {
         // Exclude tickets still in this dept (they haven't been sent anywhere)
         if (deptParam && issueDept === deptParam.toLowerCase()) return false;
       } else if (queueFilter === 'dept_all') {
-        // All open tickets in this dept regardless of assignee
-        const cat = (issue.status?.category || '').toLowerCase();
-        const stName = (issue.status?.name || '').toLowerCase();
-        if (cat === 'done' || stName.includes('done') || stName.includes('resolved') || stName.includes('closed')) return false;
+        // Every ticket in this dept, regardless of assignee OR status — the
+        // server no longer excludes done tickets here (see the fetch effect),
+        // so re-applying a done/name-substring exclusion client-side used to
+        // silently throw away most of each page it returned (a page mostly
+        // full of already-resolved migrated tickets would come back from the
+        // server correctly, then get filtered down to a handful in the
+        // browser, with the "Total" pill and the visible rows disagreeing).
         if (deptParam) {
           const issueDept = ((issue as any).current_department || '').toLowerCase();
           if (issueDept !== deptParam.toLowerCase()) return false;
@@ -1200,10 +1242,16 @@ function SpaceDetailContent() {
       const issueDept = ((issue as any).current_department || '').toUpperCase();
       if (issueDept !== deptFilter.toUpperCase()) return false;
     }
+    // Type/Status/Priority/Label (and the "extra added" fields below) all support
+    // comma-separated multi-select — a filter value of "a,b" matches either.
+    const matchesMulti = (filterVal: string, issueVal: string) => {
+      const selected = filterVal.split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+      return selected.length === 0 || selected.includes((issueVal || '').toLowerCase());
+    };
     // Type filter
-    if (filters.type && (issue.type || '').toLowerCase() !== filters.type.toLowerCase()) return false;
+    if (filters.type && !matchesMulti(filters.type, issue.type || '')) return false;
     // Status filter
-    if (filters.status && (issue.status?.name || '') !== filters.status) return false;
+    if (filters.status && !matchesMulti(filters.status, issue.status?.name || '')) return false;
     // Assignee filter — match by email (member id ≠ user id in seeded data)
     if (filters.assignee) {
       if (filters.assignee === '__unassigned') { if (issue.assignee) return false; }
@@ -1216,7 +1264,7 @@ function SpaceDetailContent() {
       }
     }
     // Priority filter
-    if (filters.priority && (issue.priority || '').toLowerCase() !== filters.priority.toLowerCase()) return false;
+    if (filters.priority && !matchesMulti(filters.priority, issue.priority || '')) return false;
     // Reporter filter
     if (filters.reporter) {
       if (filters.reporter === '__current') {
@@ -1225,12 +1273,13 @@ function SpaceDetailContent() {
         if (issue.reporter?.id !== filters.reporter) return false;
       }
     }
-    // Label filter
+    // Label filter — match if the issue has ANY of the selected labels
     if (filters.label) {
       const issueLabels: string[] = Array.isArray(issue.labels)
         ? issue.labels.map((l: any) => (typeof l === 'string' ? l : l?.name || '')).filter(Boolean)
         : [];
-      if (!issueLabels.includes(filters.label)) return false;
+      const selectedLabels = filters.label.split(',').map(v => v.trim()).filter(Boolean);
+      if (!selectedLabels.some(l => issueLabels.includes(l))) return false;
     }
     // Created date filter (client-side fallback)
     if (filters.created && issue.createdAt) {
@@ -1241,11 +1290,7 @@ function SpaceDetailContent() {
       const ms = ranges[filters.created];
       if (ms && created < now - ms) return false;
     }
-    // Extra added filters — all support comma-separated multi-select
-    const matchesMulti = (filterVal: string, issueVal: string) => {
-      const selected = filterVal.split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
-      return selected.length === 0 || selected.includes((issueVal || '').toLowerCase());
-    };
+    // Extra added filters — reuse the same comma-separated multi-select matcher
     if (filters.workType)         { if (!matchesMulti(filters.workType,        (issue as any).workType        || '')) return false; }
     if (filters.productType)      { if (!matchesMulti(filters.productType,     (issue as any).productType     || '')) return false; }
     if (filters.combination)      { if (!matchesMulti(filters.combination,     (issue as any).combination     || '')) return false; }
@@ -1391,9 +1436,11 @@ function SpaceDetailContent() {
             // Department-wide queues — also paginated, so use the real backend
             // total rather than the current page's row count (which used to show
             // as e.g. "100 Open" even when the department actually had thousands).
+            // dept_all is no longer excludeDone-scoped (see the fetch effect above),
+            // so its count is a true total, not an "open" count like the other two.
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border text-[12px] font-medium bg-blue-50 text-blue-700 border-blue-200">
               <span className="font-bold text-[15px]">{(issueTotal ?? filteredIssues.length).toLocaleString()}</span>
-              <span>Open</span>
+              <span>{queueFilter === 'dept_all' ? 'Total' : 'Open'}</span>
             </div>
           ) : (
             // All Tickets / Assigned — show only filtered count
@@ -1497,27 +1544,50 @@ function SpaceDetailContent() {
 
         const BAR_H = 180;
         const perUser: any[] = deptSummaryData?.perUser || [];
+        const perUserByProduct: Record<string, any[]> = deptSummaryData?.perUserByProduct || {};
 
-        // Pie slices for "tickets worked" share per user -- indexed by each
-        // user's rank in perUser (already sorted by ticketsWorked desc) so
-        // color assignment stays stable even as zero-activity members (no
-        // slice) are filtered out below.
         const USER_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'];
-        const totalWorked = perUser.reduce((s: number, u: any) => s + u.ticketsWorked, 0);
-        let pieCumulative = 0;
-        const pieSlices = perUser
-          .map((u: any, idx: number) => ({ u, color: USER_COLORS[idx % USER_COLORS.length] }))
-          .filter(({ u }: any) => u.ticketsWorked > 0)
-          .map(({ u, color }: any) => {
-            const pct = totalWorked > 0 ? (u.ticketsWorked / totalWorked) * 100 : 0;
-            const start = pieCumulative;
-            pieCumulative += pct;
-            return { userId: u.userId, color, pct, start, end: pieCumulative };
-          });
-        const pieColorByUser: Record<string, string> = Object.fromEntries(pieSlices.map((s: any) => [s.userId, s.color]));
-        const pieGradient = pieSlices.length
-          ? `conic-gradient(${pieSlices.map((s: any) => `${s.color} ${s.start}% ${s.end}%`).join(', ')})`
-          : undefined;
+
+        // Builds one pie chart's slices/gradient from a perUser-shaped array,
+        // ranked by whichever field this chart cares about ('currentTotal' for
+        // "All Status", 'currentDone' for "Resolved") -- each chart gets its
+        // OWN color assignment/order since who's carrying the most current
+        // load isn't necessarily who's resolved the most.
+        const buildAssigneeChart = (rows: any[], field: 'currentTotal' | 'currentDone') => {
+          const total = rows.reduce((s: number, u: any) => s + (u[field] || 0), 0);
+          let cumulative = 0;
+          const slices = [...rows]
+            .sort((a: any, b: any) => (b[field] || 0) - (a[field] || 0))
+            .map((u: any, idx: number) => ({ u, color: USER_COLORS[idx % USER_COLORS.length] }))
+            .filter(({ u }: any) => (u[field] || 0) > 0)
+            .map(({ u, color }: any) => {
+              const pct = total > 0 ? (u[field] / total) * 100 : 0;
+              const start = cumulative;
+              cumulative += pct;
+              return { userId: u.userId, color, pct, start, end: cumulative };
+            });
+          const gradient = slices.length ? `conic-gradient(${slices.map((s: any) => `${s.color} ${s.start}% ${s.end}%`).join(', ')})` : undefined;
+          return { total, slices, gradient };
+        };
+
+        const allChart      = buildAssigneeChart(perUser, 'currentTotal');
+        const resolvedChart = buildAssigneeChart(perUser, 'currentDone');
+        const pieColorByUser: Record<string, string> = Object.fromEntries(allChart.slices.map((s: any) => [s.userId, s.color]));
+        const totalWorked = allChart.total;
+
+        // Jira runs Content/Message/Email migration as separate boards with
+        // their own dashboards -- "who's carrying the load" needs its own
+        // Resolved/All-Status pair per product line, not just one chart that
+        // blends all three together.
+        const PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+        const assigneeGroups = [
+          { label: 'All Products', rows: perUser },
+          ...PRODUCT_TYPES.map((pt) => ({ label: pt, rows: perUserByProduct[pt] || [] })),
+        ].map((g) => ({
+          ...g,
+          resolved: buildAssigneeChart(g.rows, 'currentDone'),
+          all: buildAssigneeChart(g.rows, 'currentTotal'),
+        }));
 
         const STAT_CARDS = [
           { label: 'Total Issues', value: deptSummaryData?.totalIssues ?? 0, icon: ClipboardList,
@@ -1644,38 +1714,105 @@ function SpaceDetailContent() {
                   </div>
                 </div>
 
+                {/* Assignee Breakdown -- one card per product line (All
+                    Products, then Content/Message/Email Migration
+                    separately), each with two pie charts (Resolved-only, All
+                    Status) and a colored legend of assignee: count --
+                    mirroring the pair of pie-chart gadgets Jira shows per
+                    board/dashboard, since Content/Message/Email run as
+                    separate boards there too. Separate from the detailed
+                    "Per user" table below, which stays for the extra
+                    Open/In-Progress/SLA/Worked columns these charts don't
+                    show, and isn't split by product type. */}
+                {assigneeGroups.filter((g) => g.rows.length > 0).map((group) => (
+                  <div key={group.label} className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm mt-5 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-50 flex items-center gap-2">
+                      <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-fuchsia-500 to-purple-600" />
+                      <div>
+                        <h3 className="text-[13.5px] font-bold text-gray-800">Assignee Breakdown <span className="text-gray-300 mx-1">·</span> {group.label}</h3>
+                        <p className="text-[11.5px] text-gray-400 mt-0.5">Live ticket share per assignee, currently in the {deptParam} queue.</p>
+                      </div>
+                    </div>
+                    <div className="flex divide-x divide-gray-50">
+                      {[
+                        { title: 'Resolved Status', chart: group.resolved, field: 'currentDone' as const, empty: 'No resolved tickets currently in this queue.' },
+                        { title: 'All Status', chart: group.all, field: 'currentTotal' as const, empty: 'No tickets currently in this queue.' },
+                      ].map((panel) => (
+                        <div key={panel.title} className="flex-1 min-w-0 p-6">
+                          <div className="flex items-center gap-2 mb-4">
+                            <PieChart size={14} className="text-gray-400" />
+                            <h4 className="text-[12.5px] font-semibold text-gray-700">{panel.title}</h4>
+                            <span className="text-[11px] text-gray-400">· {panel.chart.total} issue{panel.chart.total === 1 ? '' : 's'}</span>
+                          </div>
+                          {panel.chart.total === 0 ? (
+                            <p className="text-[12px] text-gray-400 py-6">{panel.empty}</p>
+                          ) : (
+                            <div className="flex items-center gap-6">
+                              <div className="relative rounded-full flex items-center justify-center shadow-inner ring-1 ring-black/5 flex-shrink-0"
+                                style={{ width: 120, height: 120, background: panel.chart.gradient || '#EEF0F3' }}>
+                                <div className="rounded-full bg-white flex items-center justify-center shadow-md" style={{ width: 72, height: 72 }}>
+                                  <span className="text-[16px] font-extrabold text-gray-800">{panel.chart.total}</span>
+                                </div>
+                              </div>
+                              <div className="flex-1 min-w-0 space-y-1.5 max-h-[140px] overflow-y-auto pr-1">
+                                {panel.chart.slices.map((s: any) => {
+                                  const u = group.rows.find((pu: any) => pu.userId === s.userId);
+                                  if (!u) return null;
+                                  const displayName = `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || 'Unknown';
+                                  return (
+                                    <div key={s.userId} className="flex items-center gap-2 text-[12px]">
+                                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
+                                      <span className="text-gray-600 truncate flex-1">{displayName}</span>
+                                      <span className="font-semibold text-gray-800">{u[panel.field]}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+
                 {/* Per-user breakdown */}
                 <div className="bg-white rounded-2xl ring-1 ring-gray-100 shadow-sm mt-5 overflow-hidden">
                   <div className="px-6 py-4 border-b border-gray-50 flex items-center gap-2">
                     <span className="w-1.5 h-4 rounded-full bg-gradient-to-b from-emerald-500 to-teal-600" />
                     <div>
                       <h3 className="text-[13.5px] font-bold text-gray-800">Per user</h3>
-                      <p className="text-[11.5px] text-gray-400 mt-0.5">Tickets each team member worked in this queue, in the selected range.</p>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">
+                        Total/Open/In Progress/SLA Breached are live counts for every ticket currently in this queue (older tickets included, regardless of range). "Worked (range)" is how many they passed, returned, or closed in the selected range.
+                      </p>
                     </div>
                   </div>
                   {perUser.length === 0 ? (
-                    <p className="text-[12.5px] text-gray-400 py-8 text-center">No queue members found, or no activity in this range.</p>
+                    <p className="text-[12.5px] text-gray-400 py-8 text-center">No queue members found.</p>
                   ) : (
                     <div className="flex gap-8 p-6">
-                      {/* Donut chart -- share of tickets worked per user in this range */}
+                      {/* Donut chart -- share of CURRENT ticket load per user */}
                       <div className="flex flex-col items-center gap-3 flex-shrink-0" style={{ width: 168 }}>
                         <div className="relative rounded-full flex items-center justify-center shadow-inner ring-1 ring-black/5"
-                          style={{ width: 152, height: 152, background: pieGradient || '#EEF0F3' }}>
+                          style={{ width: 152, height: 152, background: allChart.gradient || '#EEF0F3' }}>
                           <div className="rounded-full bg-white flex flex-col items-center justify-center shadow-md" style={{ width: 96, height: 96 }}>
                             <span className="text-[20px] font-extrabold text-gray-800 leading-none">{totalWorked}</span>
                             <span className="text-[9.5px] font-medium text-gray-400 uppercase tracking-wide mt-0.5">Tickets</span>
                           </div>
                         </div>
                         {totalWorked === 0 && (
-                          <p className="text-[11px] text-gray-400 text-center">No activity in this range.</p>
+                          <p className="text-[11px] text-gray-400 text-center">No tickets currently in this queue.</p>
                         )}
                       </div>
                       <table className="w-full text-[12.5px]">
                         <thead>
                           <tr className="text-left text-[10.5px] font-semibold text-gray-400 uppercase tracking-wide">
                             <th className="pb-2.5">User</th>
-                            <th className="pb-2.5 text-right">Tickets Worked</th>
+                            <th className="pb-2.5 text-right">Total</th>
+                            <th className="pb-2.5 text-right">Open</th>
+                            <th className="pb-2.5 text-right">In Progress</th>
                             <th className="pb-2.5 text-right">SLA Breached</th>
+                            <th className="pb-2.5 text-right">Worked ({RANGE_OPTIONS.find((r) => r.id === summaryRange)?.label})</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1690,7 +1827,7 @@ function SpaceDetailContent() {
                                 className="border-t border-gray-50 cursor-pointer hover:bg-indigo-50/40 transition-colors">
                                 <td className="py-2.5 flex items-center gap-2.5">
                                   <span className="w-4 text-center flex-shrink-0">
-                                    {idx < 3 && u.ticketsWorked > 0
+                                    {idx < 3 && u.currentTotal > 0
                                       ? <Trophy size={13} className={RANK_COLORS[idx]} />
                                       : <span className="text-[10.5px] text-gray-300 font-medium">{idx + 1}</span>}
                                   </span>
@@ -1701,13 +1838,16 @@ function SpaceDetailContent() {
                                   <span className="text-gray-700 font-medium group-hover:text-indigo-600">{displayName}</span>
                                 </td>
                                 <td className="py-2.5 text-right">
-                                  <span className="font-bold text-gray-800">{u.ticketsWorked}</span>
+                                  <span className="font-bold text-gray-800">{u.currentTotal}</span>
                                 </td>
+                                <td className="py-2.5 text-right text-gray-600">{u.currentOpen}</td>
+                                <td className="py-2.5 text-right text-gray-600">{u.currentInProgress}</td>
                                 <td className="py-2.5 text-right">
                                   <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${u.slaBreached > 0 ? 'bg-rose-50 text-rose-600' : 'bg-gray-50 text-gray-400'}`}>
                                     {u.slaBreached}
                                   </span>
                                 </td>
+                                <td className="py-2.5 text-right text-gray-500">{u.ticketsWorked}</td>
                               </tr>
                             );
                           })}
@@ -1844,20 +1984,35 @@ function SpaceDetailContent() {
         {/* ── Unified Filter button ── */}
         {(() => {
           const allMembers = members.map((m: any) => m.user || m);
+          // The Assignee filter used to always list every member of the whole
+          // space, even while viewing one department's queue (e.g. Migration) --
+          // so it showed people from Dev, QA, etc. who have no access to this
+          // queue at all and could never actually be its assignee. Scope it down
+          // to that queue's own memberIds (same access-control list
+          // isUserAuthorizedForDeptQueue checks server-side) whenever a
+          // department is selected and has one configured; fall back to every
+          // space member otherwise (matches the fail-open behavior of that same
+          // server-side check when a dept has no queue config).
+          const deptQueueForAssignee = deptParam
+            ? allCustomQueues.find((q) => (q.name || '').toLowerCase() === deptParam.toLowerCase())
+            : undefined;
+          const assigneeFilterMembers = (deptQueueForAssignee?.memberIds?.length)
+            ? allMembers.filter((mb: any) => deptQueueForAssignee.memberIds.includes(mb.id))
+            : allMembers;
 
-          // Count active filters for badge
+          // Assignee, Status, and Request type (Type) each get their own standalone
+          // button — like Jira's toolbar. Everything else lives under "More filters".
           const activeFilterCount = [
-            filters.type, filters.status, filters.priority, filters.assignee,
-            filters.reporter, filters.label, filters.created,
+            filters.priority, filters.reporter, filters.label, filters.created,
             deptFilter,
             ...ADDABLE_FILTER_DEFS.map(d => filters[d.id]).filter(Boolean),
           ].filter(Boolean).length;
 
-          // Build filter category list — every field (Product Type, Combination,
-          // Project Manager, etc.) is listed directly instead of behind a
-          // "+ More Fields" sub-step, so it's reachable in a single click.
+          // Full category list (used for label lookups regardless of which button opened it) —
+          // every field (Product Type, Combination, Project Manager, etc.) is listed directly
+          // instead of behind a "+ More Fields" sub-step, so it's reachable in a single click.
           const filterCats = [
-            { id: 'type', label: 'Type', icon: <SlidersHorizontal size={13} /> },
+            { id: 'type', label: 'Request type', icon: <SlidersHorizontal size={13} /> },
             ...(rrDepartments.length > 0 ? [{ id: 'department', label: 'Department', icon: <SlidersHorizontal size={13} /> }] : []),
             { id: 'status', label: 'Status', icon: <SlidersHorizontal size={13} /> },
             { id: 'assignee', label: 'Assignee', icon: <User size={13} /> },
@@ -1867,6 +2022,8 @@ function SpaceDetailContent() {
             { id: 'created', label: 'Created', icon: <Calendar size={13} /> },
             ...ADDABLE_FILTER_DEFS.map(def => ({ id: def.id, label: def.label, icon: <AddableIcon icon={def.icon} size={13} /> })),
           ];
+          // "More filters" left panel — everything except the fields with their own button
+          const moreFilterCats = filterCats.filter(c => !['type', 'status', 'assignee'].includes(c.id));
 
           // Helper: is a category active?
           const isCatActive = (catId: string) => {
@@ -1879,16 +2036,44 @@ function SpaceDetailContent() {
             const cat = filterCategory;
 
             if (cat === 'type') {
+              const selectedVals = filters.type ? filters.type.split(',').map((v: string) => v.trim()).filter(Boolean) : [];
+              const toggle = (val: string) => {
+                const next = selectedVals.includes(val) ? selectedVals.filter((v: string) => v !== val) : [...selectedVals, val];
+                if (next.length === 0) clearFilter('type'); else setFilter('type', next.join(','));
+              };
+              const allTypes: [string, string][] = [['epic','Epic'],['story','Story'],['task','Task'],['bug','Bug'],['subtask','Subtask']];
+              const tq = dropdownSearch.trim().toLowerCase();
+              const filteredTypes = allTypes.filter(([, lbl]) => lbl.toLowerCase().includes(tq));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {[['epic','Epic'],['story','Story'],['task','Task'],['bug','Bug'],['subtask','Subtask']].map(([val, lbl]) => (
-                    <button key={val} onClick={() => { setFilter('type', val); setOpenFilter(null); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.type === val ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                      <IssueTypeIcon type={val} size={14} />
-                      <span>{lbl}</span>
-                      {filters.type === val && <Check size={12} className="ml-auto text-blue-600" />}
-                    </button>
-                  ))}
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
+                    Type <span className="font-semibold text-gray-700">= (equals)</span>
+                  </div>
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Type…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {filteredTypes.length === 0
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredTypes.map(([val, lbl]) => {
+                          const checked = selectedVals.includes(val);
+                          return (
+                            <button key={val} onClick={() => toggle(val)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
+                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                              </span>
+                              <IssueTypeIcon type={val} size={14} />
+                              <span>{lbl}</span>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredTypes.length} of {allTypes.length}</div>
                 </div>
               );
             }
@@ -1913,15 +2098,58 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'status') {
+              const selectedVals = filters.status ? filters.status.split(',').map((v: string) => v.trim()) : [];
+              const toggle = (name: string) => {
+                const next = selectedVals.includes(name) ? selectedVals.filter((v: string) => v !== name) : [...selectedVals, name];
+                if (next.length === 0) clearFilter('status'); else setFilter('status', next.join(','));
+              };
+              // Scope to the current queue's own configured workflow (same
+              // queueStatuses used by the inline per-row status dropdown)
+              // instead of the space's full status list — that list is every
+              // status from every department's workflow combined (50+ for a
+              // board with several queues), most of which this queue's own
+              // tickets can never actually be set to. Falls back to the full
+              // list outside a specific queue (All Requests, space-wide).
+              const scopedQueue: any = effectiveDept
+                ? allCustomQueues.find((q: any) => (q.name || '').toLowerCase() === effectiveDept.toLowerCase())
+                : null;
+              const scopedStatusList: any[] = scopedQueue?.queueStatuses || [];
+              const statusSource: any[] = scopedStatusList.length > 0 ? scopedStatusList : statuses;
+              const sq = dropdownSearch.trim().toLowerCase();
+              const filteredStatuses = statusSource.filter((s: any) => s.name.toLowerCase().includes(sq));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {statuses.map((s: any) => (
-                    <button key={s.id} onClick={() => { setFilter('status', s.name); setOpenFilter(null); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.status === s.name ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                      <span>{s.name}</span>
-                      {filters.status === s.name && <Check size={12} className="ml-auto text-blue-600" />}
-                    </button>
-                  ))}
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
+                    Status <span className="font-semibold text-gray-700">= (equals)</span>
+                  </div>
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Status…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {filteredStatuses.length === 0
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredStatuses.map((s: any) => {
+                          const checked = selectedVals.includes(s.name);
+                          const color = s.color || '#6B7280';
+                          return (
+                            <button key={s.id} onClick={() => toggle(s.name)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50' : ''}`}>
+                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                              </span>
+                              <span className="text-[11.5px] font-medium px-2 py-0.5 rounded-full border truncate"
+                                style={{ backgroundColor: `${color}18`, color, borderColor: `${color}40` }}>
+                                {s.name}
+                              </span>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredStatuses.length} of {statusSource.length}</div>
                 </div>
               );
             }
@@ -1929,11 +2157,14 @@ function SpaceDetailContent() {
             if (cat === 'assignee') {
               const aq = assigneeSearch.trim().toLowerCase();
               const filtered = aq
-                ? allMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
-                : allMembers;
+                ? assigneeFilterMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
+                : assigneeFilterMembers;
               return (
-                <div className="flex flex-col max-h-[340px]">
-                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0">
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
+                    Assignee <span className="font-semibold text-gray-700">= (equals)</span>
+                  </div>
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0">
                     <div className="relative">
                       <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                       <input autoFocus type="text" value={assigneeSearch} onChange={e => setAssigneeSearch(e.target.value)}
@@ -1983,16 +2214,40 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'priority') {
+              const selectedVals = filters.priority ? filters.priority.split(',').map((v: string) => v.trim()) : [];
+              const toggle = (val: string) => {
+                const next = selectedVals.includes(val) ? selectedVals.filter((v: string) => v !== val) : [...selectedVals, val];
+                if (next.length === 0) clearFilter('priority'); else setFilter('priority', next.join(','));
+              };
+              const pq = dropdownSearch.trim().toLowerCase();
+              const filteredPriorities = PRIORITIES.filter(p => p.label.toLowerCase().includes(pq));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {PRIORITIES.map(p => (
-                    <button key={p.value} onClick={() => { setFilter('priority', p.value); setOpenFilter(null); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.priority === p.value ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                      <PriorityIcon priority={p.value} size={14} />
-                      <span>{p.label}</span>
-                      {filters.priority === p.value && <Check size={12} className="ml-auto text-blue-600" />}
-                    </button>
-                  ))}
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Priority…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {filteredPriorities.length === 0
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredPriorities.map(p => {
+                          const checked = selectedVals.includes(p.value);
+                          return (
+                            <button key={p.value} onClick={() => toggle(p.value)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
+                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                              </span>
+                              <PriorityIcon priority={p.value} size={14} />
+                              <span>{p.label}</span>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredPriorities.length} of {PRIORITIES.length}</div>
                 </div>
               );
             }
@@ -2045,19 +2300,42 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'label') {
+              const selectedVals = filters.label ? filters.label.split(',').map((v: string) => v.trim()) : [];
+              const toggle = (lbl: string) => {
+                const next = selectedVals.includes(lbl) ? selectedVals.filter((v: string) => v !== lbl) : [...selectedVals, lbl];
+                if (next.length === 0) clearFilter('label'); else setFilter('label', next.join(','));
+              };
+              const lq = dropdownSearch.trim().toLowerCase();
+              const filteredLabels = allLabels.filter(l => l.toLowerCase().includes(lq));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  {allLabels.length === 0
-                    ? <p className="px-3 py-4 text-[12.5px] text-gray-400 text-center">No labels</p>
-                    : allLabels.map(lbl => (
-                      <button key={lbl} onClick={() => { setFilter('label', lbl); setOpenFilter(null); }}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.label === lbl ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                        <span className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />
-                        <span>{lbl}</span>
-                        {filters.label === lbl && <Check size={12} className="ml-auto text-blue-600" />}
-                      </button>
-                    ))
-                  }
+                <div className="flex flex-col max-h-[380px]">
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Label…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {allLabels.length === 0
+                      ? <p className="px-3 py-4 text-[12.5px] text-gray-400 text-center">No labels</p>
+                      : filteredLabels.length === 0
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredLabels.map(lbl => {
+                          const checked = selectedVals.includes(lbl);
+                          return (
+                            <button key={lbl} onClick={() => toggle(lbl)}
+                              className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${checked ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}>
+                              <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${checked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                                {checked && <Check size={10} className="text-white" strokeWidth={3} />}
+                              </span>
+                              <span className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />
+                              <span className="truncate">{lbl}</span>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  {allLabels.length > 0 && <div className="px-3 py-1.5 border-t border-gray-100 text-[11px] text-gray-400 text-right flex-shrink-0">{filteredLabels.length} of {allLabels.length}</div>}
                 </div>
               );
             }
@@ -2146,11 +2424,18 @@ function SpaceDetailContent() {
           };
 
           // Filter chips for active filters
+          // Multi-select fields store comma-separated values — join formatted labels,
+          // or collapse to a count once there are more than a couple selected.
+          const joinMulti = (vals: string[], formatOne: (v: string) => string): string => {
+            if (vals.length <= 2) return vals.map(formatOne).join(', ');
+            return `${vals.length} selected`;
+          };
+
           const getChipLabel = (key: string, val: string): string => {
-            if (key === 'type') return val.charAt(0).toUpperCase() + val.slice(1);
+            if (key === 'type') return joinMulti(val.split(','), v => v.charAt(0).toUpperCase() + v.slice(1));
             if (key === 'department') return val;
-            if (key === 'status') return val;
-            if (key === 'priority') return getPriorityMeta(val).label;
+            if (key === 'status') return joinMulti(val.split(','), v => v);
+            if (key === 'priority') return joinMulti(val.split(','), v => getPriorityMeta(v).label);
             if (key === 'assignee') {
               if (val === '__unassigned') return 'Unassigned';
               if (val === '__current') return 'Current User';
@@ -2162,7 +2447,7 @@ function SpaceDetailContent() {
               const mb = allMembers.find((m: any) => m.id === val);
               return mb ? `${mb.firstName} ${mb.lastName}` : val;
             }
-            if (key === 'label') return val;
+            if (key === 'label') return joinMulti(val.split(','), v => v);
             if (key === 'created') return ({ today: 'Today', '7d': 'Last 7d', '30d': 'Last 30d', '90d': 'Last 90d' } as Record<string,string>)[val] || val;
             const def = ADDABLE_FILTER_DEFS.find(d => d.id === key);
             return def ? `${def.label}: ${val}` : val;
@@ -2179,15 +2464,68 @@ function SpaceDetailContent() {
           if (filters.created) chips.push({ key: 'created', val: filters.created });
           ADDABLE_FILTER_DEFS.forEach(({ id }) => { if (filters[id]) chips.push({ key: id, val: filters[id] }); });
 
+          // Standalone single-panel button — one per quick-access field (Assignee,
+          // Status, Request type), matching Jira's toolbar instead of one mega-menu.
+          const QuickFilterButton = ({
+            catId, label, buttonRef, dropPos, setDropPos,
+          }: {
+            catId: string; label: string;
+            buttonRef: React.RefObject<HTMLButtonElement | null>;
+            dropPos: { top: number; left: number } | null;
+            setDropPos: (p: { top: number; left: number } | null) => void;
+          }) => {
+            const isOpen = openFilter === catId;
+            const active = isCatActive(catId);
+            return (
+              <div className="relative flex-shrink-0">
+                <button ref={buttonRef}
+                  onClick={() => {
+                    if (isOpen) { setOpenFilter(null); return; }
+                    const rect = buttonRef.current?.getBoundingClientRect();
+                    if (rect) setDropPos({ top: rect.bottom + 4, left: rect.left });
+                    setFilterCategory(catId);
+                    setOpenFilter(catId);
+                    setAssigneeSearch('');
+                    setDropdownSearch('');
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] rounded-md border transition-colors whitespace-nowrap
+                    ${isOpen || active
+                      ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
+                      : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'}`}>
+                  <span>{label}</span>
+                  <ChevronDown size={11} />
+                </button>
+                {isOpen && dropPos && (
+                  <>
+                    <div className="fixed inset-0 z-[9998]" onClick={() => setOpenFilter(null)} />
+                    <div className="fixed z-[9999] bg-white rounded-lg shadow-xl border border-gray-200"
+                      style={{ top: dropPos.top, left: dropPos.left, minWidth: 260 }}
+                      onMouseDown={e => e.stopPropagation()}>
+                      {renderRightPanel()}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          };
+
           return (
             <>
-              {/* Filter button */}
+              <QuickFilterButton catId="assignee" label="Assignee" buttonRef={assigneeFilterRef} dropPos={assigneeDropPos} setDropPos={setAssigneeDropPos} />
+              <QuickFilterButton catId="status" label="Status" buttonRef={statusFilterRef} dropPos={statusDropPos} setDropPos={setStatusDropPos} />
+              <QuickFilterButton catId="type" label="Request type" buttonRef={typeFilterRef} dropPos={typeDropPos} setDropPos={setTypeDropPos} />
+
+              {/* More filters button — everything else, still a two-panel category menu */}
               <div className="relative flex-shrink-0">
                 <button ref={addFilterRef}
                   onClick={() => {
                     if (openFilter === '__filterPanel') { setOpenFilter(null); return; }
                     const rect = addFilterRef.current?.getBoundingClientRect();
                     if (rect) setAddFilterDropPos({ top: rect.bottom + 4, left: rect.left });
+                    // Land on a category that actually lives in this menu
+                    if (!moreFilterCats.some(c => c.id === filterCategory)) {
+                      setFilterCategory(moreFilterCats[0]?.id || 'priority');
+                    }
                     setOpenFilter('__filterPanel');
                     setAssigneeSearch('');
                     setReporterSearch('');
@@ -2197,8 +2535,7 @@ function SpaceDetailContent() {
                     ${openFilter === '__filterPanel' || activeFilterCount > 0
                       ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
                       : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'}`}>
-                  <SlidersHorizontal size={13} className="flex-shrink-0" />
-                  <span>Filter</span>
+                  <span>More filters</span>
                   {activeFilterCount > 0 && (
                     <span className="ml-0.5 bg-blue-600 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center flex-shrink-0">
                       {activeFilterCount}
@@ -2220,7 +2557,7 @@ function SpaceDetailContent() {
                         <div className="px-3 pb-1 pt-0.5">
                           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Filters</p>
                         </div>
-                        {filterCats.map(cat => {
+                        {moreFilterCats.map(cat => {
                           const active = isCatActive(cat.id);
                           const isSelected = filterCategory === cat.id;
                           return (
@@ -2241,7 +2578,7 @@ function SpaceDetailContent() {
                       <div className="flex-1 min-w-[200px] max-w-[260px]">
                         <div className="px-3 py-2 border-b border-gray-100">
                           <div className="flex items-center justify-between">
-                            <p className="text-[11px] font-semibold text-gray-500 capitalize">{filterCats.find(c => c.id === filterCategory)?.label || ''}</p>
+                            <p className="text-[11px] font-semibold text-gray-500 capitalize">{moreFilterCats.find(c => c.id === filterCategory)?.label || ''}</p>
                             {isCatActive(filterCategory) && (
                               <button onClick={() => {
                                 if (filterCategory === 'department') setDeptFilter('');
@@ -2923,6 +3260,14 @@ function SpaceDetailContent() {
                                     setAssigneeRequiredModal(true);
                                     return;
                                   }
+                                  if ((s as any).category === 'done') {
+                                    const missing = getMissingCoreFieldsInline(issue);
+                                    if (missing.length > 0) {
+                                      setOpenDropdown(null);
+                                      setMissingFieldsModal(missing);
+                                      return;
+                                    }
+                                  }
                                   if (isQueueStatus) {
                                     handleInlineQueueStatusUpdate(issue.key, ticketCurrentDept, s);
                                   } else {
@@ -2946,7 +3291,6 @@ function SpaceDetailContent() {
                     if (id === 'breached') return <div key={id} className="px-2">{(issue as any).sla_breached ? <span className="text-[11px] font-medium text-red-600 bg-red-50 border border-red-100 rounded px-1.5 py-0.5">Yes</span> : <span className="text-[11px] font-medium text-emerald-600 bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5">No</span>}</div>;
                     if (id === 'labels') return <div key={id} className="px-2 flex flex-wrap gap-1">{(issue.labels||[]).length > 0 ? ((issue.labels as unknown) as string[]).slice(0,2).map((l:string) => <span key={l} className="text-[10px] bg-blue-50 text-blue-600 border border-blue-100 rounded px-1.5 py-0.5">{l}</span>) : <span className="text-[11px] text-gray-300">—</span>}</div>;
                     if (id === 'storyPoints') return <div key={id} className="px-2">{issue.storyPoints ? <span className="text-[11.5px] font-semibold text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{issue.storyPoints}</span> : <span className="text-[11px] text-gray-300">—</span>}</div>;
-                    if (id === 'type') return <div key={id} className="px-2 text-[11px] text-gray-600 capitalize">{issue.type || '—'}</div>;
                     if (id === 'workType') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).workType || <span className="text-gray-300">—</span>}</div>;
                     if (id === 'productType') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).productType || <span className="text-gray-300">—</span>}</div>;
                     if (id === 'combination') return <div key={id} className="px-2 text-[11px] text-gray-600 truncate">{(issue as any).combination || <span className="text-gray-300">—</span>}</div>;
@@ -3099,6 +3443,31 @@ function SpaceDetailContent() {
               </div>
               <p className="text-[13px] text-gray-600 mb-5">Please assign this ticket to someone before changing its status.</p>
               <button onClick={() => setAssigneeRequiredModal(false)}
+                className="w-full bg-amber-500 hover:bg-amber-600 text-white text-[13px] font-medium py-2 rounded-lg transition-colors">
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {missingFieldsModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40" onClick={() => setMissingFieldsModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-[380px] overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="h-1 bg-gradient-to-r from-amber-400 to-orange-500" />
+            <div className="px-6 py-5">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-9 h-9 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                </div>
+                <h3 className="text-[15px] font-semibold text-gray-900">Required fields missing</h3>
+              </div>
+              <p className="text-[13px] text-gray-600 mb-3">The following fields must be filled in before this ticket can be resolved:</p>
+              <ul className="space-y-1.5 mb-5">
+                {missingFieldsModal.map(f => (
+                  <li key={f} className="text-[13px] font-medium text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-1.5">{f}</li>
+                ))}
+              </ul>
+              <button onClick={() => setMissingFieldsModal(null)}
                 className="w-full bg-amber-500 hover:bg-amber-600 text-white text-[13px] font-medium py-2 rounded-lg transition-colors">
                 OK
               </button>

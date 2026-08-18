@@ -1,12 +1,12 @@
 ﻿'use client';
 
 import React, { useEffect, useState, useRef } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getIssueStatus, resolveStatusColor, getDeptColor } from '@/lib/utils';
+import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getEffectiveIssueStatus, resolveStatusColor, getDeptColor } from '@/lib/utils';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
 import RichTextEditor from '@/components/ui/RichTextEditor';
@@ -134,7 +134,18 @@ export default function IssueDetailPage() {
   const [detailsExpanded, setDetailsExpanded] = useState(true);
   const [slaExpanded, setSlaExpanded] = useState(true);
   const [slaNow, setSlaNow] = useState(() => Date.now());
-  const [sidebarWidth, setSidebarWidth] = useState(280);
+  // Wider default (was 280 -- cramped enough that Priority/Due Date/Product
+  // Type/etc. values wrapped awkwardly) and persisted across tickets/reloads
+  // via localStorage -- previously this reset to the default every single
+  // page load, so the sidebar's width looked inconsistent from one ticket
+  // view to the next depending on whether it happened to still be dragged
+  // wide from earlier in the same session.
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    if (typeof window === 'undefined') return 380;
+    const saved = Number(localStorage.getItem('issueSidebarWidth'));
+    return saved >= 200 && saved <= 500 ? saved : 380;
+  });
+  const latestSidebarWidthRef = useRef(sidebarWidth);
   const [watching, setWatching] = useState(false);
   const [watchCount, setWatchCount] = useState(0);
   const isDragging = useRef(false);
@@ -320,7 +331,11 @@ export default function IssueDetailPage() {
           if (anchor) {
             e.preventDefault();
             const href = anchor.getAttribute('href');
-            if (href && href !== '#') window.open(href, '_blank', 'noopener,noreferrer');
+            if (href && href !== '#') {
+              const filename = anchor.getAttribute('data-filename');
+              if (filename) openFilePreview(href, filename);
+              else window.open(href, '_blank', 'noopener,noreferrer');
+            }
           }
         }}
       />;
@@ -335,6 +350,8 @@ export default function IssueDetailPage() {
     )}</p>;
   };
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const cameFromList = searchParams?.get('ref') === 'filters';
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [uploadingAttachCount, setUploadingAttachCount] = useState(0);
@@ -873,6 +890,13 @@ export default function IssueDetailPage() {
       { name: 'Product Type',    key: 'productType'    },
       { name: 'Combination',     key: 'combination'    },
     ];
+    // Root Cause / Fix Description capture why a bug happened and what
+    // actually fixed it -- only meaningful for a ticket that's gone through
+    // Dev's own resolution workflow, so only required while it's currently
+    // in the Dev queue (not, say, a Migration ticket that's never touched Dev).
+    if (((issue as any)?.current_department || '').toLowerCase() === 'dev') {
+      alwaysRequired.push({ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' });
+    }
     for (const f of alwaysRequired) {
       const cfEntry = customFields.find(cf => cf.name?.toLowerCase() === f.name.toLowerCase());
       const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
@@ -1019,6 +1043,22 @@ export default function IssueDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [previewAttach, setPreviewAttach] = useState<{url: string; name: string; mime: string} | null>(null);
 
+  // Opens the same inline preview modal the dedicated Attachments section
+  // uses (image vs iframe fallback, plus a Download button) for a file
+  // chip clicked inside Description or a comment -- those links previously
+  // always forced a new-tab navigation straight to the raw uploaded file
+  // instead of staying in the app. Derives mime from the extension the
+  // same way the Attachments list already does, since inline chips only
+  // carry a filename/url, not a stored mimeType.
+  const openFilePreview = (url: string, name: string) => {
+    const mime = /\.(png|jpe?g|gif|webp|svg)$/i.test(name)
+      ? `image/${name.split('.').pop()!.toLowerCase().replace('jpg', 'jpeg')}`
+      : /\.pdf$/i.test(name)
+      ? 'application/pdf'
+      : 'application/octet-stream';
+    setPreviewAttach({ url, name, mime });
+  };
+
   // Is current user an admin of this space?
   const isSpaceAdmin = React.useMemo(() => {
     if (!user) return false;
@@ -1083,7 +1123,16 @@ export default function IssueDetailPage() {
   // ticket's queue. Navigate to a known destination instead: the queue this
   // ticket's department belongs to, list caching there means it renders from
   // cache instantly rather than re-fetching.
+  // Exception: when we know we arrived from the Filters page (its issue links
+  // carry ?ref=filters), that's real in-app history to go back to -- using
+  // the fixed dept-queue destination here instead silently discarded whatever
+  // Queue/date-range/etc. filters the user had selected, landing them on an
+  // unrelated unfiltered board.
   const handleBack = () => {
+    if (cameFromList) {
+      router.back();
+      return;
+    }
     const spaceKey = currentIssue?.spaceKey || issueKey.split('-').slice(0, -1).join('-');
     const dept = (currentIssue as any)?.current_department;
     if (spaceKey && dept) {
@@ -1117,15 +1166,9 @@ export default function IssueDetailPage() {
 
   const issue = currentIssue;
   // Use per-queue custom status from dept_statuses when the issue is in a queue
-  // and the stored status is a custom queue status (qst_... ID).
-  const rawDeptStatuses = (issue as any).dept_statuses || {};
-  const currentIssueDept = (issue as any).current_department;
-  const deptQueueSt = currentIssueDept ? rawDeptStatuses[currentIssueDept] : null;
-  // Show dept_statuses[currentDept] if it's a qst_ status OR a virtual status (id='') with a name.
-  // Virtual statuses appear when a ticket first arrives in a dept (e.g. "Waiting for Migration").
-  const issueStat = (deptQueueSt && typeof deptQueueSt.id === 'string' && (deptQueueSt.id.startsWith('qst_') || (deptQueueSt.id === '' && deptQueueSt.name)))
-    ? (deptQueueSt as any)
-    : getIssueStatus(issue);
+  // and the stored status is a custom queue status (qst_... ID) -- shared with
+  // every list view via getEffectiveIssueStatus so they all agree on what's shown.
+  const issueStat = getEffectiveIssueStatus(issue as any);
   const t = typeIcons[issue.type] || typeIcons.task;
 
   /** Real-time SLA breach value for "Time to First Response" / "Time to Resolution" custom fields */
@@ -1376,7 +1419,13 @@ export default function IssueDetailPage() {
                       e.preventDefault();
                       const href = anchor.getAttribute('href');
                       if (href && href !== '#') {
-                        window.open(href, '_blank', 'noopener,noreferrer');
+                        // Uploaded file chip (RichTextEditor stamps data-filename on
+                        // these, never on a plain pasted/typed link) -- open the
+                        // shared in-app preview instead of navigating away to the
+                        // raw file URL in a new tab.
+                        const filename = anchor.getAttribute('data-filename');
+                        if (filename) openFilePreview(href, filename);
+                        else window.open(href, '_blank', 'noopener,noreferrer');
                       }
                       return;
                     }
@@ -1583,9 +1632,9 @@ export default function IssueDetailPage() {
                             ) : linkSearchResults.length === 0 ? (
                               <div className="px-4 py-3 text-[12px] text-gray-400">No issues found</div>
                             ) : linkSearchResults.map((r: any) => (
-                              <button key={r.key} onMouseDown={() => { setLinkTarget(r.key); setLinkSearchResults([]); setShowLinkDropdown(false); }}
+                              <button key={r.key} onMouseDown={() => { setLinkTarget(r.cfKey ?? r.key); setLinkSearchResults([]); setShowLinkDropdown(false); }}
                                 className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-blue-50 text-left transition-colors">
-                                <span className="font-mono text-[11px] font-bold text-blue-600 flex-shrink-0">{r.key}</span>
+                                <span className="font-mono text-[11px] font-bold text-blue-600 flex-shrink-0">{r.cfKey ?? r.key}</span>
                                 <span className="text-[12.5px] text-gray-700 truncate">{r.summary}</span>
                                 <span className="ml-auto text-[10px] text-white px-1.5 py-0.5 rounded flex-shrink-0"
                                   style={{ backgroundColor: r.status ? resolveStatusColor(r.status) : '#6B7280' }}>{r.status?.name}</span>
@@ -1630,11 +1679,18 @@ export default function IssueDetailPage() {
                               className={`flex items-center gap-3 px-4 py-2.5 hover:bg-indigo-50/40 transition-colors group ${idx > 0 ? 'border-t border-gray-50' : ''}`}>
                               {/* Type icon */}
                               <span className="flex-shrink-0 text-base" style={{ color: lt.color }} title={li.type}>{lt.icon}</span>
-                              {/* Issue key */}
-                              <Link href={`/issues/${li.cfKey ?? li.key}`}
+                              {/* Issue key -- a plain <a>, not Next's <Link>, deliberately: clicking a
+                                  Link here to another /issues/[issueKey] route (the exact same dynamic
+                                  segment as the page already mounted on) silently did nothing at all --
+                                  no URL change, no network request, no error -- leaving the user stuck
+                                  on a page that looked unresponsive. A real anchor forces an actual
+                                  browser navigation, which reliably loads the target ticket every time,
+                                  at the minor cost of a full page load instead of an instant client
+                                  transition. */}
+                              <a href={`/issues/${li.cfKey ?? li.key}`}
                                 className="text-sm font-bold text-indigo-600 hover:text-indigo-800 hover:underline flex-shrink-0 transition-colors">
                                 {li.cfKey ?? li.key}
-                              </Link>
+                              </a>
                               {/* Summary */}
                               <span className="text-sm text-gray-700 flex-1 truncate">{li.summary}</span>
                               {/* Status badge */}
@@ -1712,38 +1768,42 @@ export default function IssueDetailPage() {
                   );
                 })}
               </div>
+            </div>
+          )}
 
-              {/* Inline preview modal */}
-              {previewAttach && (
-                <div className="fixed inset-0 z-[300] flex flex-col bg-black/80" onClick={() => setPreviewAttach(null)}>
-                  <div className="flex items-center justify-between px-5 py-3 bg-gray-900 flex-shrink-0" onClick={e => e.stopPropagation()}>
-                    <div className="flex items-center gap-3">
-                      <Paperclip size={15} className="text-gray-400" />
-                      <span className="text-white text-sm font-medium truncate max-w-[400px]">{previewAttach.name}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <a href={previewAttach.url} download={previewAttach.name}
-                        className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors"
-                        onClick={e => e.stopPropagation()}>
-                        Download
-                      </a>
-                      <button onClick={() => setPreviewAttach(null)}
-                        className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors">
-                        ✕ Close
-                      </button>
-                    </div>
-                  </div>
-                  <div className="flex-1 overflow-hidden" onClick={e => e.stopPropagation()}>
-                    {previewAttach.mime.startsWith('image/') ? (
-                      <div className="w-full h-full flex items-center justify-center p-6">
-                        <img src={previewAttach.url} alt={previewAttach.name} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
-                      </div>
-                    ) : (
-                      <iframe src={previewAttach.url} className="w-full h-full border-0" title={previewAttach.name} />
-                    )}
-                  </div>
+          {/* Inline file preview modal -- shared by the dedicated Attachments
+              list above and any uploaded-file chip clicked inside Description
+              or a comment (see openFilePreview), so it has to render
+              regardless of whether this ticket has any dedicated attachments
+              of its own. */}
+          {previewAttach && (
+            <div className="fixed inset-0 z-[300] flex flex-col bg-black/80" onClick={() => setPreviewAttach(null)}>
+              <div className="flex items-center justify-between px-5 py-3 bg-gray-900 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                <div className="flex items-center gap-3">
+                  <Paperclip size={15} className="text-gray-400" />
+                  <span className="text-white text-sm font-medium truncate max-w-[400px]">{previewAttach.name}</span>
                 </div>
-              )}
+                <div className="flex items-center gap-2">
+                  <a href={previewAttach.url} download={previewAttach.name}
+                    className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors"
+                    onClick={e => e.stopPropagation()}>
+                    Download
+                  </a>
+                  <button onClick={() => setPreviewAttach(null)}
+                    className="px-3 py-1.5 text-xs text-gray-300 hover:text-white border border-gray-600 hover:border-gray-400 rounded-md transition-colors">
+                    ✕ Close
+                  </button>
+                </div>
+              </div>
+              <div className="flex-1 overflow-hidden" onClick={e => e.stopPropagation()}>
+                {previewAttach.mime.startsWith('image/') ? (
+                  <div className="w-full h-full flex items-center justify-center p-6">
+                    <img src={previewAttach.url} alt={previewAttach.name} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
+                  </div>
+                ) : (
+                  <iframe src={previewAttach.url} className="w-full h-full border-0" title={previewAttach.name} />
+                )}
+              </div>
             </div>
           )}
 
@@ -2098,7 +2158,9 @@ export default function IssueDetailPage() {
                             <div className="flex items-center flex-wrap gap-1 text-[13px] mb-1">
                               <span className="font-semibold text-gray-800">{a.user?.firstName || 'System'}</span>
                               {a.field === 'comment' ? (
-                                <span className="text-gray-500">added a comment</span>
+                                <span className="text-gray-500">
+                                  {a.newValue === '[deleted]' ? 'deleted a comment' : a.oldValue ? 'edited a comment' : 'added a comment'}
+                                </span>
                               ) : a.field === 'created' ? (
                                 <span className="text-gray-500">created this issue</span>
                               ) : a.field === 'sla' ? (
@@ -2127,8 +2189,9 @@ export default function IssueDetailPage() {
                                 )}
                               </div>
                             )}
-                            {/* Comment preview */}
-                            {a.field === 'comment' && a.newValue && (() => {
+                            {/* Comment preview -- skipped for a delete event, whose newValue
+                                is the literal marker "[deleted]", not real comment text */}
+                            {a.field === 'comment' && a.newValue && a.newValue !== '[deleted]' && (() => {
                               const plain = stripHtmlToText(a.newValue).trim();
                               return (
                                 <div className="text-[12px] text-gray-500 italic truncate max-w-sm">"{plain.slice(0, 120)}{plain.length > 120 ? '…' : ''}"</div>
@@ -2176,6 +2239,7 @@ export default function IssueDetailPage() {
               const delta = dragStartX.current - ev.clientX;
               const newWidth = Math.min(500, Math.max(200, dragStartWidth.current + delta));
               setSidebarWidth(newWidth);
+              latestSidebarWidthRef.current = newWidth;
             };
             const onUp = () => {
               isDragging.current = false;
@@ -2183,6 +2247,7 @@ export default function IssueDetailPage() {
               document.body.style.userSelect = '';
               document.removeEventListener('mousemove', onMove);
               document.removeEventListener('mouseup', onUp);
+              try { localStorage.setItem('issueSidebarWidth', String(latestSidebarWidthRef.current)); } catch { /* non-critical */ }
             };
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup', onUp);
@@ -2489,9 +2554,9 @@ export default function IssueDetailPage() {
             )}
             {customFields.filter(cf => pinnedFields.includes(`cf_${cf.id}`) && cf.fieldType !== 'department-routing' && cf.type !== 'department-routing').map(cf => {
               const KNOWN_CF_OPTIONS: Record<string, string[]> = {
-                'Product Type':    ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'],
+                'Product Type':    ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'],
                 'Work Type':       ['New','Ongoing','Renewal','Upsell','Downgrade','Others'],
-                'Project Manager': ['Abhishek','Abhishikth','Ajay Singh','Chandra Mouli','Harika','Lakshmi Prasanna','Raghu','Sri Ram'],
+                'Project Manager': ['Abhishek','Abhishikth','Ajay Singh','Chandra Mouli','Harika','Lakshmi Prasanna','Raghu','Sri Ram','Sravan','Pranavi'],
                 'Combination':     ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Box - Microsoft','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','MyDrive to MyDrive','Shared Drive- Shared Drive','Shared Drive- SharePoint','Shared Drive - Onedrive','Shared Drive - Egnyte','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Amazon S3 - SharePoint','SharePoint - Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Teams to Slack','Chat To Slack','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Drive Change','Other'],
               };
               const effectiveType = cf.fieldType || cf.type || '';
@@ -2794,9 +2859,10 @@ export default function IssueDetailPage() {
             {issue.spaceKey === 'L2BOARD' && (() => {
               // Root Cause & Fix Description moved to main body (below Linked Work Items)
               const l2bFields: { key: string; label: string; type: 'select' | 'multiselect' | 'textarea'; options?: string[] }[] = [
-                { key: 'productType',    label: 'Product Type',    type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
+                { key: 'productType',    label: 'Product Type',    type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
+                { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','Shared Drive- Shared Drive','Shared Drive- SharePoint ','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','Box - Citrix','DropBox - Azure','Dropbox - Box','DropBox - Egnyte','Citrix - Citrix','Shared Drive - Egnyte','Shared Drive - Onedrive','SharePoint -  Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint ','SharePoint - Egnyte','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','Share Point - Amazon S3','Shared Drive - Amazon S3','Sharefile - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Sharefile - Azure','Egnyte - Azure','Amazon S3 - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Amazon workdocs - NFS','Slack to Slack','Chat to Chat','Teams to Teams','Meta to Chat','Meta to Viva','Meta to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Other','Amazon workdocs - Onedrive/SharePoint','MyDrive to MyDrive','ShareFile to SharePoint','ShareFile to ShareDrive','Drive Change','Box - Microsoft','Chat to Team','Teams to Slack','Chat To Slack'] },
-                { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan'] },
+                { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Others'] },
                 { key: 'customerName',  label: 'Customer Name',   type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
                 { key: 'clientName',    label: 'Client Name',     type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
               ];
@@ -2807,7 +2873,7 @@ export default function IssueDetailPage() {
             {issue.spaceKey === 'TESTBOARD' && (() => {
               const testFields: { key: string; label: string; type: 'select' | 'multiselect' | 'text'; options?: string[] }[] = [
                 { key: 'workType',         label: 'Work Type',         type: 'select',      options: ['Test','Task','Sub-task','Story','Bug','Epic','Test Set','Test Plan','Test Execution','Precondition'] },
-                { key: 'productType',      label: 'Product Type',      type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
+                { key: 'productType',      label: 'Product Type',      type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
                 { key: 'combination',      label: 'Combination',       type: 'multiselect', options: ['Box - OneDrive','Box - SharePoint','Box - Teams','Box - Google Drive','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox - Google Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive to MyDrive','Shared Drive - Shared Drive','Shared Drive - Onedrive','Shared Drive - SharePoint','Egnyte - Onedrive','Egnyte - SharePoint','NFS - Onedrive','NFS - SharePoint','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Teams to Slack','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Other','Others'] },
                 { key: 'testEnvironment',  label: 'Test Environment',  type: 'text' },
                 { key: 'manageClientName', label: 'Manage Client Name',type: 'multiselect', options: ['ab-inbev','cloudfuze','MarmicFire','global-v','manypets','medifast','cms','epiq-global','nfl','365datacenters','icf','concertai','utopia','hyland','bluebeaminc','cadence','manhattanassociates','noahmedical','insight','kbcadvisors','warnermedia','aresmanagement','exactsciences','nextiva','gearbox','nozominetworks','casepoint','trevitherapeutics','restorixhealth','getweave','bossdesign','onespan','lgads','savvymoney','None'] },
@@ -2821,9 +2887,10 @@ export default function IssueDetailPage() {
             {issue.spaceKey === 'L3BOARD' && (() => {
               // Root Cause & Fix Description shown in main body (below Linked Work Items)
               const l3bFields: { key: string; label: string; type: 'select' | 'multiselect'; options?: string[] }[] = [
-                { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
+                { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
+                { key: 'productionTicket', label: 'Production Ticket', type: 'select', options: ['Operational Support','Code Fixes'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: ['Box - OneDrive','Box - SharePoint','Box - Teams','Box - Google Drive','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox - Google Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive to MyDrive','Shared Drive - Shared Drive','Shared Drive - Onedrive','Shared Drive - SharePoint','Egnyte - Onedrive','Egnyte - SharePoint','NFS - Onedrive','NFS - SharePoint','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Teams to Slack','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Other','Others'] },
-                { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan'] },
+                { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Others'] },
                 { key: 'customerName',   label: 'Customer Name',    type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
                 { key: 'clientName',     label: 'Client Name',      type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
               ];
@@ -2835,7 +2902,7 @@ export default function IssueDetailPage() {
               const CFM_COMBO_OPTIONS = ['Box - OneDrive','Box - SharePoint','Box - Teams','Box - Google Drive','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox - Google Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive to MyDrive','Shared Drive - Shared Drive','Shared Drive - Onedrive','Shared Drive - SharePoint','Egnyte - Onedrive','Egnyte - SharePoint','NFS - Onedrive','NFS - SharePoint','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Teams to Slack','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Other','Others'];
               const cfmFields: { key: string; label: string; type: 'select' | 'multiselect' | 'text'; options?: string[] }[] = [
                 { key: 'workType',         label: 'Work Type',          type: 'select',      options: ['Task','Bug','Story','Epic','Sub-task','Demo','POC','Emailed Request','Technical Assistance','Security Assistance'] },
-                { key: 'productType',      label: 'Product Type',       type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
+                { key: 'productType',      label: 'Product Type',       type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
                 { key: 'combination',      label: 'Combination',        type: 'multiselect', options: CFM_COMBO_OPTIONS },
                 { key: 'manageClientName', label: 'Manage Client Name', type: 'text' },
                 { key: 'customerPlan',     label: 'Customer Plan',      type: 'text' },
@@ -2850,15 +2917,16 @@ export default function IssueDetailPage() {
                  independent, so a missing department shouldn't hide saved values) ── */}
             {(issue.spaceKey === 'L1BOAR' || !!(issue as any).current_department
               || !!(issue as any).productType || !!(issue as any).combination || !!(issue as any).projectManager
-              || !!(issue as any).customerName || !!(issue as any).clientName) && (() => {
+              || !!(issue as any).customerName || !!(issue as any).clientName || !!(issue as any).productionTicket) && (() => {
               // Exact options from Jira CFITS customfield_10236
               const L1_COMBO_OPTIONS = ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','Shared Drive- Shared Drive','Shared Drive- SharePoint ','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','Box - Citrix','DropBox - Azure','Dropbox - Box','DropBox - Egnyte','Citrix - Citrix','Shared Drive - Egnyte','Shared Drive - Onedrive','SharePoint -  Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint ','SharePoint - Egnyte','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','Share Point - Amazon S3','Shared Drive - Amazon S3','Sharefile - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Sharefile - Azure','Egnyte - Azure','Amazon S3 - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Amazon workdocs - NFS','Slack to Slack','Chat to Chat','Teams to Teams','Meta to Chat','Meta to Viva','Meta to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Other','Amazon workdocs - Onedrive/SharePoint','MyDrive to MyDrive','ShareFile to SharePoint','ShareFile to ShareDrive','Drive Change','Box - Microsoft','Chat to Team','Teams to Slack','Chat To Slack'];
               // Exact options from Jira CFITS customfield_10883
               const L1_CLIENT_OPTIONS = ['ab-inbev','cloudfuze','MarmicFire','global-v','manypets','medifast','cms','epiq-global','computer_headquarters','groundedpackaging','nfl','realtimecloudservicesllc','capmation/aaron.salazar@capmation.com','365datacenters','icf','amputeecoalitionofamerica','concertai','xica','digantararesearchandtechnologiespvtltd','utopia','oassetmanagement','hyland','bluebeaminc','secloudexperts','tandemengineeringgroup','astoundbroadband','cadence','manhattanassociates','ovo','noahmedical','lighthouselearning','insight','roccoforte','phillipsexeteracademy','kbcadvisors','palmettotechnologygroup','convergetechnologysolutions','traditionone','tvsebike','alphabest','cheilagencynetwork','steelecanvasbasket','viasuninternal','rpmtechnologies','caseware','foundationcitizengo','curtlandryministries','nferenceinc.(pramana)','aplazame','alexandriarealeestateequitiesinc','warnermedia','atlasprimary','cuorementelab','curtlandryindustries','aresmanagement','kizantechnologies','instituteofinternationaleducation(iie)','ivyrehabnetworkinc','adventinternationalltd','exactsciencescorporation','glenno.hawbaker','barrattassetmanagementllc','aqueity','ontarionursesassociation','xavier','nationalgeographic','harvardbusinesspublishing','thirdpackettechnologies','butlercohen','alliancetechnologysolutions','Washington Post','schott','roccoforte&family','wegochemicalgroup','pilottravelcenters','aptlogix','nextiva','gearboxsoftware','nozominetworks','twelvebenefitcorporation','casepoint','jamessteelelaw','trevitherapeutics','restorixhealth','wheeleezinc','getweave','None','regala_consulting','binaryevolution','softmax','gearbox','nubius','IVYREHAB-Network-Inc.','MIG','goh-inc','bossdesigncenter','onespan','lgads','savvymoney','phoenixgamesholding','todaydentalnetwork','phillipseexeter','cheil','Chryselis','papereducation','synergygatewayverified','blackeducatordevelopment','morrisconsultinggroup','convergetechnologies','tunneltotowersfoundation','gadero','wasteprosUSA','krishservices','ForvisMazars'];
               const l1bFields: { key: string; label: string; type: 'select' | 'multiselect' | 'tags'; options?: string[] }[] = [
-                { key: 'productType',    label: 'Product Type',    type: 'select',      options: ['Content Migration','Message Migration','Email Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
+                { key: 'productType',    label: 'Product Type',    type: 'select',      options: ['Content Migration','Message Migration','Email Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
+                { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: L1_COMBO_OPTIONS },
-                { key: 'projectManager', label: 'Project Manager', type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan'] },
+                { key: 'projectManager', label: 'Project Manager', type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Others'] },
                 { key: 'customerName',   label: 'Customer Name',   type: 'multiselect', options: ['Ab-Inbev','CloudFuze','CMS','Epiq_Global','EPIQ-GLOBAL','Global-V','Manypets','MarmicFire','NoahMedical','Thirdpacket'] },
                 { key: 'clientName',     label: 'Client Name',     type: 'multiselect', options: L1_CLIENT_OPTIONS },
               ];
@@ -2869,7 +2937,7 @@ export default function IssueDetailPage() {
             {issue.spaceKey === 'INFRABOARD' && (() => {
               const IB_COMBO_OPTIONS = ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','MyDrive to MyDrive','Shared Drive- Shared Drive','Shared Drive- SharePoint','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Onedrive - Onedrive','Other','Drive Change','Box - Microsoft','Teams to Slack','Chat To Slack'];
               const ibFields: { key: string; label: string; type: 'select' | 'multiselect'; options: string[] }[] = [
-                { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
+                { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
                 { key: 'combination', label: 'Combination',  type: 'multiselect', options: IB_COMBO_OPTIONS },
               ];
               return ibFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'ib'));
@@ -2879,7 +2947,7 @@ export default function IssueDetailPage() {
             {issue.spaceKey === 'QABOAR' && (() => {
               const QAB_COMBO_OPTIONS = ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','MyDrive to MyDrive','Shared Drive- Shared Drive','Shared Drive- SharePoint','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Onedrive - Onedrive','Other','Drive Change','Box - Microsoft','Teams to Slack','Chat To Slack'];
               const qabFields: { key: string; label: string; type: 'select' | 'multiselect'; options: string[] }[] = [
-                { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
+                { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
                 { key: 'combination', label: 'Combination',  type: 'multiselect', options: QAB_COMBO_OPTIONS },
               ];
               return qabFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'qab'));
@@ -2889,7 +2957,7 @@ export default function IssueDetailPage() {
             {issue.spaceKey === 'PSMBOARD' && (() => {
               const PSM_COMBO_OPTIONS = ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','Shared Drive- Shared Drive','Shared Drive- SharePoint ','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','Box - Citrix','DropBox - Azure','Dropbox - Box','DropBox - Egnyte','Citrix - Citrix','Shared Drive - Egnyte','Shared Drive - Onedrive','SharePoint -  Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint ','SharePoint - Egnyte','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','Share Point - Amazon S3','Shared Drive - Amazon S3','Sharefile - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Sharefile - Azure','Egnyte - Azure','Amazon S3 - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Other','Drive Change','Box - Microsoft','Teams to Slack','Chat To Slack','MyDrive to MyDrive','ShareFile to SharePoint','ShareFile to ShareDrive'];
               const psmFields: { key: string; label: string; type: 'select' | 'multiselect'; options: string[] }[] = [
-                { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'] },
+                { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
                 { key: 'combination', label: 'Combination',  type: 'multiselect', options: PSM_COMBO_OPTIONS },
               ];
               return psmFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'psm'));
@@ -2899,9 +2967,9 @@ export default function IssueDetailPage() {
             {(() => {
               // Known options for migrated fields that don't store options in DB
               const KNOWN_CF_OPTIONS: Record<string, string[]> = {
-                'Product Type':    ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others'],
+                'Product Type':    ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'],
                 'Work Type':       ['New','Ongoing','Renewal','Upsell','Downgrade','Others'],
-                'Project Manager': ['Abhishek','Abhishikth','Ajay Singh','Chandra Mouli','Harika','Lakshmi Prasanna','Raghu','Sri Ram'],
+                'Project Manager': ['Abhishek','Abhishikth','Ajay Singh','Chandra Mouli','Harika','Lakshmi Prasanna','Raghu','Sri Ram','Sravan','Pranavi'],
                 'Combination':     [
                   'Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Box - Microsoft',
                   'Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','Dropbox - Box','DropBox - Azure','DropBox - Egnyte',
@@ -3078,10 +3146,15 @@ export default function IssueDetailPage() {
             // instead of collapsing down to a single "best match".
             const finalEntries = dedupedEntries;
 
-            // Any SLA breached right now (live check)? A completed ticket's due time
-            // is frozen in the past, which read as breached forever once resolved —
-            // exclude completed entries the same way paused ones already are.
-            const anyBreached = finalEntries.some(s => !s.isPaused && !s.isCompleted && (s.isBreached || new Date(s.dueTime).getTime() - slaNow <= 0));
+            // Any SLA breached (live check, or resolved late)? A completed
+            // ticket's due time is frozen in the past, which would read as
+            // breached forever from the raw dueTime<=now fallback alone --
+            // only trust that fallback for still-open entries. But the
+            // backend's own s.isBreached flag now correctly stays true for a
+            // ticket resolved AFTER its due time (see computeSLAInstancesPure),
+            // so a late resolution should still flag this header, not just an
+            // actively-open one.
+            const anyBreached = finalEntries.some(s => !s.isPaused && (s.isBreached || (!s.isCompleted && new Date(s.dueTime).getTime() - slaNow <= 0)));
 
             return (
               <>
@@ -3106,28 +3179,52 @@ export default function IssueDetailPage() {
                       {finalEntries.map((s: any) => {
                         const startedAt = s.startedAt ? new Date(s.startedAt) : null;
                         const dueAt = new Date(s.dueTime);
+                        const resolvedAt = s.resolvedAt ? new Date(s.resolvedAt) : null;
                         const remainingMs = dueAt.getTime() - slaNow;
                         const isPaused = s.isPaused === true;
                         const isCompleted = s.isCompleted === true;
+                        // Backend flags isBreached=true for a resolved ticket too, if it
+                        // was resolved AFTER its due time -- distinguish "still open and
+                        // actively overdue right now" from "was resolved, but late" so a
+                        // late resolution doesn't get whitewashed into a clean on-time
+                        // completion just because it's done now.
+                        const resolvedLate = isCompleted && s.isBreached === true;
                         const isBreached = !isPaused && !isCompleted && (s.isBreached || remainingMs <= 0);
                         const goalMs: number = s.goalDurationMs || 0;
-                        // Paused: freeze elapsed at pause time (now - start), don't count up
+                        // Paused: freeze elapsed at pause time. Completed: freeze at the
+                        // actual resolution moment (previously kept counting up against
+                        // "now" forever after resolution, so a ticket resolved on time
+                        // eventually showed 100%+ elapsed as if it had run over anyway).
                         const elapsedMs = isPaused
                           ? dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()) + (goalMs - Math.max(0, dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime())))
+                          : isCompleted && resolvedAt
+                          ? resolvedAt.getTime() - (startedAt?.getTime() ?? resolvedAt.getTime())
                           : slaNow - (startedAt?.getTime() ?? slaNow);
                         const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
                         const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');
 
                         const warnMs = 30 * 60 * 1000;
                         const isNotified = s.isNotified === true && (remainingMs <= warnMs);
+                        // Same 30-min threshold the SLA_BREACH notification already
+                        // warns at — this badge used to jump straight from green
+                        // "RUNNING" to red "BREACHED" the instant the due time passed,
+                        // with no visual cue in between even though a warning
+                        // notification had already gone out. The progress bar alone
+                        // turning amber past 80% elapsed was too easy to miss (and,
+                        // for a long-duration goal, unrelated to how close to the
+                        // actual due time it is) -- add an explicit orange
+                        // "breaching soon" badge state for the same last-30-minutes
+                        // window the notification uses.
+                        const isBreachingSoon = !isPaused && !isCompleted && !isBreached && remainingMs > 0 && remainingMs <= warnMs;
+                        const showAsBreach = isBreached || resolvedLate;
 
                         return (
-                          <div key={s.id} className={`rounded-xl border p-3 ${isBreached ? 'border-red-300 bg-red-50' : isCompleted ? 'border-emerald-300 bg-emerald-50' : isPaused ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-white'}`}>
+                          <div key={s.id} className={`rounded-xl border p-3 ${showAsBreach ? 'border-red-300 bg-red-50' : isCompleted ? 'border-emerald-300 bg-emerald-50' : isPaused ? 'border-amber-300 bg-amber-50' : isBreachingSoon ? 'border-orange-300 bg-orange-50' : 'border-gray-200 bg-white'}`}>
 
                             {/* Row 1: policy name + status badges */}
                             <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-1.5 flex-wrap">
-                                <Clock size={13} className={isBreached ? 'text-red-500' : isCompleted ? 'text-emerald-500' : isPaused ? 'text-amber-500' : 'text-blue-500'} />
+                                <Clock size={13} className={showAsBreach ? 'text-red-500' : isCompleted ? 'text-emerald-500' : isPaused ? 'text-amber-500' : isBreachingSoon ? 'text-orange-500' : 'text-blue-500'} />
                                 <span className="text-[12px] font-semibold text-gray-800">{baseName}</span>
                                 {goalMs > 0 && (
                                   <span className="text-[10px] text-gray-400 font-medium">({fmtGoal(goalMs)})</span>
@@ -3141,11 +3238,13 @@ export default function IssueDetailPage() {
                                 )}
                                 <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
                                   isBreached ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse'
+                                  : resolvedLate ? 'bg-red-100 text-red-700 border border-red-200'
                                   : isCompleted ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
                                   : isPaused ? 'bg-amber-100 text-amber-700 border border-amber-200'
+                                  : isBreachingSoon ? 'bg-orange-100 text-orange-700 border border-orange-200 animate-pulse'
                                   : 'bg-green-100 text-green-700'
                                 }`}>
-                                  {isBreached ? '⚠ BREACHED' : isCompleted ? '✓ RESOLVED' : isPaused ? '⏸ PAUSED' : '● RUNNING'}
+                                  {isBreached ? '⚠ BREACHED' : resolvedLate ? '✓ RESOLVED (Breached)' : isCompleted ? '✓ RESOLVED' : isPaused ? '⏸ PAUSED' : isBreachingSoon ? '⚠ BREACHING SOON' : '● RUNNING'}
                                 </span>
                               </div>
                             </div>
@@ -3153,15 +3252,15 @@ export default function IssueDetailPage() {
                             {/* Row 2: countdown / paused / overdue / resolved time — a
                                 resolved ticket must stop counting down, not keep ticking
                                 toward (or past) its due time forever. */}
-                            <div className={`text-[17px] font-bold tabular-nums mb-2 ${isBreached ? 'text-red-600' : isCompleted ? 'text-emerald-600' : isPaused ? 'text-amber-600' : 'text-gray-900'}`}>
-                              {isCompleted ? 'Resolved' : isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
+                            <div className={`text-[17px] font-bold tabular-nums mb-2 ${showAsBreach ? 'text-red-600' : isCompleted ? 'text-emerald-600' : isPaused ? 'text-amber-600' : isBreachingSoon ? 'text-orange-600' : 'text-gray-900'}`}>
+                              {resolvedLate ? 'Resolved late' : isCompleted ? 'Resolved' : isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
                             </div>
 
                             {/* Row 3: progress bar */}
                             {goalMs > 0 && (
                               <div className="w-full h-1.5 rounded-full bg-gray-200 overflow-hidden mb-3">
                                 <div
-                                  className={`h-1.5 rounded-full transition-none ${isBreached ? 'bg-red-500' : isCompleted ? 'bg-emerald-500' : isPaused ? 'bg-amber-400' : pct > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
+                                  className={`h-1.5 rounded-full transition-none ${showAsBreach ? 'bg-red-500' : isCompleted ? 'bg-emerald-500' : isPaused ? 'bg-amber-400' : isBreachingSoon ? 'bg-orange-500' : pct > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
                                   style={{ width: `${Math.min(pct, 100)}%` }}
                                 />
                               </div>
@@ -3174,9 +3273,9 @@ export default function IssueDetailPage() {
                                   <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Start</p>
                                   <p className="text-[11px] font-semibold text-gray-700">{fmtTime(startedAt)}</p>
                                 </div>
-                                <div className={`rounded-lg px-2.5 py-1.5 ${isBreached ? 'bg-red-100' : 'bg-gray-50'}`}>
+                                <div className={`rounded-lg px-2.5 py-1.5 ${showAsBreach ? 'bg-red-100' : 'bg-gray-50'}`}>
                                   <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Due</p>
-                                  <p className={`text-[11px] font-semibold ${isBreached ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
+                                  <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
                                 </div>
                               </div>
                             )}
@@ -3496,6 +3595,14 @@ export default function IssueDetailPage() {
           className="fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4"
           onClick={() => setLightboxSrc(null)}
         >
+          <a
+            href={lightboxSrc}
+            download={decodeURIComponent(lightboxSrc.split('/').pop() || 'image')}
+            onClick={(e) => e.stopPropagation()}
+            className="absolute top-4 right-16 h-9 px-3 rounded-full bg-white/10 hover:bg-white/25 flex items-center text-white text-[13px] font-medium transition-colors"
+          >
+            Download
+          </a>
           <button
             onClick={() => setLightboxSrc(null)}
             className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/10 hover:bg-white/25 flex items-center justify-center text-white transition-colors"
@@ -3884,13 +3991,28 @@ function Dropdown({ children, onClose, width = 'w-52', align = 'left-0' }: { chi
     const parent = anchorRef.current?.parentElement;
     if (parent) {
       const rect = parent.getBoundingClientRect();
+      // Tailwind width classes actually used for this component's `width`
+      // prop -- needed as real pixel values below since a class name alone
+      // can't be measured before the panel has actually rendered anywhere.
+      const WIDTH_PX: Record<string, number> = { 'w-44': 176, 'w-52': 208, 'w-56': 224, 'w-60': 240, 'w-72': 288 };
+      const widthPx = WIDTH_PX[width] ?? 288;
       const isRight = align === 'right-0';
+      let left = isRight ? rect.right - widthPx : rect.left;
+      // Clamp to the viewport. A left-aligned panel expands rightward from
+      // the trigger's own left edge with no bound -- fine for a trigger with
+      // room to its right, but the Assignee/Reporter properties sit in a
+      // narrow right-hand sidebar where the trigger itself is already close
+      // to the right edge, so a 288px-wide panel ran off the visible area
+      // entirely instead of just shifting left to stay on-screen.
+      const margin = 8;
+      left = Math.min(left, window.innerWidth - widthPx - margin);
+      left = Math.max(left, margin);
       setPos({
         top: rect.bottom + 4,
-        left: isRight ? rect.right - 224 : rect.left,
+        left,
       });
     }
-  }, [align]);
+  }, [align, width]);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {

@@ -150,7 +150,7 @@ const PERMISSION_MAP: Record<string, Permissions> = {
     createIssues: true,     editAnyIssue: true,       editOwnIssue: true,
     deleteIssues: false,    transitionIssues: true,   assignIssues: true,
     setPriority: true,      addComments: true,        manageComments: false,
-    viewReports: true,      exportData: false,
+    viewReports: true,      exportData: true,
   },
 
   qa_engineer: {
@@ -159,7 +159,7 @@ const PERMISSION_MAP: Record<string, Permissions> = {
     createIssues: true,     editAnyIssue: true,       editOwnIssue: true,
     deleteIssues: false,    transitionIssues: true,   assignIssues: false,
     setPriority: true,      addComments: true,        manageComments: false,
-    viewReports: true,      exportData: false,
+    viewReports: true,      exportData: true,
   },
 
   hr: {
@@ -168,7 +168,7 @@ const PERMISSION_MAP: Record<string, Permissions> = {
     createIssues: true,     editAnyIssue: false,      editOwnIssue: true,
     deleteIssues: false,    transitionIssues: true,   assignIssues: false,
     setPriority: false,     addComments: true,        manageComments: false,
-    viewReports: false,     exportData: false,
+    viewReports: false,     exportData: true,
   },
 
   developer: {
@@ -177,7 +177,7 @@ const PERMISSION_MAP: Record<string, Permissions> = {
     createIssues: true,     editAnyIssue: false,      editOwnIssue: true,
     deleteIssues: false,    transitionIssues: true,   assignIssues: false,
     setPriority: false,     addComments: true,        manageComments: false,
-    viewReports: false,     exportData: false,
+    viewReports: false,     exportData: true,
   },
 
   viewer: {
@@ -186,7 +186,7 @@ const PERMISSION_MAP: Record<string, Permissions> = {
     createIssues: false,    editAnyIssue: false,      editOwnIssue: false,
     deleteIssues: false,    transitionIssues: false,  assignIssues: false,
     setPriority: false,     addComments: false,       manageComments: false,
-    viewReports: false,     exportData: false,
+    viewReports: false,     exportData: true,
   },
 
   agent: {
@@ -195,7 +195,7 @@ const PERMISSION_MAP: Record<string, Permissions> = {
     createIssues: true,     editAnyIssue: false,      editOwnIssue: true,
     deleteIssues: false,    transitionIssues: true,   assignIssues: false,
     setPriority: false,     addComments: true,        manageComments: false,
-    viewReports: false,     exportData: false,
+    viewReports: false,     exportData: true,
   },
 };
 

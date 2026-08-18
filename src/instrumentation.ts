@@ -24,6 +24,41 @@ export async function register() {
   const internalPort = process.env.INTERNAL_PORT || process.env.PORT || '3000';
   const internalUrl  = `http://localhost:${internalPort}`;
 
+  // Jira has no push/webhook wired up for these boards, and previously the
+  // ONLY way a new L2B/L3B ticket ever reached this app was someone opening
+  // its exact URL by hand (which also silently 404'd -- see the PREFIX_TO_META
+  // fix in jira-pg-api.ts). Real gap found: local was ~900 L2B and ~100 L3B
+  // tickets behind Jira, going back about a month.
+  //
+  // This calls the API over HTTP rather than importing runJiraIssueSync
+  // directly -- importing anything from jira-pg-api.ts here drags in
+  // email-service.ts's imapflow/mailsplit dependency chain (needs Node's
+  // 'stream' module), which broke the build for every route the moment it
+  // was tried. The endpoint has no user session to check since this is a
+  // background job, so it authenticates with a per-process secret instead
+  // (see internal-job-secret.ts) rather than an empty/missing Authorization
+  // header -- an unauthenticated call is exactly why checkSlaBreaches above
+  // silently 401s and never actually notifies anyone.
+  async function syncJiraIssues(label: string): Promise<void> {
+    try {
+      const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
+      // 500 is the endpoint's own hard cap (see jira-issue-sync's `limit`
+      // clamp) -- asking for it explicitly just means a freshly-deployed
+      // server clears a ~1000-issue backlog in 2 ticks instead of 20.
+      const res = await fetch(`${internalUrl}/api/jira-issue-sync?limit=500`, {
+        method: 'POST',
+        headers: { 'x-internal-job-secret': INTERNAL_JOB_SECRET },
+      });
+      const data = await res.json().catch(() => ({}));
+      const imported: string[] = data.imported ?? [];
+      const errors: string[] = data.errors ?? [];
+      if (imported.length > 0) console.log(`[Jira Sync] ${label} — imported ${imported.length} issue(s):`, imported);
+      if (errors.length > 0) console.error(`[Jira Sync] ${label} — ${errors.length} error(s):`, errors.slice(0, 10));
+    } catch (err) {
+      console.error(`[Jira Sync] ${label} — failed:`, err);
+    }
+  }
+
   async function tryRestartPollers(label: string): Promise<number> {
     try {
       const res = await fetch(`${internalUrl}/api/email/restart-pollers`, {
@@ -63,6 +98,7 @@ export async function register() {
   setTimeout(() => {
     tryRestartPollers('Boot');
     checkSlaBreaches('Boot');
+    syncJiraIssues('Boot');
 
     // Retry loop: every 5 minutes, restart any pollers that are down.
     // This handles OAuth token expiry, network blips, and tokens that
@@ -75,5 +111,11 @@ export async function register() {
     // 30-minute window, and the route's own "already notified in the last hour"
     // check prevents repeat notifications on every tick.
     setInterval(() => { checkSlaBreaches('Periodic'); }, 5 * 60 * 1000);
+
+    // Catch up on new Jira tickets every 5 minutes. The very first run after
+    // this ships processes the whole existing backlog (uncapped -- see
+    // runJiraIssueSync's default maxPerRun), which takes a while the first
+    // time; every run after that is just whatever's new since the last tick.
+    setInterval(() => { syncJiraIssues('Periodic'); }, 5 * 60 * 1000);
   }, 8000);
 }

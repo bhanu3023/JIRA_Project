@@ -117,6 +117,32 @@ export function getIssueStatus(issue: { status?: IssueStatusShape | null }): Iss
   return FALLBACK_ISSUE_STATUS;
 }
 
+/**
+ * Effective display status -- prefers the ticket's per-department
+ * dept_statuses snapshot over the global statusId-derived status when that
+ * snapshot holds a custom queue status (id starts with "qst_") or a virtual
+ * placeholder ("Waiting for X", id === '' with a name). The issue detail page
+ * has always shown this per-dept value; list views that only read
+ * issue.status showed a different, stale status for the same ticket (e.g.
+ * "In Progress" in a list vs "Waiting for Migration" on the ticket itself)
+ * whenever a queue-only status hadn't been mirrored back to the real
+ * statusId column. Use this instead of getIssueStatus anywhere a ticket
+ * carries dept_statuses/current_department, so every view agrees.
+ */
+export function getEffectiveIssueStatus(issue: {
+  status?: IssueStatusShape | null;
+  dept_statuses?: Record<string, any> | null;
+  current_department?: string | null;
+}): IssueStatusShape {
+  const rawDeptStatuses = issue.dept_statuses || {};
+  const currentDept = issue.current_department;
+  const deptQueueSt = currentDept ? rawDeptStatuses[currentDept] : null;
+  if (deptQueueSt && typeof deptQueueSt.id === 'string' && (deptQueueSt.id.startsWith('qst_') || (deptQueueSt.id === '' && deptQueueSt.name))) {
+    return { ...deptQueueSt, color: resolveStatusColor(deptQueueSt) };
+  }
+  return getIssueStatus(issue);
+}
+
 // Distinct, readable palette for department/queue badges — picked so no two adjacent
 // hues clash and everything stays legible on a light chip background.
 const DEPT_COLOR_PALETTE = [

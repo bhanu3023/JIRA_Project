@@ -16,7 +16,7 @@ function makeToken(userId: string, extra?: { email?: string; firstName?: string;
   const jwt    = require('jsonwebtoken');
   const crypto = require('crypto');
   const SECRET  = process.env.JWT_SECRET || 'NeutaraTech_SecureKey_2024_ab12f83079d8cadd0eb5678dc3d6aca6a5f65ed4d21646496093895b2ab4edfc';
-  const TTL     = 12; // hours
+  const TTL     = 24 * 30; // hours -- keep the session alive for 30 days, matching Jira's behavior of not forcing re-login on every visit
   const payload = { sub: userId, ...extra, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + TTL * 3600 };
   const token   = jwt.sign(payload, SECRET, { algorithm: 'HS256' });
   // persist session (non-blocking)
