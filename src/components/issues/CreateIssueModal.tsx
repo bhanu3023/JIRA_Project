@@ -41,15 +41,27 @@ const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
 //
 // Each heading is followed by a visibly bordered box (not just a blank
 // paragraph, which rendered with no visual indication there was anywhere to
-// type). The "Type your answer here" hint uses the exact same technique as
-// RichTextEditor's own top-level placeholder just below (a CSS `:empty`
-// pseudo-element driven by data-placeholder, not real text) rather than
-// literal gray text inside the box -- literal text would have to be
-// selected and typed over, and since `color` is CSS-inherited, whatever the
-// reporter typed in its place would render in that same faded gray, making
-// their real answer look broken/unreadable. A `:empty` pseudo-element
-// vanishes the instant there's any real content, and the typed text is a
-// plain child of the box with no color override, so it renders normally.
+// type).
+//
+// This went through two broken attempts before landing here, both
+// confirmed broken by actually testing them, not just inspecting the code:
+//   1. Literal gray placeholder text inside the box, selected and typed
+//      over. `color` is CSS-inherited, so replacement text kept the same
+//      faded gray -- looked broken/unreadable.
+//   2. A CSS `:empty`-driven pseudo-element placeholder (same technique
+//      RichTextEditor's own top-level placeholder uses), which fixed the
+//      color problem but requires the box to have ZERO real children to
+//      match `:empty`. Reproduced directly: pressing Backspace with the
+//      cursor inside a genuinely empty block deletes that entire block
+//      immediately (confirmed with execCommand('delete') -- one press
+//      removed the whole box), and since every click into a truly-empty
+//      element lands at position 0, this fired on effectively every first
+//      backspace, then kept eating into the heading above it.
+// Real, italicized placeholder text (no color change) avoids both: it's
+// never CSS-inherited color, so overtyping it renders normally, and the
+// box always has real content for Backspace to consume, so a single
+// backspace can only delete within the placeholder text, not the whole
+// block or the heading above it.
 const MIGRATION_DESCRIPTION_TEMPLATE = [
   'Issue Reported',
   'Error Description',
@@ -60,7 +72,7 @@ const MIGRATION_DESCRIPTION_TEMPLATE = [
   'Grafana Results',
   'Workspace Ids',
   'Server Url',
-].map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p><div class="empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400 empty:before:pointer-events-none" data-placeholder="Type your answer here…" style="border:1px dashed #cbd5e1;border-radius:6px;padding:8px 10px;margin:4px 0 16px 0;min-height:24px;"></div>`).join('');
+].map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p><div style="border:1px dashed #cbd5e1;border-radius:6px;padding:8px 10px;margin:4px 0 16px 0;min-height:24px;"><em>Type your answer here…</em></div>`).join('');
 
 // Combination / Product Type / Project Manager are data-migration concepts
 // (a source/destination combo, which PM owns the migration) that only make
