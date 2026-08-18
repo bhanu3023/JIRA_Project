@@ -32,6 +32,24 @@ const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
   { id: 'qst_default_resolved', name: 'Resolved', category: 'done', color: '#10B981' } as WorkflowStatus,
 ];
 
+// Migration-queue tickets follow a standard investigation writeup -- rather
+// than add nine new database columns and nine new save/cancel UI blocks,
+// this pre-fills the existing Description editor with the section headings
+// so the reporter fills in each one inline. Screenshots work exactly like
+// they already do anywhere else in a description: paste or drag an image
+// under that heading and RichTextEditor uploads and embeds it inline.
+const MIGRATION_DESCRIPTION_TEMPLATE = [
+  'Issue Reported',
+  'Error Description',
+  'Screenshots',
+  'Source and Destination Comparison and Findings',
+  'Metabase Results',
+  'Postman Results',
+  'Grafana Results',
+  'Workspace Ids',
+  'Server Url',
+].map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p><p><br></p>`).join('');
+
 // Combination / Product Type / Project Manager are data-migration concepts
 // (a source/destination combo, which PM owns the migration) that only make
 // sense on the Migration/Dev support board — they were never meant to be
@@ -406,7 +424,16 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   };
 
   const update = (field: string, value: any) => {
-    setForm(f => ({ ...f, [field]: value }));
+    setForm(f => {
+      const next = { ...f, [field]: value };
+      // Only when picking Migration, and only if they haven't already typed
+      // something -- never overwrite a description someone's already
+      // written, e.g. after switching the queue back and forth.
+      if (field === 'department' && String(value).toLowerCase() === 'migration' && !f.description.trim()) {
+        next.description = MIGRATION_DESCRIPTION_TEMPLATE;
+      }
+      return next;
+    });
     if (field === 'summary' && value.trim()) setSummaryError(false);
     if (field === 'department' && value) setQueueError(false);
     if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
