@@ -33,6 +33,21 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).cat
 // actually lands on the production table -- mirror it here so it reaches
 // prod on the next deploy regardless.
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "productionTicket" TEXT`).catch(() => {});
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMP(3)`).catch(() => {});
+
+// Jira's admin User Management shows when each user was last active. Update
+// at most once every 5 minutes per user (an in-memory throttle, not a DB
+// read-then-write) so this doesn't turn every single authenticated request
+// into an extra write.
+const _lastSeenThrottle = new Map<string, number>();
+function touchLastSeen(userId: string | null) {
+  if (!userId) return;
+  const now = Date.now();
+  const last = _lastSeenThrottle.get(userId) || 0;
+  if (now - last < 5 * 60 * 1000) return;
+  _lastSeenThrottle.set(userId, now);
+  pool.query(`UPDATE users SET "lastSeenAt" = NOW() WHERE id = $1`, [userId]).catch(() => {});
+}
 // POST /search's exact-match branch looks up an issue's subtasks by
 // parentKey (added alongside its linked-work-items lookup) -- that column
 // had no index at all, so on a large production issues table every search
@@ -851,6 +866,7 @@ function avatarRef(userId: string | null | undefined, avatarUrl: string | null |
 function formatUser(u: {
   id: string; email: string; firstName: string; lastName: string;
   role: string; avatarUrl?: string | null; isActive: boolean; createdAt?: Date; status?: string;
+  lastSeenAt?: Date | null;
 }) {
   const status = (u as any).status || (u.isActive ? 'active' : 'inactive');
   return {
@@ -865,6 +881,7 @@ function formatUser(u: {
     isActive: u.isActive,
     status,
     createdAt: u.createdAt?.toISOString() ?? nowIso(),
+    lastSeenAt: (u as any).lastSeenAt ? (u as any).lastSeenAt.toISOString() : null,
   };
 }
 
@@ -2459,6 +2476,7 @@ async function _handleJiraPgApi(
     || '0.0.0.0';
   const clientUA = req.headers.get('user-agent') || '';
   const userId = await resolveUserId(auth, clientIp);
+  touchLastSeen(userId);
   const url = new URL(req.url);
   const path = segments.join('/');
 

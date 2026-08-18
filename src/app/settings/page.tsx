@@ -185,6 +185,15 @@ function SettingsContent() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   // User management state
+  // Jira-style stacked toast cards (bottom-left, auto-dismiss) for user-
+  // management actions -- role change, deactivate/activate, delete used to
+  // update the row silently with no confirmation at all.
+  const [userToasts, setUserToasts] = useState<{ id: string; message: string; type: 'success' | 'error' }[]>([]);
+  const pushUserToast = (message: string, type: 'success' | 'error' = 'success') => {
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    setUserToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setUserToasts(prev => prev.filter(t => t.id !== id)), 5000);
+  };
   const [userSearch, setUserSearch] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState('');
   const [userStatusFilter, setUserStatusFilter] = useState('');
@@ -309,13 +318,27 @@ function SettingsContent() {
   };
 
   const handleToggleActive = async (userId: string, isActive: boolean) => {
-    await api.updateUser(userId, { isActive: !isActive });
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, isActive: !isActive } : u));
+    const target = users.find(u => u.id === userId);
+    const name = target ? `${target.firstName} ${target.lastName}`.trim() : 'User';
+    try {
+      await api.updateUser(userId, { isActive: !isActive });
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, isActive: !isActive } : u));
+      pushUserToast(isActive ? `${name} deactivated` : `${name} activated`);
+    } catch (err: any) {
+      pushUserToast(err?.message || 'Failed to update user', 'error');
+    }
   };
 
   const handleRoleChange = async (userId: string, role: string) => {
-    await api.updateUser(userId, { role });
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, role } : u));
+    const target = users.find(u => u.id === userId);
+    const name = target ? `${target.firstName} ${target.lastName}`.trim() : 'User';
+    try {
+      await api.updateUser(userId, { role });
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, role } : u));
+      pushUserToast(`${name}'s role changed to ${ALL_ROLE_LABELS[role] || role}`);
+    } catch (err: any) {
+      pushUserToast(err?.message || 'Failed to update role', 'error');
+    }
   };
 
   const handleProfileSave = async () => {
@@ -1970,12 +1993,14 @@ function SettingsContent() {
                   disabled={deletingUser}
                   onClick={async () => {
                     setDeletingUser(true);
+                    const name = `${deleteConfirmUser.firstName} ${deleteConfirmUser.lastName}`.trim();
                     try {
                       await api.deleteUser(deleteConfirmUser.id);
                       setUsers(prev => prev.filter((u: any) => u.id !== deleteConfirmUser.id));
                       setDeleteConfirmUser(null);
+                      pushUserToast(`You removed ${name} from your organization. They can no longer access your apps.`);
                     } catch (err: any) {
-                      alert(err?.message || 'Failed to delete user');
+                      pushUserToast(err?.message || 'Failed to delete user', 'error');
                     } finally {
                       setDeletingUser(false);
                     }
@@ -1986,6 +2011,28 @@ function SettingsContent() {
                 </button>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Jira-style stacked confirmation toasts for role change / deactivate /
+            activate / delete -- fixed bottom-left, auto-dismiss after 5s,
+            newest on top, each individually dismissible. */}
+        {userToasts.length > 0 && (
+          <div className="fixed bottom-5 left-5 z-[9999] flex flex-col-reverse gap-2.5 w-[360px]">
+            {userToasts.map(t => (
+              <div key={t.id} className="bg-white rounded-lg shadow-xl border border-gray-200 px-4 py-3 flex items-start gap-2.5 animate-[fadeIn_0.15s_ease-out]">
+                <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${t.type === 'success' ? 'bg-green-100' : 'bg-red-100'}`}>
+                  {t.type === 'success'
+                    ? <Check size={12} className="text-green-600" />
+                    : <X size={12} className="text-red-600" />}
+                </div>
+                <p className="text-[13px] text-gray-800 flex-1 leading-snug">{t.message}</p>
+                <button onClick={() => setUserToasts(prev => prev.filter(x => x.id !== t.id))}
+                  className="text-gray-400 hover:text-gray-600 flex-shrink-0">
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
@@ -2098,6 +2145,7 @@ function SettingsContent() {
                     <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Email</th>
                     <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[160px]">Role</th>
                     <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[100px]">Status</th>
+                    <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[110px]">Last seen</th>
                     <th className="px-4 py-2.5 text-right text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[80px]">Actions</th>
                   </tr>
                 </thead>
@@ -2171,6 +2219,11 @@ function SettingsContent() {
                             </span>
                           );
                         })()}
+                      </td>
+                      <td className="px-4 py-2.5 w-[110px] whitespace-nowrap text-sm text-gray-500">
+                        {(u as any).lastSeenAt
+                          ? new Date((u as any).lastSeenAt).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })
+                          : <span className="text-gray-300">Never</span>}
                       </td>
                       <td className="px-4 py-2.5 w-[80px] text-right whitespace-nowrap">
                         <div className="flex items-center justify-end">
