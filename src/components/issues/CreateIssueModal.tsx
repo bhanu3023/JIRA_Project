@@ -72,7 +72,12 @@ const MIGRATION_DESCRIPTION_TEMPLATE = [
   'Grafana Results',
   'Workspace Ids',
   'Server Url',
-].map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p><div style="border:1px dashed #cbd5e1;border-radius:6px;padding:8px 10px;margin:4px 0 16px 0;min-height:24px;"><em>Type your answer here…</em></div>`).join('');
+// data-rte-locked marks these as permanent structure to RichTextEditor: the
+// 9 headings and their answer boxes must always stay present (the user
+// explicitly wants exactly 9 items, each with its own box, never fewer) —
+// only an answer box's own text is meant to be edited/cleared, never the
+// heading or the box itself.
+].map((label, i) => `<p data-rte-locked="heading"><strong>${i + 1}. ${label}</strong></p><div data-rte-locked="box" style="border:1px dashed #cbd5e1;border-radius:6px;padding:8px 10px;margin:4px 0 16px 0;min-height:24px;"><em>Type your answer here…</em></div>`).join('');
 
 // Combination / Product Type / Project Manager are data-migration concepts
 // (a source/destination combo, which PM owns the migration) that only make

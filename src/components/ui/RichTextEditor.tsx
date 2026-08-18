@@ -168,7 +168,7 @@ export default function RichTextEditor({
   const formatBlock = (tag: string) => exec('formatBlock', tag);
 
   /* ── Deleting a selection that spans multiple blocks corrupts the
-   * surviving one ────────────────────────────────────────────────────────
+   * surviving one, and locked template items must never be removable ─────
    * Selecting a whole "block" (e.g. a heading + its answer paragraph, as
    * in a numbered template like "1. Issue Reported" / answer text — but
    * this reproduces with plain paragraphs too, headings aren't special)
@@ -182,22 +182,68 @@ export default function RichTextEditor({
    * — i.e. editing/removing one item visibly changes a completely
    * different one.
    *
+   * Separately, an element carrying data-rte-locked (the Migration
+   * template's 9 numbered items — see CreateIssueModal) must never be
+   * removable at all: a "heading" survives completely untouched by any
+   * deletion; a "box" survives too, but has its content reset to the
+   * empty-answer placeholder rather than being left however the deletion
+   * would have cut it — either way the item's structure can't disappear.
+   *
    * Only a selection that spans multiple top-level blocks is affected —
-   * same-block edits and single-cursor backspace-joins (the overwhelming
-   * majority of editing) are untouched. For that specific case, deletion
-   * is done via Range.deleteContents() (a plain DOM operation with none
-   * of the command's formatting-carryover behavior) and the caret is
-   * dropped into a fresh empty paragraph instead of wherever the native
-   * merge would have left it.
+   * same-block edits (the overwhelming majority of typing) are untouched
+   * and left to native handling, since deleting text within a single
+   * paragraph never touches another block's structure.
    */
+  const PLACEHOLDER_HTML = '<em>Type your answer here…</em>';
+  const isLocked = (n: Node | null): n is HTMLElement =>
+    !!n && n instanceof HTMLElement && n.hasAttribute('data-rte-locked');
+
+  // Range boundary-point comparison treats "(parent, 0)" as strictly BEFORE
+  // "(parent's first child's text, 0)" even though there's zero content
+  // between them — descending a level always reads as "later" to
+  // compareBoundaryPoints. So detecting "cursor is at the very start/end of
+  // this ancestor's content" has to walk the ancestor chain directly instead:
+  // at every level up to (and including) the ancestor, there must be no
+  // preceding (or following, for "end") sibling at all.
+  const isAtEdgeOfAncestor = (node: Node, offset: number, ancestor: Node, edge: 'start' | 'end'): boolean => {
+    const len = node.nodeType === Node.TEXT_NODE ? (node.textContent?.length ?? 0) : node.childNodes.length;
+    if (edge === 'start' ? offset !== 0 : offset !== len) return false;
+    let n: Node | null = node;
+    while (n && n !== ancestor) {
+      if (edge === 'start' ? n.previousSibling : n.nextSibling) return false;
+      n = n.parentNode;
+    }
+    return n === ancestor;
+  };
+
   const handleBeforeInput = (e: InputEvent) => {
     const inputType = e.inputType;
     if (!inputType || !inputType.startsWith('delete')) return;
     const editor = editorRef.current;
     if (!editor) return;
     const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    if (!sel || sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
+
+    // Collapsed Backspace/Delete right at a locked item's edge would merge it
+    // into its neighbor (losing its box/heading identity) without ever
+    // reaching the multi-block path below, since nothing is "selected" to
+    // delete — guard that directly. The cursor can be several levels below
+    // the locked element itself (e.g. inside the <em> placeholder's own text
+    // node), so this has to walk up to the nearest data-rte-locked ancestor.
+    if (sel.isCollapsed) {
+      const container = range.startContainer;
+      const startEl = container.nodeType === Node.ELEMENT_NODE ? (container as Element) : container.parentElement;
+      const lockedAncestor = startEl?.closest('[data-rte-locked]') as HTMLElement | null;
+      if (lockedAncestor) {
+        const edge = inputType === 'deleteContentBackward' ? 'start' : inputType === 'deleteContentForward' ? 'end' : null;
+        if (edge && isAtEdgeOfAncestor(container, range.startOffset, lockedAncestor, edge)) {
+          e.preventDefault();
+        }
+      }
+      return;
+    }
+
     const children = Array.from(editor.childNodes);
 
     // A boundary directly inside the editor (container === editor) happens for
@@ -214,15 +260,49 @@ export default function RichTextEditor({
     };
     const startIdx = topLevelIndexOf(range.startContainer, range.startOffset, false);
     const endIdx = topLevelIndexOf(range.endContainer, range.endOffset, true);
-    if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) return; // single-block edit — leave to native handling
+
+    const spanned = startIdx !== -1 && endIdx !== -1 ? children.slice(startIdx, endIdx + 1) : [];
+    const anyLocked = spanned.some(isLocked);
+    if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) {
+      // Single-block edit — ordinary editing *within* a locked box's own
+      // text (the whole point of having an answer box) must stay completely
+      // free; only a selection covering the box's *entire* content — which
+      // would otherwise leave it empty or let the block itself get wiped —
+      // needs guarding.
+      if (!anyLocked) return;
+      const node = children[startIdx];
+      const full = document.createRange();
+      full.selectNodeContents(node);
+      const fullySelected =
+        range.compareBoundaryPoints(Range.START_TO_START, full) <= 0 &&
+        range.compareBoundaryPoints(Range.END_TO_END, full) >= 0;
+      if (!fullySelected) return;
+    }
 
     e.preventDefault();
-    range.deleteContents();
-    const freshP = document.createElement('p');
-    freshP.innerHTML = '<br>';
-    range.insertNode(freshP);
+    const target = spanned.length ? spanned : (startIdx !== -1 ? [children[startIdx]] : []);
+    let caretNode: Node | null = null;
+    for (const node of target) {
+      if (isLocked(node)) {
+        if (node.getAttribute('data-rte-locked') === 'box') {
+          node.innerHTML = PLACEHOLDER_HTML;
+          if (!caretNode) caretNode = node;
+        }
+        // 'heading' nodes are left completely untouched.
+        continue;
+      }
+      node.parentNode?.removeChild(node);
+    }
+    if (!caretNode) {
+      const freshP = document.createElement('p');
+      freshP.innerHTML = '<br>';
+      const anchor = target.find(n => n.isConnected && n.parentNode === editor) ?? null;
+      if (anchor) editor.insertBefore(freshP, anchor.nextSibling);
+      else editor.appendChild(freshP);
+      caretNode = freshP;
+    }
     const newRange = document.createRange();
-    newRange.setStart(freshP, 0);
+    newRange.selectNodeContents(caretNode);
     newRange.collapse(true);
     sel.removeAllRanges();
     sel.addRange(newRange);
