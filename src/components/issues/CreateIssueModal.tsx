@@ -32,6 +32,57 @@ const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
   { id: 'qst_default_resolved', name: 'Resolved', category: 'done', color: '#10B981' } as WorkflowStatus,
 ];
 
+// Migration-queue tickets follow a standard investigation writeup -- rather
+// than add nine new database columns and nine new save/cancel UI blocks,
+// this pre-fills the existing Description editor with the section headings
+// so the reporter fills in each one inline. Screenshots work exactly like
+// they already do anywhere else in a description: paste or drag an image
+// under that heading and RichTextEditor uploads and embeds it inline.
+//
+// Each heading is followed by a visibly bordered box (not just a blank
+// paragraph, which rendered with no visual indication there was anywhere to
+// type).
+//
+// This went through two broken attempts before landing here, both
+// confirmed broken by actually testing them, not just inspecting the code:
+//   1. Literal gray placeholder text inside the box, selected and typed
+//      over. `color` is CSS-inherited, so replacement text kept the same
+//      faded gray -- looked broken/unreadable.
+//   2. A CSS `:empty`-driven pseudo-element placeholder (same technique
+//      RichTextEditor's own top-level placeholder uses), which fixed the
+//      color problem but requires the box to have ZERO real children to
+//      match `:empty`. Reproduced directly: pressing Backspace with the
+//      cursor inside a genuinely empty block deletes that entire block
+//      immediately (confirmed with execCommand('delete') -- one press
+//      removed the whole box), and since every click into a truly-empty
+//      element lands at position 0, this fired on effectively every first
+//      backspace, then kept eating into the heading above it.
+// Real, italicized placeholder text (no color change) avoids both: it's
+// never CSS-inherited color, so overtyping it renders normally, and the
+// box always has real content for Backspace to consume, so a single
+// backspace can only delete within the placeholder text, not the whole
+// block or the heading above it.
+const MIGRATION_DESCRIPTION_TEMPLATE = [
+  'Issue Reported',
+  'Error Description',
+  'Screenshots',
+  'Source and Destination Comparison and Findings',
+  'Metabase Results',
+  'Postman Results',
+  'Grafana Results',
+  'Workspace Ids',
+  'Server Url',
+].map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p><div style="border:1px dashed #cbd5e1;border-radius:6px;padding:8px 10px;margin:4px 0 16px 0;min-height:24px;"><em>Type your answer here…</em></div>`).join('');
+
+// Combination / Product Type / Project Manager are data-migration concepts
+// (a source/destination combo, which PM owns the migration) that only make
+// sense on the Migration/Dev support board — they were never meant to be
+// mandatory on every space in the app. IT Administration is a plain service
+// desk space with no migration concept at all, so these fields (and their
+// "required" validation) don't apply there. SAT_Board (key "SB") is the same
+// kind of non-migration board, so it gets the same exemption.
+const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB']);
+
 const WORK_TYPES = [
   { value: 'task',            label: 'Task' },
   { value: 'bug',             label: 'Bug' },
@@ -201,9 +252,18 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [spaceQueues, setSpaceQueues] = useState<{ id: string; label: string; dept?: string; queueStatuses?: WorkflowStatus[]; memberIds?: string[]; suspendedIds?: string[] }[]>([]);
   const [selectedQueueId, setSelectedQueueId] = useState('');
   const [form, setForm] = useState({
-    summary: '', description: '', type: 'task', priority: 'medium',
+    summary: '',
+    // The Migration-template auto-fill in update() below only fires when the
+    // Queue dropdown is CHANGED by the user -- it never ran when the queue
+    // arrives pre-selected as "Migration" (e.g. opening Create from inside
+    // the Migration queue view passes initialDept="Migration" straight into
+    // this initial state, never going through update() at all). Apply the
+    // same template here too so it's not missing just because of how the
+    // modal happened to be opened.
+    description: (initialDept && initialDept.toLowerCase() === 'migration') ? MIGRATION_DESCRIPTION_TEMPLATE : '',
+    type: 'task', priority: 'medium',
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
-    productType: [] as string[], projectManager: [] as string[],
+    productType: [] as string[], projectManager: [] as string[], productionTicket: '',
   });
   const [summaryError, setSummaryError] = useState(false);
   const [queueError, setQueueError]                 = useState(false);
@@ -259,8 +319,9 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     ? spaceQueues.find(q => q.dept?.toLowerCase() === form.department.toLowerCase())
     : undefined;
 
-  // Pre-Sales tickets don't have a project manager assigned at creation time
-  const isPreSalesQueue = form.department.trim().toLowerCase() === 'pre-sales';
+  // Pre-Sales and QA tickets don't have a project manager assigned at creation time
+  const skipsProjectManager = ['pre-sales', 'qa'].includes(form.department.trim().toLowerCase());
+  const showMigrationFields = !NON_MIGRATION_SPACE_KEYS.has(selectedSpaceKey.toUpperCase());
 
   // Narrow the Status dropdown to the selected queue's own status list, same
   // as the issue detail page's department status dropdown already does —
@@ -339,9 +400,9 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingSummary        = !form.summary.trim();
     // Only require a queue when this space actually has queues to pick from
     const missingQueue          = queueOptions.length > 0 && !form.department;
-    const missingCombination    = form.combination.length === 0;
-    const missingProductType    = form.productType.length === 0;
-    const missingProjectManager = form.projectManager.length === 0 && !isPreSalesQueue;
+    const missingCombination    = showMigrationFields && form.combination.length === 0;
+    const missingProductType    = showMigrationFields && form.productType.length === 0;
+    const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !skipsProjectManager;
 
     setSummaryError(missingSummary);
     setQueueError(missingQueue);
@@ -376,6 +437,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         combination: form.combination.length > 0 ? form.combination.join(', ') : undefined,
         productType: form.productType.length > 0 ? form.productType.join(', ') : undefined,
         projectManager: form.projectManager.length > 0 ? form.projectManager.join(', ') : undefined,
+        productionTicket: form.productionTicket || undefined,
         ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
       });
       // Save custom field values
@@ -395,7 +457,16 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   };
 
   const update = (field: string, value: any) => {
-    setForm(f => ({ ...f, [field]: value }));
+    setForm(f => {
+      const next = { ...f, [field]: value };
+      // Only when picking Migration, and only if they haven't already typed
+      // something -- never overwrite a description someone's already
+      // written, e.g. after switching the queue back and forth.
+      if (field === 'department' && String(value).toLowerCase() === 'migration' && !f.description.trim()) {
+        next.description = MIGRATION_DESCRIPTION_TEMPLATE;
+      }
+      return next;
+    });
     if (field === 'summary' && value.trim()) setSummaryError(false);
     if (field === 'department' && value) setQueueError(false);
     if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
@@ -503,68 +574,86 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
               />
             </div>
 
-            {/* Combination */}
-            <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                Combination <span className="text-red-500">*</span>
-              </label>
-              <div className={combinationError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <MultiSelectDropdown
-                  value={form.combination}
-                  onChange={v => update('combination', v)}
-                  options={COMBINATION_OPTIONS}
-                  placeholder="Select combinations..."
-                />
-              </div>
-              {combinationError && (
-                <div className="flex items-center gap-1.5 mt-1.5">
-                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
-                  <p className="text-[12px] text-red-600 font-medium">Combination is required</p>
+            {showMigrationFields && (
+              <>
+                {/* Combination */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                    Combination <span className="text-red-500">*</span>
+                  </label>
+                  <div className={combinationError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                    <MultiSelectDropdown
+                      value={form.combination}
+                      onChange={v => update('combination', v)}
+                      options={COMBINATION_OPTIONS}
+                      placeholder="Select combinations..."
+                    />
+                  </div>
+                  {combinationError && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 font-medium">Combination is required</p>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Product Type */}
-            <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                Product Type <span className="text-red-500">*</span>
-              </label>
-              <div className={productTypeError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <MultiSelectDropdown
-                  value={form.productType}
-                  onChange={v => update('productType', v)}
-                  options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others']}
-                  placeholder="Select product type..."
-                />
-              </div>
-              {productTypeError && (
-                <div className="flex items-center gap-1.5 mt-1.5">
-                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
-                  <p className="text-[12px] text-red-600 font-medium">Product Type is required</p>
+                {/* Product Type */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                    Product Type <span className="text-red-500">*</span>
+                  </label>
+                  <div className={productTypeError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                    <MultiSelectDropdown
+                      value={form.productType}
+                      onChange={v => update('productType', v)}
+                      options={['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others']}
+                      placeholder="Select product type..."
+                    />
+                  </div>
+                  {productTypeError && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 font-medium">Product Type is required</p>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Project Manager */}
-            <div className="mb-4">
-              <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                Project Manager {!isPreSalesQueue && <span className="text-red-500">*</span>}
-              </label>
-              <div className={projectManagerError ? 'rounded-lg ring-2 ring-red-300' : ''}>
-                <MultiSelectDropdown
-                  value={form.projectManager}
-                  onChange={v => update('projectManager', v)}
-                  options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan']}
-                  placeholder="Select project manager..."
-                />
-              </div>
-              {projectManagerError && (
-                <div className="flex items-center gap-1.5 mt-1.5">
-                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
-                  <p className="text-[12px] text-red-600 font-medium">Project Manager is required</p>
+                {/* Production Ticket */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Production Ticket</label>
+                  <select
+                    value={form.productionTicket}
+                    onChange={e => update('productionTicket', e.target.value)}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                  >
+                    <option value="">Select Production Ticket</option>
+                    <option value="Operational Support">Operational Support</option>
+                    <option value="Code Fixes">Code Fixes</option>
+                  </select>
                 </div>
-              )}
-            </div>
+
+                {/* Project Manager */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                    Project Manager {!skipsProjectManager && <span className="text-red-500">*</span>}
+                  </label>
+                  <div className={projectManagerError ? 'rounded-lg ring-2 ring-red-300' : ''}>
+                    <MultiSelectDropdown
+                      value={form.projectManager}
+                      onChange={v => update('projectManager', v)}
+                      options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Others']}
+                      placeholder="Select project manager..."
+                    />
+                  </div>
+                  {projectManagerError && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 font-medium">Project Manager is required</p>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
 
             {/* Dynamic custom fields */}
             {createIssueFields.length > 0 && (

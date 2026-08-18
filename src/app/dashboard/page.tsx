@@ -186,8 +186,10 @@ export default function DashboardPage() {
     setLoading(true);
     try {
       if (tab === 'assigned' && user) {
-        // Limit to 50 for speed — enough for dashboard
-        const data = await api.getIssues({ assignee: user.id, limit: '50' });
+        // Limit to 50 for speed — enough for dashboard. excludeDone so a
+        // resolved ticket doesn't linger in "My Assigned Tickets" alongside
+        // the actually-open ones it's meant to surface.
+        const data = await api.getIssues({ assignee: user.id, excludeDone: 'true', limit: '50' });
         const issues = data.issues || [];
         setAssignedIssues(issues);
         tabCache.current[tab] = issues;

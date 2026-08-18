@@ -166,9 +166,26 @@ export default function Header() {
         if (issueKey) {
           router.push(`/issues/${issueKey}`);
           closeSearch();
-        } else if (searchQuery.trim()) {
-          router.push(`/search?q=${encodeURIComponent(searchQuery)}`);
-          closeSearch();
+        } else {
+          // Jira-like quick jump: typing just a ticket's number (e.g. "29441",
+          // no "CF-" prefix) and hitting Enter previously always fell through
+          // to a generic keyword search, even when that number was an exact,
+          // unambiguous match already sitting in the live results below --
+          // landing on a noisy results page instead of the one ticket meant.
+          // Only auto-jumps for a purely numeric query matched against an
+          // already-fetched result's own number, never guesses/constructs a
+          // key that might not exist.
+          const trimmedQuery = searchQuery.trim();
+          const exactNumberMatch = /^\d+$/.test(trimmedQuery)
+            ? searchResults.find((r: any) => String(r.cfKey ?? r.key ?? '').split('-').pop() === trimmedQuery)
+            : null;
+          if (exactNumberMatch) {
+            router.push(`/issues/${(exactNumberMatch as any).cfKey ?? exactNumberMatch.key}`);
+            closeSearch();
+          } else if (trimmedQuery) {
+            router.push(`/search?q=${encodeURIComponent(searchQuery)}`);
+            closeSearch();
+          }
         }
       }
     }
@@ -306,7 +323,11 @@ export default function Header() {
             <>
               <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)} />
               <div className="absolute right-0 top-full z-50 mt-2 max-h-96 w-80 snap-y snap-proximity overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
-                <div className="sticky top-0 flex items-center justify-between rounded-t-lg border-b border-gray-200 bg-white px-4 py-3">
+                {/* z-10 is load-bearing: without it, a scrolled notification item (later
+                    in DOM order than this header, so painted after it by default) renders
+                    ON TOP of this sticky header instead of underneath it -- its title text
+                    visibly bled above/through "Notifications" once the list was scrolled. */}
+                <div className="sticky top-0 z-10 flex items-center justify-between rounded-t-lg border-b border-gray-200 bg-white px-4 py-3">
                   <span className="text-[15px] font-semibold text-jira-dark">Notifications</span>
                   <button
                     onClick={() => markAllNotificationsRead()}

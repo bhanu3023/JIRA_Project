@@ -13,6 +13,7 @@ import { getNextAgent, getDefaultDepartment, getRrConfig, saveRrConfig } from '@
 import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs } from '@/lib/connector-service';
 import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager } from '@/lib/permissions';
+import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 
 // 60-second in-memory cache for user role lookups so every API request
 // doesn't pay an extra DB round-trip just to check isAdmin.
@@ -28,12 +29,248 @@ async function getCachedUser(userId: string) {
 
 // Ensure original_dept column exists
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).catch(() => {});
+// deploy.sh never runs `prisma migrate deploy` (only `prisma generate` in the
+// Docker build), so a column added only via a Prisma migration file never
+// actually lands on the production table -- mirror it here so it reaches
+// prod on the next deploy regardless.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "productionTicket" TEXT`).catch(() => {});
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMP(3)`).catch(() => {});
+
+// Deleted-ticket trash: DELETE /issues/:key used to be a genuine hard
+// delete with no way to get a ticket back -- a production ticket got
+// deleted and there was nothing to recover it from. Rather than turn
+// every single existing issue-listing query in this file into a
+// "WHERE deletedAt IS NULL" filter (this file has dozens of raw-SQL reads
+// against `issues`, and missing even one would leak a "deleted" ticket
+// back into a live view), deletion instead snapshots the full issue
+// (including comments/attachments/history, which cascade-delete with it)
+// into this table before the real delete, and restoring re-inserts from
+// that snapshot. Every other existing query is untouched and can't
+// possibly see a deleted ticket, since it's genuinely gone from `issues`
+// until restored.
+pool.query(`CREATE TABLE IF NOT EXISTS deleted_issues (
+  id TEXT PRIMARY KEY,
+  key TEXT NOT NULL,
+  cf_key TEXT,
+  space_key TEXT,
+  summary TEXT,
+  data JSONB NOT NULL,
+  deleted_by_id TEXT,
+  deleted_by_name TEXT,
+  deleted_at TIMESTAMPTZ DEFAULT NOW()
+)`).catch(() => {});
+
+// Jira's admin User Management shows when each user was last active. Update
+// at most once every 5 minutes per user (an in-memory throttle, not a DB
+// read-then-write) so this doesn't turn every single authenticated request
+// into an extra write.
+const _lastSeenThrottle = new Map<string, number>();
+function touchLastSeen(userId: string | null) {
+  if (!userId) return;
+  const now = Date.now();
+  const last = _lastSeenThrottle.get(userId) || 0;
+  if (now - last < 5 * 60 * 1000) return;
+  _lastSeenThrottle.set(userId, now);
+  pool.query(`UPDATE users SET "lastSeenAt" = NOW() WHERE id = $1`, [userId]).catch(() => {});
+}
+// POST /search's exact-match branch looks up an issue's subtasks by
+// parentKey (added alongside its linked-work-items lookup) -- that column
+// had no index at all, so on a large production issues table every search
+// hit for an exact ticket number/key triggered a full table scan just to
+// find its subtasks, not something the smaller local dataset this was
+// built and tested against ever surfaced.
+pool.query(`CREATE INDEX IF NOT EXISTS idx_issues_parentkey ON issues("parentKey")`).catch(() => {});
 // User invite status: 'invited' | 'active' | 'inactive'
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'`).catch(() => {});
 // Backfill: invited users (isActive=false, no prior login) stay 'invited'; active users get 'active'
 pool.query(`UPDATE users SET status='active' WHERE status IS NULL OR status='' OR (status='active' AND "isActive"=true)`).catch(() => {});
 pool.query(`UPDATE users SET status='inactive' WHERE "isActive"=false AND status='active'`).catch(() => {});
 pool.query(`WITH first_dept AS (SELECT DISTINCT ON (issue_id) issue_id, from_dept FROM issue_dept_transitions WHERE from_dept != '' ORDER BY issue_id, moved_at ASC) UPDATE issues i SET original_dept = COALESCE((SELECT fd.from_dept FROM first_dept fd WHERE fd.issue_id = i.id), i.current_department) WHERE i.original_dept IS NULL`).catch(() => {});
+// Backfill: existing notification rows created before every call site was
+// fixed to use cf_key still show the internal key (e.g. "L1BOAR-15259") in
+// their title/message/issueKey -- new notifications are correct going
+// forward, but this one-time pass corrects what's already stored. Runs
+// every startup but is a no-op once caught up (the WHERE clause only
+// matches rows still on the internal key).
+pool.query(`
+  UPDATE notifications n
+  SET "issueKey" = i.cf_key,
+      title = REPLACE(n.title, n."issueKey", i.cf_key),
+      message = CASE WHEN n.message IS NOT NULL THEN REPLACE(n.message, n."issueKey", i.cf_key) ELSE n.message END
+  FROM issues i
+  WHERE i.key = n."issueKey" AND i.cf_key IS NOT NULL AND i.cf_key <> '' AND n."issueKey" IS DISTINCT FROM i.cf_key
+`).catch(() => {});
+
+// One-time correction for the "Time to resolution" SLA policy: it was
+// created pointing at a spaceId that doesn't match any real space in this
+// database, so it silently never applied to a single real ticket. The user
+// confirmed the real per-priority hours from the live Jira instance's Dev
+// queue (L2B/L3B) -- repoint it at the real space (TESTIN) and scope it to
+// Dev specifically, since Migration/QA/etc. have their own separate SLA
+// policies and there's no confirmed evidence their "Time to resolution"
+// targets are the same numbers. Guarded on dept_name IS NULL so this is a
+// no-op once applied (an admin could since retarget/rename it deliberately).
+pool.query(`
+  UPDATE sla_definitions
+  SET "spaceId" = 'pg_92q07qtnlz',
+      dept_name = 'Dev',
+      goals = '[
+        {"id":"1780317563879_g","jql":"type in (Task, Bug)","calendar":"24/7 Calendar (Default)","timeUnit":"hours","timeValue":"","isPriorityGroup":true,
+         "priorityRows":[
+           {"calendar":"24/7 Calendar (Default)","priority":"highest","timeUnit":"hours","timeValue":"6"},
+           {"calendar":"24/7 Calendar (Default)","priority":"high","timeUnit":"hours","timeValue":"8"},
+           {"calendar":"24/7 Calendar (Default)","priority":"medium","timeUnit":"hours","timeValue":"24"},
+           {"calendar":"24/7 Calendar (Default)","priority":"low","timeUnit":"hours","timeValue":"48"},
+           {"calendar":"24/7 Calendar (Default)","priority":"lowest","timeUnit":"hours","timeValue":"48"}
+         ]},
+        {"id":"1780317563879_g2","jql":"All remaining work items","calendar":"24/7 Calendar (Default)","timeUnit":"hours","timeValue":"80","isPriorityGroup":false}
+      ]'::jsonb,
+      "updatedAt" = NOW()
+  WHERE id = 'pg_athlc8237e' AND dept_name IS NULL
+`).catch(() => {});
+
+// One-time correction of jira_sla_breached for Dev (L2B/L3B) and Migration
+// (L1BOARD, matched via jira_source_key -> the real CFITS project) tickets,
+// reconciled directly against the real Jira Cloud instance. Two different
+// custom fields turned out to carry this per project -- customfield_10917
+// ("SLA Breached", the field Dev/L2B/L3B mostly uses) and customfield_10849
+// ("Resolution SLA Breach", the field Migration/CFITS mostly uses) -- and
+// neither is exclusive to one department, so both were checked together
+// (breached if EITHER field says "Yes") across every ticket in both
+// departments rather than assuming a fixed field-per-department split.
+// This list is exactly the set of issue ids confirmed via that live fetch
+// to be "Yes" in real Jira; guarded to only ever SET true (never flips a
+// genuinely-correct false), so it's safe to run again.
+const JIRA_CONFIRMED_BREACHED_ISSUE_IDS: string[] = require('./jira-sla-breach-backfill-ids.json');
+pool.query(
+  `UPDATE issues SET jira_sla_breached = true WHERE id = ANY($1::text[]) AND jira_sla_breached IS DISTINCT FROM true`,
+  [JIRA_CONFIRMED_BREACHED_ISSUE_IDS]
+).catch(() => {});
+
+// One-time cleanup: every space had multiple separate "To Do" status ROWS
+// (e.g. status_to_do, status_qa_todo, and a bare-UUID one all named "To Do"
+// in the same space) alongside a single "Open" status -- almost certainly
+// accidental duplicates from re-running setup/import at different times
+// rather than an intentional per-queue distinction, since tickets on them
+// were scattered across departments with no clean pattern. Requested fix:
+// no ticket should ever show "To Do" -- new tickets, and any already
+// sitting on one of these duplicates, should read "Open" instead.
+// Retargets in order (issues, then workflow transitions, then the status
+// rows themselves) so nothing is left dangling: WorkflowTransition's FK to
+// Status cascades on delete, so a transition still pointing at a "To Do"
+// row when it's dropped would silently vanish instead of continuing to
+// work from "Open". The NOT EXISTS guards avoid the unique
+// (spaceId, fromStatusId, toStatusId) constraint when Open already has an
+// equivalent transition. Matches by name, not hardcoded ids, so it applies
+// per-space generically and is a no-op once there's no "To Do" left to fix.
+pool.query(`
+  DO $$
+  DECLARE
+    rec RECORD;
+    open_id TEXT;
+  BEGIN
+    FOR rec IN SELECT DISTINCT "spaceId" FROM statuses WHERE LOWER(name) = 'to do' LOOP
+      SELECT id INTO open_id FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'open' ORDER BY id LIMIT 1;
+      IF open_id IS NOT NULL THEN
+        UPDATE issues SET "statusId" = open_id
+          WHERE "statusId" IN (SELECT id FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'to do');
+
+        UPDATE workflow_transitions wt SET "fromStatusId" = open_id
+          WHERE wt."spaceId" = rec."spaceId"
+            AND wt."fromStatusId" IN (SELECT id FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'to do')
+            AND NOT EXISTS (
+              SELECT 1 FROM workflow_transitions wt2
+              WHERE wt2."spaceId" = wt."spaceId" AND wt2."fromStatusId" = open_id AND wt2."toStatusId" = wt."toStatusId"
+            );
+
+        UPDATE workflow_transitions wt SET "toStatusId" = open_id
+          WHERE wt."spaceId" = rec."spaceId"
+            AND wt."toStatusId" IN (SELECT id FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'to do')
+            AND NOT EXISTS (
+              SELECT 1 FROM workflow_transitions wt2
+              WHERE wt2."spaceId" = wt."spaceId" AND wt2."toStatusId" = open_id AND wt2."fromStatusId" = wt."fromStatusId"
+            );
+
+        DELETE FROM statuses WHERE "spaceId" = rec."spaceId" AND LOWER(name) = 'to do';
+      END IF;
+    END LOOP;
+  END $$;
+`).catch(() => {});
+
+// Same "To Do" cleanup as above, but for the handful of tickets carrying a
+// "To Do" entry inside their OWN dept_statuses snapshot (the per-department
+// status memory restored when a ticket returns to a queue it left) --
+// display code that reads this snapshot (getEffectiveIssueStatus and the
+// dept-scoped issue list) still showed "To Do" on those specific tickets
+// even after the shared statuses rows above were removed, since this is a
+// separate per-ticket JSONB copy, not a foreign key into the statuses
+// table. dept_statuses is keyed by arbitrary department name (not a fixed
+// column), so this has to walk each affected row's keys in JS rather than
+// a single SQL statement; resolves each ticket's own space's real "Open"
+// status rather than hardcoding one id, so it stays correct if a
+// different space's "Open" status has a different id/color.
+(async () => {
+  try {
+    const affected = await pool.query(`SELECT id, "spaceId", dept_statuses FROM issues WHERE dept_statuses::text ILIKE '%"To Do"%'`);
+    const openBySpace: Record<string, { id: string; name: string; color: string; category: string } | null> = {};
+    for (const row of affected.rows) {
+      if (!(row.spaceId in openBySpace)) {
+        const os = await pool.query(`SELECT id, name, color, category FROM statuses WHERE "spaceId" = $1 AND LOWER(name) = 'open' ORDER BY id LIMIT 1`, [row.spaceId]);
+        openBySpace[row.spaceId] = os.rows[0] || null;
+      }
+      const openStatus = openBySpace[row.spaceId];
+      if (!openStatus) continue;
+      const deptStatuses: Record<string, any> = row.dept_statuses || {};
+      let changed = false;
+      for (const dept of Object.keys(deptStatuses)) {
+        if (deptStatuses[dept]?.name === 'To Do') {
+          deptStatuses[dept] = { id: openStatus.id, name: openStatus.name, color: openStatus.color, category: openStatus.category };
+          changed = true;
+        }
+      }
+      if (changed) {
+        await pool.query(`UPDATE issues SET dept_statuses = $1::jsonb WHERE id = $2`, [JSON.stringify(deptStatuses), row.id]);
+      }
+    }
+  } catch { /* best-effort */ }
+})();
+
+// One-time backfill for the same root cause the fix above (in the PATCH
+// /issues/:key handler) now prevents going forward: dept_statuses[current
+// department] was only ever refreshed on a department CHANGE (handoff /
+// manual Change Department / the custom-queue-status flow) -- a ticket
+// whose status changed via the ordinary status dropdown while staying in
+// the SAME department (e.g. resolved without ever leaving Dev) kept that
+// snapshot stuck at whatever it was before, even though the ticket's real
+// current status had moved on. Anywhere that snapshot is preferred over
+// the live status (the detail page's getEffectiveIssueStatus, and the
+// "Worked on" queue list) then showed that stale value. Detects staleness
+// by comparing the snapshot's remembered category against the live
+// status's actual category for that same department -- a mismatch there
+// can only mean the snapshot never got updated after the real status
+// changed.
+(async () => {
+  try {
+    const affected = await pool.query(`
+      SELECT i.id, i.current_department, i.dept_statuses,
+             s.id AS live_id, s.name AS live_name, s.color AS live_color, s.category AS live_category
+      FROM issues i
+      LEFT JOIN statuses s ON s.id = i."statusId"
+      WHERE i.dept_statuses IS NOT NULL AND i.dept_statuses::text != '{}'
+        AND i.current_department IS NOT NULL AND s.id IS NOT NULL
+    `);
+    for (const row of affected.rows) {
+      const deptStatuses: Record<string, any> = row.dept_statuses || {};
+      const key = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(row.current_department || '').toLowerCase());
+      if (!key) continue;
+      const snap = deptStatuses[key];
+      if (snap && snap.category !== row.live_category) {
+        deptStatuses[key] = { id: row.live_id, name: row.live_name, color: row.live_color, category: row.live_category };
+        await pool.query(`UPDATE issues SET dept_statuses = $1::jsonb WHERE id = $2`, [JSON.stringify(deptStatuses), row.id]);
+      }
+    }
+  } catch { /* best-effort */ }
+})();
 
 // Ensure queue_closed_tickets exists at startup (needed by Sent/Watching query)
 pool.query(`CREATE TABLE IF NOT EXISTS queue_closed_tickets (id SERIAL PRIMARY KEY, space_id TEXT NOT NULL, dept_name TEXT NOT NULL, issue_id TEXT NOT NULL, closed_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(space_id, dept_name, issue_id))`).catch(() => {});
@@ -75,6 +312,11 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIME
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`).catch(() => {});
+// Referenced throughout the codebase (formatIssue, the SLA breach check, the
+// ticket detail page's "Resolved ·" timestamp) as if it already existed, but
+// no migration ever actually created it -- every read of issue.resolvedAt
+// was silently undefined for every ticket that's ever existed in this app.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "resolvedAt" TIMESTAMPTZ`).catch(() => {});
 pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`).catch(() => {});
 pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
 pool.query(`ALTER TABLE space_members ADD COLUMN IF NOT EXISTS department VARCHAR(100)`).catch(() => {});
@@ -520,7 +762,10 @@ function nowIso() {
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || 'NeutaraTech_SecureKey_2024_ab12f83079d8cadd0eb5678dc3d6aca6a5f65ed4d21646496093895b2ab4edfc';
-const SESSION_TTL_HOURS = 12;
+// 30 days -- a short-lived session forced users to re-authenticate with
+// Microsoft constantly (once every 12h) even though they never explicitly
+// logged out, unlike Jira which keeps a session alive for weeks.
+const SESSION_TTL_HOURS = 24 * 30;
 
 /** Sign a secure JWT token using jsonwebtoken */
 function encodeToken(userId: string, ip?: string, userAgent?: string): string {
@@ -646,6 +891,7 @@ function avatarRef(userId: string | null | undefined, avatarUrl: string | null |
 function formatUser(u: {
   id: string; email: string; firstName: string; lastName: string;
   role: string; avatarUrl?: string | null; isActive: boolean; createdAt?: Date; status?: string;
+  lastSeenAt?: Date | null;
 }) {
   const status = (u as any).status || (u.isActive ? 'active' : 'inactive');
   return {
@@ -660,6 +906,7 @@ function formatUser(u: {
     isActive: u.isActive,
     status,
     createdAt: u.createdAt?.toISOString() ?? nowIso(),
+    lastSeenAt: (u as any).lastSeenAt ? (u as any).lastSeenAt.toISOString() : null,
   };
 }
 
@@ -781,6 +1028,36 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
   } catch { /* non-fatal */ }
 }
 
+// dept_assignees/dept_statuses are keyed by department name, but the
+// queueStatusId-triggered handoff below derives its targetDept by
+// regex-parsing a free-text "Waiting for X" status label a queue admin typed
+// into a plain text input (src/app/spaces/[spaceKey]/queue/[queueId]/
+// workflow/page.tsx) -- never validated against the canonical department
+// name list. A snapshot saved as deptAssignees["Dev"] (from the manual
+// Change Department dropdown, which always uses the canonical name) was
+// invisible to a later restore attempt keyed by "waiting for dev" -> "dev"
+// from a queue status typed in different casing, since plain object-key
+// access is case-sensitive -- the restore silently missed and fell through
+// to a fresh round-robin pick instead of the person who'd actually had it.
+// These helpers do a case-insensitive lookup for reads, and for writes reuse
+// whichever casing already exists for that department in THIS ticket's own
+// snapshot map (falling back to the given string only when the department
+// has never been recorded here at all), so a ticket's history stays
+// internally consistent regardless of which of the two casings triggered
+// the write.
+function deptMapGet(map: Record<string, any>, dept: string): any {
+  const key = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
+  return key ? map[key] : undefined;
+}
+function deptMapSet(map: Record<string, any>, dept: string, value: any): void {
+  const existingKey = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
+  map[existingKey || dept] = value;
+}
+function deptMapDelete(map: Record<string, any>, dept: string): void {
+  const existingKey = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
+  if (existingKey) delete map[existingKey];
+}
+
 /**
  * Moves an issue to targetDept, exactly like the "Change Department" dropdown
  * does: saves the current assignee under the old dept, restores (or
@@ -799,7 +1076,15 @@ async function performDeptHandoff(
   spaceId: string,
   productType: string | null,
   targetDept: string,
-  waitingStatusLabel: string,
+  // The ticket's status as it was right before THIS handoff -- must come from
+  // the caller's own pre-update fetch, not a fresh DB read done here. The
+  // direct-statusId caller already writes the new "Waiting for X" status to
+  // the row via db.issue.update() before this function ever runs, so a
+  // same-function re-query would only ever see that just-written transit
+  // status (category 'todo'/'in_progress'), never whatever the ticket
+  // actually was — permanently blinding the isDoneNow check below to a
+  // ticket that had just been resolved moments earlier in the same handoff.
+  priorStatus: { id: string; name: string; category: string; color: string } | null,
   fallbackStatusId: string | null,
   userId: string | null,
 ): Promise<string> {
@@ -814,37 +1099,100 @@ async function performDeptHandoff(
   if (oldDept && curAssigneeId) {
     const curAssignee = await db.user.findUnique({ where: { id: curAssigneeId }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
     if (curAssignee) {
-      deptAssignees[oldDept] = { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: avatarRef(curAssignee.id, curAssignee.avatarUrl) };
+      deptMapSet(deptAssignees, oldDept, { id: curAssignee.id, email: curAssignee.email, firstName: curAssignee.firstName, lastName: curAssignee.lastName, displayName: `${curAssignee.firstName} ${curAssignee.lastName}`.trim(), avatarUrl: avatarRef(curAssignee.id, curAssignee.avatarUrl) });
     }
   }
   // Restore whoever was saved for this dept from a previous visit (same
   // restore-or-round-robin rule the "Change Department" dropdown already
   // uses) instead of always landing unassigned.
-  const savedForTarget = deptAssignees[targetDept];
+  const savedForTarget = deptMapGet(deptAssignees, targetDept);
   let handoffAssigneeId: string | null = null;
+  let handoffAssigneeName: string | null = null;
   if (savedForTarget?.id) {
     const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedForTarget.id]);
-    if (stillExists.rows.length) handoffAssigneeId = savedForTarget.id;
-    else delete deptAssignees[targetDept];
+    if (stillExists.rows.length) { handoffAssigneeId = savedForTarget.id; handoffAssigneeName = savedForTarget.displayName || null; }
+    else deptMapDelete(deptAssignees, targetDept);
   }
   if (!handoffAssigneeId) {
     try {
       const rrAgent = await getNextAgent(spaceId, targetDept, productType);
       if (rrAgent) {
         handoffAssigneeId = rrAgent.userId;
-        deptAssignees[targetDept] = { id: rrAgent.userId, displayName: rrAgent.name };
+        handoffAssigneeName = rrAgent.name;
+        deptMapSet(deptAssignees, targetDept, { id: rrAgent.userId, displayName: rrAgent.name });
       }
     } catch { /* non-critical — falls through to unassigned */ }
   }
 
-  deptStatuses[oldDept] = { id: '', name: waitingStatusLabel, category: 'todo', color: '#F59E0B' };
-  const inProgressSt = await db.status.findFirst({ where: { spaceId, category: 'in_progress' }, orderBy: { order: 'asc' } })
-    || await db.status.findFirst({ where: { spaceId, name: { contains: 'progress', mode: 'insensitive' } }, orderBy: { order: 'asc' } });
-  const inProgressStatusObj = inProgressSt
-    ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
-    : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
-  deptStatuses[targetDept] = inProgressStatusObj;
-  const targetStatusId = inProgressSt?.id || fallbackStatusId;
+  // A ticket already marked done (e.g. resolved via this dept's own "Resolved"
+  // queue status) that then gets handed onward via a "Waiting for X" pick used
+  // to have its done state clobbered here: the OLD dept's record got a
+  // synthetic "Waiting for <targetDept>" label instead of its real status
+  // (discarding that it had been resolved), and the TARGET dept was always
+  // forced to "In Progress" no matter what -- so a ticket resolved in Dev and
+  // routed to Migration either showed Dev's raw "Resolved" (if Migration had
+  // no prior record) or a stale "Waiting for X" leftover from an earlier
+  // visit (if it did), never Migration's own actual status. Mirror the same
+  // isDoneNow/restoringOwnSnapshot rule the manual "Change Department"
+  // endpoint already uses: restore the target dept's own last-known status if
+  // it has one, or carry the done status straight through on a first
+  // arrival -- only defaulting to "In Progress" when the ticket isn't done.
+  const isDoneNow = priorStatus?.category === 'done';
+  const oldDeptStatusObj = priorStatus
+    ? { id: priorStatus.id, name: priorStatus.name, category: priorStatus.category, color: priorStatus.color }
+    : { id: '', name: 'Unknown', category: 'todo', color: '#6B7280' };
+
+  // Record the OLD dept's status exactly as it was right before the handoff --
+  // not the "Waiting for <targetDept>" transit marker, which discarded that
+  // info (same fix already applied to the manual endpoint's own oldDept
+  // recording, for the same "Sent/Watching needs to show what it actually
+  // was" reason).
+  deptMapSet(deptStatuses, oldDept, oldDeptStatusObj);
+
+  const restoringOwnSnapshot = isDoneNow && deptMapGet(deptStatuses, targetDept) != null;
+  let newDeptStatusObj: any;
+  let targetStatusId: string | null;
+  if (restoringOwnSnapshot) {
+    newDeptStatusObj = deptMapGet(deptStatuses, targetDept);
+    const realMatch = await db.status.findFirst({ where: { spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } }, orderBy: { order: 'asc' } });
+    targetStatusId = realMatch?.id || priorStatus?.id || null;
+  } else {
+    // Every department tracks its own status independently -- a status like
+    // Resolved belongs to whichever dept actually resolved it, not to a dept
+    // that's only now receiving the ticket. A dept the ticket has already
+    // visited before (isReturningToDept), OR a done ticket landing somewhere
+    // new (isDoneNow), both mean "this dept needs to actually start working
+    // it," so both get "In Progress" -- only a still-open ticket arriving at a
+    // dept for the very first time gets the untouched "Open" default.
+    const isReturningToDept = deptMapGet(deptStatuses, targetDept) != null;
+    let targetQueueStatuses: any[] = [];
+    try {
+      const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
+      for (const row of allQueueRows.rows) {
+        const queues: any[] = row.queues || [];
+        const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === targetDept.toLowerCase());
+        if (matchedQ?.queueStatuses?.length) { targetQueueStatuses = matchedQ.queueStatuses; break; }
+      }
+    } catch {}
+    if (isDoneNow || isReturningToDept) {
+      const inProgressSt = targetQueueStatuses.find((s: any) => s.category === 'in_progress')
+        || targetQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'));
+      newDeptStatusObj = inProgressSt
+        ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
+        : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+    } else {
+      const firstTodoSt = targetQueueStatuses.find((s: any) => s.category === 'todo') || targetQueueStatuses[0];
+      newDeptStatusObj = firstTodoSt
+        ? { id: firstTodoSt.id, name: firstTodoSt.name, category: firstTodoSt.category, color: firstTodoSt.color }
+        : { id: '', name: 'Open', category: 'todo', color: '#6366F1' };
+    }
+    // newDeptStatusObj can carry a queue-scoped virtual id (qst_...) that isn't
+    // a real row in the statuses table -- resolve the equivalent real status by
+    // name for the global column, same as the restoringOwnSnapshot branch above.
+    const realMatch = await db.status.findFirst({ where: { spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } }, orderBy: { order: 'asc' } });
+    targetStatusId = realMatch?.id || fallbackStatusId;
+  }
+  deptMapSet(deptStatuses, targetDept, newDeptStatusObj);
 
   await pauseDeptSLA(null, issueId, oldDept);
   await pool.query(
@@ -852,6 +1200,47 @@ async function performDeptHandoff(
     [targetDept, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), targetStatusId, issueId, handoffAssigneeId]
   );
   await startDeptSLA(null, issueId, targetDept);
+
+  // Callers already log their own "status changed to Waiting for X" /
+  // "handed to Y" entries for the picking dept's own action -- accurate, but
+  // silent on what actually happened to the ticket's real status once it
+  // landed (restoring targetDept's own snapshot, or reopening into "In
+  // Progress"), same gap the manual "Change Department" endpoint had for its
+  // own equivalent silent statusId change. Only worth a separate
+  // entry when the ticket was actually done -- the plain "In Progress" arrival
+  // for a not-done ticket is already what the caller's own entry implies.
+  if (isDoneNow) {
+    try {
+      const historyChanger = userId ? await db.user.findUnique({ where: { id: userId }, select: { firstName: true, lastName: true, email: true } }) : null;
+      pool.query(
+        `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        [rid(), issueId, 'status', oldDeptStatusObj.name, newDeptStatusObj.name, historyChanger ? `${historyChanger.firstName} ${historyChanger.lastName}`.trim() : 'System', historyChanger?.email || null]
+      ).catch(() => {});
+    } catch { /* non-critical */ }
+  }
+
+  // The restore-or-round-robin assignee logic above (lines ~893-911) silently
+  // changes issues.assigneeId on every handoff -- restoring whoever the target
+  // dept had before, or round-robining a new agent -- but nothing ever logged
+  // it, unlike a plain assignee-dropdown change (the only other place in this
+  // file that writes field:'assignee'). A ticket bouncing Migration -> Dev ->
+  // Migration correctly restored the right person under the hood (verified
+  // directly against real data), but its History tab showed no record of it
+  // ever happening in either direction -- exactly this gap, mirrored from the
+  // 'status' fix just above.
+  if (curAssigneeId !== handoffAssigneeId) {
+    try {
+      const historyChanger = userId ? await db.user.findUnique({ where: { id: userId }, select: { firstName: true, lastName: true, email: true } }) : null;
+      const oldDeptSnapshot = oldDept ? deptMapGet(deptAssignees, oldDept) : null;
+      const oldAssigneeName = (curAssigneeId && oldDeptSnapshot?.id === curAssigneeId)
+        ? oldDeptSnapshot.displayName
+        : null;
+      pool.query(
+        `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        [rid(), issueId, 'assignee', oldAssigneeName, handoffAssigneeName, historyChanger ? `${historyChanger.firstName} ${historyChanger.lastName}`.trim() : 'System', historyChanger?.email || null]
+      ).catch(() => {});
+    } catch { /* non-critical */ }
+  }
 
   if (oldDept) {
     pool.query(
@@ -969,6 +1358,25 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     });
     if (!policies.length) return [];
 
+    // When a department-specific policy shares its name with a space-wide
+    // one (dept_name null) -- e.g. both literally called "Time to
+    // resolution" -- prefer the department-specific one instead of
+    // returning both as separate instances. Without this, adding a
+    // department override for an existing space-wide metric silently
+    // doubled that metric's SLA badge on every ticket in that department.
+    // Mirrors the "prefer dept-specific policy, fall back to space-wide"
+    // rule computePausedDeptSLA already uses above, generalized to every
+    // name instead of picking one policy for the whole issue.
+    const policyByName = new Map<string, any>();
+    for (const p of policies) {
+      const key = (p.name || '').trim().toLowerCase();
+      const current = policyByName.get(key);
+      if (!current || (!!(p.dept_name || '').trim() && !(current.dept_name || '').trim())) {
+        policyByName.set(key, p);
+      }
+    }
+    const dedupedPolicies = Array.from(policyByName.values());
+
     const priority = (issue.priority || 'medium').toLowerCase();
     // The status badge shown to the user can come from EITHER the ticket's
     // global status OR its per-department dept_statuses snapshot (see
@@ -996,9 +1404,25 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     // the due time reflects the REMAINING budget, not a fresh one.
     const deptSlaLog: Record<string, any> = (issue as any).dept_sla_log || {};
     const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === issueDept);
-    const priorElapsedMs: number = deptLogKey ? (deptSlaLog[deptLogKey]?.elapsed_ms || 0) : 0;
+    const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
+    // pauseDeptSLA always copies the CURRENT dept_sla_started_at into the log
+    // entry's own started_at at the moment it pauses -- so after pausing (or
+    // resolving) WITHOUT the ticket ever actually leaving this dept, the log
+    // entry's started_at exactly matches dept_sla_started_at, because it's a
+    // snapshot of the very same still-ongoing stint, not a separate earlier
+    // visit. Crediting its elapsed_ms as "prior debt" in that case double-
+    // counted the same elapsed time (once via startedAt itself, again as
+    // extra debt subtracted from durationMs), pulling the due time hours
+    // earlier than it really is -- a ticket resolved cleanly within its goal
+    // could read as breached. Only credit it when the log's started_at is
+    // genuinely different, i.e. from an earlier stint that a later dept
+    // re-entry (which DOES reset dept_sla_started_at) has since superseded.
+    const currentStartedRaw = (issue as any).dept_sla_started_at;
+    const isSameStint = deptLogEntry?.started_at && currentStartedRaw
+      && new Date(deptLogEntry.started_at).getTime() === new Date(currentStartedRaw).getTime();
+    const priorElapsedMs: number = (deptLogEntry && !isSameStint) ? (deptLogEntry.elapsed_ms || 0) : 0;
 
-    return policies.map((policy: any) => {
+    return dedupedPolicies.map((policy: any) => {
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
       const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
       for (const goal of goals) {
@@ -1032,8 +1456,17 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       // instead of restarting it at the full duration.
       const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
       const dueTime = new Date(new Date(startedAt).getTime() + remainingBudgetMs).toISOString();
-      // Paused SLAs are never breached — clock stopped
-      const isBreached = !isResolved && !isPaused && new Date(dueTime) < new Date();
+      // Paused SLAs are never breached — clock stopped. A resolved ticket is
+      // breached if it was ALREADY overdue at the moment it got resolved
+      // (resolvedAt is stamped on every done transition -- see the PATCH
+      // handler) -- not simply "never breached because it's done now". That
+      // used to erase every late resolution's breach entirely: mark a
+      // ticket Resolved 3 days after it was due and it read as a clean,
+      // on-time completion with no trace it had ever breached.
+      const resolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt) : null;
+      const isBreached = isResolved
+        ? (resolvedAt !== null && new Date(dueTime) < resolvedAt)
+        : (!isPaused && new Date(dueTime) < new Date());
       return {
         id: `sla_${policy.id}_${issue.key}`,
         policyId: policy.id,
@@ -1043,12 +1476,414 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
         isBreached,
         isPaused,
         isCompleted: isResolved,
+        // So the frontend can freeze the elapsed/progress display at the
+        // actual resolution moment instead of continuing to count up against
+        // "now" forever after the ticket is already done.
+        resolvedAt: resolvedAt ? resolvedAt.toISOString() : null,
         startedAt,
         goalDurationMs: durationMs,
         isNotified,
       };
     });
   } catch { return []; }
+}
+
+// Shared data loader for the Team Analytics tab (ported from the standalone
+// "Reports-" app -- see the route handlers below for context). Every
+// sub-tab's endpoint calls this once and shapes the same enriched issue list
+// differently, instead of each re-running its own fetch+history-index pass.
+async function loadTeamAnalyticsScope(url: URL) {
+  const deptParam = url.searchParams.get('dept') || '';
+  const depts = deptParam && deptParam.toLowerCase() !== 'all'
+    ? deptParam.split(',').map((d) => d.trim()).filter(Boolean)
+    : null;
+  const dateType = url.searchParams.get('dateType') || 'created'; // 'created' | 'updated' | 'worked' | 'none'
+  const dateFrom = url.searchParams.get('dateFrom') || '';
+  const dateTo = url.searchParams.get('dateTo') || '';
+  const productTypeParam = url.searchParams.get('productType') || '';
+
+  const whereClauses: string[] = [`i.current_department IS NOT NULL`];
+  const params: any[] = [];
+  let idx = 1;
+  // "worked" scopes by department through user_worked_on_tickets below instead
+  // of the plain current_department match -- a ticket someone worked while it
+  // sat in Dev, then handed off elsewhere, should still count as "Dev worked
+  // this" for that historical window even though current_department has since
+  // moved on.
+  if (depts && depts.length && dateType !== 'worked') { whereClauses.push(`i.current_department = ANY($${idx++}::text[])`); params.push(depts); }
+  if (productTypeParam) { whereClauses.push(`i."productType" = $${idx++}`); params.push(productTypeParam); }
+
+  // Queue-membership map (custom_queues.queues[].name -> memberIds), matched
+  // case-insensitively against current_department. Selecting a department
+  // should only surface tickets belonging to people who actually have access
+  // to that queue, not every ticket carrying the department label -- checked
+  // against real data and found MOST department labels (Infra, QA, Pre-Sales,
+  // SalesOps, etc.) have no configured queue at all, so those keep the old
+  // department-only match; only a department with a real queue config gets
+  // the additional assignee-membership restriction below. Not needed for
+  // "worked" -- that dateType already scopes by real recorded activity, not
+  // configured membership.
+  let deptMemberSets: Record<string, Set<string>> | null = null;
+  if (depts && depts.length && dateType !== 'worked') {
+    const cq = await pool.query(`SELECT queues FROM custom_queues`);
+    const sets: Record<string, Set<string>> = {};
+    for (const row of cq.rows) {
+      const queues = Array.isArray(row.queues) ? row.queues : [];
+      for (const q of queues) {
+        const name = String(q?.name || '').trim().toLowerCase();
+        if (!name) continue;
+        const members: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+        const set = (sets[name] ??= new Set<string>());
+        for (const m of members) set.add(m);
+      }
+    }
+    deptMemberSets = sets;
+  }
+
+  const toEnd = dateTo ? new Date(new Date(dateTo).setHours(23, 59, 59, 999)) : null;
+  const fromStart = dateFrom ? new Date(dateFrom) : null;
+  if (dateType === 'none') {
+    // "Open tickets that existed on or before `to`" -- mirrors the reference
+    // app's "None (open tickets)" date-type option; `from` doesn't apply to
+    // an open-ended snapshot like this.
+    whereClauses.push(`s.category != 'done'`);
+    if (toEnd) { whereClauses.push(`i."createdAt" <= $${idx++}`); params.push(toEnd); }
+  } else if (dateType === 'worked') {
+    // "Actually worked" -- backed by user_worked_on_tickets, the same table
+    // the per-queue Summary view uses, written only on a real pass/return/
+    // close event (see the comment above that endpoint). Unlike created/
+    // updated, this can't be satisfied by a ticket merely sitting untouched
+    // in someone's queue since it was filed.
+    let workedClause = `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id`;
+    if (fromStart) { workedClause += ` AND w.worked_at >= $${idx++}`; params.push(fromStart); }
+    if (toEnd) { workedClause += ` AND w.worked_at <= $${idx++}`; params.push(toEnd); }
+    if (depts && depts.length) {
+      workedClause += ` AND LOWER(w.dept) = ANY($${idx++}::text[])`;
+      params.push(depts.map((d) => d.toLowerCase()));
+      // Only count work by someone who currently has access to that specific
+      // queue -- e.g. selecting "Dev" shouldn't credit a ticket to Dev's
+      // worked-count just because SOME person touched it while it briefly
+      // carried that department label; it must have been a real Dev-access
+      // person who did the work. Built as a dept(lowercased) -> memberIds
+      // jsonb map so each selected department is checked against its own
+      // configured list -- a department with no queue config at all (most
+      // of them; see the comment on deptMemberSets above) imposes no
+      // restriction, same "no config = no restriction" rule used elsewhere.
+      const cqW = await pool.query(`SELECT queues FROM custom_queues`);
+      const memberMap: Record<string, string[]> = {};
+      for (const row of cqW.rows) {
+        const queuesW = Array.isArray(row.queues) ? row.queues : [];
+        for (const q of queuesW) {
+          const name = String(q?.name || '').trim().toLowerCase();
+          if (!name) continue;
+          const members: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+          (memberMap[name] ??= []).push(...members);
+        }
+      }
+      workedClause += ` AND (NOT ($${idx}::jsonb ? LOWER(w.dept)) OR ($${idx}::jsonb -> LOWER(w.dept)) @> to_jsonb(w.user_id))`;
+      params.push(JSON.stringify(memberMap));
+      idx++;
+    }
+    workedClause += `)`;
+    whereClauses.push(workedClause);
+  } else {
+    const dateCol = dateType === 'updated' ? `i."updatedAt"` : `i."createdAt"`;
+    if (fromStart) { whereClauses.push(`${dateCol} >= $${idx++}`); params.push(fromStart); }
+    if (toEnd) { whereClauses.push(`${dateCol} <= $${idx++}`); params.push(toEnd); }
+  }
+
+  const rows = await pool.query(
+    `SELECT i.id, i.key, i.cf_key, i.summary, i.priority, i.type, i."productType",
+            i."customerName", i."clientName", i."projectManager", i.current_department,
+            i."assigneeId", i."reporterId", i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
+            i."dueDate", i.jira_sla_breached,
+            s.name AS status_name, s.category AS status_category,
+            a."firstName" AS assignee_first, a."lastName" AS assignee_last, a.email AS assignee_email
+     FROM issues i
+     LEFT JOIN statuses s ON s.id = i."statusId"
+     LEFT JOIN users a ON a.id = i."assigneeId"
+     WHERE ${whereClauses.join(' AND ')}
+     LIMIT 100000`,
+    params
+  );
+  const issues = deptMemberSets
+    ? rows.rows.filter((r: any) => {
+        const deptKey = String(r.current_department || '').trim().toLowerCase();
+        const memberSet = deptMemberSets![deptKey];
+        if (!memberSet || !memberSet.size) return true; // no configured queue for this dept -- keep department-only match
+        return !!r.assigneeId && memberSet.has(r.assigneeId);
+      })
+    : rows.rows;
+  const issueIds = issues.map((r: any) => r.id);
+
+  const historyRows = issueIds.length
+    ? await pool.query(
+        `SELECT "issueId", field, "oldValue", "newValue", "authorName", "createdAt"
+         FROM issue_history
+         WHERE "issueId" = ANY($1::text[]) AND field = ANY($2::text[])
+         ORDER BY "issueId", "createdAt" ASC`,
+        [issueIds, ['status', 'assignee', 'sla']]
+      )
+    : { rows: [] as any[] };
+
+  const statusHistByIssue: Record<string, any[]> = {};
+  const assigneeHistByIssue: Record<string, any[]> = {};
+  const slaBreachEventsByIssue: Record<string, any[]> = {};
+  for (const h of historyRows.rows) {
+    if (h.field === 'status') (statusHistByIssue[h.issueId] ??= []).push(h);
+    else if (h.field === 'assignee') (assigneeHistByIssue[h.issueId] ??= []).push(h);
+    // Logged by the periodic SLA monitor (runSlaBreachCheck) the first time
+    // it observes a ticket past its due time -- see line ~364 above. Poll-
+    // interval granularity, not to-the-second, but the only real breach-
+    // moment marker this app records.
+    else if (h.field === 'sla' && /breached/i.test(String(h.newValue || ''))) (slaBreachEventsByIssue[h.issueId] ??= []).push(h);
+  }
+
+  const spaceIds = Array.from(new Set(issues.map((r: any) => r.spaceId).filter(Boolean)));
+  const policiesBySpace: Record<string, any[]> = {};
+  if (spaceIds.length) {
+    const polRows = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`, [spaceIds]);
+    for (const p of polRows.rows) (policiesBySpace[p.spaceId] ??= []).push(p);
+  }
+
+  const now = Date.now();
+  const enriched = issues.map((row: any) => {
+    const statusHist = statusHistByIssue[row.id] || [];
+    const assigneeHist = assigneeHistByIssue[row.id] || [];
+    const createdMs = new Date(row.createdAt).getTime();
+    const isDone = row.status_category === 'done';
+
+    const firstAssigned = assigneeHist.find((h: any) => h.newValue);
+    const assignedTime = firstAssigned ? new Date(firstAssigned.createdAt) : null;
+    const firstInProgressEntry = statusHist.find((h: any) => h.newValue === 'In Progress');
+    const firstInProgress = firstInProgressEntry ? new Date(firstInProgressEntry.createdAt) : null;
+
+    const { inProgressHrs } = computeInProgressHours(statusHist, row.createdAt, isDone, row.resolvedAt, row.status_name);
+
+    // resolvedAt only gets stamped by this app's own PATCH handler -- a
+    // ticket resolved via the original Jira migration import never had one
+    // written (same gap documented in the resolution-sla endpoint above).
+    // Fall back to the first done-category status transition in history for
+    // those, so historical tickets still get a resolution time instead of
+    // being silently dropped from every resolution-time metric.
+    let resolvedAtComputed: Date | null = row.resolvedAt ? new Date(row.resolvedAt) : null;
+    if (!resolvedAtComputed && isDone) {
+      const firstDoneEntry = statusHist.find((h: any) => DONE_STATUS_NAME_HINTS.has(String(h.newValue || '').trim().toLowerCase()));
+      if (firstDoneEntry) resolvedAtComputed = new Date(firstDoneEntry.createdAt);
+    }
+    const resolvedHrs = resolvedAtComputed ? Math.max(0, (resolvedAtComputed.getTime() - createdMs) / 3_600_000) : null;
+
+    // Breach flag: the live computeSLAInstancesPure check when this ticket
+    // has a real resolvedAt and an applicable policy (same rule as the
+    // resolution-sla endpoint); otherwise fall back to the historical
+    // Jira-imported breach flag; otherwise unknown (excluded from breach%).
+    let isBreached: boolean | null = null;
+    if (row.resolvedAt) {
+      const policies = policiesBySpace[row.spaceId] || [];
+      const instances = computeSLAInstancesPure({ ...row, status: { name: row.status_name, category: row.status_category } }, policies, false);
+      if (instances.length) isBreached = instances.some((x: any) => x.isBreached);
+      else if (typeof row.jira_sla_breached === 'boolean') isBreached = row.jira_sla_breached;
+    } else if (typeof row.jira_sla_breached === 'boolean') {
+      isBreached = row.jira_sla_breached;
+    }
+
+    const assigneeName = row.assignee_first || row.assignee_last
+      ? `${row.assignee_first || ''} ${row.assignee_last || ''}`.trim()
+      : (row.assignee_email || null);
+
+    return {
+      ...row, isDone, assigneeName,
+      statusHist, assigneeHist,
+      assignedTime, firstInProgress,
+      resolvedAtComputed, resolvedHrs, isBreached, inProgressHrs,
+      slaBreachEvents: slaBreachEventsByIssue[row.id] || [],
+    };
+  });
+
+  return { issues: enriched, depts, dateType, dateFrom, dateTo, productType: productTypeParam };
+}
+
+// Status names seen across real (mostly Jira-migrated) data that this app's
+// own catalog doesn't classify as category:'done' but that clearly ARE
+// terminal -- used only as a fallback when a ticket has no real resolvedAt.
+const DONE_STATUS_NAME_HINTS = new Set(['done', 'resolved', 'closed', 'approved', 'complete', 'completed', 'cancelled', 'canceled', 'rejected']);
+
+// See the inProgressHrs comment above for why this is a name allowlist, not
+// a category check.
+const IN_PROGRESS_STATUS_NAMES = new Set(['in progress', 'work in progress']);
+
+// Hours actually spent in an "In Progress"-type status, NOT total wall-clock
+// age or resolution time -- see the IN_PROGRESS_STATUS_NAMES comment above
+// for why this matches literal status names rather than the category field.
+// Walks the sorted status_history transition list (field:'status' rows,
+// oldest first); the open tail (still in the current status) counts up to
+// resolvedAt for a done ticket, or up to now for one still open. Shared by
+// Team Analytics' Time Spent view and GET /issues (opt-in via
+// includeTimeSpent) so both compute this identically.
+function computeInProgressHours(
+  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+  createdAt: Date | string,
+  isDone: boolean,
+  resolvedAt: Date | string | null,
+  currentStatusName: string | null,
+): { inProgressHrs: number; noHistory: boolean } {
+  const createdMs = new Date(createdAt).getTime();
+  const statusTotals: Record<string, number> = {};
+  let cursor = createdMs;
+  let cursorStatus = statusHist[0]?.oldValue || currentStatusName || 'Unknown';
+  for (const h of statusHist) {
+    const t = new Date(h.createdAt).getTime();
+    const hrs = (t - cursor) / 3_600_000;
+    if (hrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + hrs;
+    cursor = t;
+    cursorStatus = h.newValue;
+  }
+  const tailEnd = isDone && resolvedAt ? new Date(resolvedAt).getTime() : Date.now();
+  const tailHrs = (tailEnd - cursor) / 3_600_000;
+  if (tailHrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + tailHrs;
+  const inProgressHrs = Math.round(
+    Object.entries(statusTotals).reduce((sum, [name, hrs]) => sum + (IN_PROGRESS_STATUS_NAMES.has(name.trim().toLowerCase()) ? hrs : 0), 0) * 10
+  ) / 10;
+  return { inProgressHrs, noHistory: statusHist.length === 0 };
+}
+
+function buildTeamAnalyticsOverview(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
+  const { issues } = scope;
+  const byStatus = taGroupByCount(issues, (r) => r.status_name);
+  const byPriority = taGroupByCount(issues, (r) => r.priority);
+  const byProductType = taGroupByCount(issues, (r) => r.productType);
+  const byDept = taGroupByCount(issues, (r) => r.current_department);
+
+  const byMonth: Record<string, number> = {};
+  for (const r of issues) {
+    const d = new Date(r.createdAt);
+    const label = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    byMonth[label] = (byMonth[label] || 0) + 1;
+  }
+
+  const resolved = issues.filter((r: any) => r.isDone);
+  const slaTracked = resolved.filter((r: any) => r.isBreached !== null);
+  const breached = slaTracked.filter((r: any) => r.isBreached);
+
+  const byMember: Record<string, any> = {};
+  for (const r of issues) {
+    if (!r.assigneeId) continue;
+    const m = (byMember[r.assigneeId] ??= {
+      id: r.assigneeId, name: r.assigneeName || 'Unknown', email: r.assignee_email || '',
+      ticketCount: 0, resolvedCount: 0, totalResolutionHrs: 0, resolutionSamples: 0,
+      slaTracked: 0, breached: 0,
+    });
+    m.ticketCount++;
+    if (r.isDone) {
+      m.resolvedCount++;
+      if (r.resolvedHrs !== null) { m.totalResolutionHrs += r.resolvedHrs; m.resolutionSamples++; }
+      if (r.isBreached !== null) { m.slaTracked++; if (r.isBreached) m.breached++; }
+    }
+  }
+  const memberPerformance = Object.values(byMember).map((m: any) => ({
+    id: m.id, name: m.name, email: m.email,
+    ticketCount: m.ticketCount, resolvedCount: m.resolvedCount,
+    avgResolutionHrs: m.resolutionSamples ? Math.round((m.totalResolutionHrs / m.resolutionSamples) * 10) / 10 : null,
+    slaBreachPct: m.slaTracked ? Math.round((m.breached / m.slaTracked) * 1000) / 10 : null,
+  })).sort((a: any, b: any) => b.ticketCount - a.ticketCount);
+
+  return {
+    totalTickets: issues.length,
+    resolvedCount: resolved.length,
+    openCount: issues.length - resolved.length,
+    slaBreachPct: slaTracked.length ? Math.round((breached.length / slaTracked.length) * 1000) / 10 : null,
+    slaTrackedCount: slaTracked.length,
+    byStatus, byPriority, byProductType, byDept, byMonth,
+    memberPerformance,
+    depts: Array.from(new Set(issues.map((r: any) => r.current_department).filter(Boolean))).sort(),
+    productTypes: Array.from(new Set(issues.map((r: any) => r.productType).filter(Boolean))).sort(),
+  };
+}
+
+function buildTeamAnalyticsAging(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
+  const open = scope.issues.filter((r: any) => !r.isDone);
+  const now = Date.now();
+  const BUCKETS = [
+    { key: 'le1', label: '<= 1 day', max: 1 },
+    { key: 'd2to5', label: '2-5 days', max: 5 },
+    { key: 'gt5', label: '> 5 days', max: Infinity },
+  ];
+  const bucketOf = (ageDays: number) => BUCKETS.find((b) => ageDays <= b.max)!.key;
+
+  const counts: Record<string, number> = { le1: 0, d2to5: 0, gt5: 0 };
+  const byMember: Record<string, any> = {};
+  const tickets: any[] = [];
+  for (const r of open) {
+    const ageDays = (now - new Date(r.createdAt).getTime()) / 86_400_000;
+    const bucket = bucketOf(ageDays);
+    counts[bucket]++;
+    tickets.push({
+      id: r.id, key: r.key, cfKey: r.cf_key, summary: r.summary, priority: r.priority,
+      status: r.status_name, assignee: r.assigneeName, department: r.current_department,
+      createdAt: r.createdAt, ageDays: Math.round(ageDays * 10) / 10, bucket,
+    });
+    if (r.assigneeId) {
+      const m = (byMember[r.assigneeId] ??= { id: r.assigneeId, name: r.assigneeName || 'Unknown', le1: 0, d2to5: 0, gt5: 0, total: 0 });
+      m[bucket]++; m.total++;
+    }
+  }
+
+  return {
+    totalOpen: open.length,
+    buckets: BUCKETS.map((b) => ({ key: b.key, label: b.label, count: counts[b.key] })),
+    byMember: Object.values(byMember).sort((a: any, b: any) => b.total - a.total),
+    tickets: tickets.sort((a, b) => b.ageDays - a.ageDays),
+  };
+}
+
+// Per-ticket time-spent list -- assignee x department x productType x hours
+// actually spent In Progress (see the inProgressHrs comment in
+// loadTeamAnalyticsScope for why this isn't just total resolution time).
+// Flat, not aggregated, so a real ticket's number can be checked directly
+// against its own history instead of trusting a rolled-up total.
+const TA_TIME_SPENT_CAP = 5000;
+function buildTeamAnalyticsTimeSpent(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>, q?: string) {
+  // A text search is applied BEFORE the cap below, not after -- otherwise a
+  // specific low-hours ticket (most of them, by definition) could never be
+  // found once the in-scope count exceeds the cap, since it would already
+  // have been dropped before the caller's search term ever got applied.
+  const query = (q || '').trim().toLowerCase();
+  const base = query
+    ? scope.issues.filter((r: any) =>
+        (r.cf_key || '').toLowerCase().includes(query) ||
+        (r.key || '').toLowerCase().includes(query) ||
+        (r.summary || '').toLowerCase().includes(query) ||
+        (r.assigneeName || '').toLowerCase().includes(query))
+    : scope.issues;
+  const sorted = [...base].sort((a: any, b: any) => b.inProgressHrs - a.inProgressHrs);
+  const truncated = sorted.length > TA_TIME_SPENT_CAP;
+  const tickets = sorted.slice(0, TA_TIME_SPENT_CAP).map((r: any) => ({
+    id: r.id, key: r.key, cfKey: r.cf_key, summary: r.summary, priority: r.priority,
+    status: r.status_name, isDone: r.isDone,
+    assigneeId: r.assigneeId, assignee: r.assigneeName || 'Unassigned',
+    department: r.current_department, productType: r.productType || null,
+    inProgressHrs: r.inProgressHrs, createdAt: r.createdAt,
+    isBreached: r.isBreached,
+    // A ticket with zero logged status transitions (mostly Jira-migrated
+    // tickets that arrived already in their current status, with no
+    // transition ever recorded in this app) has no way to know when it
+    // actually entered its current status -- its ENTIRE age gets counted,
+    // which can read as an extreme outlier (checked against real data:
+    // the #1 ticket by this metric has 0 history rows and is simply 269
+    // days old, sitting in "In Progress" since creation). Flagged so the UI
+    // can tell that apart from a ticket with real, tracked in-progress time.
+    noHistory: r.statusHist.length === 0,
+  }));
+  return { totalTickets: scope.issues.length, totalMatched: base.length, truncated, cap: TA_TIME_SPENT_CAP, tickets };
+}
+
+function taGroupByCount(rows: any[], getKey: (r: any) => string | null | undefined) {
+  const counts: Record<string, number> = {};
+  for (const r of rows) {
+    const k = (getKey(r) || '').trim() || '(none)';
+    counts[k] = (counts[k] || 0) + 1;
+  }
+  return Object.entries(counts).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
 }
 
 function formatIssue(issue: any) {
@@ -1139,6 +1974,7 @@ function formatIssue(issue: any) {
     customerName: issue.customerName ?? null,
     clientName: issue.clientName ?? null,
     projectManager: issue.projectManager ?? null,
+    productionTicket: issue.productionTicket ?? null,
     comments,
     commentCount: comments.length,
     attachments: [],
@@ -1149,8 +1985,8 @@ function formatIssue(issue: any) {
       return {
         id: lnk.id,
         type: lnk.linkType,
-        source: { key: sk, summary: lnk._sourceSummary ?? sk, type: 'task' },
-        target: { key: tk, summary: lnk._targetSummary ?? tk, type: 'task' },
+        source: { key: sk, cfKey: lnk._sourceCfKey ?? null, summary: lnk._sourceSummary ?? sk, type: 'task' },
+        target: { key: tk, cfKey: lnk._targetCfKey ?? null, summary: lnk._targetSummary ?? tk, type: 'task' },
       };
     }),
     children: [],
@@ -1206,6 +2042,18 @@ function parseDateRange(range: string): { from: Date; to: Date } {
     return { from: new Date(0), to: t };
   }
 
+  // "Between" (custom from/to date picker) was never handled here -- it fell
+  // through every branch above and landed on the catch-all default below,
+  // which silently returns the full all-time range. Selecting specific dates
+  // and clicking Update looked like it worked (the filter chip showed the
+  // dates) but never actually narrowed the results at all.
+  if (range.startsWith('between:')) {
+    const [, fromStr, toStr] = range.split(':');
+    const f = fromStr ? new Date(`${fromStr}T00:00:00`) : new Date(0);
+    const t = toStr ? new Date(`${toStr}T23:59:59.999`) : now;
+    return { from: f, to: t };
+  }
+
   switch (range) {
     case 'today': return { from: startOfToday, to: now };
     case 'yesterday': {
@@ -1252,22 +2100,30 @@ async function getJiraCredentials(): Promise<{ base: string; email: string; toke
   return { base: JIRA_BASE_URL, email: JIRA_EMAIL, token: JIRA_TOKEN, authHdr: JIRA_AUTH_HDR };
 }
 
-// Map issue key prefix Ã¢â€ ' { jiraProject, spaceKey }
+// Map issue key prefix -> { jiraProject, spaceKey }
+// spaceKey used to point at per-board spaces (L2BOARD, L3BOARD, ...) from an
+// older multi-space layout that was later consolidated into a single space --
+// every one of these prefixes' issues actually lives under 'TESTIN' now
+// (confirmed: issues for every prefix below all join to space key TESTIN).
+// Looking up the old spaceKey silently found no space and returned null,
+// which means importIssueFromJira has been unable to import ANY issue for
+// ANY prefix -- the on-demand "open a not-yet-synced ticket by URL" fallback
+// has simply been a dead 404 for every board this whole time.
 const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> = {
-  L1BOAR:  { jiraProject: 'CFITS',  spaceKey: 'L1BOAR'   },
-  L2B:     { jiraProject: 'L2B',    spaceKey: 'L2BOARD'  },
-  L3B:     { jiraProject: 'L3B',    spaceKey: 'L3BOARD'  },
-  PSM:     { jiraProject: 'PSM',    spaceKey: 'PSMBOARD' },
-  CFM:     { jiraProject: 'CFM',    spaceKey: 'CFMBOARD' },
-  IB:      { jiraProject: 'IB',     spaceKey: 'INFRABOARD'},
-  MB:      { jiraProject: 'MB',     spaceKey: 'MBBOARD'  },
-  EB:      { jiraProject: 'EB',     spaceKey: 'EBBOARD'  },
-  CB:      { jiraProject: 'CB',     spaceKey: 'CBBOARD'  },
-  SOPS:    { jiraProject: 'SOPS',   spaceKey: 'SOPSBOARD'},
-  QABOAR:  { jiraProject: 'QABOAR', spaceKey: 'QABOAR'   },
+  L1BOAR:  { jiraProject: 'CFITS',  spaceKey: 'TESTIN' },
+  L2B:     { jiraProject: 'L2B',    spaceKey: 'TESTIN' },
+  L3B:     { jiraProject: 'L3B',    spaceKey: 'TESTIN' },
+  PSM:     { jiraProject: 'PSM',    spaceKey: 'TESTIN' },
+  CFM:     { jiraProject: 'CFM',    spaceKey: 'TESTIN' },
+  IB:      { jiraProject: 'IB',     spaceKey: 'TESTIN' },
+  MB:      { jiraProject: 'MB',     spaceKey: 'TESTIN' },
+  EB:      { jiraProject: 'EB',     spaceKey: 'TESTIN' },
+  CB:      { jiraProject: 'CB',     spaceKey: 'TESTIN' },
+  SOPS:    { jiraProject: 'SOPS',   spaceKey: 'TESTIN' },
+  QABOAR:  { jiraProject: 'QABOAR', spaceKey: 'TESTIN' },
 };
 
-const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016';
+const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665';
 
 function extractJiraValue(raw: any): string | null {
   if (!raw) return null;
@@ -1332,7 +2188,7 @@ function adfNodeToHtml(node: any): string {
   return (node.content || []).map(adfNodeToHtml).join('');
 }
 
-async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof formatIssue> | null> {
+async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?: string }): Promise<ReturnType<typeof formatIssue> | null> {
   try {
     const prefix = localKey.split('-')[0];
     const meta = PREFIX_TO_META[prefix];
@@ -1344,7 +2200,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
     const jiraKey = localKey; // key prefix matches Jira project for all other boards
 
     const creds = await getJiraCredentials();
-    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,${JIRA_CUSTOM_FIELDS}`;
+    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,created,updated,${JIRA_CUSTOM_FIELDS}`;
     const url = `${creds.base}/rest/api/3/issue/${jiraKey}?fields=${fields}&expand=changelog`;
     // This fetch had no timeout, so whenever an issue (very often a stale or
     // broken linked-ticket key) isn't found locally, GET /issues/:key would
@@ -1425,6 +2281,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
           projectManager: extractJiraValue(f.customfield_11380) ?? existingIssue.projectManager,
           productType:    extractJiraValue(f.customfield_10203) ?? existingIssue.productType,
           combination:    extractJiraValue(f.customfield_10236) ?? existingIssue.combination,
+          productionTicket: extractJiraValue(f.customfield_10665) ?? existingIssue.productionTicket,
         },
       });
       issueId = existingIssue.id;
@@ -1445,9 +2302,21 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
           projectManager: extractJiraValue(f.customfield_11380),
           productType:    extractJiraValue(f.customfield_10203),
           combination:    extractJiraValue(f.customfield_10236),
+          productionTicket: extractJiraValue(f.customfield_10665),
+          // Preserve real Jira history instead of stamping "now" -- these feed
+          // aging/SLA/timeline analytics, so a bulk backfill imported today
+          // must still show its issues' true original creation dates.
+          createdAt: f.created ? new Date(f.created) : undefined,
+          updatedAt: f.updated ? new Date(f.updated) : undefined,
         },
       });
       issueId = created.id;
+      // current_department isn't in the Prisma schema (added via a raw
+      // migration) -- every other place in this file sets it with a plain
+      // UPDATE rather than through the Prisma client, so do the same here.
+      if (opts?.defaultDepartment) {
+        await pool.query(`UPDATE issues SET current_department = $1 WHERE id = $2`, [opts.defaultDepartment, issueId]);
+      }
     }
 
     // Import comments
@@ -1504,6 +2373,390 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
   } catch (e) {
     console.error('[importIssueFromJira] error:', e);
     return null;
+  }
+}
+
+// Projects that get an automatic, recurring catch-up sync from Jira -- see
+// runJiraIssueSync below. Add a prefix here to bring another board under the
+// same "never miss new tickets again" coverage. Only valid for boards where
+// the local key IS the Jira key (confirmed true for L2B/L3B). CFITS is NOT
+// one of these -- see importCfitsIssue below for why.
+const SYNC_PROJECTS: { prefix: string; jiraProject: string }[] = [
+  { prefix: 'L2B', jiraProject: 'L2B' },
+  { prefix: 'L3B', jiraProject: 'L3B' },
+];
+
+const CFITS_JIRA_PROJECT = 'CFITS';
+const CFITS_LOCAL_PREFIX = 'L1BOAR';
+const CFITS_SPACE_KEY = 'TESTIN';
+// Confirmed from real data, not assumed: 7465 of the 7468 already-migrated
+// L1BOAR tickets are current_department = 'Migration' -- unlike L2B/L3B
+// (which default to 'Dev'), this board is the Migration team's queue.
+const CFITS_DEFAULT_DEPARTMENT = 'Migration';
+
+// Mirrors the exact key-allocation logic POST /issues (the real "create
+// ticket" endpoint) already uses: ONE counter shared across the whole
+// space, not one per prefix -- confirmed from real data before writing
+// this (the newest L1BOAR tickets created directly in the app, not
+// migrated, sit in the 15000s: the same range L2B was in at the time,
+// because both draw from the same space-wide MAX(...)+1). A separate
+// per-prefix counter here would eventually hand out a key that collides
+// with one the real create-issue flow already gave someone else.
+async function allocateNextLocalKey(prefix: string, spaceId: string): Promise<string> {
+  const r = await pool.query(
+    `SELECT COALESCE(MAX(
+       CASE WHEN SPLIT_PART(key, '-', ARRAY_LENGTH(STRING_TO_ARRAY(key, '-'), 1)) ~ '^[0-9]+$'
+            THEN CAST(SPLIT_PART(key, '-', ARRAY_LENGTH(STRING_TO_ARRAY(key, '-'), 1)) AS INTEGER)
+            ELSE 0 END
+     ), 0) AS maxnum FROM issues WHERE "spaceId" = $1`,
+    [spaceId]
+  );
+  const next = (parseInt(r.rows[0]?.maxnum || '0', 10) || 0) + 1;
+  return `${prefix}-${next}`;
+}
+
+// CFITS needs its own import path instead of reusing importIssueFromJira:
+// local L1BOAR keys have NO relationship to Jira CFITS-N numbers (e.g. local
+// L1BOAR-7603 maps to real Jira CFITS-8110) -- the mapping lives entirely in
+// the jira_source_key column. importIssueFromJira assumes jiraKey===localKey,
+// which is only true for L2B/L3B; that's why it explicitly refuses L1BOAR.
+async function importCfitsIssue(cfitsKey: string): Promise<string | null> {
+  try {
+    // Keyed by jira_source_key, not by a matching local key -- see above.
+    const already = await pool.query(`SELECT key FROM issues WHERE jira_source_key = $1 LIMIT 1`, [cfitsKey]);
+    if (already.rows[0]) return already.rows[0].key;
+
+    const creds = await getJiraCredentials();
+    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,created,updated,${JIRA_CUSTOM_FIELDS}`;
+    const res = await fetch(`${creds.base}/rest/api/3/issue/${cfitsKey}?fields=${fields}&expand=changelog`, {
+      headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    }).catch(() => null);
+    if (!res || !res.ok) return null;
+    const ji: any = await res.json();
+    const f = ji.fields || {};
+
+    const space = await db.space.findUnique({ where: { key: CFITS_SPACE_KEY }, include: { statuses: true } });
+    if (!space) return null;
+
+    const jiraStatusName: string = f.status?.name || 'Open';
+    const localStatus = space.statuses.find(
+      (s: any) => s.name.toLowerCase() === jiraStatusName.toLowerCase()
+    ) ?? space.statuses[0] ?? null;
+
+    const resolveByDisplayName = async (jiraUser: any): Promise<string | null> => {
+      if (!jiraUser?.displayName) return null;
+      const name = jiraUser.displayName.trim();
+      const parts = name.split(/\s+/);
+      const byFull = await db.user.findFirst({
+        where: { firstName: { equals: parts[0], mode: 'insensitive' },
+                  lastName: { equals: parts.slice(1).join(' '), mode: 'insensitive' } },
+      });
+      if (byFull) return byFull.id;
+      if (jiraUser.emailAddress) {
+        const byEmail = await db.user.findFirst({ where: { email: { equals: jiraUser.emailAddress, mode: 'insensitive' } } });
+        if (byEmail) return byEmail.id;
+      }
+      const byFirst = await db.user.findFirst({ where: { firstName: { equals: parts[0], mode: 'insensitive' } } });
+      return byFirst?.id ?? null;
+    };
+
+    const [assigneeId, reporterId] = await Promise.all([
+      resolveByDisplayName(f.assignee),
+      resolveByDisplayName(f.reporter),
+    ]);
+
+    const localKey = await allocateNextLocalKey(CFITS_LOCAL_PREFIX, space.id);
+
+    const created = await db.issue.create({
+      data: {
+        id: rid(), key: localKey,
+        summary: f.summary || localKey,
+        description: f.description ? (typeof f.description === 'object' ? adfNodeToHtml(f.description) : f.description) : null,
+        type: (f.issuetype?.name || 'task').toLowerCase(),
+        priority: (f.priority?.name || 'medium').toLowerCase(),
+        spaceId: space.id, statusId: localStatus?.id ?? null,
+        assigneeId, reporterId,
+        labels: Array.isArray(f.labels) ? f.labels : [],
+        customerName:   extractJiraValue(f.customfield_10401),
+        clientName:     extractJiraValue(f.customfield_10883),
+        projectManager: extractJiraValue(f.customfield_11380),
+        productType:    extractJiraValue(f.customfield_10203),
+        combination:    extractJiraValue(f.customfield_10236),
+        productionTicket: extractJiraValue(f.customfield_10665),
+        // Real Jira history, not "now" -- see the same note in importIssueFromJira.
+        createdAt: f.created ? new Date(f.created) : undefined,
+        updatedAt: f.updated ? new Date(f.updated) : undefined,
+      },
+    });
+    // current_department and jira_source_key aren't in the Prisma schema
+    // (added via raw migrations) -- set with a plain UPDATE like every other
+    // place in this file that touches them. This UPDATE, not the create
+    // above, is where the "already migrated?" race actually lands: two
+    // concurrent calls for the same cfitsKey both pass the SELECT check at
+    // the top, both create a distinct local issue (different allocated
+    // keys, so that insert never conflicts), and then both try to stamp the
+    // same jira_source_key here -- the unique index added above lets the
+    // second one fail loudly instead of silently duplicating the ticket.
+    try {
+      await pool.query(
+        `UPDATE issues SET current_department = $1, jira_source_key = $2 WHERE id = $3`,
+        [CFITS_DEFAULT_DEPARTMENT, cfitsKey, created.id]
+      );
+    } catch (e: any) {
+      if (e?.code === '23505') {
+        // Lost the race -- another call already migrated this cfitsKey.
+        // Roll back the orphaned issue row this call created and defer to
+        // the winner instead of leaving a duplicate/half-tagged ticket.
+        await db.issue.delete({ where: { id: created.id } }).catch(() => {});
+        const winner = await pool.query(`SELECT key FROM issues WHERE jira_source_key = $1 LIMIT 1`, [cfitsKey]);
+        return winner.rows[0]?.key ?? null;
+      }
+      throw e;
+    }
+
+    const jiraComments: any[] = f.comment?.comments || [];
+    for (const jc of jiraComments) {
+      const commentAuthorId = await resolveByDisplayName(jc.author);
+      const body = typeof jc.body === 'object' ? adfNodeToHtml(jc.body) : (jc.body || '');
+      await db.comment.create({
+        data: {
+          id: rid(), body: body || '(empty)', issueId: created.id,
+          authorId: commentAuthorId,
+          authorName: jc.author?.displayName ?? null,
+          authorEmail: null,
+          createdAt: new Date(jc.created),
+          updatedAt: new Date(jc.updated || jc.created),
+        },
+      });
+    }
+
+    const changelog: any[] = ji.changelog?.histories || [];
+    const histRecs: any[] = [];
+    for (const entry of changelog) {
+      const authorName = entry.author?.displayName ?? null;
+      for (const item of entry.items || []) {
+        histRecs.push({
+          id: rid(), issueId: created.id, field: item.field?.toLowerCase() || '',
+          oldValue: item.fromString ?? null, newValue: item.toString ?? null,
+          authorName, authorEmail: null, createdAt: new Date(entry.created),
+        });
+      }
+    }
+    if (histRecs.length > 0) await db.issueHistory.createMany({ data: histRecs });
+
+    return localKey;
+  } catch (e) {
+    console.error('[importCfitsIssue] error:', e);
+    return null;
+  }
+}
+
+async function ensureAppSettingsTable(): Promise<void> {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`
+  );
+}
+
+// jira_source_key only ever had a plain (non-unique) index. That's fine for
+// L2B/L3B, which dedupe on the real `key` unique constraint instead, but
+// importCfitsIssue dedupes by looking up jira_source_key first -- and this
+// app's dev server has been observed to invoke its own boot sequence more
+// than once concurrently (Next.js re-running instrumentation's register()),
+// plus a sync run can legitimately take longer than the 5-minute interval
+// between periodic ticks. Either case is a real window for two concurrent
+// calls to both see "not migrated yet" for the same CFITS key and each
+// create a separate local ticket for it. A real unique index turns that
+// into a loud, catchable constraint violation instead of a silent
+// duplicate. Confirmed zero existing duplicate jira_source_key values
+// before adding this, so it's safe to create unconditionally.
+async function ensureJiraSourceKeyUniqueIndex(): Promise<void> {
+  await pool.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_jira_source_key_unique ON issues (jira_source_key) WHERE jira_source_key IS NOT NULL`
+  );
+}
+
+// The sync checkpoint is the highest Jira issue-number already pulled in for
+// a project. Deliberately NOT based on "created" timestamp: `ORDER BY
+// created ASC` on this Jira instance returns issues wildly out of key order
+// (e.g. L2B-5112 before L2B-11022) -- almost certainly issues moved into this
+// project from elsewhere that kept their original creation date. A
+// created-timestamp checkpoint would permanently skip any such ticket whose
+// preserved date is older than the checkpoint. Issue *key numbers* are
+// strictly increasing per Jira project regardless of that, so they're the
+// only safe cursor for "have we seen this one yet".
+async function getSyncCheckpoint(prefix: string): Promise<number> {
+  await ensureAppSettingsTable();
+  const row = await pool.query(`SELECT value FROM app_settings WHERE key = $1`, [`jira_sync_last_num_${prefix}`]);
+  if (row.rows[0]) return parseInt(row.rows[0].value, 10) || 0;
+  // No checkpoint yet -- bootstrap from whatever's already the highest local key
+  // for this prefix, so first run only pulls what's genuinely missing.
+  const r = await pool.query(
+    `SELECT key FROM issues WHERE key LIKE $1 ORDER BY (regexp_replace(key, '^.*-', ''))::int DESC LIMIT 1`,
+    [`${prefix}-%`]
+  );
+  return r.rows[0] ? (parseInt(r.rows[0].key.split('-').pop() || '0', 10) || 0) : 0;
+}
+
+async function setSyncCheckpoint(prefix: string, num: number): Promise<void> {
+  await ensureAppSettingsTable();
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [`jira_sync_last_num_${prefix}`, String(num)]
+  );
+}
+
+// Same storage shape as getSyncCheckpoint (reuses setSyncCheckpoint('CFITS', n)
+// to persist), but a different bootstrap query: CFITS has no local key to
+// scan since local L1BOAR numbers don't match Jira CFITS numbers at all (see
+// importCfitsIssue) -- the highest already-migrated CFITS number instead
+// lives in jira_source_key.
+async function getCfitsSyncCheckpoint(): Promise<number> {
+  await ensureAppSettingsTable();
+  const row = await pool.query(`SELECT value FROM app_settings WHERE key = $1`, [`jira_sync_last_num_CFITS`]);
+  if (row.rows[0]) return parseInt(row.rows[0].value, 10) || 0;
+  const r = await pool.query(
+    `SELECT jira_source_key FROM issues WHERE jira_source_key LIKE 'CFITS-%' ORDER BY (regexp_replace(jira_source_key, '^.*-', ''))::int DESC LIMIT 1`
+  );
+  return r.rows[0] ? (parseInt(r.rows[0].jira_source_key.split('-').pop() || '0', 10) || 0) : 0;
+}
+
+// Pulls every Jira issue created after the last-seen key number for each
+// project in SYNC_PROJECTS and imports the ones missing locally, defaulting
+// them into the Dev queue (matching how these boards are actually used --
+// 14900+ of the ~14916 existing local L2B issues are already current_department
+// = 'Dev'). Safe to call repeatedly/concurrently-ish: every issue is
+// existence-checked by its unique key right before import, so nothing is
+// ever duplicated even if a key gets seen again before its checkpoint commits.
+// `maxPerRun` bounds how many issues one call will process -- callers reached
+// over HTTP (with a real timeout) should pass a small number; the in-process
+// scheduler in instrumentation.ts can afford to leave it high since it isn't
+// subject to any request timeout.
+// True while a sync is running, in this process. A single run has taken as
+// long as ~5 minutes (a full backlog under the 500-per-call cap) -- right at
+// the boundary of the periodic 5-minute interval in instrumentation.ts, so a
+// slow run and the next scheduled tick WILL overlap under normal operation,
+// not just as some rare edge case. Confirmed happening: two concurrent
+// importCfitsIssue calls both passed the "not migrated yet" check for the
+// same Jira ticket and both tried to create a local copy, one of them
+// failing on the key collision. This flag makes an overlapping call a no-op
+// instead of a second call actually racing the first.
+let _jiraSyncRunning = false;
+
+export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ imported: string[]; errors: string[] }> {
+  if (_jiraSyncRunning) {
+    return { imported: [], errors: ['sync already in progress in this process, skipped'] };
+  }
+  _jiraSyncRunning = true;
+  try {
+  const imported: string[] = [];
+  const errors: string[] = [];
+  const creds = await getJiraCredentials();
+  for (const { prefix, jiraProject } of SYNC_PROJECTS) {
+    if (imported.length + errors.length >= maxPerRun) break;
+    let checkpoint = await getSyncCheckpoint(prefix);
+    let pageToken: string | undefined;
+    // Fixed for the whole pagination sweep -- a nextPageToken is only valid
+    // against the exact jql it was issued for. Recomputing jql each page
+    // using the (by-then-advanced) `checkpoint` produced a jql that no
+    // longer matched the token from the previous page's response, and Jira
+    // rejected the mismatched pair with a 400 on every page after the first.
+    const jql = encodeURIComponent(`project = ${jiraProject} AND issuekey > ${prefix}-${checkpoint} ORDER BY issuekey ASC`);
+    while (imported.length + errors.length < maxPerRun) {
+      let url = `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=50&fields=summary`;
+      if (pageToken) url += `&nextPageToken=${encodeURIComponent(pageToken)}`;
+      const res = await fetch(url, {
+        headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      }).catch((e) => { errors.push(`${prefix}: search fetch failed: ${e?.message || e}`); return null; });
+      if (!res) break;
+      if (!res.ok) { errors.push(`${prefix}: search HTTP ${res.status}`); break; }
+      const data: any = await res.json().catch(() => null);
+      if (!data) { errors.push(`${prefix}: bad JSON from search`); break; }
+      const keys: string[] = (data.issues || []).map((i: any) => i.key);
+      if (keys.length === 0) break;
+      for (const key of keys) {
+        if (imported.length + errors.length >= maxPerRun) break;
+        try {
+          const existing = await db.issue.findUnique({ where: { key }, select: { id: true } });
+          // Advance the checkpoint on confirmed success only (imported, or
+          // already existed -- e.g. from the on-demand fallback) -- NOT on
+          // failure. A failed import that still advanced the checkpoint
+          // would be permanently skipped, since the next run's JQL only
+          // asks for keys AFTER the checkpoint. Re-scanning a
+          // still-succeeded key next run is safe/cheap: this existence
+          // check just finds it and moves on.
+          let ok = !!existing;
+          if (!existing) {
+            const result = await importIssueFromJira(key, { defaultDepartment: 'Dev' });
+            if (result) { imported.push(key); ok = true; } else { errors.push(`${key}: import returned null`); }
+          }
+          if (ok) {
+            const num = parseInt(key.split('-').pop() || '0', 10);
+            if (num > checkpoint) { checkpoint = num; await setSyncCheckpoint(prefix, checkpoint); }
+          }
+        } catch (e: any) {
+          errors.push(`${key}: ${e?.message || e}`);
+        }
+        // Gentle pacing so a ~1000-issue backlog doesn't hammer Jira Cloud's
+        // rate limits in one burst.
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (data.isLast || !data.nextPageToken) break;
+      pageToken = data.nextPageToken;
+    }
+  }
+
+  // CFITS is handled separately from SYNC_PROJECTS above: its local key
+  // (L1BOAR-N) has no relationship to the Jira key (CFITS-N) -- see
+  // importCfitsIssue/allocateNextLocalKey. Checkpointing and pagination
+  // follow the same shape, just keyed by the Jira issue number instead of a
+  // (nonexistent) matching local key.
+  if (imported.length + errors.length < maxPerRun) {
+    await ensureJiraSourceKeyUniqueIndex();
+    let cfitsCheckpoint = await getCfitsSyncCheckpoint();
+    let cfitsPageToken: string | undefined;
+    const cfitsJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND issuekey > ${CFITS_JIRA_PROJECT}-${cfitsCheckpoint} ORDER BY issuekey ASC`);
+    while (imported.length + errors.length < maxPerRun) {
+      let url = `${creds.base}/rest/api/3/search/jql?jql=${cfitsJql}&maxResults=50&fields=summary`;
+      if (cfitsPageToken) url += `&nextPageToken=${encodeURIComponent(cfitsPageToken)}`;
+      const res = await fetch(url, {
+        headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      }).catch((e) => { errors.push(`CFITS: search fetch failed: ${e?.message || e}`); return null; });
+      if (!res) break;
+      if (!res.ok) { errors.push(`CFITS: search HTTP ${res.status}`); break; }
+      const data: any = await res.json().catch(() => null);
+      if (!data) { errors.push('CFITS: bad JSON from search'); break; }
+      const cfitsKeys: string[] = (data.issues || []).map((i: any) => i.key);
+      if (cfitsKeys.length === 0) break;
+      for (const cfitsKey of cfitsKeys) {
+        if (imported.length + errors.length >= maxPerRun) break;
+        try {
+          const localKey = await importCfitsIssue(cfitsKey);
+          // Same rule as the L2B/L3B loop above: only advance past a key
+          // once it's confirmed migrated (or already was) -- not on failure.
+          if (localKey) {
+            imported.push(`${cfitsKey} -> ${localKey}`);
+            const num = parseInt(cfitsKey.split('-').pop() || '0', 10);
+            if (num > cfitsCheckpoint) { cfitsCheckpoint = num; await setSyncCheckpoint('CFITS', cfitsCheckpoint); }
+          } else {
+            errors.push(`${cfitsKey}: import returned null`);
+          }
+        } catch (e: any) {
+          errors.push(`${cfitsKey}: ${e?.message || e}`);
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (data.isLast || !data.nextPageToken) break;
+      cfitsPageToken = data.nextPageToken;
+    }
+  }
+
+  return { imported, errors };
+  } finally {
+    _jiraSyncRunning = false;
   }
 }
 
@@ -1595,9 +2848,17 @@ export async function runSlaBreachCheck(): Promise<number> {
         const timeToBreachMs = dueAt - now;
         // Warn if breach within 30 min (and not already breached)
         if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
+          // Every issue is shown to users only by its CF-prefixed display key
+          // -- row.key is the internal column. runMonitorAgentScan's own
+          // SLA_BREACH notifications already key off cf_key || key (both for
+          // display AND for this exact dedup lookup); this scanner used the
+          // raw internal key for both, so the two scanners' notification
+          // rows never matched each other and could double-notify the same
+          // breach on top of showing the wrong key.
+          const displayKey = row.cf_key || row.key;
           // Avoid duplicate notifications within 1 hour
           const already = await (db as any).notification.findFirst({
-            where: { issueKey: row.key, type: 'SLA_BREACH',
+            where: { issueKey: displayKey, type: 'SLA_BREACH',
               createdAt: { gte: new Date(now - 60 * 60 * 1000) } },
           });
           if (already) continue;
@@ -1611,9 +2872,9 @@ export async function runSlaBreachCheck(): Promise<number> {
           const minsLeft = Math.ceil(timeToBreachMs / 60_000);
           await notifyUsers(recipients, null, {
             type: 'SLA_BREACH',
-            title: `SLA breaching in ${minsLeft} min: ${row.key}`,
-            message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes. Issue: ${row.summary || row.key}`,
-            issueKey: row.key,
+            title: `SLA breaching in ${minsLeft} min: ${displayKey}`,
+            message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes. Issue: ${row.summary || displayKey}`,
+            issueKey: displayKey,
           });
           // Also send email notification to assignee, shift leads, and managers
           const allEmailUserIds = [row.assigneeId, ...leadIds, ...managerIds].filter(Boolean);
@@ -1626,8 +2887,8 @@ export async function runSlaBreachCheck(): Promise<number> {
           const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
           if (assigneeEmails.length && spaceRow) {
             notifySLABreach({
-              issueKey: row.key,
-              issueSummary: row.summary || row.key,
+              issueKey: displayKey,
+              issueSummary: row.summary || displayKey,
               spaceKey: spaceRow.key,
               spaceName: spaceRow.name,
               slaName: policy.name || 'SLA',
@@ -1655,6 +2916,7 @@ async function _handleJiraPgApi(
     || '0.0.0.0';
   const clientUA = req.headers.get('user-agent') || '';
   const userId = await resolveUserId(auth, clientIp);
+  touchLastSeen(userId);
   const url = new URL(req.url);
   const path = segments.join('/');
 
@@ -1766,7 +3028,21 @@ async function _handleJiraPgApi(
 
   if (path === 'auth/me' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
-    // Dev: skip DB entirely Ã¢â‚¬â€ decode real identity from JWT claims if present
+    // This unconditionally hardcoded role: 'admin' for every user in
+    // development mode (skipping the DB lookup entirely, even when the DB
+    // was working fine and the user existed) -- meant as a fallback for a
+    // genuinely unreachable DB, but ran unconditionally instead. That
+    // silently made every locally-tested account "admin" regardless of its
+    // real role, so any role-gated behavior (space admin, permission
+    // checks, etc.) was impossible to verify locally -- it always looked
+    // like it worked because everyone was secretly an admin. Try the real
+    // DB record first; only fall back to decoding identity from the JWT's
+    // own claims if the DB is genuinely unreachable or the user row is
+    // missing.
+    try {
+      const dbUser = await db.user.findUnique({ where: { id: userId } });
+      if (dbUser) return json(formatUser(dbUser));
+    } catch { /* DB unreachable -- fall through to dev fallback below */ }
     if (process.env.NODE_ENV === 'development') {
       try {
         const jwt = require('jsonwebtoken');
@@ -1785,9 +3061,7 @@ async function _handleJiraPgApi(
         return json({ id: userId, email: 'dev@local', firstName: 'Dev', lastName: 'User', role: 'admin', isActive: true, avatarUrl: null });
       }
     }
-    const user = await db.user.findUnique({ where: { id: userId } });
-    if (!user) return json({ error: 'Unauthorized' }, 401);
-    return json(formatUser(user));
+    return json({ error: 'Unauthorized' }, 401);
   }
 
   // Logout Ã¢â‚¬â€ revoke session in DB
@@ -1854,13 +3128,19 @@ async function _handleJiraPgApi(
   // with a generic "Forbidden" error, no redirect, no message — the page kept
   // rendering from cached client state as if still logged in, while every
   // list on it quietly came back empty with no indication why.
-  if (!userId && !isPublicPath) {
+  // instrumentation.ts's own scheduled background jobs have no user session
+  // to send -- they authenticate with this per-process secret instead (see
+  // internal-job-secret.ts). Scoped to one specific path rather than a
+  // blanket bypass, since anything landing here has no session to audit.
+  const isInternalJob = path === 'jira-issue-sync' && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
+
+  if (!userId && !isPublicPath && !isInternalJob) {
     return json({ error: 'Unauthorized' }, 401);
   }
 
   // Load current user for role checks (cached 60s to avoid a DB round-trip on every request)
   const currentUser = userId ? await getCachedUser(userId) : null;
-  const isAdmin = currentUser?.role === 'admin';
+  const isAdmin = currentUser?.role === 'admin' || isInternalJob;
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Stats Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
@@ -2162,8 +3442,8 @@ async function _handleJiraPgApi(
     const memberDept = body.department ? String(body.department) : null;
     await db.spaceMember.upsert({
       where: { spaceId_userId: { spaceId: sp.id, userId: uid } },
-      create: { spaceId: sp.id, userId: uid, role: String(body.role || 'developer') },
-      update: { role: String(body.role || 'developer') },
+      create: { spaceId: sp.id, userId: uid, role: String(body.role || 'dev') },
+      update: { role: String(body.role || 'dev') },
     });
     if (memberDept !== null) {
       await pool.query(`UPDATE space_members SET department=$1 WHERE "spaceId"=$2 AND "userId"=$3`, [memberDept, sp.id, uid]);
@@ -2299,44 +3579,109 @@ async function _handleJiraPgApi(
       // Join against user_worked_on_tickets (populated on transfer/close/handoff,
       // covering unassigned handoffs too) filtered to the authenticated viewer so
       // each person only sees their own worked-on tickets, not the whole team's.
+      //
+      // That event log is ONLY written by in-app pass/return/close actions though
+      // -- a ticket resolved via the old Jira migration (its status set by a raw
+      // backfill, never through the app's own "close" flow) has no such row, so
+      // it never showed up here even though it's clearly done and clearly this
+      // person's. UNION in a second source: any ticket currently resolved/closed
+      // in this dept that this person currently owns, live off `issues` directly,
+      // no event history required. Dedup by issue id since a ticket can match
+      // both sources.
+      const mergedSourceSql = `
+        SELECT qct.issue_id, qct.closed_at, qct.dept_name
+        FROM queue_closed_tickets qct
+        JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
+        WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $3
+        UNION ALL
+        SELECT i.id AS issue_id, i."updatedAt" AS closed_at, i.current_department AS dept_name
+        FROM issues i
+        LEFT JOIN statuses s ON s.id = i."statusId"
+        WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)
+          AND s.category = 'done'
+          AND COALESCE(i.department_assignee_id, i."assigneeId") = $3
+      `;
       const rows = await pool.query(
-        `SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
-                i."createdAt", i."updatedAt", qct.closed_at, qct.dept_name,
+        `WITH merged AS (${mergedSourceSql}),
+         dedup AS (SELECT issue_id, MAX(closed_at) AS closed_at, MAX(dept_name) AS dept_name FROM merged GROUP BY issue_id)
+         SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
+                i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at, i.jira_sla_breached,
+                d.closed_at, d.dept_name,
                 s.name AS status_name, s.color AS status_color, s.category AS status_category,
-                i.dept_sla_log, i.dept_assignees,
+                i.dept_sla_log, i.dept_assignees, i.dept_statuses,
                 CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
                 a.id AS assignee_id
-         FROM queue_closed_tickets qct
-         JOIN issues i ON i.id = qct.issue_id
-         JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
+         FROM dedup d
+         JOIN issues i ON i.id = d.issue_id
          LEFT JOIN statuses s ON i."statusId" = s.id
          LEFT JOIN users a ON i."assigneeId" = a.id
-         WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $5
-         ORDER BY COALESCE(i."updatedAt", qct.closed_at) DESC LIMIT $3 OFFSET $4`,
-        [spaceId, dept, limit, (page - 1) * limit, targetUserId]
+         ORDER BY COALESCE(i."updatedAt", d.closed_at) DESC LIMIT $4 OFFSET $5`,
+        [spaceId, dept, targetUserId, limit, (page - 1) * limit]
       );
       const countRes = await pool.query(
-        `SELECT COUNT(DISTINCT qct.issue_id) FROM queue_closed_tickets qct
-         JOIN issues i ON i.id = qct.issue_id
-         JOIN user_worked_on_tickets w ON w.issue_id = qct.issue_id AND LOWER(w.dept) = LOWER(qct.dept_name)
-         WHERE qct.space_id = $1 AND LOWER(qct.dept_name) = LOWER($2) AND w.user_id = $3`,
+        `WITH merged AS (${mergedSourceSql}) SELECT COUNT(DISTINCT issue_id) FROM merged`,
         [spaceId, dept, targetUserId]
       );
+      // "Breached" on this list was always showing "No" for every ticket --
+      // the response never included any breach field at all, so the
+      // frontend's `issue.sla_breached ? 'Yes' : 'No'` check was reading
+      // `undefined` every time. Compute it the same way the resolution-sla
+      // report and Team Analytics do: live via computeSLAInstancesPure when
+      // there's a real resolvedAt and a matching policy (using THIS dept's
+      // own snapshot, not the ticket's current global department, since
+      // "Worked on — Dev" should judge breach from Dev's own perspective
+      // even after the ticket has since moved elsewhere), falling back to
+      // the historical jira_sla_breached flag otherwise.
+      const slaPoliciesRes = await pool.query(
+        `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
+        [spaceId]
+      );
+      const slaPolicies = slaPoliciesRes.rows;
       // "Worked on — Dev" showed the ticket's CURRENT global assignee, which is
       // whoever holds it now (possibly in a different dept after further
       // transfers) — not who was actually assigned while it sat in THIS dept.
       // A ticket someone worked in Dev before it moved on and got reassigned
       // elsewhere showed the new owner's name here instead of theirs. Prefer
       // the per-dept snapshot taken when the ticket left this dept.
+      //
+      // The exact same problem applied to status_name/color/category, just
+      // never fixed alongside it: they came straight from the LIVE statuses
+      // join on the ticket's current global statusId. Resolving a ticket in
+      // Dev, then handing it back to Migration (which restores Migration's
+      // own prior status, e.g. "In Progress" per computeSLAInstancesPure's
+      // dept-handoff rules) changed what this supposedly-historical "Worked
+      // on — Dev" row showed, even though Dev's own record of it never
+      // stopped being "Resolved". Prefer the per-dept status snapshot the
+      // same way, so this list reflects what Dev actually did, not whatever
+      // the ticket's global status happens to read right now.
       const issues = rows.rows.map((r: any) => {
         const deptAssignees: Record<string, any> = r.dept_assignees || {};
         const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
         const snap = snapKey ? deptAssignees[snapKey] : null;
-        const { dept_assignees, ...rest } = r;
-        if (snap && snap.id) {
-          return { ...rest, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
+        const deptStatuses: Record<string, any> = r.dept_statuses || {};
+        const statusSnapKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
+        const statusSnap = statusSnapKey ? deptStatuses[statusSnapKey] : null;
+        const { dept_assignees, dept_statuses, ...rest } = r;
+        const withStatus = statusSnap
+          ? { ...rest, status_name: statusSnap.name, status_color: statusSnap.color, status_category: statusSnap.category }
+          : rest;
+
+        let slaBreached = false;
+        if (r.resolvedAt) {
+          const instances = computeSLAInstancesPure(
+            { ...withStatus, current_department: r.dept_name, status: { name: withStatus.status_name, category: withStatus.status_category } },
+            slaPolicies,
+            false
+          );
+          slaBreached = instances.length ? instances.some((x: any) => x.isBreached) : (typeof r.jira_sla_breached === 'boolean' && r.jira_sla_breached);
+        } else if (typeof r.jira_sla_breached === 'boolean') {
+          slaBreached = r.jira_sla_breached;
         }
-        return rest;
+
+        if (snap && snap.id) {
+          return { ...withStatus, sla_breached: slaBreached, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
+        }
+        return { ...withStatus, sla_breached: slaBreached };
       });
       return json({ issues, total: parseInt(countRes.rows[0].count) });
     } catch (e: any) {
@@ -2393,10 +3738,19 @@ async function _handleJiraPgApi(
         if (row.jira_sla_breached || dueBreach) slaBreachedCount++;
       }
 
-      // Per-user breakdown -- every member of this queue, how many tickets
-      // they worked in it (from user_worked_on_tickets, same source the
-      // "Worked on" tab already uses) within the selected range, and how
-      // many of those are breached by the same rule as above.
+      // Per-user breakdown -- every member of this queue. Two different
+      // things, both needed:
+      //  - ticketsWorked/slaBreached (range-aware, from user_worked_on_tickets)
+      //    is throughput: how many tickets they passed/returned/closed in the
+      //    selected window. That table is ONLY written on those three events
+      //    -- never just because a ticket is sitting open/in-progress with
+      //      someone -- so a ticket nobody has transitioned yet (including an
+      //      old one from before this window) never shows up here, at ANY
+      //      range, even "All time". That silently hid exactly the tickets
+      //      people most need visibility into: their current backlog.
+      //  - current{Total,Open,InProgress,Waiting,SlaBreached} below fixes that
+      //    by reading live ticket ownership straight off `issues` (never
+      //    date-filtered -- it's "right now", not a historical window).
       let memberIds: string[] = [];
       try {
         const queueRows = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKeyParam]);
@@ -2407,6 +3761,7 @@ async function _handleJiraPgApi(
       } catch { /* no custom queue config */ }
 
       let perUser: any[] = [];
+      let perUserByProduct: Record<string, any[]> = {};
       if (memberIds.length) {
         const workedRes = await pool.query(
           `SELECT w.user_id, i.id AS issue_id, i.jira_sla_breached, i."dueDate", s.category AS status_category,
@@ -2443,10 +3798,68 @@ async function _handleJiraPgApi(
             byUser[uid] = { userId: uid, firstName: u.rows[0].firstName, lastName: u.rows[0].lastName, email: u.rows[0].email, avatarUrl: avatarRef(uid, u.rows[0].avatarUrl), ticketIds: new Set(), slaBreachedIds: new Set() };
           }
         }
-        perUser = Object.values(byUser).map((u: any) => ({
-          userId: u.userId, firstName: u.firstName, lastName: u.lastName, email: u.email, avatarUrl: u.avatarUrl,
-          ticketsWorked: u.ticketIds.size, slaBreached: u.slaBreachedIds.size,
-        })).sort((a: any, b: any) => b.ticketsWorked - a.ticketsWorked);
+
+        // Live current-state counts, keyed by the ticket's dept-scoped owner
+        // (falls back to the general assignee when a dept-specific one isn't
+        // set) -- deliberately NOT range-filtered, so an old ticket someone
+        // is still sitting on always counts.
+        const currentRes = await pool.query(
+          `SELECT i.department_assignee_id, i."assigneeId", i."dueDate", i.jira_sla_breached, i."productType",
+                  s.name AS status_name, s.category AS status_category
+           FROM issues i
+           LEFT JOIN statuses s ON s.id = i."statusId"
+           WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)`,
+          [spaceId, dept]
+        );
+        const isWaitingCat = (name: string) => /wait|hold/i.test(name || '');
+        const currentByUser: Record<string, { total: number; open: number; inProgress: number; waiting: number; done: number; slaBreached: number }> = {};
+        // Same current-ticket-load breakdown as currentByUser above, but split
+        // by productType -- Jira runs Content/Message/Email migration as
+        // separate boards with their own dashboards, so "who's carrying the
+        // load" needs its own answer per product line, not just one number
+        // that blends all three together.
+        const PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+        const currentByUserByProduct: Record<string, Record<string, { total: number; done: number }>> = {};
+        for (const r of currentRes.rows) {
+          const owner: string | null = r.department_assignee_id || r.assigneeId;
+          if (!owner || !memberIds.includes(owner)) continue;
+          const bucket = (currentByUser[owner] ??= { total: 0, open: 0, inProgress: 0, waiting: 0, done: 0, slaBreached: 0 });
+          const waiting = isWaitingCat(r.status_name);
+          const isDone = r.status_category === 'done';
+          bucket.total++;
+          if (isDone) bucket.done++;
+          else if (waiting) bucket.waiting++;
+          else if (r.status_category === 'in_progress') bucket.inProgress++;
+          else bucket.open++;
+          const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
+          if (!isDone && (r.jira_sla_breached || dueBreach)) bucket.slaBreached++;
+
+          if (r.productType && PRODUCT_TYPES.includes(r.productType)) {
+            const ptBucket = ((currentByUserByProduct[r.productType] ??= {})[owner] ??= { total: 0, done: 0 });
+            ptBucket.total++;
+            if (isDone) ptBucket.done++;
+          }
+        }
+
+        perUser = Object.values(byUser).map((u: any) => {
+          const cur = currentByUser[u.userId] || { total: 0, open: 0, inProgress: 0, waiting: 0, done: 0, slaBreached: 0 };
+          return {
+            userId: u.userId, firstName: u.firstName, lastName: u.lastName, email: u.email, avatarUrl: u.avatarUrl,
+            ticketsWorked: u.ticketIds.size, slaBreachedInRange: u.slaBreachedIds.size,
+            currentTotal: cur.total, currentOpen: cur.open, currentInProgress: cur.inProgress, currentWaiting: cur.waiting,
+            currentDone: cur.done, slaBreached: cur.slaBreached,
+          };
+        }).sort((a: any, b: any) => b.currentTotal - a.currentTotal);
+
+        perUserByProduct = Object.fromEntries(PRODUCT_TYPES.map((pt) => {
+          const bucket = currentByUserByProduct[pt] || {};
+          const rows = memberIds.map((uid) => {
+            const u = byUser[uid];
+            const b = bucket[uid] || { total: 0, done: 0 };
+            return { userId: uid, firstName: u?.firstName, lastName: u?.lastName, email: u?.email, currentTotal: b.total, currentDone: b.done };
+          }).sort((a, b) => b.currentTotal - a.currentTotal);
+          return [pt, rows];
+        }));
       }
 
       return json({
@@ -2456,6 +3869,7 @@ async function _handleJiraPgApi(
         statusBreakdown: Object.entries(statusMap).map(([name, v]) => ({ name, ...v })),
         priorityBreakdown: Object.entries(priorityMap).map(([priority, count]) => ({ priority, count })),
         perUser,
+        perUserByProduct,
       });
     } catch (e: any) {
       console.error('[dept-queue summary ERROR]', e?.message || e);
@@ -2491,9 +3905,28 @@ async function _handleJiraPgApi(
       : rawSearchQ;
     const createdRange  = url.searchParams.get('createdRange');
     const updatedRange  = url.searchParams.get('updatedRange');
+    // "Worked" -- backed by user_worked_on_tickets (see loadTeamAnalyticsScope's
+    // 'worked' dateType for the same table/reasoning) -- only meaningful
+    // together with a dept filter, since that table's dept column is what
+    // scopes it; only applied in the dept-scoped branch below.
+    const workedRange   = url.searchParams.get('workedRange');
+    // Opt-in: attaches inProgressHrs (hours actually spent in an "In
+    // Progress"-type status, not total ticket age) to every returned issue --
+    // requires an extra issue_history query, so only paid by callers that
+    // actually render it (the Filters page's "Time Spent" column).
+    const includeTimeSpentParam = url.searchParams.get('includeTimeSpent') === 'true';
     const excludeDone   = url.searchParams.get('excludeDone') === 'true';
     const page  = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
     const limit = Math.min(2000, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10)));
+    // SLA breach isn't a real SQL column -- it's computed live, per issue,
+    // much further below. Read this early so the fetches below can skip
+    // their own DB-level pagination when it's set: filtering AFTER an
+    // already-paginated page only ever filtered whatever 50 rows happened
+    // to be fetched, and reported that filtered subset's own size as if it
+    // were the true total across the whole matching set.
+    const slaBreachedParamEarly = url.searchParams.get('slaBreached');
+    const needsSlaPrefilter = slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no';
+    const SLA_PREFILTER_CAP = 5000;
 
     // Bulk fetch by specific keys (for Viewed tab Ã¢â‚¬â€ single request instead of N calls)
     const keysParam = url.searchParams.get('keys');
@@ -2677,21 +4110,39 @@ async function _handleJiraPgApi(
     let issues: any[] = [];
     let deptMap: Record<string, any> = {};
     if (!deptParamEarly) {
-      [total, issues] = await Promise.all([
-        db.issue.count({ where: where as any }),
-        db.issue.findMany({
+      if (needsSlaPrefilter) {
+        // Can't paginate at the DB level on a field that isn't a real column --
+        // fetch a bounded candidate set instead; the SLA-breach block further
+        // below filters it fully, and pagination happens in JS after that.
+        issues = await db.issue.findMany({
           where: where as any,
           include: {
             status: true,
             assignee: true,
             reporter: true,
             space: { select: { key: true, name: true } },
-            },
+          },
           orderBy: { createdAt: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
-        }),
-      ]);
+          take: SLA_PREFILTER_CAP,
+        });
+        total = issues.length; // placeholder -- corrected after breach filtering below
+      } else {
+        [total, issues] = await Promise.all([
+          db.issue.count({ where: where as any }),
+          db.issue.findMany({
+            where: where as any,
+            include: {
+              status: true,
+              assignee: true,
+              reporter: true,
+              space: { select: { key: true, name: true } },
+              },
+            orderBy: { createdAt: 'desc' },
+            skip: (page - 1) * limit,
+            take: limit,
+          }),
+        ]);
+      }
 
       try {
         const issueKeys = issues.map((i: any) => i.key);
@@ -2873,8 +4324,10 @@ async function _handleJiraPgApi(
             const countRow = await pool.query(
               `SELECT COUNT(DISTINCT i.id)::int AS cnt
                FROM issues i
+               LEFT JOIN statuses s ON i."statusId" = s.id
                WHERE i."spaceId" = ANY($1::text[])
                  AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
+                 AND (s.category IS NULL OR s.category != 'done')
                  AND ${sentExistsClause}
                ${sentExtraSql}`,
               countParams
@@ -2901,6 +4354,7 @@ async function _handleJiraPgApi(
              LEFT JOIN users r ON i."reporterId" = r.id
              WHERE i."spaceId" = ANY($1::text[])
                AND LOWER(COALESCE(i.current_department, '')) != LOWER($2)
+               AND (s.category IS NULL OR s.category != 'done')
                AND ${sentExistsClause}
              ${sentExtraSql}
              ORDER BY i.id, i."updatedAt" DESC, i."createdAt" DESC
@@ -3050,6 +4504,25 @@ async function _handleJiraPgApi(
       const deptExtraClauses: string[] = [];
       const deptExtraParams: any[] = [];
       let deptParamIdx = deptSearchParam ? 4 : 3;
+      // "Queue" filter on the main /filters page (opt-in via queueMembersOnly) --
+      // restricts to tickets whose assignee is an actual configured member of
+      // this department's queue, instead of every ticket merely labeled with
+      // the department. Scoped to this one caller via the flag rather than
+      // folded into deptDeptMatchSql for every caller, since this same branch
+      // also powers the department queue board pages (All Tickets/Unassigned/
+      // Assigned to me), where "All Tickets" is expected to mean literally
+      // every ticket in the department, not just its configured members.
+      const queueMembersOnlyParam = url.searchParams.get('queueMembersOnly') === 'true';
+      if (queueMembersOnlyParam && !workedRange) {
+        try {
+          const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
+          const queues: any[] = cq.rows[0]?.queues || [];
+          const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
+          const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+          deptExtraClauses.push(memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0');
+          if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
+        } catch { /* ignore -- no restriction if lookup fails */ }
+      }
       // When includeHistoryParam is set, the assignee match is folded into
       // deptDeptMatchSql below (current dept OR ever-worked-on-in-this-dept)
       // instead of a plain required AND clause here — a moved-on ticket's
@@ -3146,12 +4619,49 @@ async function _handleJiraPgApi(
       }
       const deptExtraSql = deptExtraClauses.map((c) => `AND ${c}`).join('\n');
 
+      // "Worked" range (see workedRange declaration above) -- built here, after
+      // deptExtraClauses' own params are finalized, so its parameter indices
+      // don't collide with theirs.
+      let workedRangeSql = '';
+      if (workedRange) {
+        const { from: workedFrom, to: workedTo } = parseDateRange(workedRange);
+        const workedFromIdx = deptParamIdx++;
+        const workedToIdx = deptParamIdx++;
+        deptExtraParams.push(workedFrom, workedTo);
+        workedRangeSql = ` AND w.worked_at >= $${workedFromIdx} AND w.worked_at <= $${workedToIdx}`;
+        // Only count work by someone who currently has access to this queue --
+        // e.g. selecting "Dev" shouldn't credit a ticket to Dev's worked-count
+        // just because SOME person touched it while it briefly carried that
+        // department label; it must have been a real Dev-access person who
+        // did the work. Same "no config = no restriction" rule as
+        // queueMembersOnly above -- a department with no queue config at all
+        // imposes no restriction here either.
+        try {
+          const cqW = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
+          const queuesW: any[] = cqW.rows[0]?.queues || [];
+          const qW = queuesW.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
+          const memberIdsW: string[] = Array.isArray(qW?.memberIds) ? qW.memberIds : [];
+          if (memberIdsW.length) {
+            const memberIdx = deptParamIdx++;
+            deptExtraParams.push(memberIdsW);
+            workedRangeSql += ` AND w.user_id = ANY($${memberIdx}::text[])`;
+          }
+        } catch { /* ignore -- no restriction if lookup fails */ }
+      }
+
       const deptDoneClause = deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : '';
       // Plain case: ticket must currently be in this dept (and, if requested,
       // currently open). History case: ALSO match if this user has ever been
       // credited with working this ticket while it was in this dept — covers
       // it having since been resolved or handed to another department.
-      const deptDeptMatchSql = historyAssigneeIdx
+      // Worked case (opt-in via workedRange, e.g. the Filters page's "Queue"
+      // + a "Worked" date filter): takes over the dept-match entirely, backed
+      // by user_worked_on_tickets -- a ticket worked while sitting in this
+      // dept counts for it even if it has since moved to another queue,
+      // matching Team Analytics' 'worked' dateType semantic.
+      const deptDeptMatchSql = workedRange
+        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})`
+        : historyAssigneeIdx
         ? `(
             (LOWER(i.current_department) = LOWER($2) AND i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) ${deptDoneClause})
             OR EXISTS (
@@ -3161,22 +4671,26 @@ async function _handleJiraPgApi(
           )`
         : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
 
-      try {
-        const countParams: any[] = [allSpaceIds, deptParam];
-        if (deptSearchParam) countParams.push(deptSearchParam);
-        countParams.push(...deptExtraParams);
-        const countRow = await pool.query(
-          `SELECT COUNT(*)::int AS cnt
-           FROM issues i
-           LEFT JOIN statuses s ON i."statusId" = s.id
-           WHERE i."spaceId" = ANY($1::text[])
-             AND ${deptDeptMatchSql}
-           ${deptSearchClause}
-           ${deptExtraSql}`,
-          countParams
-        );
-        deptTotal = countRow.rows[0]?.cnt ?? 0;
-      } catch (err) { console.error('[dept count query failed]', err); deptTotal = 0; }
+      if (needsSlaPrefilter) {
+        deptTotal = 0; // placeholder -- corrected after breach filtering below
+      } else {
+        try {
+          const countParams: any[] = [allSpaceIds, deptParam];
+          if (deptSearchParam) countParams.push(deptSearchParam);
+          countParams.push(...deptExtraParams);
+          const countRow = await pool.query(
+            `SELECT COUNT(*)::int AS cnt
+             FROM issues i
+             LEFT JOIN statuses s ON i."statusId" = s.id
+             WHERE i."spaceId" = ANY($1::text[])
+               AND ${deptDeptMatchSql}
+             ${deptSearchClause}
+             ${deptExtraSql}`,
+            countParams
+          );
+          deptTotal = countRow.rows[0]?.cnt ?? 0;
+        } catch (err) { console.error('[dept count query failed]', err); deptTotal = 0; }
+      }
 
       try {
         const rowParams: any[] = [allSpaceIds, deptParam];
@@ -3184,7 +4698,11 @@ async function _handleJiraPgApi(
         rowParams.push(...deptExtraParams);
         const limitIdx = rowParams.length + 1;
         const offsetIdx = rowParams.length + 2;
-        rowParams.push(limit, (page - 1) * limit);
+        // Same "can't paginate a non-SQL field" reasoning as the non-dept
+        // branch above -- fetch a bounded candidate set instead of the real
+        // page when an SLA-breach filter is active, and let the shared
+        // filtering block further below paginate the actually-filtered result.
+        rowParams.push(needsSlaPrefilter ? SLA_PREFILTER_CAP : limit, needsSlaPrefilter ? 0 : (page - 1) * limit);
         // Sorting by updatedAt made an old ticket jump to page 1 the moment anyone
         // so much as commented on it, potentially bumping a genuinely new ticket
         // off the page -- pagination should be a stable "50 newest by creation
@@ -3315,9 +4833,34 @@ async function _handleJiraPgApi(
       });
       if (slaBreachedParam === 'yes' || slaBreachedParam === 'no') {
         enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParam === 'yes' ? i.sla_breached : !i.sla_breached);
+        // Now the TRUE total across the full (up to SLA_PREFILTER_CAP)
+        // candidate set fetched above, not just whatever page would have
+        // been fetched under normal DB-level pagination. Slice to the
+        // requested page here, since pagination couldn't happen at the DB
+        // level on a field that isn't a real column.
         deptTotal = enrichedIssues.length;
+        const sliceStart = (page - 1) * limit;
+        enrichedIssues = enrichedIssues.slice(sliceStart, sliceStart + limit);
       }
     } catch { /* sla breach is best-effort */ }
+
+    if (includeTimeSpentParam && enrichedIssues.length) {
+      try {
+        const histIds = enrichedIssues.map((i: any) => i.id);
+        const histRows = await pool.query(
+          `SELECT "issueId", "oldValue", "newValue", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'status' ORDER BY "issueId", "createdAt" ASC`,
+          [histIds]
+        );
+        const histByIssue: Record<string, any[]> = {};
+        for (const h of histRows.rows) (histByIssue[h.issueId] ??= []).push(h);
+        enrichedIssues = enrichedIssues.map((i: any) => {
+          const statusHist = histByIssue[i.id] || [];
+          const isDone = i.status?.category === 'done';
+          const { inProgressHrs, noHistory } = computeInProgressHours(statusHist, i.createdAt, isDone, i.resolvedAt, i.status?.name || null);
+          return { ...i, inProgressHrs, noHistory };
+        });
+      } catch { /* time-spent is best-effort -- never block the list on it */ }
+    }
 
     return json({
       issues: enrichedIssues,
@@ -3473,6 +5016,7 @@ async function _handleJiraPgApi(
         ...(body.customerName !== undefined && { customerName: body.customerName ? String(body.customerName) : null }),
         ...(body.clientName !== undefined && { clientName: body.clientName ? String(body.clientName) : null }),
         ...(body.projectManager !== undefined && { projectManager: body.projectManager ? String(body.projectManager) : null }),
+        ...(body.productionTicket !== undefined && { productionTicket: body.productionTicket ? String(body.productionTicket) : null }),
       },
       include: {
         status: true,
@@ -3563,6 +5107,7 @@ async function _handleJiraPgApi(
 
     // If ticket has no assignee, email leads + shift leads so they can pick it up
     const issueDept = (issue as any).current_department || null;
+    const displayKey = (issue as any).cf_key || issue.key;
     if (!issue.assigneeId) {
       try {
         const { notifyUnassignedTicket } = await import('@/lib/notification-service');
@@ -3571,7 +5116,7 @@ async function _handleJiraPgApi(
           const leadUsers = await db.user.findMany({ where: { id: { in: leadIds } }, select: { email: true } });
           const leadEmails = leadUsers.map((u: any) => u.email).filter(Boolean);
           notifyUnassignedTicket({
-            issueKey: issue.key,
+            issueKey: displayKey,
             issueSummary: issue.summary,
             spaceKey: issue.space?.key ?? sk,
             spaceName: issue.space?.name ?? sk,
@@ -3588,7 +5133,7 @@ async function _handleJiraPgApi(
     await notifyUsers(
       [issue.assigneeId, ...createdLeadIds],
       issue.reporterId,
-      { type: 'CREATED', title: `New issue: ${issue.key}`, message: issue.summary, issueKey: issue.key }
+      { type: 'CREATED', title: `New issue: ${displayKey}`, message: issue.summary, issueKey: displayKey }
     );
 
     // Recurring issue detection: notify if this issue was previously resolved
@@ -3724,14 +5269,14 @@ async function _handleJiraPgApi(
       }
       const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
       if (oldDept && issue.assignee) {
-        deptAssignees[oldDept] = {
+        deptMapSet(deptAssignees, oldDept, {
           id: issue.assignee.id,
           email: (issue.assignee as any).email,
           firstName: (issue.assignee as any).firstName,
           lastName: (issue.assignee as any).lastName,
           displayName: `${(issue.assignee as any).firstName} ${(issue.assignee as any).lastName}`.trim(),
           avatarUrl: avatarRef(issue.assignee.id, (issue.assignee as any).avatarUrl),
-        };
+        });
       }
       // Deliberately NOT resetting deptAssignees[newDept] here. It already
       // holds whatever was saved from the LAST time this ticket was in
@@ -3748,7 +5293,7 @@ async function _handleJiraPgApi(
       const existingStatuses = await pool.query(`SELECT dept_statuses FROM issues WHERE key=$1`, [key]);
       const deptStatuses: Record<string, any> = existingStatuses.rows[0]?.dept_statuses || {};
       // Returning ticket (dept visited before) => In Progress; first arrival => Waiting for newDept
-      const isReturningToDept = deptStatuses[newDept] != null;
+      const isReturningToDept = deptMapGet(deptStatuses, newDept) != null;
 
       let newDeptQueueStatuses: any[] = [];
       try {
@@ -3760,13 +5305,23 @@ async function _handleJiraPgApi(
         }
       } catch {}
 
+      // Every department tracks its own status independently -- a status like
+      // Resolved belongs to whichever dept actually resolved it, not to a dept
+      // that's only now receiving the ticket. But a dept this ticket has
+      // ALREADY visited is different: that dept has its own dept_statuses
+      // snapshot of what the ticket looked like on ITS side right before it
+      // left (e.g. Migration's "In Progress" before handing off to Dev) --
+      // restore THAT instead of guessing.
+      const restoringOwnSnapshot = isDoneNow && deptMapGet(deptStatuses, newDept) != null;
+
       let newDeptStatusObj: any;
-      if (isDoneNow) {
-        // Already Resolved/Closed -- being routed on for review or final
-        // closure isn't "new work arriving," so don't reopen it by resetting
-        // to Open/In-Progress. Same done status carries straight through.
-        newDeptStatusObj = oldDeptStatusObj;
-      } else if (isReturningToDept) {
+      if (restoringOwnSnapshot) {
+        newDeptStatusObj = deptMapGet(deptStatuses, newDept);
+      } else if (isDoneNow || isReturningToDept) {
+        // A dept the ticket already visited (isReturningToDept) means work
+        // resumes there. A done ticket landing somewhere new (isDoneNow, not
+        // restoring) means that dept needs to actually start working it --
+        // neither should show as untouched, so both get "In Progress".
         const inProgressSt = newDeptQueueStatuses.find((s: any) => s.category === 'in_progress')
           || newDeptQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'))
           || newDeptQueueStatuses.find((s: any) => s.category === 'todo')
@@ -3789,9 +5344,7 @@ async function _handleJiraPgApi(
       // something invalid or defaulting to a status that doesn't match what
       // dept_statuses now shows.
       let newStatusId = issue.statusId;
-      if (isDoneNow) {
-        newStatusId = issue.statusId;
-      } else {
+      {
         const realMatch = await db.status.findFirst({
           where: { spaceId: issue.spaceId, name: { equals: newDeptStatusObj.name, mode: 'insensitive' } },
           orderBy: { order: 'asc' },
@@ -3803,16 +5356,16 @@ async function _handleJiraPgApi(
       // not the "Waiting for <newDept>" transit marker, which discarded that info
       // (Sent/Watching needs to show what it was actually at before leaving).
       if (oldDept) {
-        deptStatuses[oldDept] = issue.status
+        deptMapSet(deptStatuses, oldDept, issue.status
           ? { id: issue.status.id, name: issue.status.name, category: issue.status.category, color: issue.status.color }
-          : oldDeptStatusObj;
+          : oldDeptStatusObj);
       }
-      deptStatuses[newDept] = newDeptStatusObj;
+      deptMapSet(deptStatuses, newDept, newDeptStatusObj);
 
       // Restore previously saved assignee for this dept, or round-robin to a new one
       let rrAssigneeId: string | null = null;
       let rrAgentName: string | null = null;
-      const savedAssigneeForNewDept = deptAssignees[newDept];
+      const savedAssigneeForNewDept = deptMapGet(deptAssignees, newDept);
       // dept_assignees is a point-in-time snapshot that can outlive the user it
       // points to -- if that account was since deleted (a real hard delete via
       // Settings > User Management, e.g. an offboarded employee), restoring it
@@ -3826,7 +5379,7 @@ async function _handleJiraPgApi(
       if (savedAssigneeForNewDept?.id) {
         const stillExists = await pool.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [savedAssigneeForNewDept.id]);
         savedAssigneeStillExists = stillExists.rows.length > 0;
-        if (!savedAssigneeStillExists) delete deptAssignees[newDept];
+        if (!savedAssigneeStillExists) deptMapDelete(deptAssignees, newDept);
       }
       if (savedAssigneeForNewDept?.id && savedAssigneeStillExists) {
         // Dept was visited before -- restore the saved assignee
@@ -3838,7 +5391,7 @@ async function _handleJiraPgApi(
           if (rrAgent) {
             rrAssigneeId = rrAgent.userId;
             rrAgentName = rrAgent.name;
-            deptAssignees[newDept] = { id: rrAgent.userId, displayName: rrAgent.name };
+            deptMapSet(deptAssignees, newDept, { id: rrAgent.userId, displayName: rrAgent.name });
           }
         } catch { /* non-critical */ }
       }
@@ -3883,7 +5436,7 @@ async function _handleJiraPgApi(
           ).catch(() => {});
         }
         // When ticket returns to Dev (or any dept that has a saved assignee), also record worked-on for that dept
-        const devAssignee = deptAssignees[newDept];
+        const devAssignee = deptMapGet(deptAssignees, newDept);
         if (devAssignee?.id) {
           pool.query(
             `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'returned') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='returned', worked_at=NOW()`,
@@ -3901,12 +5454,16 @@ async function _handleJiraPgApi(
       // that to the user who just moved it.
       (async () => {
         try {
+          // Every ticket is shown to users only by its CF-prefixed display
+          // key -- `key` here is the internal column, never shown anywhere
+          // else in the app.
+          const displayKey = (issue as any).cf_key || key;
           // Notify reporter that ticket was sent to new dept
           if (issue.reporterId) {
             await notifyUsers(
               [issue.reporterId],
               userId,
-              { type: 'DEPT_CHANGE', title: `Ticket ${key} sent to ${newDept}`, message: `Your ticket "${issue.summary}" has been transferred to ${newDept}.`, issueKey: key }
+              { type: 'DEPT_CHANGE', title: `Ticket ${displayKey} sent to ${newDept}`, message: `Your ticket "${issue.summary}" has been transferred to ${newDept}.`, issueKey: displayKey }
             );
           }
           // Notify the RR-assigned agent
@@ -3914,7 +5471,7 @@ async function _handleJiraPgApi(
             await notifyUsers(
               [rrAssigneeId],
               userId,
-              { type: 'ASSIGNED', title: `Ticket assigned to you: ${key}`, message: `You have been assigned to "${issue.summary}" in the ${newDept} queue.`, issueKey: key }
+              { type: 'ASSIGNED', title: `Ticket assigned to you: ${displayKey}`, message: `You have been assigned to "${issue.summary}" in the ${newDept} queue.`, issueKey: displayKey }
             );
           }
           // Notify space members of the target dept (agents + leads/shift_leads in that dept)
@@ -3933,7 +5490,7 @@ async function _handleJiraPgApi(
             await notifyUsers(
               allDeptIds,
               userId,
-              { type: 'DEPT_ASSIGNED', title: `New ticket in ${newDept}: ${key}`, message: `Ticket "${issue.summary}" has arrived in the ${newDept} queue.`, issueKey: key }
+              { type: 'DEPT_ASSIGNED', title: `New ticket in ${newDept}: ${displayKey}`, message: `Ticket "${issue.summary}" has arrived in the ${newDept} queue.`, issueKey: displayKey }
             );
           }
           // SLA pause/resume — distinct from the DEPT_CHANGE/ASSIGNED notices
@@ -3945,14 +5502,14 @@ async function _handleJiraPgApi(
             await notifyUsers(
               [issue.assignee.id],
               userId,
-              { type: 'SLA_PAUSED', title: `SLA paused for ${key}`, message: `Ticket "${issue.summary}" moved out of ${oldDept} — its SLA clock has been paused.`, issueKey: key }
+              { type: 'SLA_PAUSED', title: `SLA paused for ${displayKey}`, message: `Ticket "${issue.summary}" moved out of ${oldDept} — its SLA clock has been paused.`, issueKey: displayKey }
             );
           }
           if (rrAssigneeId) {
             await notifyUsers(
               [rrAssigneeId],
               userId,
-              { type: 'SLA_RESUMED', title: `SLA running for ${key}`, message: `Ticket "${issue.summary}" has arrived in ${newDept} — its SLA clock is now running.`, issueKey: key }
+              { type: 'SLA_RESUMED', title: `SLA running for ${displayKey}`, message: `Ticket "${issue.summary}" has arrived in ${newDept} — its SLA clock is now running.`, issueKey: displayKey }
             );
           }
         } catch { /* ignore notification errors */ }
@@ -3972,6 +5529,42 @@ async function _handleJiraPgApi(
             authorName: authorName2, createdAt: new Date(),
           },
         });
+        // The same UPDATE above also changes statusId whenever the arriving
+        // dept's status differs from what the ticket had leaving the old one
+        // (restoring newDept's own snapshot, carrying a done status through,
+        // or defaulting to Open/In Progress) -- previously only the
+        // department field got a history row, so a ticket resolved in QA and
+        // routed back to Migration showed the transfer in History but not
+        // that its status had also silently gone from "Resolved" back to
+        // whatever Migration's own status actually was.
+        if (newStatusId !== issue.statusId) {
+          await (db as any).issueHistory.create({
+            data: {
+              id: rid(), issueId: issue.id, field: 'status',
+              oldValue: oldDeptStatusObj.name,
+              newValue: newDeptStatusObj.name,
+              authorName: authorName2, createdAt: new Date(),
+            },
+          });
+        }
+        // Same gap as the status entry just above, but for the restore-or-
+        // round-robin assignee logic (lines ~4533-4565): it silently changes
+        // issues.assigneeId on every transfer -- restoring whoever newDept
+        // had before, or round-robining someone new -- but nothing logged it,
+        // unlike a plain assignee-dropdown change (the only other place in
+        // this file writing field:'assignee'). A ticket bouncing between
+        // departments correctly got the right person back each time, but its
+        // History tab showed no record of that ever happening.
+        if (rrAssigneeId !== (issue.assigneeId ?? null)) {
+          await (db as any).issueHistory.create({
+            data: {
+              id: rid(), issueId: issue.id, field: 'assignee',
+              oldValue: issue.assignee ? (`${(issue.assignee as any).firstName ?? ''} ${(issue.assignee as any).lastName ?? ''}`.trim() || (issue.assignee as any).email) : null,
+              newValue: rrAgentName,
+              authorName: authorName2, createdAt: new Date(),
+            },
+          });
+        }
       } catch { /* non-critical */ }
 
       const updatedIssue = await db.issue.findUnique({
@@ -3990,7 +5583,7 @@ async function _handleJiraPgApi(
       // to know about (e.g. reporter's Migration ticket moving to Dev).
       if (updatedIssue) {
         notifyIssueUpdated({
-          key: updatedIssue.key, summary: updatedIssue.summary, priority: updatedIssue.priority,
+          key: updatedIssue.key, cfKey: extraCols.cf_key, summary: updatedIssue.summary, priority: updatedIssue.priority,
           spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
           status: { name: updatedIssue.status?.name ?? newStatusName, category: updatedIssue.status?.category ?? 'todo' },
           assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
@@ -4004,7 +5597,7 @@ async function _handleJiraPgApi(
         // different from who had it before leaving oldDept).
         if (rrAssigneeId && rrAssigneeId !== issue.assigneeId) {
           notifyIssueAssigned({
-            key: updatedIssue.key, summary: updatedIssue.summary, priority: updatedIssue.priority,
+            key: updatedIssue.key, cfKey: extraCols.cf_key, summary: updatedIssue.summary, priority: updatedIssue.priority,
             spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
             status: { name: updatedIssue.status?.name ?? newStatusName, category: updatedIssue.status?.category ?? 'todo' },
             assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
@@ -4053,7 +5646,8 @@ async function _handleJiraPgApi(
     const newId = rid();
 
     // If a ticket with this key already exists on target board, just update it
-    const existingOnTarget = await pool.query(`SELECT id FROM issues WHERE key = $1`, [newKey]);
+    const existingOnTarget = await pool.query(`SELECT id, cf_key FROM issues WHERE key = $1`, [newKey]);
+    let newCfKey: string | null = existingOnTarget.rows[0]?.cf_key ?? null;
     if (existingOnTarget.rows[0]) {
       // Already passed before Ã¢â‚¬â€ update assignee + status
       await pool.query(
@@ -4075,6 +5669,17 @@ async function _handleJiraPgApi(
           newDept,
         ]
       );
+      // This INSERT never allocated a CF-prefixed display key, unlike every
+      // other place a ticket gets created -- the cross-board ticket this
+      // creates showed only its bare internal key (e.g. "L2BOARD-5618") in
+      // every notification and history entry about it, never the CF- key
+      // shown everywhere else in the app.
+      try {
+        const maxRow = await pool.query(`SELECT MAX(CAST(SUBSTRING(cf_key FROM 4) AS INTEGER)) AS mx FROM issues WHERE cf_key LIKE 'CF-%'`);
+        const nextNum = (maxRow.rows[0]?.mx ?? 0) + 1;
+        newCfKey = `CF-${nextNum}`;
+        await pool.query(`UPDATE issues SET cf_key = $1 WHERE id = $2`, [newCfKey, newId]);
+      } catch { newCfKey = null; }
     }
 
     // Copy custom field values to new ticket
@@ -4119,11 +5724,13 @@ async function _handleJiraPgApi(
     await pool.query(`UPDATE issues SET "partnerKey"=$1 WHERE key=$2`, [key, newKey]);
 
     // History on ORIGINAL ticket: "Passed to Dev Ã¢â€ ' L2BOARD (new ticket: L2BOARD-5618)"
+    const displayKey = (issue as any).cf_key || key;
+    const newDisplayKey = newCfKey || newKey;
     await (db as any).issueHistory.create({
       data: {
         id: rid(), issueId: issue.id, field: 'department',
         oldValue: (issue as any).current_department || 'None',
-        newValue: `Passed to ${newDept} → ${targetSpace.key} (${newKey})`,
+        newValue: `Passed to ${newDept} → ${targetSpace.key} (${newDisplayKey})`,
         authorName, createdAt: new Date(),
       },
     });
@@ -4133,7 +5740,7 @@ async function _handleJiraPgApi(
       data: {
         id: rid(), issueId: newId, field: 'department',
         oldValue: 'Created',
-        newValue: `Passed from ${issue.space?.key || ''} (${key}) Ã‚Â· Assignee: ${assigneeName} (Round Robin)`,
+        newValue: `Passed from ${issue.space?.key || ''} (${displayKey}) · Assignee: ${assigneeName} (Round Robin)`,
         authorName: 'System', createdAt: new Date(),
       },
     });
@@ -4148,7 +5755,7 @@ async function _handleJiraPgApi(
         : null;
       const targetStatusCategory = firstStatus?.category ?? 'todo';
       notifyIssueUpdated({
-        key: newKey, summary: issue.summary, priority: issue.priority,
+        key: newKey, cfKey: newCfKey, summary: issue.summary, priority: issue.priority,
         spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
         status: { name: newStatusName, category: targetStatusCategory },
         assignee: newAssigneeUser, reporter: issue.reporter,
@@ -4157,7 +5764,7 @@ async function _handleJiraPgApi(
       }).catch(() => {});
       if (newAssigneeUser) {
         notifyIssueAssigned({
-          key: newKey, summary: issue.summary, priority: issue.priority,
+          key: newKey, cfKey: newCfKey, summary: issue.summary, priority: issue.priority,
           spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
           status: { name: newStatusName, category: targetStatusCategory },
           assignee: newAssigneeUser, reporter: issue.reporter,
@@ -4168,7 +5775,7 @@ async function _handleJiraPgApi(
         notifyUsers(
           inAppIds,
           userId,
-          { type: 'DEPT_CHANGE', title: `Ticket ${newKey} created in ${targetSpace.key}`, message: `"${issue.summary}" was passed to ${newDept} on ${targetSpace.key} as ${newKey}.`, issueKey: newKey }
+          { type: 'DEPT_CHANGE', title: `Ticket ${newDisplayKey} created in ${targetSpace.key}`, message: `"${issue.summary}" was passed to ${newDept} on ${targetSpace.key} as ${newDisplayKey}.`, issueKey: newDisplayKey }
         ).catch(() => {});
       }
     } catch { /* notification failures shouldn't block the transfer */ }
@@ -4214,9 +5821,14 @@ async function _handleJiraPgApi(
     // indefinitely if Jira is slow, unreachable, or rate-limiting. Running it
     // in the background means this load won't show the freshly-synced fields,
     // but the next load will, and the page never hangs waiting on Jira.
+    // productionTicket is checked with its own OR, not folded into the
+    // all-null AND above -- a ticket already fully synced before this field
+    // existed has every other field populated, so the all-null check alone
+    // would never re-visit Jira to pick up just this newer one.
     if (
-      issue.customerName === null && issue.clientName === null &&
-      issue.projectManager === null && issue.productType === null && issue.combination === null
+      (issue.customerName === null && issue.clientName === null &&
+       issue.projectManager === null && issue.productType === null && issue.combination === null)
+      || issue.productionTicket === null
     ) {
       (async () => {
         try {
@@ -4242,6 +5854,7 @@ async function _handleJiraPgApi(
                   projectManager: extractJiraValue(f.customfield_11380),
                   productType:    extractJiraValue(f.customfield_10203),
                   combination:    extractJiraValue(f.customfield_10236),
+                  productionTicket: extractJiraValue(f.customfield_10665),
                 };
               }
             } else if (issue.summary) {
@@ -4267,6 +5880,7 @@ async function _handleJiraPgApi(
                     projectManager: extractJiraValue(f.customfield_11380),
                     productType:    extractJiraValue(f.customfield_10203),
                     combination:    extractJiraValue(f.customfield_10236),
+                    productionTicket: extractJiraValue(f.customfield_10665),
                   };
                 }
               }
@@ -4313,7 +5927,7 @@ async function _handleJiraPgApi(
       // Raw columns Prisma's schema doesn't know about -- only needs `key`,
       // so it can run alongside everything else instead of after it.
       pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey" FROM issues WHERE key = $1 LIMIT 1`,
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt" FROM issues WHERE key = $1 LIMIT 1`,
         [key]
       ).catch(() => ({ rows: [] as any[] })),
       // Partner-ticket comment merge lookup -- also only needs `key`.
@@ -4355,13 +5969,33 @@ async function _handleJiraPgApi(
       : [];
     const summaryMap = new Map(linkedIssues.map(i => [i.key, i]));
 
+    // cf_key is a raw ALTER TABLE column Prisma doesn't know about (same gap
+    // as childCfKeyMap below) -- without this, "Linked work items" always
+    // showed the raw internal key (e.g. "L1BOAR-2164") instead of the CF-
+    // key every other section uses, and the frontend's `li.cfKey ?? li.key`
+    // fallback silently landed on the raw key every time.
+    const linkedCfKeys = linkedKeys.length
+      ? await pool.query<{ key: string; cf_key: string | null }>(
+          `SELECT key, cf_key FROM issues WHERE key = ANY($1::text[])`,
+          [linkedKeys]
+        )
+      : { rows: [] as { key: string; cf_key: string | null }[] };
+    const linkedCfKeyMap = new Map(linkedCfKeys.rows.map(r => [r.key, r.cf_key]));
+
+    // rawDeptData (this ticket's own cf_key) isn't assembled from rawDeptRow
+    // until later in this function -- read it straight off rawDeptRow here
+    // instead of waiting for that named variable.
+    const ownCfKey: string | null = rawDeptRow.rows[0]?.cf_key ?? null;
     const allLinks = deduped.map(l => {
       const otherKey = l.sourceKey === key ? l.targetKey : l.sourceKey;
       const otherSummary = summaryMap.get(otherKey)?.summary ?? otherKey;
+      const otherCfKey = linkedCfKeyMap.get(otherKey) ?? null;
       return {
         id: l.id, linkType: l.linkType, sourceKey: l.sourceKey, targetKey: l.targetKey,
         _sourceSummary: l.sourceKey === key ? issue.summary : otherSummary,
         _targetSummary: l.targetKey === key ? issue.summary : otherSummary,
+        _sourceCfKey: l.sourceKey === key ? ownCfKey : otherCfKey,
+        _targetCfKey: l.targetKey === key ? ownCfKey : otherCfKey,
       };
     });
 
@@ -4510,15 +6144,16 @@ async function _handleJiraPgApi(
 
       // Notify: restored origin-dept assignee + reporter
       try {
-        const recallIssue = await db.issue.findUnique({ where: { key }, select: { reporterId: true, summary: true } });
+        const recallIssue = await db.issue.findUnique({ where: { key }, select: { reporterId: true, summary: true, cf_key: true } });
         const summary = recallIssue?.summary || key;
+        const displayKey = (recallIssue as any)?.cf_key || key;
         const notifyIds = [recallIssue?.reporterId, restoreAssigneeId].filter(Boolean) as string[];
         if (notifyIds.length) {
           await notifyUsers(notifyIds, userId, {
             type: 'DEPT_CHANGE',
-            title: `Ticket ${key} returned to ${homeDept}`,
+            title: `Ticket ${displayKey} returned to ${homeDept}`,
             message: `Ticket "${summary}" has been returned to the ${homeDept} queue. SLA has resumed.`,
-            issueKey: key
+            issueKey: displayKey
           });
         }
         // Also notify all origin-dept members
@@ -4530,9 +6165,9 @@ async function _handleJiraPgApi(
         if (homeMemberIds.length > 0) {
           await notifyUsers(homeMemberIds, userId, {
             type: 'DEPT_ASSIGNED',
-            title: `Ticket ${key} back in ${homeDept}`,
+            title: `Ticket ${displayKey} back in ${homeDept}`,
             message: `Ticket "${summary}" has returned to ${homeDept} queue. SLA is running.`,
-            issueKey: key
+            issueKey: displayKey
           });
         }
       } catch { /* non-critical */ }
@@ -4573,6 +6208,12 @@ async function _handleJiraPgApi(
     if (body.customerName !== undefined) data.customerName = body.customerName === null ? null : String(body.customerName);
     if (body.clientName !== undefined) data.clientName = body.clientName === null ? null : String(body.clientName);
     if (body.projectManager !== undefined) data.projectManager = body.projectManager === null ? null : String(body.projectManager);
+    if (body.productionTicket !== undefined) data.productionTicket = body.productionTicket === null ? null : String(body.productionTicket);
+    // Was read by POST /issues (creation) but never by this PATCH handler --
+    // the ticket detail page's due-date editor called this endpoint and got
+    // a 200 back with no error, but the edit was silently dropped every
+    // time; nothing was ever saved or logged.
+    if (body.dueDate !== undefined) data.dueDate = body.dueDate === null ? null : new Date(String(body.dueDate));
 
     // Assignee Ã¢â‚¬â€ accept assigneeId, assignee object, or assigneeEmail
     // Assignee -- accept assigneeId, assignee object, or assigneeEmail (email pre-resolved above in parallel)
@@ -4604,20 +6245,26 @@ async function _handleJiraPgApi(
     // excludeDone filters) keeps treating the ticket as open forever, even
     // though the department that owns it just closed it.
     let queueStatusSyncedDone = false;
+    // resolvedAt is a raw column outside Prisma's schema (like current_department),
+    // so it can't go through db.issue.update's `data` object -- track the
+    // intended change here and apply it via a raw UPDATE right after that
+    // call actually runs. undefined = no change, Date = stamp resolution,
+    // null = clear it (reopened).
+    let resolvedAtChange: Date | null | undefined = undefined;
     if (body.queueStatusId) {
       try {
         const qRow = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE key=$1 LIMIT 1`, [key]);
         const dept: string = qRow.rows[0]?.current_department;
         if (dept) {
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
-          const oldQueueStatusName = deptStatuses[dept]?.name || 'Unknown';
-          const oldQueueStatusCategory = deptStatuses[dept]?.category || 'todo';
-          deptStatuses[dept] = {
+          const oldQueueStatusName = deptMapGet(deptStatuses, dept)?.name || 'Unknown';
+          const oldQueueStatusCategory = deptMapGet(deptStatuses, dept)?.category || 'todo';
+          deptMapSet(deptStatuses, dept, {
             id: String(body.queueStatusId),
             name: String(body.queueStatusName || ''),
             color: String(body.queueStatusColor || '#64748B'),
             category: String(body.queueStatusCategory || 'todo'),
-          };
+          });
           await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(deptStatuses), key]);
 
           // Reopening -- the dept's OLD status was done (Resolved/Closed/etc.)
@@ -4647,6 +6294,7 @@ async function _handleJiraPgApi(
               matchedReal = matchedReal || realStatuses.find((s: any) => s.category !== 'done');
               if (matchedReal) {
                 data.statusId = matchedReal.id;
+                resolvedAtChange = null;
                 queueStatusSyncedReopen = true;
               }
               await startDeptSLA(null, issue.id, dept);
@@ -4663,7 +6311,7 @@ async function _handleJiraPgApi(
                 [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), reopenChanger ? `${reopenChanger.firstName} ${reopenChanger.lastName}`.trim() : 'Unknown', reopenChanger?.email || null]
               ).catch(() => {});
               notifyStatusChanged({
-                key: issue.key, summary: issue.summary, priority: issue.priority,
+                key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
                 oldStatus: { name: oldQueueStatusName, category: 'done' },
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
@@ -4695,7 +6343,42 @@ async function _handleJiraPgApi(
             matchedReal = matchedReal || realStatuses.find((s: any) => s.category === 'done');
             if (matchedReal) {
               data.statusId = matchedReal.id;
+              // Stamp the actual resolution moment so the SLA check can tell
+              // whether this ticket was resolved before or after its due
+              // time -- without this, resolving always read as "on time"
+              // (see computeSLAInstancesPure) no matter how overdue it
+              // already was. Only stamp it on a genuine not-done -> done
+              // transition, matching the exact same rule the plain
+              // body.statusId path already applies (wasResolved/
+              // willBeResolved below) -- this branch previously restamped
+              // resolvedAt to right now every single time a done-category
+              // queue status got applied, even to a ticket that was ALREADY
+              // resolved (e.g. picking the same "Resolved" status again, or
+              // any other action that re-applies a done-category
+              // queue-scoped status while the ticket never left done).
+              // That silently overwrote a ticket's real, on-time resolution
+              // timestamp with whatever moment this unrelated action
+              // happened, making it read as breached/"resolved late" even
+              // though the actual work finished well before the due time.
+              if (oldQueueStatusCategory !== 'done') {
+                resolvedAtChange = new Date();
+              }
               queueStatusSyncedDone = true;
+              // This branch (like the reopen one above) skips the early-return
+              // status-history insert further down, and never reaches the
+              // generic "Status (resolve names)" history block past this
+              // function either (both are gated on body.statusId, which stays
+              // undefined for a queue-scoped status) -- a promise this exact
+              // comment already made on the reopen branch above but never
+              // actually followed through on here, so resolving a ticket via
+              // a department's own queue status dropdown (the most common way
+              // tickets get closed in this app) left no trace at all in the
+              // History tab. Write it here, same shape as the reopen entry.
+              const doneChanger = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+              pool.query(
+                `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+                [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), doneChanger ? `${doneChanger.firstName} ${doneChanger.lastName}`.trim() : 'Unknown', doneChanger?.email || null]
+              ).catch(() => {});
             }
           }
 
@@ -4713,15 +6396,48 @@ async function _handleJiraPgApi(
             if (waitMatchQueue) {
               queueHandoffTargetDept = waitMatchQueue[1].trim();
               try {
+                const priorStatusForQueueHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
                 queueHandoffOldDept = await performDeptHandoff(
                   issue.id, issue.spaceId, (issue as any).productType || null,
-                  queueHandoffTargetDept, String(body.queueStatusName || ''), null, userId,
+                  queueHandoffTargetDept, priorStatusForQueueHandoff, null, userId,
                 );
                 queueHandoffDone = true;
                 console.log(`[DeptHandoff] ${issue.key}: ${queueHandoffOldDept} → ${queueHandoffTargetDept} (via queue status)`);
               } catch (handoffErr: any) {
                 console.error(`[DeptHandoff ERROR - queueStatus] ${issue.key}:`, handoffErr?.message || handoffErr);
               }
+            } else {
+              // A queue-scoped status that's neither done, a from-done reopen,
+              // nor a "Waiting for X" handoff -- e.g. picking a plain
+              // "In Progress" from this dept's own status list -- never
+              // touched the real global statusId at all, only
+              // dept_statuses[dept] above. That left the ticket's actual
+              // statusId silently stuck on whatever it was before (often
+              // still the space's default "To Do" from creation), disagreeing
+              // with what was actually shown on screen. The done/reopen sync
+              // branches already resolve-or-create a matching real status for
+              // exactly this reason; apply the same sync here so the global
+              // column never drifts from the dept-scoped label sitting on top
+              // of it -- including the NEXT time this dept's status gets read
+              // as a snapshot when the ticket leaves (that read comes from
+              // the real column, not dept_statuses).
+              try {
+                const realStatuses = (issue.space as any)?.statuses || [];
+                const queueStName = String(body.queueStatusName || '').trim();
+                let matchedReal = realStatuses.find((s: any) => s.category !== 'done' && s.name.toLowerCase() === queueStName.toLowerCase());
+                if (!matchedReal && queueStName) {
+                  const maxOrder = await pool.query(`SELECT COALESCE(MAX("order"), 0) AS m FROM statuses WHERE "spaceId"=$1`, [issue.spaceId]);
+                  const newRealStatusId = rid();
+                  await pool.query(
+                    `INSERT INTO statuses (id, name, category, color, "order", "spaceId") VALUES ($1,$2,$3,$4,$5,$6)`,
+                    [newRealStatusId, queueStName, String(body.queueStatusCategory || 'todo'), String(body.queueStatusColor || '#64748B'), (maxOrder.rows[0]?.m ?? 0) + 1, issue.spaceId]
+                  );
+                  matchedReal = { id: newRealStatusId };
+                }
+                if (matchedReal && matchedReal.id !== issue.statusId) {
+                  await pool.query(`UPDATE issues SET "statusId"=$1, "updatedAt"=NOW() WHERE id=$2`, [matchedReal.id, issue.id]);
+                }
+              } catch (e: any) { console.error('[Queue status global sync failed]', issue.key, e?.message || e); }
             }
 
             // Re-fetch AFTER the handoff (if any) so the response and the
@@ -4753,8 +6469,9 @@ async function _handleJiraPgApi(
                   [rid(), issue.id, 'department', queueHandoffOldDept || 'None', `Handed to ${queueHandoffTargetDept} — SLA started`, changer ? `${changer.firstName} ${changer.lastName}`.trim() : 'Unknown', changer?.email || null]
                 ).catch(() => {});
               }
+              const refreshedDisplayKey = (refreshed as any).cf_key || refreshed.key;
               notifyStatusChanged({
-                key: refreshed.key, summary: refreshed.summary, priority: refreshed.priority,
+                key: refreshed.key, cfKey: (refreshed as any).cf_key, summary: refreshed.summary, priority: refreshed.priority,
                 spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
                 oldStatus: { name: oldQueueStatusName, category: 'todo' },
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
@@ -4770,7 +6487,7 @@ async function _handleJiraPgApi(
               notifyUsers(
                 [refreshed.assigneeId, refreshed.reporterId],
                 userId,
-                { type: 'STATUS_CHANGED', title: `${refreshed.key} status → ${String(body.queueStatusName || '')}`, message: refreshed.summary, issueKey: refreshed.key }
+                { type: 'STATUS_CHANGED', title: `${refreshedDisplayKey} status → ${String(body.queueStatusName || '')}`, message: refreshed.summary, issueKey: refreshedDisplayKey }
               ).catch(() => {});
               // current_department/dept_statuses/etc. are raw-SQL columns, not
               // part of the Prisma schema -- db.issue.findUnique above never
@@ -4795,6 +6512,22 @@ async function _handleJiraPgApi(
     // Status
     if (body.statusId !== undefined) {
       data.statusId = body.statusId === null ? null : String(body.statusId);
+      // Stamp (or clear) the actual resolution moment on every done/not-done
+      // transition -- computeSLAInstancesPure needs this to tell whether a
+      // ticket was resolved before or after its due time. Without it, a
+      // ticket that breached and was THEN resolved read as "resolved on
+      // time" (isCompleted forced isBreached false with no way to tell the
+      // two cases apart), silently erasing that it had ever breached.
+      if (data.statusId !== issue.statusId) {
+        // This handler's own `issue` fetch (above) only includes
+        // space.statuses, not the status relation itself -- look the
+        // current/new status category up from there instead.
+        const spaceStatuses = issue.space?.statuses ?? [];
+        const wasResolved = spaceStatuses.find((s: any) => s.id === issue.statusId)?.category === 'done';
+        const willBeResolved = spaceStatuses.find((s: any) => s.id === data.statusId)?.category === 'done';
+        if (willBeResolved && !wasResolved) resolvedAtChange = new Date();
+        else if (!willBeResolved && wasResolved) resolvedAtChange = null;
+      }
     }
 
     data.updatedAt = new Date();
@@ -4809,11 +6542,11 @@ async function _handleJiraPgApi(
         if (currentDept) {
           const deptAssignees: Record<string, any> = rawIssue.rows[0]?.dept_assignees || {};
           if (data.assigneeId === null) {
-            deptAssignees[currentDept] = null;
+            deptMapSet(deptAssignees, currentDept, null);
           } else {
             const newAssignee = await db.user.findUnique({ where: { id: data.assigneeId as string }, select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true } });
             if (newAssignee) {
-              deptAssignees[currentDept] = { id: newAssignee.id, email: newAssignee.email, firstName: newAssignee.firstName, lastName: newAssignee.lastName, displayName: `${newAssignee.firstName} ${newAssignee.lastName}`.trim(), avatarUrl: avatarRef(newAssignee.id, newAssignee.avatarUrl) };
+              deptMapSet(deptAssignees, currentDept, { id: newAssignee.id, email: newAssignee.email, firstName: newAssignee.firstName, lastName: newAssignee.lastName, displayName: `${newAssignee.firstName} ${newAssignee.lastName}`.trim(), avatarUrl: avatarRef(newAssignee.id, newAssignee.avatarUrl) });
             }
           }
           await pool.query(`UPDATE issues SET dept_assignees=$1::jsonb WHERE key=$2`, [JSON.stringify(deptAssignees), key]);
@@ -4831,6 +6564,10 @@ async function _handleJiraPgApi(
         space: { select: { key: true, name: true } },
       },
     });
+
+    if (resolvedAtChange !== undefined) {
+      await pool.query(`UPDATE issues SET "resolvedAt"=$1 WHERE id=$2`, [resolvedAtChange, updated.id]).catch(() => {});
+    }
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Auto-record history for every changed field Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // ── Dept handoff on "Waiting for [Dept]" status change ──────────────
@@ -4858,9 +6595,10 @@ async function _handleJiraPgApi(
       if (waitMatchHandoff) {
         handoffTargetDept = waitMatchHandoff[1].trim();
         try {
+          const priorStatusForHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
           handoffOldDept = await performDeptHandoff(
             issue.id, issue.spaceId, (issue as any).productType || null,
-            handoffTargetDept, newStatusNameForHandoff, data.statusId as string | null, userId,
+            handoffTargetDept, priorStatusForHandoff, data.statusId as string | null, userId,
           );
           deptHandoffDone = true;
           console.log(`[DeptHandoff] ${issue.key}: ${handoffOldDept} → ${handoffTargetDept}`);
@@ -4879,6 +6617,35 @@ async function _handleJiraPgApi(
         } catch (handoffErr: any) {
           console.error(`[DeptHandoff ERROR] ${issue.key}:`, handoffErr?.message || handoffErr);
         }
+      }
+    }
+
+    // ── Keep dept_statuses[current department] in sync with plain status changes ──
+    // Only performDeptHandoff / the manual Change Department endpoint / the
+    // custom-queue-status flow ever refreshed dept_statuses -- all on a
+    // department CHANGE. A ticket resolved via the ordinary status dropdown
+    // while staying in the SAME department (the common case: Open -> In
+    // Progress -> Resolved, never leaving Dev) left dept_statuses[Dev] stuck
+    // at whatever it was before, even though the ticket's real current
+    // status had moved on. Anywhere that snapshot is preferred over the
+    // live status (getEffectiveIssueStatus on the detail page, and the
+    // "Worked on" queue list) then showed that stale value instead of the
+    // ticket's actual current status.
+    if (body.statusId !== undefined && issue.statusId !== data.statusId && !deptHandoffDone) {
+      try {
+        const newStForSync = (issue.space?.statuses ?? []).find((s: any) => s.id === data.statusId) as any
+          ?? (data.statusId ? await db.status.findUnique({ where: { id: String(data.statusId) } }) : null);
+        if (newStForSync) {
+          const syncRow = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE id=$1`, [issue.id]);
+          const syncDept: string = syncRow.rows[0]?.current_department || '';
+          if (syncDept) {
+            const syncDeptStatuses: Record<string, any> = syncRow.rows[0]?.dept_statuses || {};
+            deptMapSet(syncDeptStatuses, syncDept, { id: newStForSync.id, name: newStForSync.name, color: newStForSync.color, category: newStForSync.category });
+            await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb WHERE id=$2`, [JSON.stringify(syncDeptStatuses), issue.id]);
+          }
+        }
+      } catch (syncErr: any) {
+        console.error(`[dept_statuses sync ERROR] ${issue.key}:`, syncErr?.message || syncErr);
       }
     }
 
@@ -4999,6 +6766,11 @@ async function _handleJiraPgApi(
       if (body.customerName !== undefined)     track('customer name',     (issue as any).customerName,     data.customerName as string);
       if (body.clientName !== undefined)       track('client name',       (issue as any).clientName,       data.clientName as string);
       if (body.projectManager !== undefined)   track('project manager',   (issue as any).projectManager,   data.projectManager as string);
+      if (body.dueDate !== undefined) {
+        const oldD = issue.dueDate ? new Date(issue.dueDate).toISOString().split('T')[0] : null;
+        const newD = data.dueDate ? new Date(data.dueDate as Date).toISOString().split('T')[0] : null;
+        track('due date', oldD, newD);
+      }
 
       // Labels (array Ã¢â€ ' comma string)
       if (body.labels !== undefined) {
@@ -5028,6 +6800,18 @@ async function _handleJiraPgApi(
         histRecs.push({ issueId: issue.id, field: 'assignee', oldValue: oldN, newValue: newN, authorName, authorEmail, createdAt: now });
       }
 
+      // Reporter (resolve display names) -- previously changed silently: a
+      // PATCH that set BOTH assignee and reporter in the same request only
+      // ever logged the assignee, since there was no track() call for this
+      // field at all.
+      if (data.reporterId !== undefined && issue.reporterId !== data.reporterId) {
+        const oldR = issue.reporterId ? await db.user.findUnique({ where: { id: issue.reporterId } }) : null;
+        const newR = data.reporterId ? await db.user.findUnique({ where: { id: data.reporterId as string } }) : null;
+        const oldRN = oldR ? (`${oldR.firstName ?? ''} ${oldR.lastName ?? ''}`.trim() || oldR.email) : null;
+        const newRN = newR ? (`${newR.firstName ?? ''} ${newR.lastName ?? ''}`.trim() || newR.email) : null;
+        histRecs.push({ issueId: issue.id, field: 'reporter', oldValue: oldRN, newValue: newRN, authorName, authorEmail, createdAt: now });
+      }
+
       if (histRecs.length > 0) {
         await (db as any).issueHistory.createMany({ data: histRecs });
       }
@@ -5037,8 +6821,13 @@ async function _handleJiraPgApi(
     // Send notifications (fire-and-forget)
     const spaceKey = updated.space?.key ?? '';
     const spaceName = updated.space?.name ?? '';
+    // Every ticket is shown to users only by its CF-prefixed display key --
+    // `key` is the internal column. cfKey here flows into notifyStatusChanged/
+    // notifyIssueAssigned/notifyIssueUpdated below, which already know to
+    // prefer it over the raw key for anything user-facing.
+    const updatedDisplayKey = (updated as any).cf_key || updated.key;
     const issueForNotif = {
-      key: updated.key, summary: updated.summary, priority: updated.priority,
+      key: updated.key, cfKey: (updated as any).cf_key, summary: updated.summary, priority: updated.priority,
       spaceKey, spaceName,
       status: { name: updated.status?.name ?? 'Open', category: updated.status?.category ?? 'todo' },
       assignee: updated.assignee, reporter: updated.reporter,
@@ -5069,7 +6858,7 @@ async function _handleJiraPgApi(
       if (newStRec?.category === 'done') {
         try {
           const deptRow = await pool.query(
-            `SELECT current_department, original_dept, dept_assignees FROM issues WHERE id=$1`,
+            `SELECT current_department, original_dept, dept_assignees, dept_statuses FROM issues WHERE id=$1`,
             [issue.id]
           );
           const resolvingDept: string = deptRow.rows[0]?.current_department || '';
@@ -5091,11 +6880,39 @@ async function _handleJiraPgApi(
             // Move the ticket back to its origin dept, restoring whoever was
             // handling it there before it was passed along.
             const deptAssignees: Record<string, any> = deptRow.rows[0]?.dept_assignees || {};
-            const homeAssignee = deptAssignees[homeDept];
+            const homeAssignee = deptMapGet(deptAssignees, homeDept);
             const restoreAssigneeId: string | null = homeAssignee?.id || null;
+
+            // Restore whatever status this ticket showed in its home dept
+            // right before it was handed off -- opening it from home used to
+            // show the RESOLVING dept's terminal status (e.g. Dev's
+            // "Resolved") because this UPDATE never touched statusId at all,
+            // leaving whatever the resolve action just set. Home should see
+            // the same status it had before the handoff, so it can actually
+            // review the work and close it themselves rather than land back
+            // pre-marked done. The "Change Department" endpoint already
+            // saves this exact snapshot into dept_statuses[oldDept] on every
+            // manual handoff -- read it back here the same way that endpoint
+            // resolves a snapshot name to a real status row.
+            const deptStatuses: Record<string, any> = deptRow.rows[0]?.dept_statuses || {};
+            const homeStatusSnapshot = deptMapGet(deptStatuses, homeDept);
+            let restoredStatusId: string | null = null;
+            if (homeStatusSnapshot?.name) {
+              const realMatch = await db.status.findFirst({
+                where: { spaceId: issue.spaceId, name: { equals: homeStatusSnapshot.name, mode: 'insensitive' } },
+                orderBy: { order: 'asc' },
+              });
+              if (realMatch) restoredStatusId = realMatch.id;
+            }
+            // Record what the ticket's status actually was on leaving the
+            // resolving dept, symmetric with how a manual transfer records
+            // the old dept's status -- so a future visit back to this dept
+            // sees accurate history instead of nothing.
+            deptMapSet(deptStatuses, resolvingDept, { id: newStRec.id, name: newStRec.name, category: newStRec.category, color: newStRec.color });
+
             await pool.query(
-              `UPDATE issues SET current_department=$1, "assigneeId"=$2, "updatedAt"=NOW() WHERE id=$3`,
-              [homeDept, restoreAssigneeId, issue.id]
+              `UPDATE issues SET current_department=$1, "assigneeId"=$2, "statusId"=COALESCE($4, "statusId"), dept_statuses=$5::jsonb, "updatedAt"=NOW() WHERE id=$3`,
+              [homeDept, restoreAssigneeId, issue.id, restoredStatusId, JSON.stringify(deptStatuses)]
             );
             await pool.query(
               `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept) VALUES ($1, $2, $3, $4)`,
@@ -5113,11 +6930,12 @@ async function _handleJiraPgApi(
             // Notify whoever now owns it back home, plus the reporter
             const notifyIds = [restoreAssigneeId, updated.reporterId].filter(Boolean) as string[];
             if (notifyIds.length) {
+              const updatedDisplayKey = (updated as any).cf_key || updated.key;
               await notifyUsers(notifyIds, userId, {
                 type: 'DEPT_CHANGE',
-                title: `Ticket ${updated.key} back in ${homeDept}`,
+                title: `Ticket ${updatedDisplayKey} back in ${homeDept}`,
                 message: `Ticket "${updated.summary}" was resolved in ${resolvingDept} and has returned to ${homeDept}.`,
-                issueKey: updated.key,
+                issueKey: updatedDisplayKey,
               });
             }
           }
@@ -5136,9 +6954,9 @@ async function _handleJiraPgApi(
       await notifyUsers(
         [updated.assigneeId, updated.reporterId],
         userId,
-        { type: 'STATUS_CHANGED', title: `${updated.key} status → ${issueForNotif.status.name}`, message: updated.summary, issueKey: updated.key }
+        { type: 'STATUS_CHANGED', title: `${updatedDisplayKey} status → ${issueForNotif.status.name}`, message: updated.summary, issueKey: updatedDisplayKey }
       );
-      await notifyWatchers(updated.key, userId, { title: `${updated.key} status → ${issueForNotif.status.name}`, message: updated.summary });
+      await notifyWatchers(updated.key, userId, { title: `${updatedDisplayKey} status → ${issueForNotif.status.name}`, message: updated.summary });
     }
     // Assignee changed?
     if (assigneeChangedForNotif) {
@@ -5148,7 +6966,7 @@ async function _handleJiraPgApi(
       await notifyUsers(
         [updated.assigneeId, updated.reporterId],
         userId,
-        { type: 'ASSIGNED', title: `${updated.key} assigned to you`, message: updated.summary, issueKey: updated.key }
+        { type: 'ASSIGNED', title: `${updatedDisplayKey} assigned to you`, message: updated.summary, issueKey: updatedDisplayKey }
       );
     }
     // General update (summary, description, priority, etc.) -- only when
@@ -5171,12 +6989,25 @@ async function _handleJiraPgApi(
         await notifyUsers(
           [updated.assigneeId, updated.reporterId],
           userId,
-          { type: 'UPDATED', title: `${updated.key} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', '), issueKey: updated.key }
+          { type: 'UPDATED', title: `${updatedDisplayKey} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', '), issueKey: updatedDisplayKey }
         );
-        await notifyWatchers(updated.key, userId, { title: `${updated.key} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', ') });
+        await notifyWatchers(updated.key, userId, { title: `${updatedDisplayKey} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', ') });
       }
     }
 
+    // None of these are part of Prisma's schema, so `updated` never carries
+    // them -- computeIssueSLAsFromDb silently fell back to issue.createdAt
+    // instead of the real dept-specific SLA start, and dropped every
+    // dept-scoped policy entirely (its dept-match check saw an empty
+    // current_department), for as long as this endpoint has existed. Merge
+    // them in the same way the GET /issues/:key handler already does.
+    try {
+      const r = await pool.query(
+        `SELECT current_department, dept_sla_started_at, dept_sla_log, "resolvedAt" FROM issues WHERE id=$1`,
+        [updated.id]
+      );
+      Object.assign(updated as any, r.rows[0] || {});
+    } catch { /* non-critical */ }
     const slaInstances = await computeIssueSLAsFromDb(updated);
 
     // Fire connector events (fire-and-forget)
@@ -5232,12 +7063,43 @@ async function _handleJiraPgApi(
       }
     } catch { /* non-critical */ }
 
+    // Snapshot everything that's about to cascade-delete (comments,
+    // attachments, history) into the trash table before the real delete, so
+    // it can be fully restored later. Raw SELECT * rather than a Prisma
+    // include: several issue columns (current_department, jira_source_key,
+    // dept_assignees, ...) were added via raw migrations and aren't in the
+    // Prisma schema at all, so a Prisma query would silently drop them from
+    // the snapshot.
+    try {
+      const issueRow = (await pool.query(`SELECT * FROM issues WHERE key = $1`, [key])).rows[0];
+      const [comments, attachments, history] = await Promise.all([
+        pool.query(`SELECT * FROM comments WHERE "issueId" = $1`, [issueRow.id]),
+        pool.query(`SELECT * FROM attachments WHERE "issueId" = $1`, [issueRow.id]),
+        pool.query(`SELECT * FROM issue_history WHERE "issueId" = $1`, [issueRow.id]),
+      ]);
+      const deleter = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+      await pool.query(
+        `INSERT INTO deleted_issues (id, key, cf_key, space_key, summary, data, deleted_by_id, deleted_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          rid(), issueRow.key, issueRow.cf_key, issue.space?.key ?? null, issueRow.summary,
+          JSON.stringify({ issue: issueRow, comments: comments.rows, attachments: attachments.rows, history: history.rows }),
+          userId ?? null, deleter ? `${deleter.firstName} ${deleter.lastName}`.trim() : null,
+        ]
+      );
+    } catch (e) {
+      // If the snapshot fails for any reason, still let the delete proceed
+      // rather than blocking someone from deleting a ticket -- but log it
+      // loudly since it means that particular delete won't be recoverable.
+      console.error(`[DELETE ${key}] Failed to snapshot for trash — this delete will NOT be recoverable:`, e);
+    }
+
     await db.issue.delete({ where: { key } });
     await db.space.update({ where: { id: issue.spaceId }, data: { issueCount: { decrement: 1 } } });
 
     // Notify
     notifyIssueDeleted({
-      key: issue.key, summary: issue.summary,
+      key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary,
       spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
       assignee: issue.assignee, reporter: issue.reporter,
       deletedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
@@ -5246,14 +7108,99 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
+
+  // --- Deleted-ticket trash: list / restore / permanently purge ---------
+  if (path === 'deleted-issues' && method === 'GET') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    const rows = await pool.query(
+      `SELECT id, key, cf_key, space_key, summary, deleted_by_name, deleted_at FROM deleted_issues ORDER BY deleted_at DESC LIMIT 500`
+    );
+    return json({ deleted: rows.rows });
+  }
+
+  const restoreMatch = path.match(/^deleted-issues\/([^/]+)\/restore$/);
+  if (restoreMatch && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    const trashId = restoreMatch[1];
+    const trashRow = (await pool.query(`SELECT * FROM deleted_issues WHERE id = $1`, [trashId])).rows[0];
+    if (!trashRow) return json({ error: 'Not found in trash' }, 404);
+
+    const already = await pool.query(`SELECT 1 FROM issues WHERE key = $1`, [trashRow.key]);
+    if (already.rows[0]) {
+      return json({ error: `A ticket with key ${trashRow.key} already exists -- can't restore over it` }, 409);
+    }
+
+    const { issue: issueRow, comments = [], attachments = [], history = [] } = trashRow.data;
+
+    // Re-insert each row exactly as it was, column-for-column, rather than
+    // hardcoding a column list -- these rows can carry raw-migration columns
+    // (current_department, jira_source_key, ...) that Prisma doesn't know
+    // about, and hardcoding would silently drop any column added after this
+    // code was written.
+    const insertRow = async (table: string, row: Record<string, any>) => {
+      const cols = Object.keys(row);
+      const colList = cols.map((c) => `"${c}"`).join(', ');
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      const values = cols.map((c) => row[c]);
+      await pool.query(`INSERT INTO ${table} (${colList}) VALUES (${placeholders})`, values);
+    };
+
+    try {
+      await insertRow('issues', issueRow);
+      for (const c of comments) await insertRow('comments', c);
+      for (const a of attachments) await insertRow('attachments', a);
+      for (const h of history) await insertRow('issue_history', h);
+      await db.space.update({ where: { id: issueRow.spaceId }, data: { issueCount: { increment: 1 } } }).catch(() => {});
+      await pool.query(`DELETE FROM deleted_issues WHERE id = $1`, [trashId]);
+    } catch (e: any) {
+      console.error(`[restore ${trashRow.key}] failed:`, e);
+      return json({ error: `Restore failed: ${e?.message || e}` }, 500);
+    }
+    return json({ ok: true, key: issueRow.key });
+  }
+
+  const purgeMatch = path.match(/^deleted-issues\/([^/]+)$/);
+  if (purgeMatch && method === 'DELETE') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    await pool.query(`DELETE FROM deleted_issues WHERE id = $1`, [purgeMatch[1]]);
+    return json({ ok: true });
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ Issue Links Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   const issueLinksPost = path.match(/^issues\/([^/]+)\/links$/);
   if (issueLinksPost && method === 'POST') {
-    const sourceKey = issueLinksPost[1].toUpperCase();
+    let sourceKey = issueLinksPost[1].toUpperCase();
     const body = await readJson(req);
-    const targetKey = String(body.targetKey || '').toUpperCase();
+    let targetKey = String(body.targetKey || '').toUpperCase();
     if (!targetKey) return json({ error: 'targetKey required' }, 400);
+
+    // Every issue is shown to users ONLY by its CF-prefixed display key (URLs,
+    // breadcrumbs, search results, the ticket title itself) -- the "key"
+    // column here (sourceKey/targetKey) is the internal Prisma key underneath
+    // it, which the user never sees anywhere. The "Search issues" box's own
+    // dropdown returns the correct internal key when a result is clicked, but
+    // typing a CF-key directly and hitting Enter without picking a result
+    // (or a stale/typo'd URL param) sent that CF-key straight through as
+    // sourceKey/targetKey unresolved -- silently creating a link row that
+    // could never match a real issue on either side, so it just vanished
+    // instead of appearing (or erroring). Resolve CF- keys the same way
+    // every other route in this file already does before using them.
+    if (sourceKey.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [sourceKey]);
+      if (cfRow.rows[0]) sourceKey = cfRow.rows[0].key;
+    }
+    if (targetKey.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [targetKey]);
+      if (cfRow.rows[0]) targetKey = cfRow.rows[0].key;
+    }
+    const [sourceExists, targetExists] = await Promise.all([
+      pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [sourceKey]),
+      pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [targetKey]),
+    ]);
+    if (!sourceExists.rows[0]) return json({ error: `Issue ${issueLinksPost[1]} not found` }, 404);
+    if (!targetExists.rows[0]) return json({ error: `Issue ${body.targetKey} not found` }, 404);
+    if (sourceKey === targetKey) return json({ error: 'An issue cannot be linked to itself' }, 400);
 
     // Upsert so duplicate calls are safe
     const link = await db.issueLink.upsert({
@@ -5261,6 +7208,22 @@ async function _handleJiraPgApi(
       create: { id: rid(), sourceKey, targetKey, linkType: String(body.linkType || 'relates') },
       update: {},
     });
+    // Logged on BOTH tickets -- a link is symmetric (creating it changed
+    // what each side's "Linked work items" shows), and previously logged on
+    // neither, so the History tab gave no trace a link was ever added.
+    try {
+      const linkAuthorName = currentUser
+        ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+        : 'Unknown';
+      const sourceDisplay = sourceExists.rows[0].cf_key || sourceKey;
+      const targetDisplay = targetExists.rows[0].cf_key || targetKey;
+      await (db as any).issueHistory.createMany({
+        data: [
+          { issueId: sourceExists.rows[0].id, field: 'link', oldValue: null, newValue: `Linked to ${targetDisplay} (${link.linkType})`, authorName: linkAuthorName, authorEmail: currentUser?.email ?? null, createdAt: new Date() },
+          { issueId: targetExists.rows[0].id, field: 'link', oldValue: null, newValue: `Linked to ${sourceDisplay} (${link.linkType})`, authorName: linkAuthorName, authorEmail: currentUser?.email ?? null, createdAt: new Date() },
+        ],
+      });
+    } catch { /* history tracking should never break the main response */ }
     return json(link);
   }
 
@@ -5268,7 +7231,25 @@ async function _handleJiraPgApi(
   if (issueLinkDel && method === 'DELETE') {
     const id = issueLinkDel[1];
     try {
+      const linkBefore = await db.issueLink.findUnique({ where: { id } });
       await db.issueLink.delete({ where: { id } });
+      if (linkBefore) {
+        try {
+          const [srcRow, tgtRow] = await Promise.all([
+            pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [linkBefore.sourceKey]),
+            pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [linkBefore.targetKey]),
+          ]);
+          const linkAuthorName = currentUser
+            ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+            : 'Unknown';
+          const srcDisplay = srcRow.rows[0]?.cf_key || linkBefore.sourceKey;
+          const tgtDisplay = tgtRow.rows[0]?.cf_key || linkBefore.targetKey;
+          const recs = [];
+          if (srcRow.rows[0]) recs.push({ issueId: srcRow.rows[0].id, field: 'link', oldValue: `Linked to ${tgtDisplay} (${linkBefore.linkType})`, newValue: null, authorName: linkAuthorName, authorEmail: currentUser?.email ?? null, createdAt: new Date() });
+          if (tgtRow.rows[0]) recs.push({ issueId: tgtRow.rows[0].id, field: 'link', oldValue: `Linked to ${srcDisplay} (${linkBefore.linkType})`, newValue: null, authorName: linkAuthorName, authorEmail: currentUser?.email ?? null, createdAt: new Date() });
+          if (recs.length) await (db as any).issueHistory.createMany({ data: recs });
+        } catch { /* history tracking should never break the main response */ }
+      }
     } catch {
       // already deleted
     }
@@ -5360,9 +7341,10 @@ async function _handleJiraPgApi(
     } catch (_e) {}
 
 
+    const issueDisplayKey = (issue as any).cf_key || issue.key;
     // Email: notify assignee + reporter (not the commenter)
     notifyCommentAdded({
-      key: issue.key, summary: issue.summary,
+      key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary,
       spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
       status: { name: issue.status?.name ?? 'Open', category: issue.status?.category ?? 'todo' },
       assignee: issue.assignee, reporter: issue.reporter,
@@ -5398,9 +7380,9 @@ async function _handleJiraPgApi(
     await notifyUsers(
       [issue.assigneeId, issue.reporterId, ...commentLeadIds],
       userId,
-      { type: 'COMMENTED', title: `New comment on ${issue.key}`, message: commentPreview, issueKey: issue.key }
+      { type: 'COMMENTED', title: `New comment on ${issueDisplayKey}`, message: commentPreview, issueKey: issueDisplayKey }
     );
-    await notifyWatchers(issue.key, userId, { title: `New comment on ${issue.key}`, message: commentPreview });
+    await notifyWatchers(issue.key, userId, { title: `New comment on ${issueDisplayKey}`, message: commentPreview });
 
     // Detect @mentions Ã¢â‚¬â€ extract data-userid from mention spans (most reliable)
     // Falls back to regex on plain text for non-rich-text comments
@@ -5441,8 +7423,8 @@ async function _handleJiraPgApi(
       // In-app notification
       await createNotification({
         userId: mentionedId, type: 'MENTIONED',
-        title: `${commenterName} mentioned you in ${issue.key}`,
-        message: mentionPreview, issueKey: issue.key,
+        title: `${commenterName} mentioned you in ${issueDisplayKey}`,
+        message: mentionPreview, issueKey: issueDisplayKey,
       });
       // Email notification
       if (mentionedUser.email) {
@@ -5450,7 +7432,7 @@ async function _handleJiraPgApi(
           mentionedEmail: mentionedUser.email,
           mentionedName: `${mentionedUser.firstName} ${mentionedUser.lastName}`.trim(),
           mentionedBy: commenterName,
-          issueKey: issue.key,
+          issueKey: issueDisplayKey,
           issueSummary: issue.summary,
           spaceKey: issue.space?.key ?? '',
           spaceName: issue.space?.name ?? '',
@@ -5477,13 +7459,45 @@ async function _handleJiraPgApi(
   const commentById = path.match(/^comments\/([^/]+)$/);
   if (commentById) {
     const commentId = commentById[1];
+    // Strips HTML/entities down to a short readable preview -- same approach
+    // used for the comment-added notification preview above; a raw HTML
+    // comment body in a history row would read as unrendered markup.
+    const previewComment = (raw: string) => (raw || '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
     if (method === 'PATCH') {
       const body = await readJson(req);
+      // Comment edits previously replaced the body with no trace of the
+      // change -- fetch the prior body first so history has an old value to
+      // show, not just "something changed."
+      const before = await db.comment.findUnique({ where: { id: commentId } });
       const updated = await db.comment.update({
         where: { id: commentId },
         data: { body: String(body.body || ''), updatedAt: new Date() },
         include: { author: true },
       });
+      if (before && before.body !== updated.body) {
+        try {
+          const authorName = currentUser
+            ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+            : 'Unknown';
+          await (db as any).issueHistory.create({
+            data: {
+              issueId: before.issueId, field: 'comment',
+              oldValue: previewComment(before.body) || null,
+              newValue: previewComment(updated.body) || null,
+              authorName, authorEmail: currentUser?.email ?? null, createdAt: new Date(),
+            },
+          });
+        } catch { /* history tracking should never break the main response */ }
+      }
       return json({
         id: updated.id, body: updated.body,
         author: updated.author
@@ -5494,7 +7508,25 @@ async function _handleJiraPgApi(
       });
     }
     if (method === 'DELETE') {
+      // Same gap as edit above -- a deleted comment left no trace it had
+      // ever existed. Fetch it first so history can record what was removed.
+      const before = await db.comment.findUnique({ where: { id: commentId } });
       await db.comment.delete({ where: { id: commentId } });
+      if (before) {
+        try {
+          const authorName = currentUser
+            ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+            : 'Unknown';
+          await (db as any).issueHistory.create({
+            data: {
+              issueId: before.issueId, field: 'comment',
+              oldValue: previewComment(before.body) || null,
+              newValue: '[deleted]',
+              authorName, authorEmail: currentUser?.email ?? null, createdAt: new Date(),
+            },
+          });
+        } catch { /* history tracking should never break the main response */ }
+      }
       return json({ ok: true });
     }
   }
@@ -5513,12 +7545,22 @@ async function _handleJiraPgApi(
       space: { select: { key: true, name: true } },
     };
 
+    // Every ticket's user-facing key is "CF-<number>" -- typing just the bare
+    // number (no "CF-" prefix) is a completely ordinary way to look one up,
+    // but cf_key never literally equals a bare number, so without this it
+    // never matched here and fell all the way through to the noisy `contains`
+    // scan below, mixing the one ticket meant in with unrelated tickets that
+    // happen to have that same digit sequence somewhere in their summary or
+    // description (e.g. a phone number, a date, an unrelated id).
+    const isNumericQuery = /^\d+$/.test(q);
+
     // Step 1: fetch exact + startsWith matches for CF key first (guaranteed to be in results)
     const exactMatches = await db.issue.findMany({
       where: {
         OR: [
           { cf_key: { equals: q, mode: 'insensitive' } },
           { key: { equals: q, mode: 'insensitive' } },
+          ...(isNumericQuery ? [{ cf_key: { equals: `CF-${q}`, mode: 'insensitive' as const } }] : []),
         ],
       },
       include: includeFields,
@@ -5530,8 +7572,40 @@ async function _handleJiraPgApi(
     // waiting on startsWith + the full-text `contains` scan across
     // summary/description on every issue in the space, which is the slow
     // part of this endpoint and pointless once the exact ticket is found.
+    // Also pulls in that ticket's own subtasks and linked work items (and
+    // nothing else) -- looking up one ticket by its exact number/key should
+    // surface the family it belongs to, not get diluted by unrelated
+    // substring matches.
     if (exactMatches.length > 0) {
-      return json({ issues: exactMatches.map(formatIssue), total: exactMatches.length, page: 1, totalPages: 1 });
+      const matchedKeys = exactMatches.map((i) => i.key);
+      const [subtasks, linksOut, linksIn] = await Promise.all([
+        db.issue.findMany({ where: { parentKey: { in: matchedKeys } }, include: includeFields }),
+        db.issueLink.findMany({ where: { sourceKey: { in: matchedKeys } } }),
+        db.issueLink.findMany({ where: { targetKey: { in: matchedKeys } } }),
+      ]);
+      const linkedKeys = new Set<string>();
+      for (const l of linksOut) linkedKeys.add(l.targetKey);
+      for (const l of linksIn) linkedKeys.add(l.sourceKey);
+      for (const k of matchedKeys) linkedKeys.delete(k);
+      const linkedIssues = linkedKeys.size
+        ? await db.issue.findMany({ where: { key: { in: Array.from(linkedKeys) } }, include: includeFields })
+        : [];
+      const seenIds = new Set<string>();
+      const combined: any[] = [];
+      for (const issue of [...exactMatches, ...subtasks, ...linkedIssues]) {
+        if (!seenIds.has(issue.id)) { seenIds.add(issue.id); combined.push(issue); }
+      }
+      return json({ issues: combined.map(formatIssue), total: combined.length, page: 1, totalPages: 1 });
+    }
+
+    // A purely numeric query with no exact ticket match is a lookup that
+    // came up empty, not a keyword to search for -- falling through to the
+    // broad `contains` scan below matched that same digit sequence wherever
+    // it happened to appear in any ticket's summary/description (a date, a
+    // phone number, an unrelated id), returning unrelated tickets instead of
+    // "no results" for a ticket number that simply doesn't exist.
+    if (isNumericQuery) {
+      return json({ issues: [], total: 0, page: 1, totalPages: 1 });
     }
 
     const startsWithMatches = await db.issue.findMany({
@@ -5735,6 +7809,214 @@ async function _handleJiraPgApi(
     }));
 
     return json(results);
+  }
+
+  // GET /reports/resolution-sla?dept=&productType=&dateFrom=&dateTo= — Resolution %,
+  // SLA %, and SLA Breach % per the formulas:
+  //   Resolution % = Resolved / Assigned * 100
+  //   SLA %        = Resolved-within-SLA / Resolved * 100
+  //   Breach %     = Resolved-outside-SLA / Resolved * 100  (= 100 - SLA %)
+  // dept/productType are OPTIONAL scoping filters (when omitted, scoped to the
+  // fixed Migration/Dev depts and Content/Message/Email product types this
+  // report is for). A ticket is "within SLA" using the exact same live
+  // breach check as the ticket detail page (computeSLAInstancesPure, reusing
+  // its resolvedAt-vs-due-time comparison), not a separate/different rule.
+  if (path === 'reports/resolution-sla' && method === 'GET') {
+    if (!isAdmin && currentUser?.role !== 'manager') return json({ error: 'Forbidden' }, 403);
+    const deptParam = url.searchParams.get('dept') || '';
+    const productTypeParam = url.searchParams.get('productType') || '';
+    const dateFrom = url.searchParams.get('dateFrom');
+    const dateTo = url.searchParams.get('dateTo');
+
+    const DEPTS = ['Migration', 'Dev'];
+    const PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+
+    const whereClauses: string[] = [`i.current_department IS NOT NULL`];
+    const params: any[] = [];
+    let idx = 1;
+    if (deptParam) { whereClauses.push(`LOWER(i.current_department) = LOWER($${idx++})`); params.push(deptParam); }
+    else { whereClauses.push(`LOWER(i.current_department) = ANY($${idx++}::text[])`); params.push(DEPTS.map(d => d.toLowerCase())); }
+    // productType (Content/Message/Email Migration) is a Migration-specific
+    // categorization -- Dev tickets essentially never have it set at all
+    // (checked: 15,565 of 15,566 Dev tickets have productType = null).
+    // Requiring a match against the 3 fixed values by default silently
+    // excluded every single Dev ticket from this report, dept filter or
+    // not -- only apply this as a restriction when the caller explicitly
+    // picked one; "no filter" means no restriction, not "must be Migration
+    // content".
+    if (productTypeParam) { whereClauses.push(`i."productType" = $${idx++}`); params.push(productTypeParam); }
+    if (dateFrom) { whereClauses.push(`i."createdAt" >= $${idx++}`); params.push(new Date(dateFrom)); }
+    if (dateTo) { whereClauses.push(`i."createdAt" <= $${idx++}`); params.push(new Date(new Date(dateTo).setHours(23, 59, 59, 999))); }
+
+    const rows = await pool.query(
+      `SELECT i.id, i.key, i.cf_key, i.priority, i."assigneeId", i."spaceId", i.current_department, i."productType",
+              i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i."updatedAt", i."createdAt",
+              s.name AS status_name, s.category AS status_category
+       FROM issues i
+       LEFT JOIN statuses s ON s.id = i."statusId"
+       WHERE ${whereClauses.join(' AND ')}
+       LIMIT 100000`,
+      params
+    );
+
+    const spaceIds = Array.from(new Set(rows.rows.map((r: any) => r.spaceId).filter(Boolean)));
+    const policiesBySpace: Record<string, any[]> = {};
+    if (spaceIds.length) {
+      const polRows = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`, [spaceIds]);
+      for (const p of polRows.rows) (policiesBySpace[p.spaceId] ??= []).push(p);
+    }
+    const assigneeIds = Array.from(new Set(rows.rows.map((r: any) => r.assigneeId).filter(Boolean)));
+    const usersRes = assigneeIds.length
+      ? await pool.query(`SELECT id, "firstName", "lastName", email FROM users WHERE id = ANY($1::text[])`, [assigneeIds])
+      : { rows: [] as any[] };
+    const userById: Record<string, any> = Object.fromEntries(usersRes.rows.map((u: any) => [u.id, u]));
+
+    type Bucket = { totalAssigned: number; totalResolved: number; withinSla: number; breached: number };
+    const mkBucket = (): Bucket => ({ totalAssigned: 0, totalResolved: 0, withinSla: 0, breached: 0 });
+    const overall = mkBucket();
+    const byDept: Record<string, Bucket> = {};
+    const byProductType: Record<string, Bucket> = {};
+    const byDeptProductType: Record<string, Bucket> = {};
+    const byUser: Record<string, Bucket & { name: string; email: string }> = {};
+
+    // Weekly breakdown by product type (Content/Message/Email only -- Dev
+    // essentially never sets this field, same reason it's excluded from
+    // "By Product Type" above) -- powers the "SLA Breach %" / "Resolution %"
+    // grouped-bar-per-week charts. Weeks are anchored to createdAt, starting
+    // at the selected dateFrom (or, with no range picked, the last 3 full
+    // weeks ending today) so week boundaries always line up with the date
+    // range filter shown on the page.
+    const WEEKLY_PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const weekRangeEnd = dateTo ? new Date(new Date(dateTo).setHours(23, 59, 59, 999)) : new Date();
+    const weekRangeStart = dateFrom ? new Date(dateFrom) : new Date(weekRangeEnd.getTime() - 21 * DAY_MS);
+    const totalDays = Math.max(1, Math.ceil((weekRangeEnd.getTime() - weekRangeStart.getTime()) / DAY_MS));
+    const weekCount = Math.min(12, Math.max(1, Math.ceil(totalDays / 7)));
+    const weekLabels = Array.from({ length: weekCount }, (_, i) => `Wk${i + 1}`);
+    const weekRanges = Array.from({ length: weekCount }, (_, i) => {
+      const from = new Date(weekRangeStart.getTime() + i * 7 * DAY_MS);
+      const to = new Date(Math.min(weekRangeStart.getTime() + (i + 1) * 7 * DAY_MS - 1, weekRangeEnd.getTime()));
+      return { from: from.toISOString(), to: to.toISOString() };
+    });
+    const byWeekProductType: Record<string, Bucket[]> = {};
+    for (const pt of WEEKLY_PRODUCT_TYPES) byWeekProductType[pt] = weekLabels.map(() => mkBucket());
+
+    for (const row of rows.rows) {
+      const dept = row.current_department;
+      const ptype = row.productType || 'Unknown';
+      const isDone = row.status_category === 'done';
+      const deptBucket = (byDept[dept] ??= mkBucket());
+      const typeBucket = (byProductType[ptype] ??= mkBucket());
+      const comboBucket = (byDeptProductType[`${dept}::${ptype}`] ??= mkBucket());
+      let userBucket: (Bucket & { name: string; email: string }) | null = null;
+      if (row.assigneeId) {
+        const u = userById[row.assigneeId];
+        const name = u ? (`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email) : 'Unknown';
+        userBucket = (byUser[row.assigneeId] ??= { ...mkBucket(), name, email: u?.email || '' });
+      }
+      let weekBucket: Bucket | null = null;
+      if (WEEKLY_PRODUCT_TYPES.includes(row.productType) && row.createdAt) {
+        const createdMs = new Date(row.createdAt).getTime();
+        const weekIdx = Math.floor((createdMs - weekRangeStart.getTime()) / (7 * DAY_MS));
+        if (weekIdx >= 0 && weekIdx < weekCount) weekBucket = byWeekProductType[row.productType][weekIdx];
+      }
+      overall.totalAssigned++; deptBucket.totalAssigned++; typeBucket.totalAssigned++; comboBucket.totalAssigned++;
+      if (userBucket) userBucket.totalAssigned++;
+      if (weekBucket) weekBucket.totalAssigned++;
+      if (!isDone) continue;
+      overall.totalResolved++; deptBucket.totalResolved++; typeBucket.totalResolved++; comboBucket.totalResolved++;
+      if (userBucket) userBucket.totalResolved++;
+      if (weekBucket) weekBucket.totalResolved++;
+
+      // resolvedAt only gets stamped by this app's own PATCH handler (added
+      // this session) -- a ticket resolved via the original Jira migration
+      // import never had one written, for any of its resolved tickets
+      // (checked against this exact dataset: 7,473 resolved Migration
+      // tickets, only 1 has a real resolvedAt). Tried falling back to
+      // updatedAt for those, but that produces a WORSE number, not a better
+      // one: these tickets took months to migrate, while the currently
+      // configured SLA policies are a few hours, so nearly all of them
+      // read as "breached" purely because the SLA target being checked
+      // almost certainly didn't exist yet when that historical work
+      // actually happened -- a fabricated signal, not a real one. Only
+      // count a ticket toward SLA%/Breach% when it has a REAL resolvedAt;
+      // everything else is included in Resolution% (which only needs
+      // assigned-vs-resolved, no timing) but excluded here, and the exact
+      // count of how many are excluded is surfaced to the caller so this
+      // doesn't quietly look like 100% either way.
+      if (!row.resolvedAt) continue;
+      const policies = policiesBySpace[row.spaceId] || [];
+      const instances = computeSLAInstancesPure(
+        { ...row, status: { name: row.status_name, category: row.status_category } },
+        policies,
+        false
+      );
+      if (!instances.length) continue; // no SLA policy applies -- excluded from the SLA%/Breach% denominator, same as "N/A"
+      const primary = instances.find((x: any) => x.deptName && x.deptName.toLowerCase() === String(dept || '').toLowerCase()) || instances[0];
+      const bump = (b: Bucket) => { if (primary.isBreached) b.breached++; else b.withinSla++; };
+      bump(overall); bump(deptBucket); bump(typeBucket); bump(comboBucket);
+      if (userBucket) bump(userBucket);
+      if (weekBucket) bump(weekBucket);
+    }
+
+    const pct = (n: number, d: number) => d > 0 ? Math.round((n / d) * 1000) / 10 : 0;
+    // withinSla + breached is the sample that actually HAS a real, trustworthy
+    // resolvedAt -- not the same as totalResolved (which includes every
+    // historical ticket with no resolution timestamp at all). Naming this out
+    // explicitly so the UI can show "N of M resolved tickets have tracked
+    // timing" instead of silently dividing by totalResolved and implying a
+    // sample size that doesn't exist yet.
+    const finalize = (b: Bucket) => {
+      const slaTracked = b.withinSla + b.breached;
+      return {
+        ...b,
+        slaTracked,
+        resolutionPct: pct(b.totalResolved, b.totalAssigned),
+        slaPct: pct(b.withinSla, slaTracked),
+        breachPct: pct(b.breached, slaTracked),
+      };
+    };
+
+    return json({
+      overall: finalize(overall),
+      byDept: Object.fromEntries(Object.entries(byDept).map(([k, v]) => [k, finalize(v)])),
+      byProductType: Object.fromEntries(Object.entries(byProductType).map(([k, v]) => [k, finalize(v)])),
+      byDeptProductType: Object.fromEntries(Object.entries(byDeptProductType).map(([k, v]) => [k, finalize(v)])),
+      perUser: Object.entries(byUser)
+        .map(([id, v]) => ({ id, ...finalize(v) }))
+        .sort((a, b) => b.totalAssigned - a.totalAssigned),
+      weekly: {
+        weekLabels,
+        weekRanges,
+        byProductType: Object.fromEntries(
+          WEEKLY_PRODUCT_TYPES.map(pt => [pt, byWeekProductType[pt].map(finalize)])
+        ),
+      },
+    });
+  }
+
+  // Team Analytics -- ported from the standalone "Reports-" app, which pulled
+  // Jira Cloud data into its own SQLite DB and computed these metrics in
+  // memory over CSV rows. Re-implemented here directly against this app's own
+  // issues/issue_history tables (live data, including tickets created inside
+  // this app, not a periodically-refreshed copy). That app's "team" was an
+  // arbitrary named group of people; the closest concept here is
+  // current_department (Migration/Dev/QA/Infra/Pre-Sales/...), which every
+  // filter below groups by instead.
+  if (path.startsWith('reports/team-analytics') && method === 'GET') {
+    if (!isAdmin && currentUser?.role !== 'manager') return json({ error: 'Forbidden' }, 403);
+    const scope = await loadTeamAnalyticsScope(url);
+
+    if (path === 'reports/team-analytics/overview') {
+      return json(buildTeamAnalyticsOverview(scope));
+    }
+    if (path === 'reports/team-analytics/aging') {
+      return json(buildTeamAnalyticsAging(scope));
+    }
+    if (path === 'reports/team-analytics/time-spent') {
+      return json(buildTeamAnalyticsTimeSpent(scope, url.searchParams.get('q') || undefined));
+    }
+    return json({ error: 'Not found' }, 404);
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Workflow Routes (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -6227,7 +8509,17 @@ async function _handleJiraPgApi(
   // POST /issues/:key/watch  Ã¢â‚¬â€ start watching
   const watchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchMatch && method === 'POST') {
-    const key = watchMatch[1].toUpperCase();
+    let key = watchMatch[1].toUpperCase();
+    // Every other issue-scoped route resolves a CF-prefixed key to the real
+    // internal key before using it -- this one never did, so a watch
+    // registered from a "/issues/CF-.../watch" URL (i.e. any normal ticket
+    // page) got stored under the CF key, while notifyWatchers() always looks
+    // up by the internal key. Those watchers were never actually notified of
+    // anything, silently.
+    if (key.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
+      if (cfRow.rows[0]) key = cfRow.rows[0].key;
+    }
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     await (db as any).issueWatch.upsert({
       where: { issueKey_userId: { issueKey: key, userId } },
@@ -6240,7 +8532,11 @@ async function _handleJiraPgApi(
   // DELETE /issues/:key/watch  Ã¢â‚¬â€ stop watching
   const unwatchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (unwatchMatch && method === 'DELETE') {
-    const key = unwatchMatch[1].toUpperCase();
+    let key = unwatchMatch[1].toUpperCase();
+    if (key.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
+      if (cfRow.rows[0]) key = cfRow.rows[0].key;
+    }
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     await (db as any).issueWatch.deleteMany({ where: { issueKey: key, userId } });
     return json({ watching: false });
@@ -6249,7 +8545,11 @@ async function _handleJiraPgApi(
   // GET /issues/:key/watch  Ã¢â‚¬â€ check if watching
   const watchCheckMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchCheckMatch && method === 'GET') {
-    const key = watchCheckMatch[1].toUpperCase();
+    let key = watchCheckMatch[1].toUpperCase();
+    if (key.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
+      if (cfRow.rows[0]) key = cfRow.rows[0].key;
+    }
     if (!userId) return json({ watching: false, count: 0 });
     const [watch, count] = await Promise.all([
       (db as any).issueWatch.findUnique({ where: { issueKey_userId: { issueKey: key, userId } } }),
@@ -6300,25 +8600,33 @@ async function _handleJiraPgApi(
     let count = 0;
     for (const issue of overdue) {
       if (!issue.assigneeId) continue;
+      // Every issue is shown to users only by its CF-prefixed display key --
+      // runMonitorAgentScan's own DUE_DATE notifications already dedup and
+      // display via cf_key || key; using the raw internal key here (both for
+      // display AND this dedup lookup) meant the two never matched each
+      // other and could double-notify the same due date on top of showing
+      // the wrong key.
+      const displayKey = (issue as any).cf_key || issue.key;
       const already = await (db as any).notification.findFirst({
-        where: { userId: issue.assigneeId, issueKey: issue.key, type: 'DUE_DATE',
+        where: { userId: issue.assigneeId, issueKey: displayKey, type: 'DUE_DATE',
           createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
       });
       if (!already) {
         await createNotification({ userId: issue.assigneeId, type: 'DUE_DATE',
-          title: `Overdue: ${issue.key}`, message: issue.summary, issueKey: issue.key });
+          title: `Overdue: ${displayKey}`, message: issue.summary, issueKey: displayKey });
         count++;
       }
     }
     for (const issue of dueToday) {
       if (!issue.assigneeId) continue;
+      const displayKey = (issue as any).cf_key || issue.key;
       const already = await (db as any).notification.findFirst({
-        where: { userId: issue.assigneeId, issueKey: issue.key, type: 'DUE_DATE',
+        where: { userId: issue.assigneeId, issueKey: displayKey, type: 'DUE_DATE',
           createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
       });
       if (!already) {
         await createNotification({ userId: issue.assigneeId, type: 'DUE_DATE',
-          title: `Due today: ${issue.key}`, message: issue.summary, issueKey: issue.key });
+          title: `Due today: ${displayKey}`, message: issue.summary, issueKey: displayKey });
         count++;
       }
     }
@@ -6353,6 +8661,17 @@ async function _handleJiraPgApi(
       }
       return json({ ok: true });
     }
+  }
+
+  // POST /jira-issue-sync -- admin-triggered manual run of the same catch-up
+  // sync that also runs automatically on a timer (see instrumentation.ts).
+  // Bounded to a small batch since this goes over HTTP and has a real
+  // request timeout, unlike the in-process scheduled call.
+  if (path === 'jira-issue-sync' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 500);
+    const result = await runJiraIssueSync(limit);
+    return json(result);
   }
 
   // GET /migration-reporters -- every distinct reporter with at least one
@@ -6661,6 +8980,17 @@ async function _handleJiraPgApi(
         const att = await (db as any).attachment.create({
           data: { issueId, filename: file.name, url, mimeType: file.type || null, size: file.size || null },
         });
+        try {
+          const uploaderName = currentUser
+            ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+            : 'Unknown';
+          await (db as any).issueHistory.create({
+            data: {
+              issueId, field: 'attachment', oldValue: null, newValue: `Added ${file.name}`,
+              authorName: uploaderName, authorEmail: currentUser?.email ?? null, createdAt: new Date(),
+            },
+          });
+        } catch { /* history tracking should never break the upload */ }
         return json({ id: att.id, url: att.url, originalName: att.filename, mimeType: att.mimeType, size: att.size, createdAt: att.createdAt });
       } catch (e: any) {
         console.error('[attachments] upload error:', e);

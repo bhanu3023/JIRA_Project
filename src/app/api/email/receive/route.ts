@@ -650,7 +650,7 @@ export async function POST(req: NextRequest) {
   // Resolve reporter by email — if not found, auto-create a guest user from sender info
   let reporter = await db.user.findFirst({
     where: { email: { equals: fromEmail, mode: 'insensitive' } },
-    select: { id: true },
+    select: { id: true, firstName: true, lastName: true, email: true },
   });
 
   if (!reporter && fromEmail && fromEmail !== 'unknown@sender.com') {
@@ -673,7 +673,7 @@ export async function POST(req: NextRequest) {
           password: '',
           isActive: true,
         },
-        select: { id: true },
+        select: { id: true, firstName: true, lastName: true, email: true },
       });
       reporter = newUser;
       console.log(`[EmailReceive] Auto-created guest user for ${fromEmail}`);
@@ -681,7 +681,7 @@ export async function POST(req: NextRequest) {
       // User might have been created concurrently — try fetching again
       reporter = await db.user.findFirst({
         where: { email: { equals: fromEmail, mode: 'insensitive' } },
-        select: { id: true },
+        select: { id: true, firstName: true, lastName: true, email: true },
       });
     }
   }
@@ -755,6 +755,32 @@ export async function POST(req: NextRequest) {
       await p2.query(`UPDATE issues SET current_department = $1 WHERE key = $2`, [emailDepartment, issue.key]);
     } catch { /* non-critical */ }
   }
+
+  // History: record issue creation -- this path (POST /api/email/receive)
+  // creates issues directly via db.issue.create, bypassing the main
+  // POST /issues handler entirely, which is the only place that normally
+  // logs a 'created' row. Without this, an email-created ticket had ZERO
+  // issue_history rows for its entire life unless/until someone changed
+  // its status or assignee through the normal ticket detail page -- and
+  // even then, only that one later change would show up, with nothing
+  // recording when the ticket actually started or who/what created it.
+  // Matches the exact 'created' pattern jira-pg-api.ts's POST /issues uses.
+  try {
+    await (db as any).issueHistory.create({
+      data: {
+        id: rid(),
+        issueId: issue.id,
+        field: 'created',
+        oldValue: null,
+        newValue: reporter
+          ? `Issue created from an email by ${(`${reporter.firstName ?? ''} ${reporter.lastName ?? ''}`.trim()) || reporter.email}`
+          : 'Issue created from an incoming email',
+        authorName: reporter ? ((`${reporter.firstName ?? ''} ${reporter.lastName ?? ''}`.trim()) || reporter.email) : 'System',
+        authorEmail: reporter?.email ?? null,
+        createdAt: new Date(),
+      },
+    });
+  } catch { /* non-critical */ }
 
   // If no assignee was found via RR, alert leads + shift leads
   if (!rrAssigneeId) {

@@ -15,7 +15,17 @@ import {
   Mail, Copy, ToggleLeft, ToggleRight, RefreshCw, Shield, Filter, ExternalLink, Power, Search
 } from 'lucide-react';
 import { PriorityIcon, getPriorityMeta } from '@/components/ui/PriorityIcon';
-import { ROLE_LABELS, SELECTABLE_ROLES } from '@/lib/permissions';
+
+// A member's role here is scoped to THIS space (SpaceMember.role), not their
+// site-wide account role -- this used to reuse the global role list
+// (Admin/Manager/Migration Engineer/QA Engineer/...) which doesn't match any
+// row in the "Space permissions" reference table below (admin/manager/dev/
+// viewer), so most choices silently fell through to no defined permissions
+// at all. These four are the only space roles the rest of the app (the
+// Sidebar's canManageSpace check, the permissions table) actually knows
+// about.
+const SPACE_ROLES = ['admin', 'manager', 'dev', 'viewer'] as const;
+const SPACE_ROLE_LABELS: Record<string, string> = { admin: 'Admin', manager: 'Manager', dev: 'Developer', viewer: 'Viewer' };
 
 // ── Sidebar nav ───────────────────────────────────────────────────────────────
 const NAV = [
@@ -166,10 +176,16 @@ function Section({ title, description, children }: { title: string; description?
 }
 
 // ── People & Access section (own component so hooks are always called) ─────────
+// Kept in sync with SPACE_ROLES/SPACE_ROLE_LABELS below -- this used to offer
+// 'developer' (no matching row in the edit-role dropdown, which uses 'dev')
+// and had no 'manager' option at all, so a member added here as anything but
+// Admin/Viewer landed on a role the rest of the space-permissions system
+// didn't recognize.
 const MEMBER_ROLES = [
-  { value: 'admin',     label: 'Admin',     desc: 'Full control over space settings and members' },
-  { value: 'developer', label: 'Developer', desc: 'Can create and manage issues' },
-  { value: 'viewer',    label: 'Viewer',    desc: 'Read-only access to the space' },
+  { value: 'admin',   label: 'Admin',     desc: 'Full control over space settings and members' },
+  { value: 'manager', label: 'Manager',   desc: 'Can manage members and issues, not workflows or settings' },
+  { value: 'dev',     label: 'Developer', desc: 'Can create and manage issues' },
+  { value: 'viewer',  label: 'Viewer',    desc: 'Read-only access to the space' },
 ];
 
 function PeopleSection({
@@ -183,8 +199,8 @@ function PeopleSection({
 }) {
   const [showAddModal, setShowAddModal] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
-  const [selectedUser, setSelectedUser] = useState<any>(null);
-  const [selectedRole, setSelectedRole] = useState('developer');
+  const [selectedUsers, setSelectedUsers] = useState<any[]>([]);
+  const [selectedRole, setSelectedRole] = useState('dev');
   const [selectedDept, setSelectedDept] = useState('');
   const [addingMember, setAddingMember] = useState(false);
   const [addMemberMsg, setAddMemberMsg] = useState('');
@@ -201,19 +217,32 @@ function PeopleSection({
   const memberEmails = new Set(
     (currentSpace.members || []).map((m: any) => (m.email || m.user?.email || '').toLowerCase())
   );
-  const availableUsers = users.filter(u => !memberEmails.has((u.email || '').toLowerCase()));
+  // Suspended/deactivated accounts shouldn't show up as addable -- but a
+  // freshly-invited user who hasn't logged in yet ALSO has isActive=false
+  // (see the isActive/status backfill near the top of jira-pg-api.ts: invited
+  // stays isActive=false, distinct from a deliberately-suspended inactive
+  // account) and is exactly the kind of "recently added/updated user" someone
+  // would want to add to a space right after inviting them. Filtering on
+  // isActive alone hid both groups identically; check the actual status
+  // field instead so only genuinely suspended accounts (status === 'inactive')
+  // are excluded.
+  const availableUsers = users.filter(u => !memberEmails.has((u.email || '').toLowerCase()) && u.status !== 'inactive');
   const filteredUsers  = availableUsers.filter(u => {
     const q = memberSearch.toLowerCase();
     return !q
       || (u.firstName + ' ' + u.lastName).toLowerCase().includes(q)
       || (u.email || '').toLowerCase().includes(q);
   });
+  const selectedIds = new Set(selectedUsers.map(u => u.id));
+  const toggleUserSelect = (u: any) => {
+    setSelectedUsers(prev => prev.some(s => s.id === u.id) ? prev.filter(s => s.id !== u.id) : [...prev, u]);
+  };
 
   const DEPT_OPTIONS = ['', 'Migration', 'Dev', 'QA', 'Pre-Sales', 'Support'];
 
   const openModal = () => {
     setShowAddModal(true);
-    setSelectedUser(null);
+    setSelectedUsers([]);
     setMemberSearch('');
     setSelectedRole('developer');
     setSelectedDept('');
@@ -221,20 +250,26 @@ function PeopleSection({
   };
 
   const doAddMember = async () => {
-    if (!selectedUser) return;
+    if (!selectedUsers.length) return;
     setAddingMember(true);
     setAddMemberMsg('');
-    try {
-      await onAddMember(selectedUser.id, selectedRole, selectedDept);
-      setAddMemberMsg(`${selectedUser.firstName} ${selectedUser.lastName} added successfully.`);
-      setSelectedUser(null);
+    const toAdd = selectedUsers;
+    const results = await Promise.allSettled(toAdd.map(u => onAddMember(u.id, selectedRole, selectedDept)));
+    const failed = toAdd.filter((_, i) => results[i].status === 'rejected');
+    if (failed.length === 0) {
+      setAddMemberMsg(toAdd.length === 1
+        ? `${toAdd[0].firstName} ${toAdd[0].lastName} added successfully.`
+        : `${toAdd.length} members added successfully.`);
+      setSelectedUsers([]);
       setMemberSearch('');
       setTimeout(() => { setShowAddModal(false); setAddMemberMsg(''); }, 1200);
-    } catch {
-      setAddMemberMsg('Failed to add member. Please try again.');
-    } finally {
-      setAddingMember(false);
+    } else {
+      setSelectedUsers(failed); // keep only the ones that failed, so the user can retry just those
+      setAddMemberMsg(failed.length === toAdd.length
+        ? 'Failed to add member(s). Please try again.'
+        : `Added ${toAdd.length - failed.length} of ${toAdd.length}. ${failed.length} failed — please retry.`);
     }
+    setAddingMember(false);
   };
 
   return (
@@ -303,17 +338,16 @@ function PeopleSection({
                       value={role}
                       onChange={async (e) => {
                         const newRole = e.target.value;
-                        await fetch(`/api/spaces/${spaceKey}/members/${m.userId || m.id}`, {
+                        await api.request(`/spaces/${spaceKey}/members/${m.userId || m.id}`, {
                           method: 'PATCH',
-                          headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({ role: newRole }),
                         });
                         onReload();
                       }}
                       className="text-[12px] border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
                     >
-                      {SELECTABLE_ROLES.map(r => (
-                        <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+                      {SPACE_ROLES.map(r => (
+                        <option key={r} value={r}>{SPACE_ROLE_LABELS[r]}</option>
                       ))}
                     </select>
                   </td>
@@ -327,9 +361,8 @@ function PeopleSection({
                           ))}
                         </select>
                         <button onClick={async () => {
-                          await fetch(`/api/spaces/${spaceKey}/members/${m.userId || m.id}`, {
+                          await api.request(`/spaces/${spaceKey}/members/${m.userId || m.id}`, {
                             method: 'PATCH',
-                            headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ department: editingDeptVal || null }),
                           });
                           setEditingDeptId(null);
@@ -368,12 +401,10 @@ function PeopleSection({
                               setResendingId(m.id);
                               setResendMsg(null);
                               try {
-                                const res = await fetch('/api/users/invite', {
+                                const data = await api.request<any>('/users/invite', {
                                   method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify({ email, firstName, lastName, role, invitedBy: 'Admin' }),
                                 });
-                                const data = await res.json();
                                 setResendMsg({ id: m.id, ok: data.emailSent, text: data.emailSent ? 'Invite sent!' : 'Not configured' });
                               } catch {
                                 setResendMsg({ id: m.id, ok: false, text: 'Failed to send' });
@@ -393,9 +424,8 @@ function PeopleSection({
                               if (!confirm(`Suspend ${firstName} ${lastName}? They will not be able to log in.`)) return;
                               setSuspendingId(m.id);
                               try {
-                                await fetch(`/api/jira-pg?path=users/${m.userId || m.id}`, {
+                                await api.request(`/users/${m.userId || m.id}`, {
                                   method: 'PATCH',
-                                  headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify({ isActive: false }),
                                 });
                                 onReload();
@@ -463,38 +493,64 @@ function PeopleSection({
 
               {/* Search */}
               <div>
-                <label className="block text-[12px] font-semibold text-gray-700 mb-1.5">
-                  Search by name or email <span className="text-red-500">*</span>
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-[12px] font-semibold text-gray-700">
+                    Search by name or email <span className="text-red-500">*</span>
+                  </label>
+                  {selectedUsers.length > 0 && (
+                    <button type="button" onClick={() => setSelectedUsers([])}
+                      className="text-[11.5px] font-medium text-blue-600 hover:text-blue-700">
+                      Clear ({selectedUsers.length})
+                    </button>
+                  )}
+                </div>
+                {selectedUsers.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-2 p-2 bg-blue-50/60 border border-blue-100 rounded-lg">
+                    {selectedUsers.map(u => (
+                      <span key={u.id} className="inline-flex items-center gap-1.5 pl-1 pr-1.5 py-1 bg-white border border-blue-200 rounded-full text-[12px] font-medium text-gray-700 shadow-sm">
+                        <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 bg-gradient-to-br from-indigo-400 to-purple-500 text-white">
+                          {getInitials(u.firstName, u.lastName)}
+                        </span>
+                        {u.firstName} {u.lastName}
+                        <button type="button" onClick={() => toggleUserSelect(u)}
+                          className="text-gray-400 hover:text-red-500 transition-colors">
+                          <X size={12} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <input
                   type="text"
                   autoFocus
                   placeholder="Search users..."
                   value={memberSearch}
-                  onChange={e => { setMemberSearch(e.target.value); setSelectedUser(null); }}
+                  onChange={e => setMemberSearch(e.target.value)}
                   className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400"
                 />
-                <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100 max-h-52 overflow-y-auto">
+                <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100 max-h-64 overflow-y-auto">
                   {filteredUsers.length === 0 ? (
                     <div className="px-4 py-5 text-center text-sm text-gray-400">
                       {availableUsers.length === 0
-                        ? 'All users are already members of this space.'
+                        ? 'All active users are already members of this space.'
                         : 'No users match your search.'}
                     </div>
                   ) : filteredUsers.map(u => {
-                    const isSel = selectedUser?.id === u.id;
+                    const isSel = selectedIds.has(u.id);
                     return (
                       <button key={u.id} type="button"
-                        onClick={() => setSelectedUser(isSel ? null : u)}
+                        onClick={() => toggleUserSelect(u)}
                         className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors ${isSel ? 'bg-blue-50' : ''}`}>
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${isSel ? 'bg-blue-600 text-white' : 'bg-gradient-to-br from-indigo-400 to-purple-500 text-white'}`}>
-                          {isSel ? <Check size={14} /> : getInitials(u.firstName, u.lastName)}
+                        <div className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${isSel ? 'border-blue-600 bg-blue-600' : 'border-gray-300 bg-white'}`}>
+                          {isSel && <Check size={11} className="text-white" strokeWidth={3} />}
+                        </div>
+                        <div className="w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 bg-gradient-to-br from-indigo-400 to-purple-500 text-white">
+                          {getInitials(u.firstName, u.lastName)}
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className={`text-[13px] font-semibold ${isSel ? 'text-blue-700' : 'text-gray-900'}`}>{u.firstName} {u.lastName}</p>
                           <p className="text-[11.5px] text-gray-400 truncate">{u.email}</p>
                         </div>
-                        {isSel && <Check size={15} className="text-blue-600 flex-shrink-0" />}
                       </button>
                     );
                   })}
@@ -541,19 +597,21 @@ function PeopleSection({
 
             {/* Modal footer */}
             <div className="flex items-center justify-between px-5 py-3.5 border-t border-gray-200 bg-gray-50 rounded-b-xl">
-              <p className="text-[12px] text-gray-500">
-                {selectedUser
-                  ? <><span className="text-gray-400">Adding:</span> <span className="font-semibold text-gray-700">{selectedUser.firstName} {selectedUser.lastName}</span></>
-                  : 'Select a user above'}
+              <p className="text-[12px] text-gray-500 truncate max-w-[220px]">
+                {selectedUsers.length === 0
+                  ? 'Select one or more users above'
+                  : selectedUsers.length === 1
+                    ? <><span className="text-gray-400">Adding:</span> <span className="font-semibold text-gray-700">{selectedUsers[0].firstName} {selectedUsers[0].lastName}</span></>
+                    : <><span className="font-semibold text-gray-700">{selectedUsers.length} users</span> <span className="text-gray-400">selected</span></>}
               </p>
               <div className="flex gap-2">
                 <button onClick={() => setShowAddModal(false)}
                   className="px-4 py-2 text-[12.5px] font-medium text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
                   Cancel
                 </button>
-                <button onClick={doAddMember} disabled={!selectedUser || addingMember}
+                <button onClick={doAddMember} disabled={!selectedUsers.length || addingMember}
                   className="px-4 py-2 text-[12.5px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-                  {addingMember ? 'Adding…' : 'Add member'}
+                  {addingMember ? 'Adding…' : selectedUsers.length > 1 ? `Add ${selectedUsers.length} members` : 'Add member'}
                 </button>
               </div>
             </div>
@@ -3343,7 +3401,7 @@ function SpaceSettingsContent() {
     }
   }, [currentSpace]);
 
-  const handleAddMember  = async (userId: string, role = 'developer', department = '') => { await api.addSpaceMember(spaceKey, { userId, role, department: department || null }); loadSpace(spaceKey, true); };
+  const handleAddMember  = async (userId: string, role = 'dev', department = '') => { await api.addSpaceMember(spaceKey, { userId, role, department: department || null }); loadSpace(spaceKey, true); };
   const handleAddLabel   = async (e: React.FormEvent) => { e.preventDefault(); await api.createLabel({ spaceKey, ...newLabel }); setNewLabel({ name: '', color: '#3B82F6' }); api.getLabels(spaceKey).then(setLabels); };
   const handleSaveGeneral = async () => {
     setSaving(true);
