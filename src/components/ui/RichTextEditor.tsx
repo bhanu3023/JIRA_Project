@@ -4,7 +4,7 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import {
   Bold, Italic, Underline, Strikethrough,
   List, ListOrdered, Code, Quote, Link2,
-  Image as ImageIcon, Minus, Paperclip, FolderUp,
+  Minus, Paperclip, FolderUp,
   Heading1, Heading2, Type,
 } from 'lucide-react';
 
@@ -47,7 +47,6 @@ export default function RichTextEditor({
   onUploadingChange,
 }: Props) {
   const editorRef  = useRef<HTMLDivElement>(null);
-  const imgRef     = useRef<HTMLInputElement>(null);
   const fileRef    = useRef<HTMLInputElement>(null);
   const folderRef  = useRef<HTMLInputElement>(null);
   const pendingUploads = useRef(0);
@@ -552,10 +551,6 @@ export default function RichTextEditor({
     });
   };
 
-  const handleImgInput  = (e: React.ChangeEvent<HTMLInputElement>) => {
-    Array.from(e.target.files ?? []).forEach(f => f.type.startsWith('image/') ? insertImage(f) : insertFile(f));
-    e.target.value = '';
-  };
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     Array.from(e.target.files ?? []).forEach(f => f.type.startsWith('image/') ? insertImage(f) : insertFile(f));
     e.target.value = '';
@@ -657,7 +652,6 @@ export default function RichTextEditor({
         <TBtn title="Horizontal rule" onClick={() => exec('insertHorizontalRule')}><Minus size={13} /></TBtn>
         <Divider />
         <TBtn title="Insert link"  onClick={insertLink}><Link2 size={13} /></TBtn>
-        <TBtn title="Insert image" onClick={() => imgRef.current?.click()}><ImageIcon size={13} /></TBtn>
         <TBtn title="Attach file"   onClick={() => fileRef.current?.click()}><Paperclip size={13} /></TBtn>
         <TBtn title="Attach folder" onClick={() => folderRef.current?.click()}><FolderUp size={13} /></TBtn>
       </div>
@@ -788,7 +782,6 @@ export default function RichTextEditor({
       )}
 
       {/* Hidden inputs */}
-      <input ref={imgRef}  type="file" accept="image/*" multiple hidden onChange={handleImgInput} />
       <input ref={fileRef} type="file" accept="*/*"     multiple hidden onChange={handleFileInput} />
       {/* webkitdirectory isn't in React's DOM typings — spread it in untyped so
           the folder picker (not just multi-file select) actually opens. */}
