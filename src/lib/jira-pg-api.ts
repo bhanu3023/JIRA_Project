@@ -13,6 +13,7 @@ import { getNextAgent, getDefaultDepartment, getRrConfig, saveRrConfig } from '@
 import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs } from '@/lib/connector-service';
 import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager } from '@/lib/permissions';
+import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 
 // 60-second in-memory cache for user role lookups so every API request
 // doesn't pay an extra DB round-trip just to check isAdmin.
@@ -2063,19 +2064,27 @@ async function getJiraCredentials(): Promise<{ base: string; email: string; toke
   return { base: JIRA_BASE_URL, email: JIRA_EMAIL, token: JIRA_TOKEN, authHdr: JIRA_AUTH_HDR };
 }
 
-// Map issue key prefix Ã¢â€ ' { jiraProject, spaceKey }
+// Map issue key prefix -> { jiraProject, spaceKey }
+// spaceKey used to point at per-board spaces (L2BOARD, L3BOARD, ...) from an
+// older multi-space layout that was later consolidated into a single space --
+// every one of these prefixes' issues actually lives under 'TESTIN' now
+// (confirmed: issues for every prefix below all join to space key TESTIN).
+// Looking up the old spaceKey silently found no space and returned null,
+// which means importIssueFromJira has been unable to import ANY issue for
+// ANY prefix -- the on-demand "open a not-yet-synced ticket by URL" fallback
+// has simply been a dead 404 for every board this whole time.
 const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> = {
-  L1BOAR:  { jiraProject: 'CFITS',  spaceKey: 'L1BOAR'   },
-  L2B:     { jiraProject: 'L2B',    spaceKey: 'L2BOARD'  },
-  L3B:     { jiraProject: 'L3B',    spaceKey: 'L3BOARD'  },
-  PSM:     { jiraProject: 'PSM',    spaceKey: 'PSMBOARD' },
-  CFM:     { jiraProject: 'CFM',    spaceKey: 'CFMBOARD' },
-  IB:      { jiraProject: 'IB',     spaceKey: 'INFRABOARD'},
-  MB:      { jiraProject: 'MB',     spaceKey: 'MBBOARD'  },
-  EB:      { jiraProject: 'EB',     spaceKey: 'EBBOARD'  },
-  CB:      { jiraProject: 'CB',     spaceKey: 'CBBOARD'  },
-  SOPS:    { jiraProject: 'SOPS',   spaceKey: 'SOPSBOARD'},
-  QABOAR:  { jiraProject: 'QABOAR', spaceKey: 'QABOAR'   },
+  L1BOAR:  { jiraProject: 'CFITS',  spaceKey: 'TESTIN' },
+  L2B:     { jiraProject: 'L2B',    spaceKey: 'TESTIN' },
+  L3B:     { jiraProject: 'L3B',    spaceKey: 'TESTIN' },
+  PSM:     { jiraProject: 'PSM',    spaceKey: 'TESTIN' },
+  CFM:     { jiraProject: 'CFM',    spaceKey: 'TESTIN' },
+  IB:      { jiraProject: 'IB',     spaceKey: 'TESTIN' },
+  MB:      { jiraProject: 'MB',     spaceKey: 'TESTIN' },
+  EB:      { jiraProject: 'EB',     spaceKey: 'TESTIN' },
+  CB:      { jiraProject: 'CB',     spaceKey: 'TESTIN' },
+  SOPS:    { jiraProject: 'SOPS',   spaceKey: 'TESTIN' },
+  QABOAR:  { jiraProject: 'QABOAR', spaceKey: 'TESTIN' },
 };
 
 const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665';
@@ -2143,7 +2152,7 @@ function adfNodeToHtml(node: any): string {
   return (node.content || []).map(adfNodeToHtml).join('');
 }
 
-async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof formatIssue> | null> {
+async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?: string }): Promise<ReturnType<typeof formatIssue> | null> {
   try {
     const prefix = localKey.split('-')[0];
     const meta = PREFIX_TO_META[prefix];
@@ -2155,7 +2164,7 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
     const jiraKey = localKey; // key prefix matches Jira project for all other boards
 
     const creds = await getJiraCredentials();
-    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,${JIRA_CUSTOM_FIELDS}`;
+    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,created,updated,${JIRA_CUSTOM_FIELDS}`;
     const url = `${creds.base}/rest/api/3/issue/${jiraKey}?fields=${fields}&expand=changelog`;
     // This fetch had no timeout, so whenever an issue (very often a stale or
     // broken linked-ticket key) isn't found locally, GET /issues/:key would
@@ -2258,9 +2267,20 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
           productType:    extractJiraValue(f.customfield_10203),
           combination:    extractJiraValue(f.customfield_10236),
           productionTicket: extractJiraValue(f.customfield_10665),
+          // Preserve real Jira history instead of stamping "now" -- these feed
+          // aging/SLA/timeline analytics, so a bulk backfill imported today
+          // must still show its issues' true original creation dates.
+          createdAt: f.created ? new Date(f.created) : undefined,
+          updatedAt: f.updated ? new Date(f.updated) : undefined,
         },
       });
       issueId = created.id;
+      // current_department isn't in the Prisma schema (added via a raw
+      // migration) -- every other place in this file sets it with a plain
+      // UPDATE rather than through the Prisma client, so do the same here.
+      if (opts?.defaultDepartment) {
+        await pool.query(`UPDATE issues SET current_department = $1 WHERE id = $2`, [opts.defaultDepartment, issueId]);
+      }
     }
 
     // Import comments
@@ -2317,6 +2337,390 @@ async function importIssueFromJira(localKey: string): Promise<ReturnType<typeof 
   } catch (e) {
     console.error('[importIssueFromJira] error:', e);
     return null;
+  }
+}
+
+// Projects that get an automatic, recurring catch-up sync from Jira -- see
+// runJiraIssueSync below. Add a prefix here to bring another board under the
+// same "never miss new tickets again" coverage. Only valid for boards where
+// the local key IS the Jira key (confirmed true for L2B/L3B). CFITS is NOT
+// one of these -- see importCfitsIssue below for why.
+const SYNC_PROJECTS: { prefix: string; jiraProject: string }[] = [
+  { prefix: 'L2B', jiraProject: 'L2B' },
+  { prefix: 'L3B', jiraProject: 'L3B' },
+];
+
+const CFITS_JIRA_PROJECT = 'CFITS';
+const CFITS_LOCAL_PREFIX = 'L1BOAR';
+const CFITS_SPACE_KEY = 'TESTIN';
+// Confirmed from real data, not assumed: 7465 of the 7468 already-migrated
+// L1BOAR tickets are current_department = 'Migration' -- unlike L2B/L3B
+// (which default to 'Dev'), this board is the Migration team's queue.
+const CFITS_DEFAULT_DEPARTMENT = 'Migration';
+
+// Mirrors the exact key-allocation logic POST /issues (the real "create
+// ticket" endpoint) already uses: ONE counter shared across the whole
+// space, not one per prefix -- confirmed from real data before writing
+// this (the newest L1BOAR tickets created directly in the app, not
+// migrated, sit in the 15000s: the same range L2B was in at the time,
+// because both draw from the same space-wide MAX(...)+1). A separate
+// per-prefix counter here would eventually hand out a key that collides
+// with one the real create-issue flow already gave someone else.
+async function allocateNextLocalKey(prefix: string, spaceId: string): Promise<string> {
+  const r = await pool.query(
+    `SELECT COALESCE(MAX(
+       CASE WHEN SPLIT_PART(key, '-', ARRAY_LENGTH(STRING_TO_ARRAY(key, '-'), 1)) ~ '^[0-9]+$'
+            THEN CAST(SPLIT_PART(key, '-', ARRAY_LENGTH(STRING_TO_ARRAY(key, '-'), 1)) AS INTEGER)
+            ELSE 0 END
+     ), 0) AS maxnum FROM issues WHERE "spaceId" = $1`,
+    [spaceId]
+  );
+  const next = (parseInt(r.rows[0]?.maxnum || '0', 10) || 0) + 1;
+  return `${prefix}-${next}`;
+}
+
+// CFITS needs its own import path instead of reusing importIssueFromJira:
+// local L1BOAR keys have NO relationship to Jira CFITS-N numbers (e.g. local
+// L1BOAR-7603 maps to real Jira CFITS-8110) -- the mapping lives entirely in
+// the jira_source_key column. importIssueFromJira assumes jiraKey===localKey,
+// which is only true for L2B/L3B; that's why it explicitly refuses L1BOAR.
+async function importCfitsIssue(cfitsKey: string): Promise<string | null> {
+  try {
+    // Keyed by jira_source_key, not by a matching local key -- see above.
+    const already = await pool.query(`SELECT key FROM issues WHERE jira_source_key = $1 LIMIT 1`, [cfitsKey]);
+    if (already.rows[0]) return already.rows[0].key;
+
+    const creds = await getJiraCredentials();
+    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,created,updated,${JIRA_CUSTOM_FIELDS}`;
+    const res = await fetch(`${creds.base}/rest/api/3/issue/${cfitsKey}?fields=${fields}&expand=changelog`, {
+      headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    }).catch(() => null);
+    if (!res || !res.ok) return null;
+    const ji: any = await res.json();
+    const f = ji.fields || {};
+
+    const space = await db.space.findUnique({ where: { key: CFITS_SPACE_KEY }, include: { statuses: true } });
+    if (!space) return null;
+
+    const jiraStatusName: string = f.status?.name || 'Open';
+    const localStatus = space.statuses.find(
+      (s: any) => s.name.toLowerCase() === jiraStatusName.toLowerCase()
+    ) ?? space.statuses[0] ?? null;
+
+    const resolveByDisplayName = async (jiraUser: any): Promise<string | null> => {
+      if (!jiraUser?.displayName) return null;
+      const name = jiraUser.displayName.trim();
+      const parts = name.split(/\s+/);
+      const byFull = await db.user.findFirst({
+        where: { firstName: { equals: parts[0], mode: 'insensitive' },
+                  lastName: { equals: parts.slice(1).join(' '), mode: 'insensitive' } },
+      });
+      if (byFull) return byFull.id;
+      if (jiraUser.emailAddress) {
+        const byEmail = await db.user.findFirst({ where: { email: { equals: jiraUser.emailAddress, mode: 'insensitive' } } });
+        if (byEmail) return byEmail.id;
+      }
+      const byFirst = await db.user.findFirst({ where: { firstName: { equals: parts[0], mode: 'insensitive' } } });
+      return byFirst?.id ?? null;
+    };
+
+    const [assigneeId, reporterId] = await Promise.all([
+      resolveByDisplayName(f.assignee),
+      resolveByDisplayName(f.reporter),
+    ]);
+
+    const localKey = await allocateNextLocalKey(CFITS_LOCAL_PREFIX, space.id);
+
+    const created = await db.issue.create({
+      data: {
+        id: rid(), key: localKey,
+        summary: f.summary || localKey,
+        description: f.description ? (typeof f.description === 'object' ? adfNodeToHtml(f.description) : f.description) : null,
+        type: (f.issuetype?.name || 'task').toLowerCase(),
+        priority: (f.priority?.name || 'medium').toLowerCase(),
+        spaceId: space.id, statusId: localStatus?.id ?? null,
+        assigneeId, reporterId,
+        labels: Array.isArray(f.labels) ? f.labels : [],
+        customerName:   extractJiraValue(f.customfield_10401),
+        clientName:     extractJiraValue(f.customfield_10883),
+        projectManager: extractJiraValue(f.customfield_11380),
+        productType:    extractJiraValue(f.customfield_10203),
+        combination:    extractJiraValue(f.customfield_10236),
+        productionTicket: extractJiraValue(f.customfield_10665),
+        // Real Jira history, not "now" -- see the same note in importIssueFromJira.
+        createdAt: f.created ? new Date(f.created) : undefined,
+        updatedAt: f.updated ? new Date(f.updated) : undefined,
+      },
+    });
+    // current_department and jira_source_key aren't in the Prisma schema
+    // (added via raw migrations) -- set with a plain UPDATE like every other
+    // place in this file that touches them. This UPDATE, not the create
+    // above, is where the "already migrated?" race actually lands: two
+    // concurrent calls for the same cfitsKey both pass the SELECT check at
+    // the top, both create a distinct local issue (different allocated
+    // keys, so that insert never conflicts), and then both try to stamp the
+    // same jira_source_key here -- the unique index added above lets the
+    // second one fail loudly instead of silently duplicating the ticket.
+    try {
+      await pool.query(
+        `UPDATE issues SET current_department = $1, jira_source_key = $2 WHERE id = $3`,
+        [CFITS_DEFAULT_DEPARTMENT, cfitsKey, created.id]
+      );
+    } catch (e: any) {
+      if (e?.code === '23505') {
+        // Lost the race -- another call already migrated this cfitsKey.
+        // Roll back the orphaned issue row this call created and defer to
+        // the winner instead of leaving a duplicate/half-tagged ticket.
+        await db.issue.delete({ where: { id: created.id } }).catch(() => {});
+        const winner = await pool.query(`SELECT key FROM issues WHERE jira_source_key = $1 LIMIT 1`, [cfitsKey]);
+        return winner.rows[0]?.key ?? null;
+      }
+      throw e;
+    }
+
+    const jiraComments: any[] = f.comment?.comments || [];
+    for (const jc of jiraComments) {
+      const commentAuthorId = await resolveByDisplayName(jc.author);
+      const body = typeof jc.body === 'object' ? adfNodeToHtml(jc.body) : (jc.body || '');
+      await db.comment.create({
+        data: {
+          id: rid(), body: body || '(empty)', issueId: created.id,
+          authorId: commentAuthorId,
+          authorName: jc.author?.displayName ?? null,
+          authorEmail: null,
+          createdAt: new Date(jc.created),
+          updatedAt: new Date(jc.updated || jc.created),
+        },
+      });
+    }
+
+    const changelog: any[] = ji.changelog?.histories || [];
+    const histRecs: any[] = [];
+    for (const entry of changelog) {
+      const authorName = entry.author?.displayName ?? null;
+      for (const item of entry.items || []) {
+        histRecs.push({
+          id: rid(), issueId: created.id, field: item.field?.toLowerCase() || '',
+          oldValue: item.fromString ?? null, newValue: item.toString ?? null,
+          authorName, authorEmail: null, createdAt: new Date(entry.created),
+        });
+      }
+    }
+    if (histRecs.length > 0) await db.issueHistory.createMany({ data: histRecs });
+
+    return localKey;
+  } catch (e) {
+    console.error('[importCfitsIssue] error:', e);
+    return null;
+  }
+}
+
+async function ensureAppSettingsTable(): Promise<void> {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`
+  );
+}
+
+// jira_source_key only ever had a plain (non-unique) index. That's fine for
+// L2B/L3B, which dedupe on the real `key` unique constraint instead, but
+// importCfitsIssue dedupes by looking up jira_source_key first -- and this
+// app's dev server has been observed to invoke its own boot sequence more
+// than once concurrently (Next.js re-running instrumentation's register()),
+// plus a sync run can legitimately take longer than the 5-minute interval
+// between periodic ticks. Either case is a real window for two concurrent
+// calls to both see "not migrated yet" for the same CFITS key and each
+// create a separate local ticket for it. A real unique index turns that
+// into a loud, catchable constraint violation instead of a silent
+// duplicate. Confirmed zero existing duplicate jira_source_key values
+// before adding this, so it's safe to create unconditionally.
+async function ensureJiraSourceKeyUniqueIndex(): Promise<void> {
+  await pool.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_jira_source_key_unique ON issues (jira_source_key) WHERE jira_source_key IS NOT NULL`
+  );
+}
+
+// The sync checkpoint is the highest Jira issue-number already pulled in for
+// a project. Deliberately NOT based on "created" timestamp: `ORDER BY
+// created ASC` on this Jira instance returns issues wildly out of key order
+// (e.g. L2B-5112 before L2B-11022) -- almost certainly issues moved into this
+// project from elsewhere that kept their original creation date. A
+// created-timestamp checkpoint would permanently skip any such ticket whose
+// preserved date is older than the checkpoint. Issue *key numbers* are
+// strictly increasing per Jira project regardless of that, so they're the
+// only safe cursor for "have we seen this one yet".
+async function getSyncCheckpoint(prefix: string): Promise<number> {
+  await ensureAppSettingsTable();
+  const row = await pool.query(`SELECT value FROM app_settings WHERE key = $1`, [`jira_sync_last_num_${prefix}`]);
+  if (row.rows[0]) return parseInt(row.rows[0].value, 10) || 0;
+  // No checkpoint yet -- bootstrap from whatever's already the highest local key
+  // for this prefix, so first run only pulls what's genuinely missing.
+  const r = await pool.query(
+    `SELECT key FROM issues WHERE key LIKE $1 ORDER BY (regexp_replace(key, '^.*-', ''))::int DESC LIMIT 1`,
+    [`${prefix}-%`]
+  );
+  return r.rows[0] ? (parseInt(r.rows[0].key.split('-').pop() || '0', 10) || 0) : 0;
+}
+
+async function setSyncCheckpoint(prefix: string, num: number): Promise<void> {
+  await ensureAppSettingsTable();
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [`jira_sync_last_num_${prefix}`, String(num)]
+  );
+}
+
+// Same storage shape as getSyncCheckpoint (reuses setSyncCheckpoint('CFITS', n)
+// to persist), but a different bootstrap query: CFITS has no local key to
+// scan since local L1BOAR numbers don't match Jira CFITS numbers at all (see
+// importCfitsIssue) -- the highest already-migrated CFITS number instead
+// lives in jira_source_key.
+async function getCfitsSyncCheckpoint(): Promise<number> {
+  await ensureAppSettingsTable();
+  const row = await pool.query(`SELECT value FROM app_settings WHERE key = $1`, [`jira_sync_last_num_CFITS`]);
+  if (row.rows[0]) return parseInt(row.rows[0].value, 10) || 0;
+  const r = await pool.query(
+    `SELECT jira_source_key FROM issues WHERE jira_source_key LIKE 'CFITS-%' ORDER BY (regexp_replace(jira_source_key, '^.*-', ''))::int DESC LIMIT 1`
+  );
+  return r.rows[0] ? (parseInt(r.rows[0].jira_source_key.split('-').pop() || '0', 10) || 0) : 0;
+}
+
+// Pulls every Jira issue created after the last-seen key number for each
+// project in SYNC_PROJECTS and imports the ones missing locally, defaulting
+// them into the Dev queue (matching how these boards are actually used --
+// 14900+ of the ~14916 existing local L2B issues are already current_department
+// = 'Dev'). Safe to call repeatedly/concurrently-ish: every issue is
+// existence-checked by its unique key right before import, so nothing is
+// ever duplicated even if a key gets seen again before its checkpoint commits.
+// `maxPerRun` bounds how many issues one call will process -- callers reached
+// over HTTP (with a real timeout) should pass a small number; the in-process
+// scheduler in instrumentation.ts can afford to leave it high since it isn't
+// subject to any request timeout.
+// True while a sync is running, in this process. A single run has taken as
+// long as ~5 minutes (a full backlog under the 500-per-call cap) -- right at
+// the boundary of the periodic 5-minute interval in instrumentation.ts, so a
+// slow run and the next scheduled tick WILL overlap under normal operation,
+// not just as some rare edge case. Confirmed happening: two concurrent
+// importCfitsIssue calls both passed the "not migrated yet" check for the
+// same Jira ticket and both tried to create a local copy, one of them
+// failing on the key collision. This flag makes an overlapping call a no-op
+// instead of a second call actually racing the first.
+let _jiraSyncRunning = false;
+
+export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ imported: string[]; errors: string[] }> {
+  if (_jiraSyncRunning) {
+    return { imported: [], errors: ['sync already in progress in this process, skipped'] };
+  }
+  _jiraSyncRunning = true;
+  try {
+  const imported: string[] = [];
+  const errors: string[] = [];
+  const creds = await getJiraCredentials();
+  for (const { prefix, jiraProject } of SYNC_PROJECTS) {
+    if (imported.length + errors.length >= maxPerRun) break;
+    let checkpoint = await getSyncCheckpoint(prefix);
+    let pageToken: string | undefined;
+    // Fixed for the whole pagination sweep -- a nextPageToken is only valid
+    // against the exact jql it was issued for. Recomputing jql each page
+    // using the (by-then-advanced) `checkpoint` produced a jql that no
+    // longer matched the token from the previous page's response, and Jira
+    // rejected the mismatched pair with a 400 on every page after the first.
+    const jql = encodeURIComponent(`project = ${jiraProject} AND issuekey > ${prefix}-${checkpoint} ORDER BY issuekey ASC`);
+    while (imported.length + errors.length < maxPerRun) {
+      let url = `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=50&fields=summary`;
+      if (pageToken) url += `&nextPageToken=${encodeURIComponent(pageToken)}`;
+      const res = await fetch(url, {
+        headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      }).catch((e) => { errors.push(`${prefix}: search fetch failed: ${e?.message || e}`); return null; });
+      if (!res) break;
+      if (!res.ok) { errors.push(`${prefix}: search HTTP ${res.status}`); break; }
+      const data: any = await res.json().catch(() => null);
+      if (!data) { errors.push(`${prefix}: bad JSON from search`); break; }
+      const keys: string[] = (data.issues || []).map((i: any) => i.key);
+      if (keys.length === 0) break;
+      for (const key of keys) {
+        if (imported.length + errors.length >= maxPerRun) break;
+        try {
+          const existing = await db.issue.findUnique({ where: { key }, select: { id: true } });
+          // Advance the checkpoint on confirmed success only (imported, or
+          // already existed -- e.g. from the on-demand fallback) -- NOT on
+          // failure. A failed import that still advanced the checkpoint
+          // would be permanently skipped, since the next run's JQL only
+          // asks for keys AFTER the checkpoint. Re-scanning a
+          // still-succeeded key next run is safe/cheap: this existence
+          // check just finds it and moves on.
+          let ok = !!existing;
+          if (!existing) {
+            const result = await importIssueFromJira(key, { defaultDepartment: 'Dev' });
+            if (result) { imported.push(key); ok = true; } else { errors.push(`${key}: import returned null`); }
+          }
+          if (ok) {
+            const num = parseInt(key.split('-').pop() || '0', 10);
+            if (num > checkpoint) { checkpoint = num; await setSyncCheckpoint(prefix, checkpoint); }
+          }
+        } catch (e: any) {
+          errors.push(`${key}: ${e?.message || e}`);
+        }
+        // Gentle pacing so a ~1000-issue backlog doesn't hammer Jira Cloud's
+        // rate limits in one burst.
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (data.isLast || !data.nextPageToken) break;
+      pageToken = data.nextPageToken;
+    }
+  }
+
+  // CFITS is handled separately from SYNC_PROJECTS above: its local key
+  // (L1BOAR-N) has no relationship to the Jira key (CFITS-N) -- see
+  // importCfitsIssue/allocateNextLocalKey. Checkpointing and pagination
+  // follow the same shape, just keyed by the Jira issue number instead of a
+  // (nonexistent) matching local key.
+  if (imported.length + errors.length < maxPerRun) {
+    await ensureJiraSourceKeyUniqueIndex();
+    let cfitsCheckpoint = await getCfitsSyncCheckpoint();
+    let cfitsPageToken: string | undefined;
+    const cfitsJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND issuekey > ${CFITS_JIRA_PROJECT}-${cfitsCheckpoint} ORDER BY issuekey ASC`);
+    while (imported.length + errors.length < maxPerRun) {
+      let url = `${creds.base}/rest/api/3/search/jql?jql=${cfitsJql}&maxResults=50&fields=summary`;
+      if (cfitsPageToken) url += `&nextPageToken=${encodeURIComponent(cfitsPageToken)}`;
+      const res = await fetch(url, {
+        headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      }).catch((e) => { errors.push(`CFITS: search fetch failed: ${e?.message || e}`); return null; });
+      if (!res) break;
+      if (!res.ok) { errors.push(`CFITS: search HTTP ${res.status}`); break; }
+      const data: any = await res.json().catch(() => null);
+      if (!data) { errors.push('CFITS: bad JSON from search'); break; }
+      const cfitsKeys: string[] = (data.issues || []).map((i: any) => i.key);
+      if (cfitsKeys.length === 0) break;
+      for (const cfitsKey of cfitsKeys) {
+        if (imported.length + errors.length >= maxPerRun) break;
+        try {
+          const localKey = await importCfitsIssue(cfitsKey);
+          // Same rule as the L2B/L3B loop above: only advance past a key
+          // once it's confirmed migrated (or already was) -- not on failure.
+          if (localKey) {
+            imported.push(`${cfitsKey} -> ${localKey}`);
+            const num = parseInt(cfitsKey.split('-').pop() || '0', 10);
+            if (num > cfitsCheckpoint) { cfitsCheckpoint = num; await setSyncCheckpoint('CFITS', cfitsCheckpoint); }
+          } else {
+            errors.push(`${cfitsKey}: import returned null`);
+          }
+        } catch (e: any) {
+          errors.push(`${cfitsKey}: ${e?.message || e}`);
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (data.isLast || !data.nextPageToken) break;
+      cfitsPageToken = data.nextPageToken;
+    }
+  }
+
+  return { imported, errors };
+  } finally {
+    _jiraSyncRunning = false;
   }
 }
 
@@ -2688,13 +3092,19 @@ async function _handleJiraPgApi(
   // with a generic "Forbidden" error, no redirect, no message — the page kept
   // rendering from cached client state as if still logged in, while every
   // list on it quietly came back empty with no indication why.
-  if (!userId && !isPublicPath) {
+  // instrumentation.ts's own scheduled background jobs have no user session
+  // to send -- they authenticate with this per-process secret instead (see
+  // internal-job-secret.ts). Scoped to one specific path rather than a
+  // blanket bypass, since anything landing here has no session to audit.
+  const isInternalJob = path === 'jira-issue-sync' && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
+
+  if (!userId && !isPublicPath && !isInternalJob) {
     return json({ error: 'Unauthorized' }, 401);
   }
 
   // Load current user for role checks (cached 60s to avoid a DB round-trip on every request)
   const currentUser = userId ? await getCachedUser(userId) : null;
-  const isAdmin = currentUser?.role === 'admin';
+  const isAdmin = currentUser?.role === 'admin' || isInternalJob;
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Stats Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
@@ -8126,6 +8536,17 @@ async function _handleJiraPgApi(
       }
       return json({ ok: true });
     }
+  }
+
+  // POST /jira-issue-sync -- admin-triggered manual run of the same catch-up
+  // sync that also runs automatically on a timer (see instrumentation.ts).
+  // Bounded to a small batch since this goes over HTTP and has a real
+  // request timeout, unlike the in-process scheduled call.
+  if (path === 'jira-issue-sync' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 500);
+    const result = await runJiraIssueSync(limit);
+    return json(result);
   }
 
   // GET /migration-reporters -- every distinct reporter with at least one
