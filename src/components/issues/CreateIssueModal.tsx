@@ -38,6 +38,18 @@ const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
 // so the reporter fills in each one inline. Screenshots work exactly like
 // they already do anywhere else in a description: paste or drag an image
 // under that heading and RichTextEditor uploads and embeds it inline.
+//
+// Each heading is followed by a visibly bordered box (not just a blank
+// paragraph, which rendered with no visual indication there was anywhere to
+// type). The "Type your answer here" hint uses the exact same technique as
+// RichTextEditor's own top-level placeholder just below (a CSS `:empty`
+// pseudo-element driven by data-placeholder, not real text) rather than
+// literal gray text inside the box -- literal text would have to be
+// selected and typed over, and since `color` is CSS-inherited, whatever the
+// reporter typed in its place would render in that same faded gray, making
+// their real answer look broken/unreadable. A `:empty` pseudo-element
+// vanishes the instant there's any real content, and the typed text is a
+// plain child of the box with no color override, so it renders normally.
 const MIGRATION_DESCRIPTION_TEMPLATE = [
   'Issue Reported',
   'Error Description',
@@ -48,7 +60,7 @@ const MIGRATION_DESCRIPTION_TEMPLATE = [
   'Grafana Results',
   'Workspace Ids',
   'Server Url',
-].map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p><p><br></p>`).join('');
+].map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p><div class="empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400 empty:before:pointer-events-none" data-placeholder="Type your answer here…" style="border:1px dashed #cbd5e1;border-radius:6px;padding:8px 10px;margin:4px 0 16px 0;min-height:24px;"></div>`).join('');
 
 // Combination / Product Type / Project Manager are data-migration concepts
 // (a source/destination combo, which PM owns the migration) that only make
