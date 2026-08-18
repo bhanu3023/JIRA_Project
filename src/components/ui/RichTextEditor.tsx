@@ -83,11 +83,28 @@ export default function RichTextEditor({
   // doesn't dominate the description box — clicking one opens it full-size
   // in an overlay instead, rather than at its cramped inline thumbnail size.
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const PLACEHOLDER_HTML = '<em>Type your answer here…</em>';
   const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     if (target.tagName === 'IMG') {
       e.preventDefault();
       setLightboxSrc((target as HTMLImageElement).src);
+    }
+
+    // Clicking into a locked answer box that still shows its unmodified
+    // placeholder should let the very next keystroke replace it outright —
+    // like a real input's placeholder — instead of just landing the caret
+    // wherever was clicked and having typed text glue onto "Type your
+    // answer here…". Only auto-selects while the box's content is still
+    // exactly the placeholder; once a real answer is typed, clicking back
+    // in just positions the caret normally, same as any other text.
+    const box = target.closest('[data-rte-locked="box"]');
+    if (box && box.innerHTML === PLACEHOLDER_HTML) {
+      const range = document.createRange();
+      range.selectNodeContents(box);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
     }
   };
   const warnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -194,7 +211,6 @@ export default function RichTextEditor({
    * and left to native handling, since deleting text within a single
    * paragraph never touches another block's structure.
    */
-  const PLACEHOLDER_HTML = '<em>Type your answer here…</em>';
   const isLocked = (n: Node | null): n is HTMLElement =>
     !!n && n instanceof HTMLElement && n.hasAttribute('data-rte-locked');
 
