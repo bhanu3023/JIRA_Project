@@ -2018,6 +2018,18 @@ function parseDateRange(range: string): { from: Date; to: Date } {
     return { from: new Date(0), to: t };
   }
 
+  // "Between" (custom from/to date picker) was never handled here -- it fell
+  // through every branch above and landed on the catch-all default below,
+  // which silently returns the full all-time range. Selecting specific dates
+  // and clicking Update looked like it worked (the filter chip showed the
+  // dates) but never actually narrowed the results at all.
+  if (range.startsWith('between:')) {
+    const [, fromStr, toStr] = range.split(':');
+    const f = fromStr ? new Date(`${fromStr}T00:00:00`) : new Date(0);
+    const t = toStr ? new Date(`${toStr}T23:59:59.999`) : now;
+    return { from: f, to: t };
+  }
+
   switch (range) {
     case 'today': return { from: startOfToday, to: now };
     case 'yesterday': {
