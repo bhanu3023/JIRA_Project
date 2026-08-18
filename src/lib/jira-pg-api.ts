@@ -2588,7 +2588,21 @@ async function _handleJiraPgApi(
 
   if (path === 'auth/me' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
-    // Dev: skip DB entirely Ã¢â‚¬â€ decode real identity from JWT claims if present
+    // This unconditionally hardcoded role: 'admin' for every user in
+    // development mode (skipping the DB lookup entirely, even when the DB
+    // was working fine and the user existed) -- meant as a fallback for a
+    // genuinely unreachable DB, but ran unconditionally instead. That
+    // silently made every locally-tested account "admin" regardless of its
+    // real role, so any role-gated behavior (space admin, permission
+    // checks, etc.) was impossible to verify locally -- it always looked
+    // like it worked because everyone was secretly an admin. Try the real
+    // DB record first; only fall back to decoding identity from the JWT's
+    // own claims if the DB is genuinely unreachable or the user row is
+    // missing.
+    try {
+      const dbUser = await db.user.findUnique({ where: { id: userId } });
+      if (dbUser) return json(formatUser(dbUser));
+    } catch { /* DB unreachable -- fall through to dev fallback below */ }
     if (process.env.NODE_ENV === 'development') {
       try {
         const jwt = require('jsonwebtoken');
@@ -2607,9 +2621,7 @@ async function _handleJiraPgApi(
         return json({ id: userId, email: 'dev@local', firstName: 'Dev', lastName: 'User', role: 'admin', isActive: true, avatarUrl: null });
       }
     }
-    const user = await db.user.findUnique({ where: { id: userId } });
-    if (!user) return json({ error: 'Unauthorized' }, 401);
-    return json(formatUser(user));
+    return json({ error: 'Unauthorized' }, 401);
   }
 
   // Logout Ã¢â‚¬â€ revoke session in DB
@@ -2984,8 +2996,8 @@ async function _handleJiraPgApi(
     const memberDept = body.department ? String(body.department) : null;
     await db.spaceMember.upsert({
       where: { spaceId_userId: { spaceId: sp.id, userId: uid } },
-      create: { spaceId: sp.id, userId: uid, role: String(body.role || 'developer') },
-      update: { role: String(body.role || 'developer') },
+      create: { spaceId: sp.id, userId: uid, role: String(body.role || 'dev') },
+      update: { role: String(body.role || 'dev') },
     });
     if (memberDept !== null) {
       await pool.query(`UPDATE space_members SET department=$1 WHERE "spaceId"=$2 AND "userId"=$3`, [memberDept, sp.id, uid]);

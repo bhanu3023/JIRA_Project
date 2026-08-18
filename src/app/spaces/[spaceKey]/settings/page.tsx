@@ -15,7 +15,17 @@ import {
   Mail, Copy, ToggleLeft, ToggleRight, RefreshCw, Shield, Filter, ExternalLink, Power, Search
 } from 'lucide-react';
 import { PriorityIcon, getPriorityMeta } from '@/components/ui/PriorityIcon';
-import { ROLE_LABELS, SELECTABLE_ROLES } from '@/lib/permissions';
+
+// A member's role here is scoped to THIS space (SpaceMember.role), not their
+// site-wide account role -- this used to reuse the global role list
+// (Admin/Manager/Migration Engineer/QA Engineer/...) which doesn't match any
+// row in the "Space permissions" reference table below (admin/manager/dev/
+// viewer), so most choices silently fell through to no defined permissions
+// at all. These four are the only space roles the rest of the app (the
+// Sidebar's canManageSpace check, the permissions table) actually knows
+// about.
+const SPACE_ROLES = ['admin', 'manager', 'dev', 'viewer'] as const;
+const SPACE_ROLE_LABELS: Record<string, string> = { admin: 'Admin', manager: 'Manager', dev: 'Developer', viewer: 'Viewer' };
 
 // ── Sidebar nav ───────────────────────────────────────────────────────────────
 const NAV = [
@@ -166,10 +176,16 @@ function Section({ title, description, children }: { title: string; description?
 }
 
 // ── People & Access section (own component so hooks are always called) ─────────
+// Kept in sync with SPACE_ROLES/SPACE_ROLE_LABELS below -- this used to offer
+// 'developer' (no matching row in the edit-role dropdown, which uses 'dev')
+// and had no 'manager' option at all, so a member added here as anything but
+// Admin/Viewer landed on a role the rest of the space-permissions system
+// didn't recognize.
 const MEMBER_ROLES = [
-  { value: 'admin',     label: 'Admin',     desc: 'Full control over space settings and members' },
-  { value: 'developer', label: 'Developer', desc: 'Can create and manage issues' },
-  { value: 'viewer',    label: 'Viewer',    desc: 'Read-only access to the space' },
+  { value: 'admin',   label: 'Admin',     desc: 'Full control over space settings and members' },
+  { value: 'manager', label: 'Manager',   desc: 'Can manage members and issues, not workflows or settings' },
+  { value: 'dev',     label: 'Developer', desc: 'Can create and manage issues' },
+  { value: 'viewer',  label: 'Viewer',    desc: 'Read-only access to the space' },
 ];
 
 function PeopleSection({
@@ -184,7 +200,7 @@ function PeopleSection({
   const [showAddModal, setShowAddModal] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const [selectedUsers, setSelectedUsers] = useState<any[]>([]);
-  const [selectedRole, setSelectedRole] = useState('developer');
+  const [selectedRole, setSelectedRole] = useState('dev');
   const [selectedDept, setSelectedDept] = useState('');
   const [addingMember, setAddingMember] = useState(false);
   const [addMemberMsg, setAddMemberMsg] = useState('');
@@ -330,8 +346,8 @@ function PeopleSection({
                       }}
                       className="text-[12px] border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
                     >
-                      {SELECTABLE_ROLES.map(r => (
-                        <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+                      {SPACE_ROLES.map(r => (
+                        <option key={r} value={r}>{SPACE_ROLE_LABELS[r]}</option>
                       ))}
                     </select>
                   </td>
@@ -3385,7 +3401,7 @@ function SpaceSettingsContent() {
     }
   }, [currentSpace]);
 
-  const handleAddMember  = async (userId: string, role = 'developer', department = '') => { await api.addSpaceMember(spaceKey, { userId, role, department: department || null }); loadSpace(spaceKey, true); };
+  const handleAddMember  = async (userId: string, role = 'dev', department = '') => { await api.addSpaceMember(spaceKey, { userId, role, department: department || null }); loadSpace(spaceKey, true); };
   const handleAddLabel   = async (e: React.FormEvent) => { e.preventDefault(); await api.createLabel({ spaceKey, ...newLabel }); setNewLabel({ name: '', color: '#3B82F6' }); api.getLabels(spaceKey).then(setLabels); };
   const handleSaveGeneral = async () => {
     setSaving(true);
