@@ -36,6 +36,30 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).cat
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "productionTicket" TEXT`).catch(() => {});
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMP(3)`).catch(() => {});
 
+// Deleted-ticket trash: DELETE /issues/:key used to be a genuine hard
+// delete with no way to get a ticket back -- a production ticket got
+// deleted and there was nothing to recover it from. Rather than turn
+// every single existing issue-listing query in this file into a
+// "WHERE deletedAt IS NULL" filter (this file has dozens of raw-SQL reads
+// against `issues`, and missing even one would leak a "deleted" ticket
+// back into a live view), deletion instead snapshots the full issue
+// (including comments/attachments/history, which cascade-delete with it)
+// into this table before the real delete, and restoring re-inserts from
+// that snapshot. Every other existing query is untouched and can't
+// possibly see a deleted ticket, since it's genuinely gone from `issues`
+// until restored.
+pool.query(`CREATE TABLE IF NOT EXISTS deleted_issues (
+  id TEXT PRIMARY KEY,
+  key TEXT NOT NULL,
+  cf_key TEXT,
+  space_key TEXT,
+  summary TEXT,
+  data JSONB NOT NULL,
+  deleted_by_id TEXT,
+  deleted_by_name TEXT,
+  deleted_at TIMESTAMPTZ DEFAULT NOW()
+)`).catch(() => {});
+
 // Jira's admin User Management shows when each user was last active. Update
 // at most once every 5 minutes per user (an in-memory throttle, not a DB
 // read-then-write) so this doesn't turn every single authenticated request
@@ -7039,6 +7063,37 @@ async function _handleJiraPgApi(
       }
     } catch { /* non-critical */ }
 
+    // Snapshot everything that's about to cascade-delete (comments,
+    // attachments, history) into the trash table before the real delete, so
+    // it can be fully restored later. Raw SELECT * rather than a Prisma
+    // include: several issue columns (current_department, jira_source_key,
+    // dept_assignees, ...) were added via raw migrations and aren't in the
+    // Prisma schema at all, so a Prisma query would silently drop them from
+    // the snapshot.
+    try {
+      const issueRow = (await pool.query(`SELECT * FROM issues WHERE key = $1`, [key])).rows[0];
+      const [comments, attachments, history] = await Promise.all([
+        pool.query(`SELECT * FROM comments WHERE "issueId" = $1`, [issueRow.id]),
+        pool.query(`SELECT * FROM attachments WHERE "issueId" = $1`, [issueRow.id]),
+        pool.query(`SELECT * FROM issue_history WHERE "issueId" = $1`, [issueRow.id]),
+      ]);
+      const deleter = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+      await pool.query(
+        `INSERT INTO deleted_issues (id, key, cf_key, space_key, summary, data, deleted_by_id, deleted_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          rid(), issueRow.key, issueRow.cf_key, issue.space?.key ?? null, issueRow.summary,
+          JSON.stringify({ issue: issueRow, comments: comments.rows, attachments: attachments.rows, history: history.rows }),
+          userId ?? null, deleter ? `${deleter.firstName} ${deleter.lastName}`.trim() : null,
+        ]
+      );
+    } catch (e) {
+      // If the snapshot fails for any reason, still let the delete proceed
+      // rather than blocking someone from deleting a ticket -- but log it
+      // loudly since it means that particular delete won't be recoverable.
+      console.error(`[DELETE ${key}] Failed to snapshot for trash — this delete will NOT be recoverable:`, e);
+    }
+
     await db.issue.delete({ where: { key } });
     await db.space.update({ where: { id: issue.spaceId }, data: { issueCount: { decrement: 1 } } });
 
@@ -7050,6 +7105,64 @@ async function _handleJiraPgApi(
       deletedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
     }).catch(() => {});
 
+    return json({ ok: true });
+  }
+
+
+  // --- Deleted-ticket trash: list / restore / permanently purge ---------
+  if (path === 'deleted-issues' && method === 'GET') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    const rows = await pool.query(
+      `SELECT id, key, cf_key, space_key, summary, deleted_by_name, deleted_at FROM deleted_issues ORDER BY deleted_at DESC LIMIT 500`
+    );
+    return json({ deleted: rows.rows });
+  }
+
+  const restoreMatch = path.match(/^deleted-issues\/([^/]+)\/restore$/);
+  if (restoreMatch && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    const trashId = restoreMatch[1];
+    const trashRow = (await pool.query(`SELECT * FROM deleted_issues WHERE id = $1`, [trashId])).rows[0];
+    if (!trashRow) return json({ error: 'Not found in trash' }, 404);
+
+    const already = await pool.query(`SELECT 1 FROM issues WHERE key = $1`, [trashRow.key]);
+    if (already.rows[0]) {
+      return json({ error: `A ticket with key ${trashRow.key} already exists -- can't restore over it` }, 409);
+    }
+
+    const { issue: issueRow, comments = [], attachments = [], history = [] } = trashRow.data;
+
+    // Re-insert each row exactly as it was, column-for-column, rather than
+    // hardcoding a column list -- these rows can carry raw-migration columns
+    // (current_department, jira_source_key, ...) that Prisma doesn't know
+    // about, and hardcoding would silently drop any column added after this
+    // code was written.
+    const insertRow = async (table: string, row: Record<string, any>) => {
+      const cols = Object.keys(row);
+      const colList = cols.map((c) => `"${c}"`).join(', ');
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      const values = cols.map((c) => row[c]);
+      await pool.query(`INSERT INTO ${table} (${colList}) VALUES (${placeholders})`, values);
+    };
+
+    try {
+      await insertRow('issues', issueRow);
+      for (const c of comments) await insertRow('comments', c);
+      for (const a of attachments) await insertRow('attachments', a);
+      for (const h of history) await insertRow('issue_history', h);
+      await db.space.update({ where: { id: issueRow.spaceId }, data: { issueCount: { increment: 1 } } }).catch(() => {});
+      await pool.query(`DELETE FROM deleted_issues WHERE id = $1`, [trashId]);
+    } catch (e: any) {
+      console.error(`[restore ${trashRow.key}] failed:`, e);
+      return json({ error: `Restore failed: ${e?.message || e}` }, 500);
+    }
+    return json({ ok: true, key: issueRow.key });
+  }
+
+  const purgeMatch = path.match(/^deleted-issues\/([^/]+)$/);
+  if (purgeMatch && method === 'DELETE') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    await pool.query(`DELETE FROM deleted_issues WHERE id = $1`, [purgeMatch[1]]);
     return json({ ok: true });
   }
 

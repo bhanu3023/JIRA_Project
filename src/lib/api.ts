@@ -165,6 +165,9 @@ class ApiClient {
   createIssue(data: any) { return this.request<any>('/issues', { method: 'POST', body: JSON.stringify(data) }); }
   updateIssue(key: string, data: any) { return this.request<any>(`/issues/${key}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteIssue(key: string) { return this.request<any>(`/issues/${key}`, { method: 'DELETE' }); }
+  getDeletedIssues() { return this.request<any>('/deleted-issues'); }
+  restoreDeletedIssue(id: string) { return this.request<any>(`/deleted-issues/${id}/restore`, { method: 'POST' }); }
+  purgeDeletedIssue(id: string) { return this.request<any>(`/deleted-issues/${id}`, { method: 'DELETE' }); }
   addComment(key: string, data: any) { return this.request<any>(`/issues/${key}/comments`, { method: 'POST', body: JSON.stringify(data) }); }
   updateComment(commentId: string, data: { body: string }) { return this.request<any>(`/comments/${commentId}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteComment(commentId: string) { return this.request<any>(`/comments/${commentId}`, { method: 'DELETE' }); }

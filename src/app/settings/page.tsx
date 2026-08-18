@@ -139,7 +139,7 @@ function SyncBoardFieldsButton() {
   );
 }
 
-type SettingsView = 'main' | 'general' | 'notifications' | 'system' | 'apps' | 'spaces' | 'work-items' | 'marketplace' | 'operations' | 'users' | 'billing' | 'permissions' | 'sites' | 'api' | 'connectors';
+type SettingsView = 'main' | 'general' | 'notifications' | 'system' | 'apps' | 'spaces' | 'work-items' | 'marketplace' | 'operations' | 'users' | 'billing' | 'permissions' | 'sites' | 'api' | 'connectors' | 'deleted-issues';
 
 interface Site {
   id: string;
@@ -302,6 +302,20 @@ function SettingsContent() {
     if (view === 'users') loadUsers();
   }, [view]);
 
+  const [deletedIssues, setDeletedIssues] = useState<any[]>([]);
+  const [deletedLoading, setDeletedLoading] = useState(false);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const loadDeletedIssues = useCallback(() => {
+    setDeletedLoading(true);
+    api.getDeletedIssues()
+      .then((r: any) => setDeletedIssues(r.deleted || []))
+      .catch(() => {})
+      .finally(() => setDeletedLoading(false));
+  }, []);
+  useEffect(() => {
+    if (view === 'deleted-issues') loadDeletedIssues();
+  }, [view, loadDeletedIssues]);
+
   useEffect(() => {
     if (user) setProfileForm({ firstName: user.firstName, lastName: user.lastName });
   }, [user]);
@@ -392,6 +406,7 @@ function SettingsContent() {
               <SettingsMenuItem icon={<Users size={18} />} iconBg="bg-indigo-100 text-indigo-600" title="User Management" desc="Manage users, Groups and access request" onClick={() => navigate('users')} external />
               <SettingsMenuItem icon={<Globe size={18} />} iconBg="bg-teal-100 text-teal-600" title="Sites" desc="Manage sites, domains and support email addresses" onClick={() => navigate('sites')} />
               <SettingsMenuItem icon={<Shield size={18} />} iconBg="bg-rose-100 text-rose-600" title="Permissions" desc="View and manage role-based access permissions" onClick={() => navigate('permissions')} />
+              <SettingsMenuItem icon={<Trash2 size={18} />} iconBg="bg-red-100 text-red-600" title="Deleted Tickets" desc="View deleted tickets, see who deleted them, and restore" onClick={() => navigate('deleted-issues')} />
             </div>
           </>
         )}
@@ -2811,6 +2826,96 @@ function SettingsContent() {
               </div>
             </div>
           </>
+        )}
+      </SubPage>
+    );
+  }
+
+  // Deleted Tickets — trash view (admin/owner only)
+  if (view === 'deleted-issues') {
+    if (!isPrivileged) return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 text-center">
+        <div className="w-14 h-14 rounded-full bg-red-50 flex items-center justify-center"><Trash2 size={28} className="text-red-400" /></div>
+        <h2 className="text-lg font-semibold text-gray-800">Access Restricted</h2>
+        <p className="text-sm text-gray-500 max-w-xs">You don't have permission to view deleted tickets. Contact your admin.</p>
+      </div>
+    );
+
+    const handleRestore = async (row: any) => {
+      setRestoringId(row.id);
+      try {
+        await api.restoreDeletedIssue(row.id);
+        setDeletedIssues(prev => prev.filter(d => d.id !== row.id));
+        setMessage(`${row.cf_key || row.key} restored.`);
+        setTimeout(() => setMessage(''), 4000);
+      } catch (e: any) {
+        alert(e?.message || 'Restore failed.');
+      } finally {
+        setRestoringId(null);
+      }
+    };
+
+    const handlePurge = async (row: any) => {
+      if (!confirm(`Permanently delete ${row.cf_key || row.key}? This cannot be undone.`)) return;
+      try {
+        await api.purgeDeletedIssue(row.id);
+        setDeletedIssues(prev => prev.filter(d => d.id !== row.id));
+      } catch { /* ignore */ }
+    };
+
+    return (
+      <SubPage title="Deleted Tickets">
+        {message && (
+          <div className="mb-4 rounded-lg bg-green-50 border border-green-200 px-4 py-2.5 text-sm text-green-700">{message}</div>
+        )}
+        {deletedLoading ? (
+          <div className="text-center py-16 text-gray-400 text-sm">Loading…</div>
+        ) : deletedIssues.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
+            <Trash2 size={32} className="text-gray-300" />
+            <p className="text-sm text-gray-500">No deleted tickets. Anything deleted from here on will show up in this list.</p>
+          </div>
+        ) : (
+          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100 bg-gray-50 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                  <th className="px-4 py-2.5">Key</th>
+                  <th className="px-4 py-2.5">Summary</th>
+                  <th className="px-4 py-2.5">Space</th>
+                  <th className="px-4 py-2.5">Deleted By</th>
+                  <th className="px-4 py-2.5">Deleted At</th>
+                  <th className="px-4 py-2.5"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {deletedIssues.map(row => (
+                  <tr key={row.id}>
+                    <td className="px-4 py-2.5 font-medium text-gray-800 whitespace-nowrap">{row.cf_key || row.key}</td>
+                    <td className="px-4 py-2.5 text-gray-600 max-w-[280px] truncate">{row.summary || '—'}</td>
+                    <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">{row.space_key || '—'}</td>
+                    <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">{row.deleted_by_name || 'Unknown'}</td>
+                    <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">{new Date(row.deleted_at).toLocaleString()}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button
+                        onClick={() => handleRestore(row)}
+                        disabled={restoringId === row.id}
+                        className="text-xs font-semibold text-blue-600 hover:text-blue-700 disabled:opacity-50 mr-3"
+                      >
+                        {restoringId === row.id ? 'Restoring…' : 'Restore'}
+                      </button>
+                      <button
+                        onClick={() => handlePurge(row)}
+                        className="text-xs font-semibold text-red-500 hover:text-red-600"
+                      >
+                        Delete forever
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </SubPage>
     );
