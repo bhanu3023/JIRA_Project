@@ -228,7 +228,16 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [spaceQueues, setSpaceQueues] = useState<{ id: string; label: string; dept?: string; queueStatuses?: WorkflowStatus[]; memberIds?: string[]; suspendedIds?: string[] }[]>([]);
   const [selectedQueueId, setSelectedQueueId] = useState('');
   const [form, setForm] = useState({
-    summary: '', description: '', type: 'task', priority: 'medium',
+    summary: '',
+    // The Migration-template auto-fill in update() below only fires when the
+    // Queue dropdown is CHANGED by the user -- it never ran when the queue
+    // arrives pre-selected as "Migration" (e.g. opening Create from inside
+    // the Migration queue view passes initialDept="Migration" straight into
+    // this initial state, never going through update() at all). Apply the
+    // same template here too so it's not missing just because of how the
+    // modal happened to be opened.
+    description: (initialDept && initialDept.toLowerCase() === 'migration') ? MIGRATION_DESCRIPTION_TEMPLATE : '',
+    type: 'task', priority: 'medium',
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
     productType: [] as string[], projectManager: [] as string[], productionTicket: '',
   });
