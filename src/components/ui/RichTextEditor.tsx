@@ -947,6 +947,9 @@ export default function RichTextEditor({
           [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0
           [&_a]:text-blue-600 [&_a]:underline
           [&_img]:max-w-[220px] [&_img]:max-h-[160px] [&_img]:w-auto [&_img]:h-auto [&_img]:object-contain [&_img]:rounded-md [&_img]:my-1 [&_img]:cursor-pointer
+          [&_table]:border-collapse [&_table]:my-2 [&_table]:max-w-full
+          [&_td]:border [&_td]:border-gray-300 [&_td]:px-2 [&_td]:py-1 [&_td]:align-top
+          [&_th]:border [&_th]:border-gray-300 [&_th]:px-2 [&_th]:py-1 [&_th]:align-top [&_th]:bg-gray-50 [&_th]:font-semibold
           empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400
           empty:before:pointer-events-none
         `}
