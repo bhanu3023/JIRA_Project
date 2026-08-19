@@ -50,7 +50,7 @@ class ApiClient {
     return this.requestUncoalesced<T>(endpoint, options);
   }
 
-  private async requestUncoalesced<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  private async requestUncoalesced<T>(endpoint: string, options: RequestInit = {}, attempt = 0): Promise<T> {
     const method = (options.method || 'GET').toUpperCase();
     const skipAuthHeader =
       method === 'POST' && (endpoint === '/auth/login' || endpoint === '/auth/register');
@@ -131,6 +131,17 @@ class ApiClient {
     // from) need to fail loudly on an unparseable body; a DELETE returning
     // {} is normal, not evidence of a broken response.
     if (bodyParseFailed && method === 'GET') {
+      // Most cases of this are a one-off truncated response (a slow connection
+      // or an intermediate proxy cutting off a large payload mid-stream), not
+      // a permanent condition -- retrying the exact same request a moment
+      // later succeeds the vast majority of the time. Previously this always
+      // threw immediately and made the user click "Retry" themselves for
+      // something that would have quietly succeeded on its own; only surface
+      // the hard error once a retry has also failed.
+      if (attempt < 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return this.requestUncoalesced<T>(endpoint, options, attempt + 1);
+      }
       throw new Error(`Received an incomplete response from the server for ${endpoint} — please try again.`);
     }
     return data as T;

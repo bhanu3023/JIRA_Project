@@ -6337,6 +6337,24 @@ async function _handleJiraPgApi(
               : c
           );
         }
+        // The History tab's activity feed stores the FULL old/new text of every
+        // edited field (see the `track()` history-recorder above) -- for a
+        // 'description' change that's the entire description, twice, on every
+        // single edit. A ticket with a long description edited many times (the
+        // Migration template tickets especially) can accumulate megabytes here
+        // even when the CURRENT description and comments are both small and
+        // already under their own caps above -- this was the one field this
+        // guard didn't check, so it kept sending truncated responses for
+        // exactly this class of ticket.
+        if (Array.isArray(responsePayload.activity)) {
+          responsePayload.activity = responsePayload.activity.map((a: any) => ({
+            ...a,
+            oldValue: typeof a.oldValue === 'string' && a.oldValue.length > MAX_FIELD_CHARS
+              ? a.oldValue.slice(0, MAX_FIELD_CHARS) + TRUNCATE_NOTE : a.oldValue,
+            newValue: typeof a.newValue === 'string' && a.newValue.length > MAX_FIELD_CHARS
+              ? a.newValue.slice(0, MAX_FIELD_CHARS) + TRUNCATE_NOTE : a.newValue,
+          }));
+        }
       }
     } catch (e) {
       console.error(`[GET /issues/${key}] Failed to measure/trim response size:`, e);
