@@ -2200,7 +2200,7 @@ export default function IssueDetailPage() {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-1 mb-1">
                             <span className="font-semibold text-gray-700 text-[13px]">System</span>
-                            <span className="text-gray-400 text-[11px]">{timeAgo(c.createdAt)}</span>
+                            <span className="text-gray-400 text-[11px]">{formatJiraDateTime(c.createdAt)}</span>
                           </div>
                           <div className="text-[12.5px] text-gray-600 break-words [&_img]:cursor-pointer" dangerouslySetInnerHTML={{ __html: c.body }}
                             onClick={(e) => { const t = e.target as HTMLElement; if (t.tagName === 'IMG') { const src = (t as HTMLImageElement).src; if (src) setLightboxSrc(src); } }} />
@@ -2235,7 +2235,7 @@ export default function IssueDetailPage() {
                                   <span className="font-semibold text-gray-700 capitalize">{a.field?.replace(/_/g, ' ')}</span>
                                 </>
                               )}
-                              <span className="text-gray-400 text-[11px] ml-1">{timeAgo(a.createdAt)}</span>
+                              <span className="text-gray-400 text-[11px] ml-1">{formatJiraDateTime(a.createdAt)}</span>
                             </div>
                             {/* Old → New value (skip for comments, created, and SLA events) */}
                             {a.field !== 'comment' && a.field !== 'created' && a.field !== 'sla' && (
