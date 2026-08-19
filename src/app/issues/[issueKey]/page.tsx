@@ -2335,6 +2335,17 @@ export default function IssueDetailPage() {
             document.body.style.userSelect = 'none';
             const onMove = (ev: MouseEvent) => {
               if (!isDragging.current) return;
+              // The mouse button can be released outside the browser window
+              // entirely (a fast drag past the edge, alt-tabbing mid-drag) --
+              // some browsers never deliver that mouseup back to `document`
+              // at all, so `onUp` below never runs and userSelect stays
+              // 'none' on the WHOLE page forever after, silently breaking
+              // text selection (and therefore copy) everywhere, including
+              // Description and Comments, until the page is reloaded. Every
+              // mousemove still reports the real button state via `buttons`
+              // even when re-entering the window with the button no longer
+              // held, so treat that as an implicit mouseup and self-heal.
+              if (ev.buttons === 0) { onUp(); return; }
               const delta = dragStartX.current - ev.clientX;
               const newWidth = Math.min(500, Math.max(200, dragStartWidth.current + delta));
               setSidebarWidth(newWidth);
@@ -2346,10 +2357,15 @@ export default function IssueDetailPage() {
               document.body.style.userSelect = '';
               document.removeEventListener('mousemove', onMove);
               document.removeEventListener('mouseup', onUp);
+              window.removeEventListener('blur', onUp);
               try { localStorage.setItem('issueSidebarWidth', String(latestSidebarWidthRef.current)); } catch { /* non-critical */ }
             };
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup', onUp);
+            // Second safety net: the window losing focus entirely mid-drag
+            // (alt-tab, clicking into another app) means no more mouse events
+            // reach this page at all, not even a self-healing mousemove.
+            window.addEventListener('blur', onUp);
           }}
         >
           <div className="absolute inset-y-0 -left-1 -right-1" />
