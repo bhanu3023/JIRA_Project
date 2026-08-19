@@ -9021,8 +9021,27 @@ async function _handleJiraPgApi(
   if (path === 'jira-issue-sync' && method === 'POST') {
     if (!isAdmin) return json({ error: 'Admin only' }, 403);
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 500);
-    const result = await runJiraIssueSync(limit);
-    return json(result);
+    // This had no try/catch of its own -- an exception ANYWHERE inside
+    // runJiraIssueSync (a bad query, a schema mismatch, whatever) fell
+    // through to the generic top-level error handler, which logs it as
+    // "[API] Unhandled error: ..." (not "[Jira Sync]", so it's invisible to
+    // anyone grepping logs for the sync specifically) and responds with
+    // { error: 'Internal server error' } -- note `error`, singular.
+    // instrumentation.ts's syncJiraIssues() only ever checked `data.errors`
+    // (plural, an array), which is always empty on that response shape, so
+    // NOTHING got logged there either. Net effect: if this has been crashing
+    // on every single run, there would be zero trace of it anywhere, which
+    // is exactly consistent with the sync checkpoint never once advancing.
+    // Catching here and returning the proper { imported, errors } shape
+    // regardless of how it failed means a real crash is now impossible to
+    // silently lose again.
+    try {
+      const result = await runJiraIssueSync(limit);
+      return json(result);
+    } catch (e: any) {
+      console.error('[Jira Sync] runJiraIssueSync threw:', e?.message || e, e?.stack);
+      return json({ imported: [], errors: [`runJiraIssueSync threw: ${e?.message || e}`] });
+    }
   }
 
   // POST /admin/backfill-client-names -- one-time catch-up for every EXISTING

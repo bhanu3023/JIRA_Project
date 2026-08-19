@@ -54,6 +54,17 @@ export async function register() {
       const errors: string[] = data.errors ?? [];
       if (imported.length > 0) console.log(`[Jira Sync] ${label} — imported ${imported.length} issue(s):`, imported);
       if (errors.length > 0) console.error(`[Jira Sync] ${label} — ${errors.length} error(s):`, errors.slice(0, 10));
+      // Belt-and-suspenders: this endpoint is meant to always return
+      // { imported, errors } (even on failure -- see the try/catch wrapped
+      // around it in jira-pg-api.ts), but a non-2xx from something upstream
+      // of that (an auth mismatch, a proxy, a crash before the route even
+      // runs) would return some other shape entirely -- {error: '...'},
+      // an HTML error page, or an empty body -- and neither check above
+      // would ever catch it, silently losing the sync run exactly like the
+      // errors/error naming mismatch this was written to guard against.
+      if (!res.ok || (imported.length === 0 && errors.length === 0 && typeof data.error === 'string')) {
+        console.error(`[Jira Sync] ${label} — unexpected response (HTTP ${res.status}):`, data.error || JSON.stringify(data).slice(0, 300));
+      }
     } catch (err) {
       console.error(`[Jira Sync] ${label} — failed:`, err);
     }
