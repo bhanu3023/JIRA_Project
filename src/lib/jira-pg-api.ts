@@ -5064,10 +5064,19 @@ async function _handleJiraPgApi(
       (!body.assigneeId && body.assigneeEmail) ? db.user.findFirst({ where: { email: { equals: String(body.assigneeEmail), mode: 'insensitive' } } }) : Promise.resolve(null),
     ]);
     let resolvedReporterId: string | null = reporterByEmail?.id ?? null;
+    let resolvedReporterEmail: string | null = reporterByEmail?.email ?? null;
     if (!resolvedReporterId && userId) {
       const reporterUser = await db.user.findUnique({ where: { id: userId } });
       resolvedReporterId = reporterUser?.id ?? null;
+      resolvedReporterEmail = reporterUser?.email ?? null;
     }
+    // Client Name auto-fills from the reporter's email domain
+    // (e.g. "name@cloudfuze.com" -> "cloudfuze.com") whenever the caller
+    // doesn't explicitly set one, so a new ticket starts with a client
+    // attributed instead of blank. Only kicks in when clientName was never
+    // provided at all -- an explicit value (including an intentional empty
+    // string to clear it) always wins.
+    const autoClientName = resolvedReporterEmail ? resolvedReporterEmail.split('@')[1]?.toLowerCase() || null : null;
     let resolvedAssigneeId: string | null = body.assigneeId ? String(body.assigneeId) : (assigneeByEmail?.id ?? null);
     // Assignment logic:
     // 1. Manual creation (userId present, not from email) Ã¢â€ ' assign to creator
@@ -5143,7 +5152,9 @@ async function _handleJiraPgApi(
         ...(body.productType !== undefined && { productType: body.productType ? String(body.productType) : null }),
         ...(body.combination !== undefined && { combination: body.combination ? String(body.combination) : null }),
         ...(body.customerName !== undefined && { customerName: body.customerName ? String(body.customerName) : null }),
-        ...(body.clientName !== undefined && { clientName: body.clientName ? String(body.clientName) : null }),
+        ...(body.clientName !== undefined
+          ? { clientName: body.clientName ? String(body.clientName) : null }
+          : autoClientName ? { clientName: autoClientName } : {}),
         ...(body.projectManager !== undefined && { projectManager: body.projectManager ? String(body.projectManager) : null }),
         ...(body.productionTicket !== undefined && { productionTicket: body.productionTicket ? String(body.productionTicket) : null }),
       },
