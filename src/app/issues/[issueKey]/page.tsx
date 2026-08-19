@@ -3308,11 +3308,33 @@ export default function IssueDetailPage() {
                                 silently pins a late resolution on whoever holds the ticket
                                 now even if a different person's later status change (e.g.
                                 reopening and re-resolving after the due time) is what
-                                actually caused it. */}
-                            {isCompleted && s.resolvedByName && (
-                              <p className="text-[10.5px] text-gray-400 mt-2">
-                                Resolved by <span className={`font-semibold ${resolvedLate ? 'text-red-500' : 'text-gray-600'}`}>{s.resolvedByName}</span>
-                              </p>
+                                actually caused it. When the ticket was resolved more than
+                                once (resolved, reopened, resolved again by someone else),
+                                show every attempt with its own date and on-time/late verdict
+                                instead of collapsing them into one badge that only reflects
+                                whichever attempt happened last. */}
+                            {isCompleted && Array.isArray(s.history) && s.history.length > 0 && (
+                              s.history.length === 1 ? (
+                                <p className="text-[10.5px] text-gray-400 mt-2">
+                                  Resolved by <span className={`font-semibold ${s.history[0].wasBreached ? 'text-red-500' : 'text-gray-600'}`}>{s.history[0].resolvedByName}</span>
+                                </p>
+                              ) : (
+                                <div className="mt-2 pt-2 border-t border-gray-100">
+                                  <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-1">Resolution history</p>
+                                  <div className="space-y-1">
+                                    {s.history.map((h: any, i: number) => (
+                                      <p key={i} className="text-[10.5px] text-gray-500 flex items-center gap-1.5">
+                                        <span className={`font-semibold ${h.wasBreached ? 'text-red-500' : 'text-emerald-600'}`}>{h.resolvedByName}</span>
+                                        <span className="text-gray-300">·</span>
+                                        <span>{fmtTime(new Date(h.resolvedAt))}</span>
+                                        <span className={`ml-auto text-[9.5px] font-bold px-1.5 py-0.5 rounded-full ${h.wasBreached ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}`}>
+                                          {h.wasBreached ? 'Late' : 'On time'}
+                                        </span>
+                                      </p>
+                                    ))}
+                                  </div>
+                                </div>
+                              )
                             )}
                           </div>
                         );

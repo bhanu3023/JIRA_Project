@@ -1322,13 +1322,43 @@ async function computePausedDeptSLA(
 }
 
 // A resolved/breached SLA badge previously had no way to show WHO actually
-// resolved the ticket -- only the issue's current Assignee field was visible
-// nearby, which silently pins the blame for a late resolution on whoever
-// happens to be assigned now, even if a different person's later status
-// change (e.g. reopening and re-resolving after the due time) is what
-// actually caused the breach. Surface the real author of the status change
-// that last moved the ticket into its current state, from issue_history
-// (which already records who changed status and when), instead.
+// resolved the ticket, or that MULTIPLE people may have resolved it at
+// different times (e.g. resolved on time, reopened, then resolved again
+// later by someone else after the due time) -- only the issue's current
+// Assignee field was visible nearby, and the ticket's single shared
+// resolvedAt/breach flag only ever reflects the LAST such event, silently
+// erasing that an earlier, on-time resolution by a different person ever
+// happened. issue_history already records every status change with who
+// made it and when; walk it to reconstruct every time this ticket was
+// actually moved into a "done" status, and whether THAT SPECIFIC event was
+// late against the due time this policy is currently using -- accurate as
+// long as the department (and so the due time) didn't change in between,
+// which covers the common "resolved, reopened, resolved again in the same
+// queue" case this exists for.
+async function getDoneStatusNames(spaceId: string | null | undefined, currentDept: string | null | undefined): Promise<Set<string>> {
+  const doneNames = new Set<string>(['resolved', 'closed', 'done']);
+  if (!spaceId) return doneNames;
+  try {
+    const stRows = await pool.query(`SELECT name FROM statuses WHERE "spaceId" = $1 AND category = 'done'`, [spaceId]);
+    for (const row of stRows.rows) doneNames.add((row.name || '').trim().toLowerCase());
+  } catch { /* non-critical */ }
+  if (currentDept) {
+    try {
+      const spaceRow = await pool.query(`SELECT key FROM spaces WHERE id = $1`, [spaceId]);
+      const spaceKey: string | undefined = spaceRow.rows[0]?.key;
+      if (spaceKey) {
+        const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey.toUpperCase()]);
+        const queues: any[] = cq.rows[0]?.queues || [];
+        const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === currentDept.toLowerCase());
+        for (const qs of (q?.queueStatuses || [])) {
+          if ((qs.category || '') === 'done') doneNames.add((qs.name || '').trim().toLowerCase());
+        }
+      }
+    } catch { /* non-critical */ }
+  }
+  return doneNames;
+}
+
 async function getLastStatusChangeAuthor(issueId: string): Promise<string | null> {
   try {
     const r = await pool.query(
@@ -1339,14 +1369,40 @@ async function getLastStatusChangeAuthor(issueId: string): Promise<string | null
   } catch { return null; }
 }
 
-// Attaches resolvedByName (see getLastStatusChangeAuthor) to every completed
-// SLA entry, so the frontend can show "Resolved by X" next to a
-// resolved/breached badge instead of leaving it unattributed.
-async function enrichSlaWithResolver(issueId: string, slaInstances: any[]): Promise<any[]> {
+async function getResolutionHistoryEvents(
+  issueId: string, spaceId: string | null | undefined, currentDept: string | null | undefined
+): Promise<Array<{ resolvedByName: string; resolvedAt: string }>> {
+  try {
+    const doneNames = await getDoneStatusNames(spaceId, currentDept);
+    const hist = await pool.query(
+      `SELECT "authorName", "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'status' ORDER BY "createdAt" ASC`,
+      [issueId]
+    );
+    return hist.rows
+      .filter((row: any) => doneNames.has((row.newValue || '').trim().toLowerCase()))
+      .map((row: any) => ({ resolvedByName: row.authorName || 'Unknown', resolvedAt: row.createdAt?.toISOString() }));
+  } catch { return []; }
+}
+
+// Attaches resolvedByName + a full per-event `history` (see
+// getResolutionHistoryEvents) to every completed SLA entry, so the frontend
+// can show who resolved it and, when it was resolved more than once, every
+// attempt with its own date and on-time/late verdict -- instead of one
+// unattributed badge that only reflects whichever attempt happened last.
+async function enrichSlaWithResolver(
+  issueId: string, slaInstances: any[], spaceId?: string | null, currentDept?: string | null
+): Promise<any[]> {
   if (!slaInstances.some((s: any) => s.isCompleted)) return slaInstances;
-  const resolvedByName = await getLastStatusChangeAuthor(issueId);
-  if (!resolvedByName) return slaInstances;
-  return slaInstances.map((s: any) => (s.isCompleted ? { ...s, resolvedByName } : s));
+  const [resolvedByName, events] = await Promise.all([
+    getLastStatusChangeAuthor(issueId),
+    getResolutionHistoryEvents(issueId, spaceId, currentDept),
+  ]);
+  return slaInstances.map((s: any) => {
+    if (!s.isCompleted) return s;
+    const dueMs = new Date(s.dueTime).getTime();
+    const history = events.map((e) => ({ ...e, wasBreached: new Date(e.resolvedAt).getTime() > dueMs }));
+    return { ...s, resolvedByName: resolvedByName || s.resolvedByName, history };
+  });
 }
 
 /** Format a DB issue record to the API shape the frontend expects */
@@ -6113,7 +6169,9 @@ async function _handleJiraPgApi(
     } catch { /* ignore */ }
 
     const mergedIssue = { ...issue, comments: allComments, _links: allLinks, ...rawDeptData };
-    const slaInstances = await enrichSlaWithResolver(mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue));
+    const slaInstances = await enrichSlaWithResolver(
+      mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
+    );
     return json({ ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {} });
   }
 
@@ -7083,7 +7141,9 @@ async function _handleJiraPgApi(
       }
     } catch { /* non-critical */ }
 
-    const slaInstances = await enrichSlaWithResolver(updated.id, await computeIssueSLAsFromDb(updated));
+    const slaInstances = await enrichSlaWithResolver(
+      updated.id, await computeIssueSLAsFromDb(updated), updated.spaceId, (updated as any).current_department
+    );
 
     // Fire connector events (fire-and-forget)
     const _issueUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/issues/${updated.key}`;
