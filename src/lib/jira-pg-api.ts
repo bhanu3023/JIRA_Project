@@ -6085,9 +6085,17 @@ async function _handleJiraPgApi(
     // directions) + children all together -- these were previously five
     // sequential round trips to the DB, each adding its own latency to every
     // ticket-open, even though none of them depend on each other's results.
-    const [deptRow, dbAttachments, dbHistory, outLinksRaw, inLinksRaw, childIssues, rawDeptRow, partnerRows] = await Promise.all([
+    const [suspendCheckQueues, dbAttachments, dbHistory, outLinksRaw, inLinksRaw, childIssues, rawDeptRow, partnerRows] = await Promise.all([
+      // Only a non-admin can ever be suspended from a queue, so this is
+      // skipped entirely for admins. Fetches the space's own custom_queues
+      // row directly (rather than a separate current_department lookup +
+      // THEN this, sequentially, once we knew which dept) -- the dept is
+      // already coming out of rawDeptRow below in this same batch, so the
+      // actual suspendedIds check below can run purely from data already in
+      // hand instead of paying its own extra round trip after this Promise.all
+      // resolves.
       (!isAdmin && issue.space?.key)
-        ? pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]).catch(() => null)
+        ? pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [issue.space.key.toUpperCase()]).catch(() => ({ rows: [] as any[] }))
         : Promise.resolve(null),
       (db as any).attachment.findMany({
         where: { issueId: issue.id },
@@ -6117,10 +6125,13 @@ async function _handleJiraPgApi(
       ).catch(() => ({ rows: [] as any[] })),
     ]);
 
-    if (!isAdmin && issue.space?.key && deptRow) {
+    if (!isAdmin && issue.space?.key && suspendCheckQueues) {
       try {
-        const issueDept = deptRow.rows[0]?.current_department;
-        if (issueDept && await isUserSuspendedFromQueue(issue.space.key, issueDept, userId)) {
+        const issueDept: string | undefined = rawDeptRow.rows[0]?.current_department;
+        const queues: any[] = suspendCheckQueues.rows[0]?.queues || [];
+        const q = issueDept ? queues.find((qq: any) => String(qq.name || '').toLowerCase() === issueDept.toLowerCase()) : null;
+        const isSuspended = userId && Array.isArray(q?.suspendedIds) && q.suspendedIds.includes(userId);
+        if (isSuspended) {
           return json({ error: 'Your access to this queue has been suspended.' }, 403);
         }
       } catch { /* non-critical — don't block ticket viewing on this lookup failing */ }
