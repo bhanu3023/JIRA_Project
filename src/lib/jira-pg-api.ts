@@ -7264,6 +7264,13 @@ async function _handleJiraPgApi(
     });
     if (!issue) return json({ error: 'Not found' }, 404);
 
+    // The frontend only ever shows the delete control to admins (issue detail
+    // page's "..." menu, the bulk-delete toolbar), but nothing here ever
+    // actually enforced that server-side -- any authenticated session of any
+    // role could hit this endpoint directly and delete a ticket. Matches the
+    // same isAdmin gate the space/board DELETE endpoint already uses.
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+
     // Before deleting: save emailthreadid to processed_emails so this email is NEVER re-processed
     // even after the ticket is deleted (survives server restarts and re-polls)
     try {
