@@ -4774,8 +4774,24 @@ async function _handleJiraPgApi(
       // by user_worked_on_tickets -- a ticket worked while sitting in this
       // dept counts for it even if it has since moved to another queue,
       // matching Team Analytics' 'worked' dateType semantic.
+      // "Worked" used to count a ticket the instant ANY user_worked_on_tickets
+      // row existed for this dept -- including a 'passed' handoff logged while
+      // the ticket was still actively open (e.g. still "In Progress" per this
+      // dept's own frozen status), so still-open work counted as if it were
+      // done and finished. A ticket only really belongs under "worked"/closed
+      // once it's actually done, judged from THIS dept's own perspective: its
+      // live status while still current here, or its frozen dept_statuses
+      // snapshot (case-insensitive key match, same as every other per-dept
+      // snapshot read in this file) once it's moved on to another dept.
       const deptDeptMatchSql = workedRange
-        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})`
+        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})
+           AND (
+             (LOWER(i.current_department) = LOWER($2) AND s.category = 'done')
+             OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
+               SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
+             ))
+           )`
         : historyAssigneeIdx
         ? `(
             (LOWER(i.current_department) = LOWER($2) AND i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) ${deptDoneClause})
