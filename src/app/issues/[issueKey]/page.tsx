@@ -2117,7 +2117,7 @@ export default function IssueDetailPage() {
                     <div className={`flex-1 ${comment.isInternal ? 'bg-yellow-50 border border-yellow-200 rounded p-3' : ''}`}>
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-[13px] font-semibold text-gray-900">{comment.author?.firstName ? `${comment.author.firstName} ${comment.author.lastName ?? ''}`.trim() : (comment.authorName || 'Unknown')}</span>
-                        <span className="text-[11px] text-gray-400">{timeAgo(comment.createdAt)}</span>
+                        <span className="text-[11px] text-gray-400">{formatJiraDateTime(comment.createdAt)}</span>
                         {comment.isInternal && <span className="text-[10px] font-semibold bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">Internal</span>}
                         {comment.updatedAt && comment.updatedAt !== comment.createdAt && (
                           <span className="text-[10px] text-gray-400 italic">edited</span>
