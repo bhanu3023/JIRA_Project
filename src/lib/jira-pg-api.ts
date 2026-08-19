@@ -1341,68 +1341,66 @@ async function computePausedDeptSLA(
 // long as the department (and so the due time) didn't change in between,
 // which covers the common "resolved, reopened, resolved again in the same
 // queue" case this exists for.
+// Was 2-3 sequential round trips (statuses, then spaces, then custom_queues) --
+// every GET /issues/:key request pays this cost when the ticket is resolved,
+// so a slow/loaded DB connection turns into real added latency on the ticket
+// page. The space-key lookup is folded into a single join with custom_queues
+// instead of a separate round trip, and it runs in parallel with the
+// statuses query rather than after it.
 async function getDoneStatusNames(spaceId: string | null | undefined, currentDept: string | null | undefined): Promise<Set<string>> {
   const doneNames = new Set<string>(['resolved', 'closed', 'done']);
   if (!spaceId) return doneNames;
-  try {
-    const stRows = await pool.query(`SELECT name FROM statuses WHERE "spaceId" = $1 AND category = 'done'`, [spaceId]);
-    for (const row of stRows.rows) doneNames.add((row.name || '').trim().toLowerCase());
-  } catch { /* non-critical */ }
+  const [statusRows, queueRows] = await Promise.all([
+    pool.query(`SELECT name FROM statuses WHERE "spaceId" = $1 AND category = 'done'`, [spaceId]).catch(() => ({ rows: [] as any[] })),
+    currentDept
+      ? pool.query(
+          `SELECT cq.queues FROM custom_queues cq JOIN spaces sp ON sp.key = cq.space_key WHERE sp.id = $1`,
+          [spaceId]
+        ).catch(() => ({ rows: [] as any[] }))
+      : Promise.resolve({ rows: [] as any[] }),
+  ]);
+  for (const row of statusRows.rows) doneNames.add((row.name || '').trim().toLowerCase());
   if (currentDept) {
-    try {
-      const spaceRow = await pool.query(`SELECT key FROM spaces WHERE id = $1`, [spaceId]);
-      const spaceKey: string | undefined = spaceRow.rows[0]?.key;
-      if (spaceKey) {
-        const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey.toUpperCase()]);
-        const queues: any[] = cq.rows[0]?.queues || [];
-        const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === currentDept.toLowerCase());
-        for (const qs of (q?.queueStatuses || [])) {
-          if ((qs.category || '') === 'done') doneNames.add((qs.name || '').trim().toLowerCase());
-        }
-      }
-    } catch { /* non-critical */ }
+    const queues: any[] = queueRows.rows[0]?.queues || [];
+    const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === currentDept.toLowerCase());
+    for (const qs of (q?.queueStatuses || [])) {
+      if ((qs.category || '') === 'done') doneNames.add((qs.name || '').trim().toLowerCase());
+    }
   }
   return doneNames;
 }
 
-async function getLastStatusChangeAuthor(issueId: string): Promise<string | null> {
+// getLastStatusChangeAuthor and getResolutionHistoryEvents used to each run
+// their own separate query against the exact same issue_history rows (one
+// DESC LIMIT 1, one ASC) -- fetched once here and reused for both.
+async function getStatusHistoryRows(issueId: string): Promise<Array<{ authorName: string | null; newValue: string | null; createdAt: any }>> {
   try {
     const r = await pool.query(
-      `SELECT "authorName" FROM issue_history WHERE "issueId" = $1 AND field = 'status' ORDER BY "createdAt" DESC LIMIT 1`,
-      [issueId]
-    );
-    return r.rows[0]?.authorName || null;
-  } catch { return null; }
-}
-
-async function getResolutionHistoryEvents(
-  issueId: string, spaceId: string | null | undefined, currentDept: string | null | undefined
-): Promise<Array<{ resolvedByName: string; resolvedAt: string }>> {
-  try {
-    const doneNames = await getDoneStatusNames(spaceId, currentDept);
-    const hist = await pool.query(
       `SELECT "authorName", "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'status' ORDER BY "createdAt" ASC`,
       [issueId]
     );
-    return hist.rows
-      .filter((row: any) => doneNames.has((row.newValue || '').trim().toLowerCase()))
-      .map((row: any) => ({ resolvedByName: row.authorName || 'Unknown', resolvedAt: row.createdAt?.toISOString() }));
+    return r.rows;
   } catch { return []; }
 }
 
-// Attaches resolvedByName + a full per-event `history` (see
-// getResolutionHistoryEvents) to every completed SLA entry, so the frontend
-// can show who resolved it and, when it was resolved more than once, every
-// attempt with its own date and on-time/late verdict -- instead of one
-// unattributed badge that only reflects whichever attempt happened last.
+// Attaches resolvedByName + a full per-event `history` to every completed SLA
+// entry, so the frontend can show who resolved it and, when it was resolved
+// more than once, every attempt with its own date and on-time/late verdict --
+// instead of one unattributed badge that only reflects whichever attempt
+// happened last. The two independent lookups (status history, done-status
+// names) run in parallel rather than one function awaiting the other.
 async function enrichSlaWithResolver(
   issueId: string, slaInstances: any[], spaceId?: string | null, currentDept?: string | null
 ): Promise<any[]> {
   if (!slaInstances.some((s: any) => s.isCompleted)) return slaInstances;
-  const [resolvedByName, events] = await Promise.all([
-    getLastStatusChangeAuthor(issueId),
-    getResolutionHistoryEvents(issueId, spaceId, currentDept),
+  const [statusHistory, doneNames] = await Promise.all([
+    getStatusHistoryRows(issueId),
+    getDoneStatusNames(spaceId, currentDept),
   ]);
+  const resolvedByName = statusHistory.length ? (statusHistory[statusHistory.length - 1].authorName || null) : null;
+  const events = statusHistory
+    .filter((row) => doneNames.has((row.newValue || '').trim().toLowerCase()))
+    .map((row) => ({ resolvedByName: row.authorName || 'Unknown', resolvedAt: row.createdAt?.toISOString?.() || row.createdAt }));
   return slaInstances.map((s: any) => {
     if (!s.isCompleted) return s;
     const dueMs = new Date(s.dueTime).getTime();
