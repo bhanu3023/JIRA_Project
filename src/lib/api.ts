@@ -82,6 +82,16 @@ class ApiClient {
     } catch (e: any) {
       const target = endpoint.startsWith('/') ? `${API_URL}${endpoint}` : `${API_URL}/${endpoint}`;
       if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+        // This server shares its host with dozens of other unrelated
+        // services -- a GET that times out is far more often a momentary
+        // load/contention spike than a request that will never complete, and
+        // retrying a moment later succeeds most of the time. Same reasoning
+        // as the bodyParseFailed retry below; don't retry a caller-supplied
+        // signal (they're managing their own cancellation, e.g. a user
+        // navigating away) or a non-GET (not safe to blindly re-run a write).
+        if (method === 'GET' && !options.signal && attempt < 1) {
+          return this.requestUncoalesced<T>(endpoint, options, attempt + 1);
+        }
         throw new Error(`Request timed out (${target}). The server took too long to respond -- please try again.`);
       }
       const hint =

@@ -6286,12 +6286,20 @@ async function _handleJiraPgApi(
     // unrelated tickets that happen to share the same number suffix.
     let allComments = [...(issue.comments || [])];
     try {
-      for (const pr of partnerRows.rows) {
-        const partnerComments = await db.comment.findMany({
-          where: { issueId: pr.id },
-          include: { author: true },
-          orderBy: { createdAt: 'asc' },
-        });
+      // Was one DB round trip per partner ticket, awaited one at a time --
+      // a ticket handed between boards several times (each hop adds another
+      // partnerKey row) paid that latency serially on every single load. None
+      // of these queries depend on each other, so run them together instead.
+      const partnerCommentSets = await Promise.all(
+        partnerRows.rows.map((pr: any) =>
+          db.comment.findMany({
+            where: { issueId: pr.id },
+            include: { author: true },
+            orderBy: { createdAt: 'asc' },
+          })
+        )
+      );
+      for (const partnerComments of partnerCommentSets) {
         allComments = [...allComments, ...partnerComments];
       }
       // Deduplicate by id and sort by createdAt
