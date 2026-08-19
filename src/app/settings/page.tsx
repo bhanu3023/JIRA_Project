@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { getInitials } from '@/lib/utils';
+import { getInitials, timeAgo } from '@/lib/utils';
 import { ROLE_LABELS as ALL_ROLE_LABELS, ROLE_COLORS as ALL_ROLE_COLORS, SELECTABLE_ROLES, can, type Permissions } from '@/lib/permissions';
 import {
   User, Bell, Monitor, Grid3X3, Rocket, Box, Globe, Users,
@@ -12,7 +12,7 @@ import {
   Settings, Zap, Layers, LayoutList, ArrowLeft, Check, X, Plus, Trash2,
   ChevronDown, MoreHorizontal, RefreshCw, UserPlus, UserCheck, UserX, Filter,
   ImageDown, AlertCircle, Link2, Webhook, Slack, Activity, ToggleLeft, ToggleRight,
-  Copy, FlaskConical,
+  Copy, FlaskConical, RotateCcw, Clock,
 } from 'lucide-react';
 
 // ── Sync MS Photos button ─────────────────────────────────────────────────────
@@ -2863,61 +2863,120 @@ function SettingsContent() {
       } catch { /* ignore */ }
     };
 
+    const TRASH_AVATAR_COLORS = [
+      'bg-indigo-500', 'bg-rose-500', 'bg-emerald-500', 'bg-amber-500',
+      'bg-sky-500', 'bg-fuchsia-500', 'bg-teal-500',
+    ];
+    const trashAvatarColor = (name: string) => TRASH_AVATAR_COLORS[(name || '').charCodeAt(0) % TRASH_AVATAR_COLORS.length];
+
     return (
-      <SubPage title="Deleted Tickets">
+      <div className="max-w-[960px] mx-auto px-6 py-6">
+        <button onClick={() => navigate('main')} className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-5">
+          <ArrowLeft size={14} /> Back to settings
+        </button>
+
+        {/* Header */}
+        <div className="flex items-center gap-4 mb-6">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-rose-50 to-red-100 border border-red-100 flex items-center justify-center flex-shrink-0 shadow-sm">
+            <Trash2 size={20} className="text-red-500" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold text-gray-900 tracking-tight">Deleted Tickets</h1>
+            <p className="text-[13px] text-gray-400 mt-0.5">
+              {deletedLoading ? 'Loading…' : deletedIssues.length === 0 ? 'Nothing in the trash right now' : `${deletedIssues.length} ticket${deletedIssues.length === 1 ? '' : 's'} awaiting restore or permanent removal`}
+            </p>
+          </div>
+        </div>
+
         {message && (
-          <div className="mb-4 rounded-lg bg-green-50 border border-green-200 px-4 py-2.5 text-sm text-green-700">{message}</div>
+          <div className="mb-5 flex items-center gap-2 rounded-xl bg-emerald-50 border border-emerald-200/70 px-4 py-2.5 text-[13px] font-medium text-emerald-700 shadow-sm">
+            <Check size={14} /> {message}
+          </div>
         )}
+
         {deletedLoading ? (
-          <div className="text-center py-16 text-gray-400 text-sm">Loading…</div>
+          <div className="bg-white border border-gray-200/70 rounded-2xl shadow-sm divide-y divide-gray-100 overflow-hidden">
+            {[0, 1, 2].map(i => (
+              <div key={i} className="flex items-center gap-4 px-5 py-4 animate-pulse">
+                <div className="h-3.5 w-16 bg-gray-200 rounded" />
+                <div className="h-3.5 flex-1 bg-gray-100 rounded" />
+                <div className="h-6 w-6 rounded-full bg-gray-200" />
+                <div className="h-3.5 w-20 bg-gray-100 rounded" />
+              </div>
+            ))}
+          </div>
         ) : deletedIssues.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
-            <Trash2 size={32} className="text-gray-300" />
-            <p className="text-sm text-gray-500">No deleted tickets. Anything deleted from here on will show up in this list.</p>
+          <div className="bg-white border border-gray-200/70 rounded-2xl shadow-sm">
+            <div className="flex flex-col items-center justify-center py-20 gap-3 text-center px-8">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200/70 flex items-center justify-center mb-1">
+                <Trash2 size={26} className="text-gray-300" />
+              </div>
+              <h2 className="text-[15px] font-semibold text-gray-700">The trash is empty</h2>
+              <p className="text-[13px] text-gray-400 max-w-xs">Anything deleted from a ticket view will show up here, ready to be restored or permanently removed.</p>
+            </div>
           </div>
         ) : (
-          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100 bg-gray-50 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-500">
-                  <th className="px-4 py-2.5">Key</th>
-                  <th className="px-4 py-2.5">Summary</th>
-                  <th className="px-4 py-2.5">Space</th>
-                  <th className="px-4 py-2.5">Deleted By</th>
-                  <th className="px-4 py-2.5">Deleted At</th>
-                  <th className="px-4 py-2.5"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {deletedIssues.map(row => (
-                  <tr key={row.id}>
-                    <td className="px-4 py-2.5 font-medium text-gray-800 whitespace-nowrap">{row.cf_key || row.key}</td>
-                    <td className="px-4 py-2.5 text-gray-600 max-w-[280px] truncate">{row.summary || '—'}</td>
-                    <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">{row.space_key || '—'}</td>
-                    <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">{row.deleted_by_name || 'Unknown'}</td>
-                    <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">{new Date(row.deleted_at).toLocaleString()}</td>
-                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+          <div className="bg-white border border-gray-200/70 rounded-2xl shadow-sm overflow-hidden">
+            <div className="divide-y divide-gray-100">
+              {deletedIssues.map(row => {
+                const displayKey = row.cf_key || row.key;
+                const deletedByName = row.deleted_by_name || 'Unknown';
+                return (
+                  <div key={row.id} className="flex items-center gap-4 px-5 py-4 transition-colors hover:bg-gray-50/70 group">
+                    {/* Key */}
+                    <span className="flex-shrink-0 font-mono text-[12.5px] font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-lg px-2.5 py-1">
+                      {displayKey}
+                    </span>
+
+                    {/* Summary + space */}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[13.5px] text-gray-800 font-medium truncate">{row.summary || '—'}</p>
+                      {row.space_key && (
+                        <span className="inline-block mt-1 text-[10.5px] font-medium text-gray-400 bg-gray-50 border border-gray-200 rounded-full px-2 py-0.5">
+                          {row.space_key}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Deleted by */}
+                    <div className="hidden sm:flex items-center gap-2 flex-shrink-0 w-40">
+                      <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0 ${trashAvatarColor(deletedByName)}`}>
+                        {getInitials(deletedByName.split(' ')[0], deletedByName.split(' ').slice(1).join(' '))}
+                      </div>
+                      <span className="text-[12.5px] text-gray-600 truncate">{deletedByName}</span>
+                    </div>
+
+                    {/* Deleted at */}
+                    <div className="hidden md:flex items-center gap-1.5 flex-shrink-0 text-gray-400 w-28" title={new Date(row.deleted_at).toLocaleString()}>
+                      <Clock size={12} />
+                      <span className="text-[12px]">{timeAgo(row.deleted_at)}</span>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center gap-2 flex-shrink-0">
                       <button
                         onClick={() => handleRestore(row)}
                         disabled={restoringId === row.id}
-                        className="text-xs font-semibold text-blue-600 hover:text-blue-700 disabled:opacity-50 mr-3"
+                        className="flex items-center gap-1.5 text-[12px] font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 rounded-full px-3 py-1.5 transition-colors disabled:opacity-50"
                       >
+                        <RotateCcw size={12} className={restoringId === row.id ? 'animate-spin' : ''} />
                         {restoringId === row.id ? 'Restoring…' : 'Restore'}
                       </button>
                       <button
                         onClick={() => handlePurge(row)}
-                        className="text-xs font-semibold text-red-500 hover:text-red-600"
+                        title="Delete forever"
+                        className="flex items-center justify-center w-8 h-8 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
                       >
-                        Delete forever
+                        <Trash2 size={14} />
                       </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
-      </SubPage>
+      </div>
     );
   }
 
