@@ -6454,7 +6454,7 @@ async function _handleJiraPgApi(
 
     // Resolve issue + assignee email + reporter email in parallel
     const assigneeEmailToLookup = body.assigneeEmail ? String(body.assigneeEmail) : (body.assignee as any)?.email ?? null;
-    const [issue, resolvedAssigneePatch, resolvedReporterPatch] = await Promise.all([
+    const [issue, resolvedAssigneePatch, resolvedReporterPatch, issueCfKeyRow] = await Promise.all([
       db.issue.findUnique({ where: { key }, include: { space: { include: { statuses: true } } } }),
       assigneeEmailToLookup
         ? db.user.findFirst({ where: { email: { equals: assigneeEmailToLookup, mode: 'insensitive' } } })
@@ -6462,8 +6462,18 @@ async function _handleJiraPgApi(
       body.reporterEmail
         ? db.user.findFirst({ where: { email: { equals: String(body.reporterEmail), mode: 'insensitive' } } })
         : Promise.resolve(null),
+      pool.query<{ cf_key: string | null }>(`SELECT cf_key FROM issues WHERE key = $1 LIMIT 1`, [key]),
     ]);
     if (!issue) return json({ error: 'Not found' }, 404);
+    // cf_key is a raw ALTER TABLE column Prisma doesn't select on any
+    // db.issue.findUnique/update call in this handler ("issue", "updated",
+    // and "refreshed" below are all Prisma results) -- every notifyStatusChanged/
+    // notifyIssueUpdated call here was reading `(x as any).cf_key`, which was
+    // always undefined, silently falling back to the raw internal key (e.g.
+    // "L1BOAR-15259" or "L2B-482") in every status-change email instead of the
+    // CF-#### key every user-facing screen shows. cf_key never changes for an
+    // existing ticket, so one lookup up front covers the whole handler.
+    const issueCfKey: string | null = issueCfKeyRow.rows[0]?.cf_key ?? null;
 
     // Once a ticket has moved into a specific department's queue, only that
     // queue's own members (or an admin) may change its status — otherwise
@@ -6606,7 +6616,7 @@ async function _handleJiraPgApi(
                 [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), reopenChanger ? `${reopenChanger.firstName} ${reopenChanger.lastName}`.trim() : 'Unknown', reopenChanger?.email || null]
               ).catch(() => {});
               notifyStatusChanged({
-                key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary, priority: issue.priority,
+                key: issue.key, cfKey: issueCfKey, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
                 oldStatus: { name: oldQueueStatusName, category: 'done' },
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
@@ -6764,9 +6774,9 @@ async function _handleJiraPgApi(
                   [rid(), issue.id, 'department', queueHandoffOldDept || 'None', `Handed to ${queueHandoffTargetDept} — SLA started`, changer ? `${changer.firstName} ${changer.lastName}`.trim() : 'Unknown', changer?.email || null]
                 ).catch(() => {});
               }
-              const refreshedDisplayKey = (refreshed as any).cf_key || refreshed.key;
+              const refreshedDisplayKey = issueCfKey || refreshed.key;
               notifyStatusChanged({
-                key: refreshed.key, cfKey: (refreshed as any).cf_key, summary: refreshed.summary, priority: refreshed.priority,
+                key: refreshed.key, cfKey: issueCfKey, summary: refreshed.summary, priority: refreshed.priority,
                 spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
                 oldStatus: { name: oldQueueStatusName, category: 'todo' },
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
@@ -7120,9 +7130,9 @@ async function _handleJiraPgApi(
     // `key` is the internal column. cfKey here flows into notifyStatusChanged/
     // notifyIssueAssigned/notifyIssueUpdated below, which already know to
     // prefer it over the raw key for anything user-facing.
-    const updatedDisplayKey = (updated as any).cf_key || updated.key;
+    const updatedDisplayKey = issueCfKey || updated.key;
     const issueForNotif = {
-      key: updated.key, cfKey: (updated as any).cf_key, summary: updated.summary, priority: updated.priority,
+      key: updated.key, cfKey: issueCfKey, summary: updated.summary, priority: updated.priority,
       spaceKey, spaceName,
       status: { name: updated.status?.name ?? 'Open', category: updated.status?.category ?? 'todo' },
       assignee: updated.assignee, reporter: updated.reporter,
@@ -7225,7 +7235,7 @@ async function _handleJiraPgApi(
             // Notify whoever now owns it back home, plus the reporter
             const notifyIds = [restoreAssigneeId, updated.reporterId].filter(Boolean) as string[];
             if (notifyIds.length) {
-              const updatedDisplayKey = (updated as any).cf_key || updated.key;
+              const updatedDisplayKey = issueCfKey || updated.key;
               await notifyUsers(notifyIds, userId, {
                 type: 'DEPT_CHANGE',
                 title: `Ticket ${updatedDisplayKey} back in ${homeDept}`,
@@ -7336,7 +7346,7 @@ async function _handleJiraPgApi(
     // Fire connector events (fire-and-forget)
     const _issueUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/issues/${updated.key}`;
     const _issueBase = {
-      key: updated.key, cf_key: (updated as any).cf_key,
+      key: updated.key, cf_key: issueCfKey ?? undefined,
       summary: updated.summary, type: updated.type, priority: updated.priority,
       status: updated.status?.name, spaceKey: updated.space?.key ?? '', spaceName: updated.space?.name,
       assignee: updated.assignee ? `${(updated.assignee as any).firstName} ${(updated.assignee as any).lastName}`.trim() : undefined,
