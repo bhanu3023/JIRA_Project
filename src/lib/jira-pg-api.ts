@@ -317,6 +317,12 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAU
 // no migration ever actually created it -- every read of issue.resolvedAt
 // was silently undefined for every ticket that's ever existed in this app.
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "resolvedAt" TIMESTAMPTZ`).catch(() => {});
+// Lets an admin waive a specific SLA policy's breach on a specific ticket
+// (e.g. it was resolved late for a reason outside anyone's control) so it
+// stops reading as breached, instead of the breach being a permanent,
+// unremovable fact of the ticket's stored dates. Keyed by policy id since a
+// ticket can be tracked against more than one SLA policy at once.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS sla_waivers JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`).catch(() => {});
 pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
 pool.query(`ALTER TABLE space_members ADD COLUMN IF NOT EXISTS department VARCHAR(100)`).catch(() => {});
@@ -1548,9 +1554,18 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       // ticket Resolved 3 days after it was due and it read as a clean,
       // on-time completion with no trace it had ever breached.
       const resolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt) : null;
-      const isBreached = isResolved
+      const rawIsBreached = isResolved
         ? (resolvedAt !== null && new Date(dueTime) < resolvedAt)
         : (!isPaused && new Date(dueTime) < new Date());
+
+      // An admin can waive this specific policy's breach on this specific
+      // ticket (e.g. it was resolved late for a reason outside anyone's
+      // control) -- the breach itself isn't erased from history, but it no
+      // longer counts against this ticket for as long as the waiver stands.
+      const waivers: Record<string, any> = (issue as any).sla_waivers || {};
+      const waiver = waivers[policy.id] || null;
+      const isBreached = waiver ? false : rawIsBreached;
+
       return {
         id: `sla_${policy.id}_${issue.key}`,
         policyId: policy.id,
@@ -1567,6 +1582,10 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
         startedAt,
         goalDurationMs: durationMs,
         isNotified,
+        waived: !!waiver,
+        waivedByName: waiver?.waivedByName || null,
+        waivedAt: waiver?.waivedAt || null,
+        waivedReason: waiver?.reason || null,
       };
     });
   } catch { return []; }
@@ -5879,6 +5898,57 @@ async function _handleJiraPgApi(
     return json({ ok: true, department: newDept, newKey, targetBoardKey: targetSpace.key, assignee: rrAgent, newStatus: newStatusName });
   }
 
+  // ── SLA Breach Waiver (admin only) ──────────────────────────────────────
+  // Lets an admin mark a specific SLA policy's breach on a specific ticket as
+  // waived -- e.g. it was resolved late for a reason outside anyone's
+  // control -- so the ticket stops reading as breached, without altering
+  // its actual recorded dates/history (see computeSLAInstancesPure).
+  const slaWaiverMatch = path.match(/^issues\/([^/]+)\/sla-waiver$/);
+  if (slaWaiverMatch && method === 'PATCH') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    let key = slaWaiverMatch[1].toUpperCase();
+    if (key.startsWith('CF-')) {
+      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
+      if (cfRow.rows[0]) key = cfRow.rows[0].key;
+    }
+    const body = await readJson(req);
+    const policyId = String(body.policyId || '');
+    const waived = body.waived !== false;
+    if (!policyId) return json({ error: 'policyId is required' }, 400);
+
+    const issueRow = await pool.query(`SELECT id, sla_waivers FROM issues WHERE key = $1 LIMIT 1`, [key]);
+    if (!issueRow.rows[0]) return json({ error: 'Not found' }, 404);
+    const waivers: Record<string, any> = issueRow.rows[0].sla_waivers || {};
+    const actor = userId ? await getCachedUser(userId) : null;
+    const actorName = actor ? `${actor.firstName} ${actor.lastName}`.trim() : 'Admin';
+
+    if (waived) {
+      waivers[policyId] = {
+        waivedBy: userId || null,
+        waivedByName: actorName,
+        waivedAt: new Date().toISOString(),
+        reason: body.reason ? String(body.reason).slice(0, 300) : null,
+      };
+    } else {
+      delete waivers[policyId];
+    }
+
+    await pool.query(`UPDATE issues SET sla_waivers = $1::jsonb, "updatedAt" = NOW() WHERE id = $2`, [JSON.stringify(waivers), issueRow.rows[0].id]);
+
+    try {
+      await pool.query(
+        `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail") VALUES ($1,$2,'sla',$3,$4,$5,$6)`,
+        [
+          rid(), issueRow.rows[0].id, null,
+          waived ? `SLA breach waived${body.reason ? ' — ' + String(body.reason).slice(0, 200) : ''}` : 'SLA breach waiver removed',
+          actorName, actor?.email || null,
+        ]
+      );
+    } catch { /* non-critical */ }
+
+    return json({ ok: true, waived });
+  }
+
   const issueKeyMatch = path.match(/^issues\/([^/]+)$/);
   if (issueKeyMatch && method === 'GET') {
     const rawKey = issueKeyMatch[1].toUpperCase();
@@ -6023,7 +6093,7 @@ async function _handleJiraPgApi(
       // Raw columns Prisma's schema doesn't know about -- only needs `key`,
       // so it can run alongside everything else instead of after it.
       pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt" FROM issues WHERE key = $1 LIMIT 1`,
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers FROM issues WHERE key = $1 LIMIT 1`,
         [key]
       ).catch(() => ({ rows: [] as any[] })),
       // Partner-ticket comment merge lookup -- also only needs `key`.
@@ -7122,7 +7192,7 @@ async function _handleJiraPgApi(
     // them in the same way the GET /issues/:key handler already does.
     try {
       const r = await pool.query(
-        `SELECT current_department, dept_sla_started_at, dept_sla_log, "resolvedAt" FROM issues WHERE id=$1`,
+        `SELECT current_department, dept_sla_started_at, dept_sla_log, "resolvedAt", sla_waivers FROM issues WHERE id=$1`,
         [updated.id]
       );
       Object.assign(updated as any, r.rows[0] || {});

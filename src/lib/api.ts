@@ -164,6 +164,11 @@ class ApiClient {
   getIssue(key: string) { return this.request<any>(`/issues/${key}`); }
   createIssue(data: any) { return this.request<any>('/issues', { method: 'POST', body: JSON.stringify(data) }); }
   updateIssue(key: string, data: any) { return this.request<any>(`/issues/${key}`, { method: 'PATCH', body: JSON.stringify(data) }); }
+  setSlaWaiver(key: string, policyId: string, waived: boolean, reason?: string) {
+    return this.request<{ ok: boolean; waived: boolean }>(`/issues/${key}/sla-waiver`, {
+      method: 'PATCH', body: JSON.stringify({ policyId, waived, reason }),
+    });
+  }
   deleteIssue(key: string) { return this.request<any>(`/issues/${key}`, { method: 'DELETE' }); }
   getDeletedIssues() { return this.request<any>('/deleted-issues'); }
   restoreDeletedIssue(id: string) { return this.request<any>(`/deleted-issues/${id}/restore`, { method: 'POST' }); }

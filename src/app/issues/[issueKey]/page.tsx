@@ -769,6 +769,26 @@ export default function IssueDetailPage() {
     }
   };
 
+  const [slaWaiverBusyId, setSlaWaiverBusyId] = useState<string | null>(null);
+  const handleSlaWaiver = async (policyId: string, waive: boolean) => {
+    let reason: string | undefined;
+    if (waive) {
+      const input = window.prompt('Optional: why is this breach being waived?') || '';
+      reason = input.trim() || undefined;
+    } else if (!window.confirm('Remove this waiver? The ticket will read as breached again.')) {
+      return;
+    }
+    setSlaWaiverBusyId(policyId);
+    try {
+      await api.setSlaWaiver(issueKey, policyId, waive, reason);
+      await loadIssue(issueKey);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to update the SLA waiver.');
+    } finally {
+      setSlaWaiverBusyId(null);
+    }
+  };
+
   // The board-specific custom fields below (Combination, Product Type, Project
   // Manager, etc.) used to await BOTH the PATCH and a full loadIssue() re-fetch
   // before closing the edit UI — but PATCH /issues/:key already returns the
@@ -3363,6 +3383,39 @@ export default function IssueDetailPage() {
                                   </div>
                                 </div>
                               )
+                            )}
+
+                            {/* Admin override: a breach can be waived (e.g. resolved late
+                                for a reason outside anyone's control) so the ticket stops
+                                reading as breached without altering its actual recorded
+                                dates/history -- the waiver itself stays visible here for
+                                accountability instead of silently erasing the breach. */}
+                            {s.waived ? (
+                              <div className="mt-2 pt-2 border-t border-gray-100 flex items-start justify-between gap-2">
+                                <p className="text-[10.5px] text-emerald-600">
+                                  ✓ Breach waived by <span className="font-semibold">{s.waivedByName}</span>
+                                  {s.waivedReason && <span className="text-gray-400"> — {s.waivedReason}</span>}
+                                </p>
+                                {user?.role === 'admin' && (
+                                  <button
+                                    onClick={() => handleSlaWaiver(s.policyId, false)}
+                                    disabled={slaWaiverBusyId === s.policyId}
+                                    className="text-[10px] font-semibold text-gray-400 hover:text-red-500 flex-shrink-0 disabled:opacity-50"
+                                  >
+                                    {slaWaiverBusyId === s.policyId ? 'Removing…' : 'Remove waiver'}
+                                  </button>
+                                )}
+                              </div>
+                            ) : resolvedLate && user?.role === 'admin' && (
+                              <div className="mt-2 pt-2 border-t border-gray-100">
+                                <button
+                                  onClick={() => handleSlaWaiver(s.policyId, true)}
+                                  disabled={slaWaiverBusyId === s.policyId}
+                                  className="text-[10.5px] font-semibold text-gray-400 hover:text-emerald-600 disabled:opacity-50"
+                                >
+                                  {slaWaiverBusyId === s.policyId ? 'Waiving…' : 'Waive this breach'}
+                                </button>
+                              </div>
                             )}
                           </div>
                         );
