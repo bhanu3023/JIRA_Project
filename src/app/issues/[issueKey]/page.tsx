@@ -1222,6 +1222,27 @@ export default function IssueDetailPage() {
   );
 
   const issue = currentIssue;
+
+  // A Migration ticket's description is created as 9 fixed section headers
+  // ("1. Issue Reported", "2. Error Description", ...) each followed by its
+  // own free-text content, concatenated into one HTML string at creation
+  // (see MIGRATION_SECTION_LABELS in CreateIssueModal.tsx). At create time
+  // each heading is plain React text OUTSIDE any contentEditable region,
+  // making it structurally impossible to Backspace into -- but editing the
+  // description afterward loads the WHOLE thing into this one shared
+  // RichTextEditor, so a Backspace at a section boundary here could merge
+  // into and silently corrupt a header. Mark each header paragraph
+  // contenteditable="false" while editing (same technique already used for
+  // the image-remove overlay) so it becomes an atomic block no Backspace can
+  // erode character-by-character, then strip that marker back out before
+  // saving so the persisted HTML stays exactly as originally authored.
+  const isMigrationTicket = ((issue as any)?.current_department || '').trim().toLowerCase() === 'migration';
+  const MIGRATION_HEADER_RE = /<p><strong>(\d+\.\s+[^<]*)<\/strong><\/p>/g;
+  const protectMigrationHeaders = (html: string): string =>
+    isMigrationTicket ? html.replace(MIGRATION_HEADER_RE, '<p contenteditable="false"><strong>$1</strong></p>') : html;
+  const stripMigrationHeaderProtection = (html: string): string =>
+    isMigrationTicket ? html.replace(/<p contenteditable="false"><strong>/g, '<p><strong>') : html;
+
   // Use per-queue custom status from dept_statuses when the issue is in a queue
   // and the stored status is a custom queue status (qst_... ID) -- shared with
   // every list view via getEffectiveIssueStatus so they all agree on what's shown.
@@ -1447,7 +1468,7 @@ export default function IssueDetailPage() {
                   onUploadingChange={setIsUploadingDescription}
                 />
                 <div className="flex gap-2 mt-2">
-                  <button onClick={() => handleUpdate('description', editValue)} disabled={isUploadingDescription}
+                  <button onClick={() => handleUpdate('description', stripMigrationHeaderProtection(editValue))} disabled={isUploadingDescription}
                     className="bg-blue-600 text-white text-[13px] font-medium px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
                     {isUploadingDescription ? 'Uploading…' : 'Save'}
                   </button>
@@ -1512,7 +1533,7 @@ export default function IssueDetailPage() {
                       if (src) setLightboxSrc(src);
                       return;
                     }
-                    setEditing('description'); setEditValue(issue.description || '');
+                    setEditing('description'); setEditValue(protectMigrationHeaders(issue.description || ''));
                   }}
                   dangerouslySetInnerHTML={{ __html: renderHtml }}
                 />
@@ -1520,7 +1541,7 @@ export default function IssueDetailPage() {
                 <div
                   className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer break-words"
                   dangerouslySetInnerHTML={{ __html: renderHtml }}
-                  onClick={() => { setEditing('description'); setEditValue(issue.description || ''); }}
+                  onClick={() => { setEditing('description'); setEditValue(protectMigrationHeaders(issue.description || '')); }}
                 />
                 )
                 );
