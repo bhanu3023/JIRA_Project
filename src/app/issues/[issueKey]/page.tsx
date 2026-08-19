@@ -745,7 +745,7 @@ export default function IssueDetailPage() {
 
   // displayPatch covers relational fields (assignee, status) whose visible name/avatar
   // lives on a different key than the raw id being saved (issue.assignee vs assigneeId).
-  const handleUpdate = async (field: string, value: any, displayPatch?: Record<string, any>) => {
+  const handleUpdate = async (field: string, value: any, displayPatch?: Record<string, any>, onError?: (err: any) => void) => {
     const prevValue = (issue as any)?.[field];
     const patchKeys = displayPatch ? Object.keys(displayPatch) : [];
     const prevDisplay: Record<string, any> = {};
@@ -765,6 +765,7 @@ export default function IssueDetailPage() {
       useStore.setState(s => ({
         currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: prevValue, ...prevDisplay } as any : s.currentIssue,
       }));
+      onError?.(err);
     }
   };
 
@@ -968,18 +969,21 @@ export default function IssueDetailPage() {
             queueStatusCategory: queueSt.category,
           } as any);
           loadIssue(issueKey);
-        } catch (err) {
+        } catch (err: any) {
           console.error(err);
           useStore.setState(s => ({
             currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: prevDeptStatuses } as any : s.currentIssue,
           }));
+          alert(err?.message || 'Failed to change status.');
         }
         return;
       }
     }
     await handleUpdate('statusId', statusId, targetStatus
       ? { status: { id: targetStatus.id, name: targetStatus.name, category: (targetStatus as any).category, color: (targetStatus as any).color } }
-      : undefined);
+      : undefined,
+      (err: any) => { alert(err?.message || 'Failed to change status.'); }
+    );
   };
 
   const handleAssigneeChange = async (assigneeId: string | null) => {

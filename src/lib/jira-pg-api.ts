@@ -6191,6 +6191,27 @@ async function _handleJiraPgApi(
     ]);
     if (!issue) return json({ error: 'Not found' }, 404);
 
+    // Once a ticket has moved into a specific department's queue, only that
+    // queue's own members (or an admin) may change its status — otherwise
+    // someone from an unrelated queue (e.g. a Dev-queue member) can reopen or
+    // resolve a ticket that's currently sitting in Migration, which silently
+    // corrupts the SLA/resolution history the owning department is actually
+    // responsible for. The department-transfer endpoint already enforces this
+    // exact same rule via isUserAuthorizedForDeptQueue; this PATCH handler
+    // (which is what every status change actually goes through) never did.
+    if (!isAdmin && (body.statusId !== undefined || body.queueStatusId !== undefined)) {
+      try {
+        const deptRow = await pool.query(`SELECT current_department FROM issues WHERE id=$1 LIMIT 1`, [issue.id]);
+        const currentDept: string | null = deptRow.rows[0]?.current_department || null;
+        if (currentDept && issue.space?.key) {
+          const authorized = await isUserAuthorizedForDeptQueue(issue.space.key, currentDept, userId);
+          if (!authorized) {
+            return json({ error: `You can view and comment on this ticket, but it has moved to ${currentDept} — only that queue can change its status.` }, 403);
+          }
+        }
+      } catch { /* fail open on lookup errors, same as the department-change endpoint */ }
+    }
+
     const data: Record<string, unknown> = {};
     if (body.summary !== undefined) data.summary = String(body.summary);
     if (body.description !== undefined) data.description = body.description === null ? null : String(body.description);
