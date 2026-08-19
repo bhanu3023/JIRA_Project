@@ -6279,7 +6279,45 @@ async function _handleJiraPgApi(
     const slaInstances = await enrichSlaWithResolver(
       mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
     );
-    return json({ ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {} });
+    const responsePayload: any = {
+      ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {},
+    };
+
+    // A ticket whose description or comments contain large embedded images
+    // (pasted directly into the rich-text editor, stored as base64 data URIs
+    // rather than real uploaded attachments) can balloon this response to
+    // several MB. Unlike the issue-list endpoint (which always truncates
+    // description to a short preview), this single-ticket endpoint needs the
+    // real full content -- but an abnormally large response is exactly the
+    // kind of payload a slow connection or an intermediate proxy can deliver
+    // truncated, which surfaced to users as "Couldn't load this ticket" with
+    // no indication why, and no way to recover by retrying since the size
+    // never changes. Detect that case before sending and cap only the
+    // oversized field(s) instead of failing outright -- a ticket that loads
+    // with one huge comment trimmed is far better than one that never loads.
+    try {
+      const byteSize = Buffer.byteLength(JSON.stringify(responsePayload), 'utf8');
+      const MAX_SAFE_BYTES = 3 * 1024 * 1024; // 3MB
+      if (byteSize > MAX_SAFE_BYTES) {
+        console.warn(`[GET /issues/${key}] Response is ${(byteSize / 1024 / 1024).toFixed(1)}MB — trimming oversized fields before sending.`);
+        const MAX_FIELD_CHARS = 150_000;
+        const TRUNCATE_NOTE = '\n\n[This content was too large to load in full and has been trimmed. Ask an admin to check the original ticket if you need the rest.]';
+        if (typeof responsePayload.description === 'string' && responsePayload.description.length > MAX_FIELD_CHARS) {
+          responsePayload.description = responsePayload.description.slice(0, MAX_FIELD_CHARS) + TRUNCATE_NOTE;
+        }
+        if (Array.isArray(responsePayload.comments)) {
+          responsePayload.comments = responsePayload.comments.map((c: any) =>
+            typeof c.body === 'string' && c.body.length > MAX_FIELD_CHARS
+              ? { ...c, body: c.body.slice(0, MAX_FIELD_CHARS) + TRUNCATE_NOTE }
+              : c
+          );
+        }
+      }
+    } catch (e) {
+      console.error(`[GET /issues/${key}] Failed to measure/trim response size:`, e);
+    }
+
+    return json(responsePayload);
   }
 
   if (issueKeyMatch && method === 'PATCH') {
