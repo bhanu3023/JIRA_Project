@@ -367,6 +367,7 @@ function SpaceDetailContent() {
   const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [filterCategory, setFilterCategory] = useState<string>('type');
   const [dropdownSearch, setDropdownSearch] = useState<string>('');
+  const [filterCatSearch, setFilterCatSearch] = useState<string>('');
   const colsStorageKey    = `visibleCols_${spaceKey}`;
 
   const [addFilterDropPos, setAddFilterDropPos] = useState<{ top: number; left: number } | null>(null);
@@ -2013,10 +2014,10 @@ function SpaceDetailContent() {
           // instead of behind a "+ More Fields" sub-step, so it's reachable in a single click.
           const filterCats = [
             { id: 'type', label: 'Request type', icon: <SlidersHorizontal size={13} /> },
-            ...(rrDepartments.length > 0 ? [{ id: 'department', label: 'Department', icon: <SlidersHorizontal size={13} /> }] : []),
+            ...(rrDepartments.length > 0 ? [{ id: 'department', label: 'Department', icon: <Building2 size={13} /> }] : []),
             { id: 'status', label: 'Status', icon: <SlidersHorizontal size={13} /> },
             { id: 'assignee', label: 'Assignee', icon: <User size={13} /> },
-            { id: 'priority', label: 'Priority', icon: <SlidersHorizontal size={13} /> },
+            { id: 'priority', label: 'Priority', icon: <BarChart2 size={13} /> },
             { id: 'reporter', label: 'Reporter', icon: <UserCheck size={13} /> },
             { id: 'label', label: 'Label', icon: <Tag size={13} /> },
             { id: 'created', label: 'Created', icon: <Calendar size={13} /> },
@@ -2079,20 +2080,35 @@ function SpaceDetailContent() {
             }
 
             if (cat === 'department') {
+              const dq2 = dropdownSearch.trim().toLowerCase();
+              const filteredDepts = rrDepartments.filter(d => d.toLowerCase().includes(dq2));
               return (
-                <div className="overflow-y-auto max-h-[340px]">
-                  <button onClick={() => { setDeptFilter(''); setOpenFilter(null); }}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${!deptFilter ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                    <span>All Departments</span>
-                    {!deptFilter && <Check size={12} className="ml-auto text-blue-600" />}
-                  </button>
-                  {rrDepartments.map(dept => (
-                    <button key={dept} onClick={() => { setDeptFilter(dept); setOpenFilter(null); }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${deptFilter === dept ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
-                      <span>{dept}</span>
-                      {deptFilter === dept && <Check size={12} className="ml-auto text-blue-600" />}
-                    </button>
-                  ))}
+                <div className="flex flex-col max-h-[340px]">
+                  <div className="px-2 pt-2 pb-1 flex-shrink-0 relative">
+                    <Search size={12} className="absolute left-4.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                    <input autoFocus type="text" value={dropdownSearch} onChange={e => setDropdownSearch(e.target.value)}
+                      placeholder="Search Department…"
+                      className="w-full pl-7 pr-2.5 py-1.5 text-[12.5px] border border-blue-300 rounded-md outline-none focus:ring-1 focus:ring-blue-400" />
+                  </div>
+                  <div className="overflow-y-auto flex-1">
+                    {!dq2 && (
+                      <button onClick={() => { setDeptFilter(''); setOpenFilter(null); }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${!deptFilter ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
+                        <span>All Departments</span>
+                        {!deptFilter && <Check size={12} className="ml-auto text-blue-600" />}
+                      </button>
+                    )}
+                    {filteredDepts.length === 0 && dq2
+                      ? <p className="px-3 py-3 text-[12.5px] text-gray-400 text-center">No matches</p>
+                      : filteredDepts.map(dept => (
+                          <button key={dept} onClick={() => { setDeptFilter(dept); setOpenFilter(null); }}
+                            className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${deptFilter === dept ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
+                            <span>{dept}</span>
+                            {deptFilter === dept && <Check size={12} className="ml-auto text-blue-600" />}
+                          </button>
+                        ))
+                    }
+                  </div>
                 </div>
               );
             }
@@ -2530,6 +2546,7 @@ function SpaceDetailContent() {
                     setAssigneeSearch('');
                     setReporterSearch('');
                     setDropdownSearch('');
+                    setFilterCatSearch('');
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] rounded-md border transition-colors whitespace-nowrap
                     ${openFilter === '__filterPanel' || activeFilterCount > 0
@@ -2553,39 +2570,54 @@ function SpaceDetailContent() {
                       onMouseDown={e => e.stopPropagation()}>
 
                       {/* Left panel — categories */}
-                      <div className="w-[160px] border-r border-gray-100 py-1.5 flex-shrink-0">
-                        <div className="px-3 pb-1 pt-0.5">
-                          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Filters</p>
+                      <div className="w-[180px] border-r border-gray-100 flex-shrink-0 flex flex-col max-h-[380px]">
+                        <div className="px-3 pt-2 pb-1.5 flex-shrink-0">
+                          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Filters</p>
+                          <div className="relative">
+                            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                            <input autoFocus type="text" value={filterCatSearch} onChange={e => setFilterCatSearch(e.target.value)}
+                              placeholder="Search filters…"
+                              className="w-full pl-7 pr-2.5 py-1.5 text-[12px] border border-gray-200 rounded-md outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 placeholder-gray-400" />
+                          </div>
                         </div>
-                        {moreFilterCats.map(cat => {
-                          const active = isCatActive(cat.id);
-                          const isSelected = filterCategory === cat.id;
-                          return (
-                            <button key={cat.id}
-                              onClick={() => { setFilterCategory(cat.id); setAssigneeSearch(''); setReporterSearch(''); setDropdownSearch(''); }}
-                              className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] transition-colors text-left
-                                ${isSelected ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700 hover:bg-gray-50'}
-                                ${active && !isSelected ? 'text-blue-600' : ''}`}>
-                              <span className="flex-shrink-0 text-gray-400">{cat.icon}</span>
-                              <span className="flex-1 truncate">{cat.label}</span>
-                              {active && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 flex-shrink-0" />}
-                            </button>
-                          );
-                        })}
+                        <div className="overflow-y-auto flex-1 pb-1.5">
+                          {(() => {
+                            const fq = filterCatSearch.trim().toLowerCase();
+                            const visibleCats = fq ? moreFilterCats.filter(c => c.label.toLowerCase().includes(fq)) : moreFilterCats;
+                            if (visibleCats.length === 0) return <p className="px-3 py-3 text-[12px] text-gray-400 text-center">No matching filters</p>;
+                            return visibleCats.map(cat => {
+                              const active = isCatActive(cat.id);
+                              const isSelected = filterCategory === cat.id;
+                              return (
+                                <button key={cat.id}
+                                  onClick={() => { setFilterCategory(cat.id); setAssigneeSearch(''); setReporterSearch(''); setDropdownSearch(''); }}
+                                  className={`w-full flex items-center gap-2 px-3 py-2 text-[12.5px] transition-colors text-left
+                                    ${isSelected ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700 hover:bg-gray-50'}
+                                    ${active && !isSelected ? 'text-blue-600' : ''}`}>
+                                  <span className="flex-shrink-0 text-gray-400">{cat.icon}</span>
+                                  <span className="flex-1 truncate">{cat.label}</span>
+                                  {active && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 flex-shrink-0" />}
+                                </button>
+                              );
+                            });
+                          })()}
+                        </div>
                       </div>
 
-                      {/* Right panel — options for selected category */}
+                      {/* Right panel — options for selected category, header matches
+                          the "Field = (equals)" style used by the Type/Status/Assignee
+                          quick-filter buttons so every filter dropdown looks consistent. */}
                       <div className="flex-1 min-w-[200px] max-w-[260px]">
-                        <div className="px-3 py-2 border-b border-gray-100">
-                          <div className="flex items-center justify-between">
-                            <p className="text-[11px] font-semibold text-gray-500 capitalize">{moreFilterCats.find(c => c.id === filterCategory)?.label || ''}</p>
-                            {isCatActive(filterCategory) && (
-                              <button onClick={() => {
-                                if (filterCategory === 'department') setDeptFilter('');
-                                else clearFilter(filterCategory);
-                              }} className="text-[11px] text-red-400 hover:text-red-600 transition-colors">Clear</button>
-                            )}
-                          </div>
+                        <div className="px-3 py-2 border-b border-gray-100 flex items-center justify-between gap-2">
+                          <p className="text-[12px] text-gray-500 truncate">
+                            {moreFilterCats.find(c => c.id === filterCategory)?.label || ''} <span className="font-semibold text-gray-700">= (equals)</span>
+                          </p>
+                          {isCatActive(filterCategory) && (
+                            <button onClick={() => {
+                              if (filterCategory === 'department') setDeptFilter('');
+                              else clearFilter(filterCategory);
+                            }} className="text-[11px] text-red-400 hover:text-red-600 transition-colors flex-shrink-0">Clear</button>
+                          )}
                         </div>
                         {renderRightPanel()}
                       </div>
