@@ -2150,8 +2150,21 @@ function parseDateRange(range: string): { from: Date; to: Date } {
   // dates) but never actually narrowed the results at all.
   if (range.startsWith('between:')) {
     const [, fromStr, toStr] = range.split(':');
-    const f = fromStr ? new Date(`${fromStr}T00:00:00`) : new Date(0);
-    const t = toStr ? new Date(`${toStr}T23:59:59.999`) : now;
+    // A bare "YYYY-MM-DDTHH:mm:ss" string with no offset is parsed in
+    // whatever timezone the NODE PROCESS happens to be running in -- fine on
+    // a dev machine set to IST, but this app's actual users (and whoever's
+    // querying this endpoint from an external reporting tool) operate in
+    // IST regardless of where the server itself is deployed. A Docker
+    // container defaults to UTC unless explicitly configured otherwise, and
+    // this one has no TZ set -- so "to 2026-07-31" was silently cut off at
+    // 2026-07-31 00:00 UTC, which is 2026-07-31 05:30 IST, quietly dropping
+    // the rest of that IST calendar day's tickets from the range (and,
+    // depending on server TZ, potentially the START boundary shifting the
+    // same way). Anchoring explicitly to IST (+05:30) makes the calendar-day
+    // boundary match what a human picking these dates actually means,
+    // independent of whatever timezone the server process happens to run in.
+    const f = fromStr ? new Date(`${fromStr}T00:00:00+05:30`) : new Date(0);
+    const t = toStr ? new Date(`${toStr}T23:59:59.999+05:30`) : now;
     return { from: f, to: t };
   }
 
