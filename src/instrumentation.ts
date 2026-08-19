@@ -93,12 +93,32 @@ export async function register() {
     }
   }
 
+  // One-time catch-up: fills Client Name (from the reporter's email domain)
+  // on every EXISTING ticket that predates auto-fill at creation time. The
+  // endpoint itself is idempotent (checks app_settings before touching
+  // anything and only ever runs the bulk update once), so calling it on
+  // every boot is safe -- it's a real no-op after the first successful run.
+  async function backfillClientNames(label: string): Promise<void> {
+    try {
+      const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
+      const res = await fetch(`${internalUrl}/api/admin/backfill-client-names`, {
+        method: 'POST',
+        headers: { 'x-internal-job-secret': INTERNAL_JOB_SECRET },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.updated > 0) console.log(`[Client Name backfill] ${label} — filled ${data.updated} ticket(s).`);
+    } catch (err) {
+      console.error(`[Client Name backfill] ${label} — failed:`, err);
+    }
+  }
+
   // Fire-and-forget: schedule the boot-time run and both 5-minute intervals,
   // but do NOT await any of it here — see the note above for why.
   setTimeout(() => {
     tryRestartPollers('Boot');
     checkSlaBreaches('Boot');
     syncJiraIssues('Boot');
+    backfillClientNames('Boot');
 
     // Retry loop: every 5 minutes, restart any pollers that are down.
     // This handles OAuth token expiry, network blips, and tokens that

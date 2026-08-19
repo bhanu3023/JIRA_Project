@@ -3233,7 +3233,8 @@ async function _handleJiraPgApi(
   // to send -- they authenticate with this per-process secret instead (see
   // internal-job-secret.ts). Scoped to one specific path rather than a
   // blanket bypass, since anything landing here has no session to audit.
-  const isInternalJob = path === 'jira-issue-sync' && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
+  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names')
+    && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
 
   if (!userId && !isPublicPath && !isInternalJob) {
     return json({ error: 'Unauthorized' }, 401);
@@ -8970,6 +8971,46 @@ async function _handleJiraPgApi(
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 500);
     const result = await runJiraIssueSync(limit);
     return json(result);
+  }
+
+  // POST /admin/backfill-client-names -- one-time catch-up for every EXISTING
+  // ticket created before Client Name started auto-filling from the reporter's
+  // email domain at creation time. Only ever fills a ticket whose clientName
+  // is currently NULL -- a ticket that already has a real, manually-picked
+  // customer name (the overwhelming majority of tickets with clientName set,
+  // per the actual data) is never touched, so this can't clobber good
+  // existing data. Admin-triggered manually, or run once automatically at
+  // boot (see instrumentation.ts) the same way jira-issue-sync is.
+  if (path === 'admin/backfill-client-names' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+      // Idempotent regardless of who/what calls this -- runs at most once
+      // (across every server restart, not just this process) unless
+      // explicitly forced, so wiring it into the boot sequence alongside the
+      // other one-time catch-up jobs never repeats the bulk update.
+      const already = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'client_name_backfill_v1_done'`);
+      if (already.rows.length > 0 && url.searchParams.get('force') !== 'true') {
+        return json({ updated: 0, alreadyRan: true });
+      }
+      const result = await pool.query(`
+        UPDATE issues i
+        SET "clientName" = LOWER(SPLIT_PART(u.email, '@', 2)), "updatedAt" = NOW()
+        FROM users u
+        WHERE i."reporterId" = u.id
+          AND i."clientName" IS NULL
+          AND u.email IS NOT NULL
+          AND POSITION('@' IN u.email) > 0
+      `);
+      await pool.query(
+        `INSERT INTO app_settings (key, value) VALUES ('client_name_backfill_v1_done', 'true')
+         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()`
+      );
+      return json({ updated: result.rowCount ?? 0 });
+    } catch (e: any) {
+      console.error('[backfill-client-names] failed:', e?.message || e);
+      return json({ error: 'Backfill failed', details: e?.message }, 500);
+    }
   }
 
   // GET /migration-reporters -- every distinct reporter with at least one
