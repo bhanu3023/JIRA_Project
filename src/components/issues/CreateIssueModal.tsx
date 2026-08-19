@@ -32,37 +32,30 @@ const DEFAULT_QUEUE_STATUSES: WorkflowStatus[] = [
   { id: 'qst_default_resolved', name: 'Resolved', category: 'done', color: '#10B981' } as WorkflowStatus,
 ];
 
-// Migration-queue tickets follow a standard investigation writeup -- rather
-// than add nine new database columns and nine new save/cancel UI blocks,
-// this pre-fills the existing Description editor with the section headings
-// so the reporter fills in each one inline. Screenshots work exactly like
-// they already do anywhere else in a description: paste or drag an image
-// under that heading and RichTextEditor uploads and embeds it inline.
+// Migration-queue tickets follow a standard investigation writeup. Three
+// earlier attempts at this all put the section headings AND the answer
+// area inside the SAME single contentEditable region as sibling nodes
+// (plain paragraphs, then a bordered <div>, then the same div with
+// placeholder text) -- every one of them let Backspace merge an answer
+// block into the heading paragraph right before it, since that's just how
+// browsers resolve "delete backward past the start of this block" for any
+// two adjacent block-level siblings, regardless of tag or styling. Fixing
+// the merge behavior itself (short of a bespoke keydown interceptor added
+// to the shared RichTextEditor -- disproportionate for a component used
+// everywhere else in the app too) isn't reliable.
 //
-// Each heading is followed by a visibly bordered box (not just a blank
-// paragraph, which rendered with no visual indication there was anywhere to
-// type).
-//
-// This went through two broken attempts before landing here, both
-// confirmed broken by actually testing them, not just inspecting the code:
-//   1. Literal gray placeholder text inside the box, selected and typed
-//      over. `color` is CSS-inherited, so replacement text kept the same
-//      faded gray -- looked broken/unreadable.
-//   2. A CSS `:empty`-driven pseudo-element placeholder (same technique
-//      RichTextEditor's own top-level placeholder uses), which fixed the
-//      color problem but requires the box to have ZERO real children to
-//      match `:empty`. Reproduced directly: pressing Backspace with the
-//      cursor inside a genuinely empty block deletes that entire block
-//      immediately (confirmed with execCommand('delete') -- one press
-//      removed the whole box), and since every click into a truly-empty
-//      element lands at position 0, this fired on effectively every first
-//      backspace, then kept eating into the heading above it.
-// Real, italicized placeholder text (no color change) avoids both: it's
-// never CSS-inherited color, so overtyping it renders normally, and the
-// box always has real content for Backspace to consume, so a single
-// backspace can only delete within the placeholder text, not the whole
-// block or the heading above it.
-const MIGRATION_DESCRIPTION_TEMPLATE = [
+// Structural fix: give each section its OWN independent RichTextEditor
+// instance, with the heading rendered as plain React text OUTSIDE any
+// contentEditable region at all. A heading that was never editable can't
+// be edited or merged into by anything happening in a sibling editor --
+// there's no shared DOM tree for a browser merge behavior to act on. Each
+// section is the exact same rich editor the main Description uses (bold,
+// headers, lists, pasted images, links -- everything), and its placeholder
+// is the editor's own native one (a safe, already-proven mechanism, since
+// there's nothing before a lone top-level empty editor to merge into).
+// All nine are concatenated into one HTML string for the single
+// `description` field on submit -- no new database columns.
+const MIGRATION_SECTION_LABELS = [
   'Issue Reported',
   'Error Description',
   'Screenshots',
@@ -72,7 +65,7 @@ const MIGRATION_DESCRIPTION_TEMPLATE = [
   'Grafana Results',
   'Workspace Ids',
   'Server Url',
-].map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p><div style="border:1px dashed #cbd5e1;border-radius:6px;padding:8px 10px;margin:4px 0 16px 0;min-height:24px;"><em>Type your answer here…</em></div>`).join('');
+];
 
 // Combination / Product Type / Project Manager are data-migration concepts
 // (a source/destination combo, which PM owns the migration) that only make
@@ -253,18 +246,18 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [selectedQueueId, setSelectedQueueId] = useState('');
   const [form, setForm] = useState({
     summary: '',
-    // The Migration-template auto-fill in update() below only fires when the
-    // Queue dropdown is CHANGED by the user -- it never ran when the queue
-    // arrives pre-selected as "Migration" (e.g. opening Create from inside
-    // the Migration queue view passes initialDept="Migration" straight into
-    // this initial state, never going through update() at all). Apply the
-    // same template here too so it's not missing just because of how the
-    // modal happened to be opened.
-    description: (initialDept && initialDept.toLowerCase() === 'migration') ? MIGRATION_DESCRIPTION_TEMPLATE : '',
+    description: '',
     type: 'task', priority: 'medium',
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
     productType: [] as string[], projectManager: [] as string[], productionTicket: '',
   });
+  // One independent rich-text value per Migration section (see
+  // MIGRATION_SECTION_LABELS above for why these are separate editors
+  // rather than one shared region). Concatenated into `description` at
+  // submit time -- see handleSubmit.
+  const [migrationSections, setMigrationSections] = useState<string[]>(() => MIGRATION_SECTION_LABELS.map(() => ''));
+  const [migrationUploading, setMigrationUploading] = useState<boolean[]>(() => MIGRATION_SECTION_LABELS.map(() => false));
+  const isMigrationDept = form.department.toLowerCase() === 'migration';
   const [summaryError, setSummaryError] = useState(false);
   const [queueError, setQueueError]                 = useState(false);
   const [combinationError, setCombinationError]     = useState(false);
@@ -421,14 +414,22 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
       setError(`Please fill in the required field${missingLabels.length > 1 ? 's' : ''}: ${missingLabels.join(', ')}`);
       return;
     }
-    if (uploading) { setError('Please wait for attachments to finish uploading before creating.'); return; }
+    if (uploading || migrationUploading.some(Boolean)) { setError('Please wait for attachments to finish uploading before creating.'); return; }
     setError('');
     setLoading(true);
     try {
+      // Each Migration section is its own isolated editor (see
+      // MIGRATION_SECTION_LABELS above) -- concatenate them into the one
+      // `description` field the backend actually stores. A section left
+      // untouched still shows its heading with nothing under it, same as
+      // any optional field someone skipped.
+      const description = isMigrationDept
+        ? MIGRATION_SECTION_LABELS.map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p>${migrationSections[i] || ''}`).join('')
+        : form.description;
       const newIssue = await createIssue({
         spaceKey: selectedSpaceKey,
         summary: form.summary,
-        description: form.description,
+        description,
         type: form.type,
         priority: form.priority,
         assigneeId: form.assigneeId || undefined,
@@ -457,16 +458,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   };
 
   const update = (field: string, value: any) => {
-    setForm(f => {
-      const next = { ...f, [field]: value };
-      // Only when picking Migration, and only if they haven't already typed
-      // something -- never overwrite a description someone's already
-      // written, e.g. after switching the queue back and forth.
-      if (field === 'department' && String(value).toLowerCase() === 'migration' && !f.description.trim()) {
-        next.description = MIGRATION_DESCRIPTION_TEMPLATE;
-      }
-      return next;
-    });
+    setForm(f => ({ ...f, [field]: value }));
     if (field === 'summary' && value.trim()) setSummaryError(false);
     if (field === 'department' && value) setQueueError(false);
     if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
@@ -565,13 +557,30 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             {/* Description */}
             <div className="mb-5">
               <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Description</label>
-              <RichTextEditor
-                value={form.description}
-                onChange={v => update('description', v)}
-                placeholder="Add a description… paste or drag images, use the toolbar to format"
-                minHeight="280px"
-                onUploadingChange={setUploading}
-              />
+              {isMigrationDept ? (
+                <div className="flex flex-col gap-1">
+                  {MIGRATION_SECTION_LABELS.map((label, i) => (
+                    <div key={label} className="border border-gray-200 rounded-lg p-2.5">
+                      <p className="text-[12.5px] font-semibold text-gray-600 mb-1">{i + 1}. {label}</p>
+                      <RichTextEditor
+                        value={migrationSections[i]}
+                        onChange={v => setMigrationSections(prev => prev.map((x, idx) => (idx === i ? v : x)))}
+                        placeholder=""
+                        minHeight="70px"
+                        onUploadingChange={u => setMigrationUploading(prev => prev.map((x, idx) => (idx === i ? u : x)))}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <RichTextEditor
+                  value={form.description}
+                  onChange={v => update('description', v)}
+                  placeholder="Add a description… paste or drag images, use the toolbar to format"
+                  minHeight="280px"
+                  onUploadingChange={setUploading}
+                />
+              )}
             </div>
 
             {showMigrationFields && (
