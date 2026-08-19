@@ -396,7 +396,10 @@ export default function DashboardPage() {
                     <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Summary</th>
                     {activeTab === 'worked_on' && (
-                      <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Queue</th>
+                      <>
+                        <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Queue</th>
+                        <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Reporter</th>
+                      </>
                     )}
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Status</th>
                     <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-10">P</th>
@@ -405,23 +408,39 @@ export default function DashboardPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {displayedIssues.slice(0, 12).map(issue => {
+                    // "Worked On" shows this queue's own FROZEN snapshot for a
+                    // ticket that's since moved to a different department (see
+                    // the same ?viewDept= pattern on the spaces page's own
+                    // Worked-on list) -- without this, opening a ticket the
+                    // Dev queue shows here landed on the issue detail page
+                    // showing whatever department the ticket is CURRENTLY in
+                    // (e.g. Migration), directly contradicting the Dev queue
+                    // this same row was just opened from.
+                    const issueHref = activeTab === 'worked_on' && (issue as any).dept
+                      ? `/issues/${issue.cfKey ?? issue.key}?viewDept=${encodeURIComponent((issue as any).dept)}`
+                      : `/issues/${issue.cfKey ?? issue.key}`;
                     return (
                       <tr key={issue.id} className="group transition-colors hover:bg-gray-50">
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-1.5">
                             <IssueTypeIcon type={issue.type} size={16} />
-                            <Link href={`/issues/${issue.cfKey ?? issue.key}`} className="whitespace-nowrap font-mono text-[11.5px] font-semibold text-blue-600 hover:text-blue-800">
+                            <Link href={issueHref} className="whitespace-nowrap font-mono text-[11.5px] font-semibold text-blue-600 hover:text-blue-800">
                               {issue.cfKey ?? issue.key}
                             </Link>
                           </div>
                         </td>
                         <td className="px-2 py-2.5 max-w-0">
-                          <Link href={`/issues/${issue.cfKey ?? issue.key}`} className="block truncate text-[13px] text-gray-900 transition-colors group-hover:text-jira-dark">
+                          <Link href={issueHref} className="block truncate text-[13px] text-gray-900 transition-colors group-hover:text-jira-dark">
                             {issue.summary}
                           </Link>
                         </td>
                         {activeTab === 'worked_on' && (
-                          <td className="px-2 py-2.5 text-[11.5px] text-gray-600">{(issue as any).dept || '—'}</td>
+                          <>
+                            <td className="px-2 py-2.5 text-[11.5px] text-gray-600">{(issue as any).dept || '—'}</td>
+                            <td className="px-2 py-2.5 text-[11.5px] text-gray-600 truncate max-w-[130px]" title={(issue as any).reporterEmail || undefined}>
+                              {(issue as any).reporterName || <span className="text-gray-300">—</span>}
+                            </td>
+                          </>
                         )}
                         <td className="px-2 py-2.5">
                           <span className="text-[11px] font-medium text-white px-2 py-0.5 rounded whitespace-nowrap"

@@ -8524,13 +8524,15 @@ async function _handleJiraPgApi(
     }
     const rows = await pool.query(
       `SELECT w.issue_id, w.dept, w.reason, w.worked_at,
-              i.key, i.summary, i.type, i.priority, i."statusId",
+              i.key, i.cf_key, i.summary, i.type, i.priority, i."statusId",
               s.name AS status_name, s.category AS status_category, s.color AS status_color,
-              sp.key AS space_key, sp.name AS space_name
+              sp.key AS space_key, sp.name AS space_name,
+              CONCAT(r."firstName", ' ', r."lastName") AS reporter_name, r.email AS reporter_email
        FROM user_worked_on_tickets w
        JOIN issues i ON i.id = w.issue_id
        LEFT JOIN statuses s ON s.id = i."statusId"
        LEFT JOIN spaces sp ON sp.id = i."spaceId"
+       LEFT JOIN users r ON r.id = i."reporterId"
        WHERE w.user_id = $1 ${deptClause}
        ORDER BY w.worked_at DESC
        LIMIT 100`,
@@ -8539,6 +8541,7 @@ async function _handleJiraPgApi(
     const issues = rows.rows.map((r: any) => ({
       id: r.issue_id,
       key: r.key,
+      cfKey: r.cf_key,
       summary: r.summary,
       type: r.type,
       priority: r.priority,
@@ -8547,6 +8550,8 @@ async function _handleJiraPgApi(
       workedAt: r.worked_at,
       status: r.status_name ? { id: r.statusId, name: r.status_name, category: r.status_category, color: r.status_color } : null,
       space: { key: r.space_key, name: r.space_name },
+      reporterName: (r.reporter_name || '').trim() || null,
+      reporterEmail: r.reporter_email || null,
     }));
     return json({ issues });
   }
