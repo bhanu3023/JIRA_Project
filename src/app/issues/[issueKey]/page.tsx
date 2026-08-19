@@ -881,9 +881,21 @@ export default function IssueDetailPage() {
     );
   };
 
+  // IT Administration tickets never collect Combination/Product Type/Project
+  // Manager/Root Cause/Fix Description in the first place (Create Issue only
+  // shows those fields for migration-style boards) — enforcing them here at
+  // resolve/department-change time made every IT Administration ticket
+  // permanently unresolvable over fields it was never asked to fill in.
+  // Defined as a function (not evaluated inline) since `issue` itself isn't
+  // declared until later in this component — same reason getMissingCoreFields
+  // below is a function rather than a plain value.
+  const isMandatoryFieldsExemptDept = () =>
+    ((issue as any)?.current_department || '').trim().toLowerCase() === 'it administration';
+
   // Combination / Product Type / Project Manager must be filled before resolving a ticket
   // OR moving it to another department — shared by handleStatusChange and department change.
   const getMissingCoreFields = (): string[] => {
+    if (isMandatoryFieldsExemptDept()) return [];
     const missing: string[] = [];
     const alwaysRequired: { name: string; key: string }[] = [
       { name: 'Project Manager', key: 'projectManager' },
@@ -912,20 +924,22 @@ export default function IssueDetailPage() {
     if (targetStatus?.category === 'done') {
       const missing: string[] = getMissingCoreFields();
 
-      // Any other custom fields explicitly marked required
-      const nativeKey: Record<string, string> = {
-        'Customer Name': 'customerName', 'Client Name': 'clientName',
-        'Work Type': 'workType', 'Product Type': 'productType',
-        'Combination': 'combination', 'Project Manager': 'projectManager',
-      };
-      for (const cf of customFields.filter(c => c.required)) {
-        if (missing.includes(cf.name) || ['Project Manager', 'Product Type', 'Combination'].includes(cf.name)) continue; // already checked
-        const val = customFieldValues[cf.id] || (nativeKey[cf.name] ? (issue as any)?.[nativeKey[cf.name]] : null);
-        if (!val || val.toString().trim() === '') missing.push(cf.name);
-      }
+      if (!isMandatoryFieldsExemptDept()) {
+        // Any other custom fields explicitly marked required
+        const nativeKey: Record<string, string> = {
+          'Customer Name': 'customerName', 'Client Name': 'clientName',
+          'Work Type': 'workType', 'Product Type': 'productType',
+          'Combination': 'combination', 'Project Manager': 'projectManager',
+        };
+        for (const cf of customFields.filter(c => c.required)) {
+          if (missing.includes(cf.name) || ['Project Manager', 'Product Type', 'Combination'].includes(cf.name)) continue; // already checked
+          const val = customFieldValues[cf.id] || (nativeKey[cf.name] ? (issue as any)?.[nativeKey[cf.name]] : null);
+          if (!val || val.toString().trim() === '') missing.push(cf.name);
+        }
 
-      // Assignee must be set
-      if (!issue?.assignee) missing.push('Assignee');
+        // Assignee must be set
+        if (!issue?.assignee) missing.push('Assignee');
+      }
 
       if (missing.length > 0) {
         setMandatoryModal({ missingFields: missing, pendingStatusId: statusId, context: 'resolve' });
