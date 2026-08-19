@@ -7057,6 +7057,32 @@ async function _handleJiraPgApi(
       );
       Object.assign(updated as any, r.rows[0] || {});
     } catch { /* non-critical */ }
+
+    // Record that this user did real work on the ticket while it sat in its
+    // current department. Previously ONLY a formal department handoff (the
+    // 'passed'/'returned'/'closed' inserts elsewhere in this file) ever wrote
+    // to user_worked_on_tickets — a status or assignee change made by anyone
+    // with legitimate access to this queue but no actual handoff (e.g. a
+    // multi-queue member acting on a ticket that never formally left another
+    // department) left zero trace here, so that work was invisible to the
+    // Filters page's Queue + Worked view, the sidebar's "Worked on" list, and
+    // Team Analytics alike, even though isUserAuthorizedForDeptQueue had
+    // already confirmed they were allowed to touch it. Uses its own 'worked'
+    // reason and only fills in worked_at on conflict (never overwrites an
+    // existing 'passed'/'returned'/'closed' row's more specific reason).
+    try {
+      const statusChangedNow = body.statusId !== undefined && issue.statusId !== data.statusId;
+      const assigneeChangedNow = body.assigneeId !== undefined && issue.assigneeId !== data.assigneeId;
+      const workedDept: string | null = (updated as any).current_department || null;
+      if (userId && workedDept && (statusChangedNow || assigneeChangedNow)) {
+        await pool.query(
+          `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
+           ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET worked_at=NOW()`,
+          [userId, updated.id, workedDept]
+        );
+      }
+    } catch { /* non-critical */ }
+
     const slaInstances = await enrichSlaWithResolver(updated.id, await computeIssueSLAsFromDb(updated));
 
     // Fire connector events (fire-and-forget)
