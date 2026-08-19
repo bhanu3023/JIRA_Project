@@ -92,10 +92,19 @@ class ApiClient {
     }
 
     let data: Record<string, unknown> = {};
+    // A 200 with a body that fails to parse (truncated by a flaky connection
+    // or proxy, a mid-response server crash, etc.) used to be silently treated
+    // as "success, here's an empty object" -- the caller got back {} instead
+    // of an error, and a page like the issue detail view (which only gates on
+    // "is this null", not "is this actually populated") rendered every field
+    // as its empty default instead of showing an error or retrying. Track
+    // whether parsing genuinely failed so a 200 with a broken body still
+    // throws instead of masquerading as a valid empty response.
+    let bodyParseFailed = false;
     try {
       data = (await res.json()) as Record<string, unknown>;
     } catch {
-      /* non-JSON body */
+      bodyParseFailed = true;
     }
 
     if (res.status === 401) {
@@ -117,6 +126,13 @@ class ApiClient {
     }
 
     if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
+    // DELETE and similar endpoints can legitimately return a 200/204 with no
+    // body at all -- only GETs (which callers always expect real data back
+    // from) need to fail loudly on an unparseable body; a DELETE returning
+    // {} is normal, not evidence of a broken response.
+    if (bodyParseFailed && method === 'GET') {
+      throw new Error(`Received an incomplete response from the server for ${endpoint} — please try again.`);
+    }
     return data as T;
   }
 

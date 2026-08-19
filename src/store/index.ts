@@ -45,6 +45,13 @@ interface AppState {
   // Issues
   issues: Issue[];
   currentIssue: Issue | null;
+  // Distinguishes "still fetching" (currentIssue null, no error) from "the
+  // fetch actually failed" (currentIssue null, error set) -- the issue detail
+  // page only ever checked "is currentIssue null" for its loading spinner, so
+  // a genuine failure (broken response, timeout, network drop) looked exactly
+  // like it was still loading forever, with no way to tell the user what
+  // happened or offer a retry.
+  currentIssueError: string | null;
   issueTotal: number;
   issuePage: number;
   loadIssues: (params?: Record<string, string>) => Promise<void>;
@@ -177,6 +184,7 @@ export const useStore = create<AppState>((set, get) => ({
   // Issues
   issues: [],
   currentIssue: null,
+  currentIssueError: null,
   issueTotal: 0,
   issuePage: 1,
   issuesVersion: 0,
@@ -231,15 +239,16 @@ export const useStore = create<AppState>((set, get) => ({
   },
   loadIssue: async (key) => {
     activeIssueKey = key;
+    if (activeIssueKey === key) set({ currentIssueError: null });
     try {
       const issue = await api.getIssue(key);
       // Only apply this response if no newer loadIssue() call has superseded
       // it in the meantime — otherwise a slow fetch for a ticket the user has
       // already navigated away from can win the race and overwrite the
       // ticket that's actually on screen now.
-      if (activeIssueKey === key) set({ currentIssue: issue });
-    } catch {
-      if (activeIssueKey === key) set({ currentIssue: null });
+      if (activeIssueKey === key) set({ currentIssue: issue, currentIssueError: null });
+    } catch (err: any) {
+      if (activeIssueKey === key) set({ currentIssue: null, currentIssueError: err?.message || 'Failed to load this ticket.' });
     }
   },
   createIssue: async (data) => {
@@ -251,7 +260,7 @@ export const useStore = create<AppState>((set, get) => ({
     issuesCache.clear();
     await api.updateIssue(key, data);
   },
-  clearCurrentIssue: () => set({ currentIssue: null }),
+  clearCurrentIssue: () => set({ currentIssue: null, currentIssueError: null }),
 
   // Sprints
   sprints: [],

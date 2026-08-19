@@ -95,9 +95,10 @@ export default function IssueDetailPage() {
   // Normalize key: strip Jira sub-issue colon suffix (e.g. L2B-12718:1 → L2B-12718)
   const rawKey = (params.issueKey as string).toUpperCase();
   const issueKey = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-  const { currentIssue, loadIssue, clearCurrentIssue, user, spaces } = useStore(
+  const { currentIssue, currentIssueError, loadIssue, clearCurrentIssue, user, spaces } = useStore(
     useShallow((s) => ({
       currentIssue: s.currentIssue,
+      currentIssueError: s.currentIssueError,
       loadIssue: s.loadIssue,
       clearCurrentIssue: s.clearCurrentIssue,
       user: s.user,
@@ -1190,10 +1191,23 @@ export default function IssueDetailPage() {
   if (issueLoadDone && !currentIssue) return (
     <div className="flex items-center justify-center h-64">
       <div className="flex flex-col items-center gap-3 text-center">
-        <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-400 text-2xl">?</div>
-        <p className="text-base font-semibold text-gray-700">Issue not found</p>
-        <p className="text-sm text-gray-400">The issue <span className="font-mono font-medium text-gray-600">{issueKey}</span> does not exist or was deleted.</p>
-        <button onClick={handleBack} className="mt-2 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">Go back</button>
+        <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-400 text-2xl">{currentIssueError ? '!' : '?'}</div>
+        {currentIssueError ? (
+          <>
+            <p className="text-base font-semibold text-gray-700">Couldn't load this ticket</p>
+            <p className="text-sm text-gray-400 max-w-sm">{currentIssueError}</p>
+            <div className="flex items-center gap-2 mt-1">
+              <button onClick={() => loadIssue(issueKey)} className="px-4 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors">Retry</button>
+              <button onClick={handleBack} className="px-4 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors">Go back</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-base font-semibold text-gray-700">Issue not found</p>
+            <p className="text-sm text-gray-400">The issue <span className="font-mono font-medium text-gray-600">{issueKey}</span> does not exist or was deleted.</p>
+            <button onClick={handleBack} className="mt-2 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">Go back</button>
+          </>
+        )}
       </div>
     </div>
   );
