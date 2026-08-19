@@ -882,16 +882,21 @@ export default function IssueDetailPage() {
     );
   };
 
-  // IT Administration tickets never collect Combination/Product Type/Project
-  // Manager/Root Cause/Fix Description in the first place (Create Issue only
-  // shows those fields for migration-style boards) — enforcing them here at
-  // resolve/department-change time made every IT Administration ticket
-  // permanently unresolvable over fields it was never asked to fill in.
+  // IT Administration (space key "IA") never collects Combination/Product
+  // Type/Project Manager/Root Cause/Fix Description in the first place —
+  // Create Issue only shows those migration-only fields for migration-style
+  // boards (see NON_MIGRATION_SPACE_KEYS in CreateIssueModal.tsx). Enforcing
+  // them here at resolve/department-change time made every IT Administration
+  // ticket permanently unresolvable over fields it was never asked to fill
+  // in. IT Administration is its own standalone space, NOT a department
+  // inside another board, so this has to key off the ticket's spaceKey, not
+  // current_department (an earlier version of this check matched
+  // current_department === 'IT Administration', which never matched here at
+  // all and left this board's tickets just as unresolvable as before).
   // Defined as a function (not evaluated inline) since `issue` itself isn't
   // declared until later in this component — same reason getMissingCoreFields
   // below is a function rather than a plain value.
-  const isMandatoryFieldsExemptDept = () =>
-    ((issue as any)?.current_department || '').trim().toLowerCase() === 'it administration';
+  const isMandatoryFieldsExemptDept = () => (issue?.spaceKey || '').toUpperCase() === 'IA';
 
   // Combination / Product Type / Project Manager must be filled before resolving a ticket
   // OR moving it to another department — shared by handleStatusChange and department change.
