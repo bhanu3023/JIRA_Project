@@ -5991,6 +5991,17 @@ async function _handleJiraPgApi(
   const issueKeyMatch = path.match(/^issues\/([^/]+)$/);
   if (issueKeyMatch && method === 'GET') {
     const rawKey = issueKeyMatch[1].toUpperCase();
+    // Timing instrumentation: a ticket-open timeout was reported in production
+    // (times out once, works moments later for someone else opening the exact
+    // same ticket) with no way to tell whether the DB, an external Jira call,
+    // or something else was the actual cause -- every fix so far has been
+    // informed guessing. This logs a per-phase breakdown whenever a load takes
+    // more than 3s, so the NEXT occurrence points at the real bottleneck in
+    // the server logs instead of another guess. Safe to leave on permanently
+    // -- it's a few Date.now() calls and one console.warn, not a real cost.
+    const _perfT0 = Date.now();
+    const _perfMarks: Array<[string, number]> = [];
+    const _mark = (label: string) => _perfMarks.push([label, Date.now() - _perfT0]);
     // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" Ã¢â€ ' "L2B-12718")
     let key = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
     // Resolve CF key to actual Jira key (e.g. "CF-1" Ã¢â€ ' "L2B-5112")
@@ -6013,6 +6024,7 @@ async function _handleJiraPgApi(
         },
       },
     });
+    _mark('primary-issue-fetch');
     if (!issue) {
       // Try to import from Jira on-demand
       const imported = await importIssueFromJira(key);
@@ -6149,6 +6161,7 @@ async function _handleJiraPgApi(
         [key]
       ).catch(() => ({ rows: [] as any[] })),
     ]);
+    _mark('batch-promise-all');
 
     if (!isAdmin && issue.space?.key && suspendCheckQueues) {
       try {
@@ -6307,14 +6320,17 @@ async function _handleJiraPgApi(
       allComments = allComments.filter((c: any) => { if (seen.has(c.id)) return false; seen.add(c.id); return true; });
       allComments.sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     } catch { /* ignore */ }
+    _mark('partner-comments-merge');
 
     const mergedIssue = { ...issue, comments: allComments, _links: allLinks, ...rawDeptData };
     const slaInstances = await enrichSlaWithResolver(
       mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
     );
+    _mark('sla-enrichment');
     const responsePayload: any = {
       ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {},
     };
+    _mark('format-response');
 
     // A ticket whose description or comments contain large embedded images
     // (pasted directly into the rich-text editor, stored as base64 data URIs
@@ -6366,6 +6382,13 @@ async function _handleJiraPgApi(
       }
     } catch (e) {
       console.error(`[GET /issues/${key}] Failed to measure/trim response size:`, e);
+    }
+    _mark('size-guard');
+
+    const _perfTotal = Date.now() - _perfT0;
+    if (_perfTotal > 3000) {
+      const breakdown = _perfMarks.map(([label, t], i) => `${label}=${t - (_perfMarks[i - 1]?.[1] ?? 0)}ms`).join(', ');
+      console.warn(`[PERF] GET /issues/${key} took ${_perfTotal}ms -- ${breakdown} (cumulative: ${_perfMarks.map(([l, t]) => `${l}@${t}ms`).join(', ')})`);
     }
 
     return json(responsePayload);
