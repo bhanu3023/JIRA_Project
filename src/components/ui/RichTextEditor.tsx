@@ -137,6 +137,16 @@ export default function RichTextEditor({
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
+    // The "x" that appears over an image on hover, to remove it without
+    // having to place a cursor and backspace through it -- checked first,
+    // since the button itself sits visually on top of the image.
+    const removeBtn = target.closest('[data-rte-img-remove]');
+    if (removeBtn) {
+      e.preventDefault();
+      removeBtn.closest('[data-rte-img-wrap]')?.remove();
+      emit();
+      return;
+    }
     if (target.tagName === 'IMG') {
       e.preventDefault();
       setLightboxSrc((target as HTMLImageElement).src);
@@ -577,7 +587,27 @@ export default function RichTextEditor({
           imgEl.alt = file.name;
           imgEl.title = file.name;
           imgEl.style.cssText = 'max-width:220px;max-height:160px;width:auto;height:auto;border-radius:6px;margin:6px 0;display:block;cursor:pointer;object-fit:contain;';
-          el?.replaceWith(imgEl);
+          // Wrapped so a small "x" can float over the top of the image on
+          // hover, to remove it directly rather than having to place a
+          // cursor next to it and backspace through it. contenteditable
+          // false keeps the whole wrapper (image + button) as one atomic
+          // unit for editing purposes, same as the "Uploading…" placeholder
+          // above it -- the button itself still receives real clicks
+          // (handled in handleEditorClick), contenteditable="false" only
+          // affects text-editing operations, not pointer events.
+          const wrap = document.createElement('span');
+          wrap.setAttribute('data-rte-img-wrap', '');
+          wrap.setAttribute('contenteditable', 'false');
+          wrap.className = 'group relative inline-block align-top';
+          wrap.appendChild(imgEl);
+          const removeBtn = document.createElement('span');
+          removeBtn.setAttribute('data-rte-img-remove', '');
+          removeBtn.title = 'Remove image';
+          removeBtn.className = 'hidden group-hover:flex';
+          removeBtn.style.cssText = 'position:absolute;top:4px;right:4px;width:20px;height:20px;align-items:center;justify-content:center;background:rgba(15,23,42,0.75);color:#fff;border-radius:9999px;font-size:13px;line-height:1;cursor:pointer;';
+          removeBtn.textContent = '×';
+          wrap.appendChild(removeBtn);
+          el?.replaceWith(wrap);
           emit();
           endUpload();
         }, 'image/jpeg', 0.75);
