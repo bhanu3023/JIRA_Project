@@ -488,6 +488,20 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
       .map(q => q.dept as string)
   ));
 
+  // A user restricted to a single queue (e.g. a Migration engineer/manager who
+  // only has access to the Migration queue) has nothing to actually choose —
+  // opening Create from the space itself (rather than from inside that
+  // queue's own "All Tickets" view, which passes initialDept from the URL)
+  // otherwise leaves department blank until they manually pick it, which also
+  // hides department-specific UI like the Migration description template
+  // until they do. Default straight to the only option they have.
+  useEffect(() => {
+    if (!form.department && queueOptions.length === 1) {
+      setForm(f => (f.department ? f : { ...f, department: queueOptions[0] }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queueOptions.join('|'), form.department]);
+
   const categoryOrder: Record<string, number> = { todo: 0, in_progress: 1, done: 3 };
   const sortedStatuses = [...spaceStatuses].sort((a, b) => {
     const ac = (a as any).category as string | undefined;
