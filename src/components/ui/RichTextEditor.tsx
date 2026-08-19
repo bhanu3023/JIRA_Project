@@ -17,6 +17,58 @@ interface Member {
   avatarUrl?: string;
 }
 
+// Matches a bare URL immediately preceding the cursor -- used while actively
+// typing (see checkAutolink/linkifyTrailingUrl below), so it's anchored to
+// the end of whatever text is being checked.
+const URL_PATTERN = /(https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+)$/i;
+// Same shape but unanchored and global, for scanning a whole block of HTML
+// text for every bare URL it contains -- see linkifyPlainUrls below.
+const URL_PATTERN_GLOBAL = /(https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+)/gi;
+
+// A submit-time safety net, not just the live typing/blur handlers below:
+// this session's testing found the live handlers can be timing-sensitive
+// (a trailing space normalizes to U+00A0 rather than U+0020 in some cases,
+// and this environment couldn't fully confirm blur firing reliably), so a
+// ticket's real description could still be saved with an unlinked URL if
+// either handler missed it. Runs as a pure string transform on saved HTML:
+// parses it, walks every text node NOT already inside an <a> (so an
+// already-linked URL, or the same domain appearing as plain label text
+// inside a link, is left alone), and wraps any bare URL substring found.
+export function linkifyPlainUrls(html: string): string {
+  if (!html || !html.includes('http') && !html.includes('www.')) return html;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+  const targets: Text[] = [];
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    const text = n as Text;
+    if (text.parentElement?.closest('a')) continue; // already a link
+    URL_PATTERN_GLOBAL.lastIndex = 0;
+    if (URL_PATTERN_GLOBAL.test(text.textContent ?? '')) targets.push(text);
+  }
+  for (const text of targets) {
+    const frag = doc.createDocumentFragment();
+    let lastIndex = 0;
+    URL_PATTERN_GLOBAL.lastIndex = 0;
+    const original = text.textContent ?? '';
+    let m: RegExpExecArray | null;
+    while ((m = URL_PATTERN_GLOBAL.exec(original))) {
+      if (m.index > lastIndex) frag.appendChild(doc.createTextNode(original.slice(lastIndex, m.index)));
+      const url = m[0];
+      const a = doc.createElement('a');
+      a.href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = url;
+      frag.appendChild(a);
+      lastIndex = m.index + url.length;
+    }
+    if (lastIndex < original.length) frag.appendChild(doc.createTextNode(original.slice(lastIndex)));
+    text.parentNode?.replaceChild(frag, text);
+  }
+  return doc.body.innerHTML;
+}
+
 interface Props {
   value: string;
   onChange: (html: string) => void;
@@ -238,6 +290,110 @@ export default function RichTextEditor({
     el.addEventListener('beforeinput', handleBeforeInput);
     return () => el.removeEventListener('beforeinput', handleBeforeInput);
   }, [handleBeforeInput]);
+
+  /* ── Auto-link a plain-typed URL ───────────────────────────────────
+   * There was no automatic URL detection at all -- the only way to get a
+   * real link was the toolbar's "Insert link" button and its prompt()
+   * dialog. Typing (or pasting, see handlePaste) a bare URL just left it
+   * as inert plain text, unlike Jira's own description editor and most
+   * other rich text editors, which auto-linkify on the fly.
+   *
+   * Fires in two places: after typing a trailing space/tab (the URL is
+   * followed by more text) via checkAutolink() below on every input event,
+   * and on blur (the URL is the last/only thing typed in the field, so no
+   * trailing space ever arrives) via linkifyTrailingUrl(). Also backstopped
+   * by linkifyPlainUrls (module scope, above) at whatever consumer's submit
+   * time, in case either handler misses it.
+   */
+
+  // `url` is passed explicitly rather than re-sliced from (startIdx, endIdx)
+  // -- checkAutolink's endIdx spans through trailing whitespace too (so
+  // deleteContents also removes it), but that same span sliced as "the URL
+  // text" then baked that whitespace into the <a>'s href and label. Confirmed
+  // directly: deriving the url via slice(startIdx, endIdx) produced a
+  // trailing "&nbsp;" inside both the href and the visible link text.
+  const wrapUrlInRange = (node: Text, startIdx: number, endIdx: number, url: string): HTMLAnchorElement => {
+    const href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+    const range = document.createRange();
+    range.setStart(node, startIdx);
+    range.setEnd(node, endIdx);
+    range.deleteContents();
+    const a = document.createElement('a');
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = url;
+    range.insertNode(a);
+    return a;
+  };
+
+  const checkAutolink = useCallback(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    const node = range.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE) return;
+    const text = node.textContent ?? '';
+    const cursorOffset = range.startOffset;
+    // Only fires right after typing a trailing space -- that's what
+    // completes the preceding "word" as a finished token worth linkifying.
+    // Confirmed directly (not assumed): a single space keystroke at the end
+    // of a text node doesn't insert one U+0020 -- it inserts U+00A0
+    // (non-breaking space) followed by a real U+0020, TWO characters, to
+    // keep the space from being visually collapsed away. Stripping only the
+    // single last character left the nbsp attached to the "word" being
+    // checked, so the captured URL (and its href) ended up with a literal
+    // trailing nbsp baked in. Strip the WHOLE trailing run of space/nbsp,
+    // however many characters that is, rather than assuming exactly one.
+    const upToCursor = text.slice(0, cursorOffset);
+    const trailingWs = upToCursor.match(/[ \t\u00A0]+$/);
+    if (!trailingWs) return;
+    const beforeSpace = upToCursor.slice(0, upToCursor.length - trailingWs[0].length);
+    const match = beforeSpace.match(URL_PATTERN);
+    if (!match) return;
+    const startIdx = beforeSpace.length - match[0].length;
+    // Consume the whole trailing whitespace run in the deletion too --
+    // otherwise the node's existing separator space (the one before the
+    // URL) and the freshly re-inserted one below end up adjacent, showing
+    // as doubled-up whitespace.
+    const a = wrapUrlInRange(node as Text, startIdx, cursorOffset, match[0]);
+    // Range.insertNode splits the original text node around the insertion
+    // point -- since that point was at the very end of its remaining
+    // content, the "after" half is an empty Text node with nothing in it.
+    // Harmless on its own, but left in place it's an empty sibling right
+    // after the fresh space node below, which is exactly the shape that
+    // confused where the browser puts the next character typed.
+    if (a.nextSibling?.nodeType === Node.TEXT_NODE && a.nextSibling.textContent === '') {
+      a.nextSibling.remove();
+    }
+    const sp = document.createTextNode(' ');
+    a.parentNode?.insertBefore(sp, a.nextSibling);
+    const newRange = document.createRange();
+    newRange.setStart(sp, 1);
+    newRange.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+    emit();
+  }, [emit]);
+
+  // A URL with nothing typed after it (no trailing space ever arrives, e.g.
+  // it's the only/last content in the field) never reaches checkAutolink's
+  // space-triggered path -- catch it on blur instead, scanning the very
+  // last text node in the editor for a trailing URL with no space to consume.
+  const linkifyTrailingUrl = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    let lastText: Text | null = null;
+    let n: Node | null;
+    while ((n = walker.nextNode())) lastText = n as Text;
+    if (!lastText) return;
+    const text = lastText.textContent ?? '';
+    const match = text.match(URL_PATTERN);
+    if (!match) return;
+    wrapUrlInRange(lastText, text.length - match[0].length, text.length, match[0]);
+    emit();
+  }, [emit]);
 
   /* ── Detect @mention while typing ───────────────────────────────── */
   const checkMention = useCallback(() => {
@@ -739,7 +895,8 @@ export default function RichTextEditor({
         ref={editorRef}
         contentEditable
         suppressContentEditableWarning
-        onInput={() => { emit(); checkMention(); }}
+        onInput={() => { emit(); checkMention(); checkAutolink(); }}
+        onBlur={linkifyTrailingUrl}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         onDrop={handleDrop}

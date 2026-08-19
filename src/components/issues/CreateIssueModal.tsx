@@ -11,7 +11,7 @@ import SpaceIcon from '@/components/ui/SpaceIcon';
 import { api } from '@/lib/api';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
 import DeptDropdown from '@/components/ui/DeptDropdown';
-import RichTextEditor from '@/components/ui/RichTextEditor';
+import RichTextEditor, { linkifyPlainUrls } from '@/components/ui/RichTextEditor';
 
 interface Props {
   spaceKey: string;
@@ -423,9 +423,15 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
       // `description` field the backend actually stores. A section left
       // untouched still shows its heading with nothing under it, same as
       // any optional field someone skipped.
-      const description = isMigrationDept
+      const rawDescription = isMigrationDept
         ? MIGRATION_SECTION_LABELS.map((label, i) => `<p><strong>${i + 1}. ${label}</strong></p>${migrationSections[i] || ''}`).join('')
         : form.description;
+      // Backstop for a URL typed as the very last thing in a field, with
+      // nothing typed after it -- RichTextEditor's own live handlers
+      // (space-triggered, and on blur) should already catch this, but this
+      // runs as a plain string pass right before saving regardless of
+      // whether either of those fired in time.
+      const description = linkifyPlainUrls(rawDescription);
       const newIssue = await createIssue({
         spaceKey: selectedSpaceKey,
         summary: form.summary,
