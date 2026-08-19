@@ -2773,7 +2773,12 @@ function SpaceDetailContent() {
                 return h > 0 ? `${h}h ${m}m` : `${m}m`;
               };
               return (
-              <a key={issue.id} href={`/issues/${issue.cfKey ?? issue.key}`}
+              // Carries which queue this "Worked on" row was opened from, so the
+              // issue detail page can show THIS queue's own frozen status/assignee
+              // snapshot (matching what this list itself already shows, per
+              // dept_statuses above) instead of the ticket's current live global
+              // state if it's since moved to a different department.
+              <a key={issue.id} href={`/issues/${issue.cfKey ?? issue.key}?viewDept=${encodeURIComponent(deptParam)}`}
                 className="grid px-4 py-3 border-b border-gray-100 hover:bg-blue-50 transition-colors cursor-pointer items-center"
                 style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 140px 110px 110px' }}>
                 <span className="text-[12px] font-semibold text-blue-600 font-mono">{issue.cfKey ?? issue.key}</span>

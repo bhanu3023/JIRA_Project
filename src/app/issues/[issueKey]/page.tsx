@@ -1192,6 +1192,27 @@ export default function IssueDetailPage() {
   // and the stored status is a custom queue status (qst_... ID) -- shared with
   // every list view via getEffectiveIssueStatus so they all agree on what's shown.
   const issueStat = getEffectiveIssueStatus(issue as any);
+
+  // A queue's own "Worked on" list (dept_closed) already shows each ticket's
+  // FROZEN per-department status/assignee snapshot (dept_statuses/dept_assignees)
+  // instead of the ticket's current live state, once it's moved to a different
+  // department -- e.g. Dev's list keeps showing "In Progress" for a ticket Dev
+  // handed off, even after Migration resolves it. Opening that same row here
+  // showed the ticket's live global status instead ("Resolved"), directly
+  // contradicting the list it was just opened from. ?viewDept= (added to that
+  // list's links) says which queue's perspective the viewer opened this from;
+  // if that differs from the ticket's current department and a snapshot for it
+  // exists, show THAT queue's own frozen status here too instead of the live one.
+  const viewDeptParam = searchParams?.get('viewDept') || '';
+  const currentDeptForView = ((issue as any)?.current_department || '').trim();
+  const isHistoricalDeptView = !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
+  const historicalDeptStatuses: Record<string, any> = (issue as any)?.dept_statuses || {};
+  const historicalStatusKey = Object.keys(historicalDeptStatuses).find(k => k.toLowerCase() === viewDeptParam.toLowerCase());
+  const historicalStatusSnap = isHistoricalDeptView && historicalStatusKey ? historicalDeptStatuses[historicalStatusKey] : null;
+  const displayStat = historicalStatusSnap
+    ? { id: historicalStatusSnap.id, name: historicalStatusSnap.name, color: resolveStatusColor(historicalStatusSnap), category: historicalStatusSnap.category }
+    : issueStat;
+
   const t = typeIcons[issue.type] || typeIcons.task;
 
   /** Real-time SLA breach value for "Time to First Response" / "Time to Resolution" custom fields */
@@ -2285,21 +2306,28 @@ export default function IssueDetailPage() {
           {/* Status selector — Jira style */}
           <div className="px-4 pt-4 pb-3">
             <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2">Status</p>
+            {isHistoricalDeptView && (
+              <p className="text-[10.5px] text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mb-2">
+                Showing {viewDeptParam}'s own status — this ticket has since moved to {currentDeptForView || 'another queue'}.
+              </p>
+            )}
             <div className="relative">
-              {/* Current status badge button — matches Jira's colored pill */}
+              {/* Current status badge button — matches Jira's colored pill.
+                  Read-only (not editable) while showing another queue's frozen
+                  historical snapshot instead of the ticket's live status. */}
               <button
-                onClick={() => canEdit && setShowStatusDropdown(v => !v)}
-                disabled={!canEdit}
-                title={canEdit ? undefined : 'This ticket has moved to another queue — only that queue can change its status'}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-bold uppercase tracking-wide transition-all select-none ${canEdit ? 'hover:brightness-95' : 'cursor-not-allowed opacity-70'}`}
+                onClick={() => canEdit && !isHistoricalDeptView && setShowStatusDropdown(v => !v)}
+                disabled={!canEdit || isHistoricalDeptView}
+                title={isHistoricalDeptView ? `Historical status as last seen in ${viewDeptParam}` : canEdit ? undefined : 'This ticket has moved to another queue — only that queue can change its status'}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-bold uppercase tracking-wide transition-all select-none ${canEdit && !isHistoricalDeptView ? 'hover:brightness-95' : 'cursor-not-allowed opacity-70'}`}
                 style={{
-                  backgroundColor: issueStat.color + '25',
-                  color: issueStat.color,
-                  border: `1.5px solid ${issueStat.color}60`,
+                  backgroundColor: displayStat.color + '25',
+                  color: displayStat.color,
+                  border: `1.5px solid ${displayStat.color}60`,
                 }}
               >
-                {issueStat.name}
-                {canEdit && <ChevronDown size={11} strokeWidth={2.5} />}
+                {displayStat.name}
+                {canEdit && !isHistoricalDeptView && <ChevronDown size={11} strokeWidth={2.5} />}
               </button>
 
               {showStatusDropdown && (() => {

@@ -3767,7 +3767,19 @@ async function _handleJiraPgApi(
         }
         return { ...withStatus, sla_breached: slaBreached };
       });
-      return json({ issues, total: parseInt(countRes.rows[0].count) });
+
+      // "Worked on" is meant to be the record of tickets THIS queue is actually
+      // done with -- but user_worked_on_tickets' 'passed' entries fire on any
+      // handoff, whether or not the ticket had reached a done status yet, so a
+      // ticket merely passed along mid-work (still "In Progress" per this
+      // queue's own status_category, matching the frozen dept_statuses snapshot
+      // above) showed up here as if it were closed, even though it's still
+      // actively open work that belongs in "Assigned to me" until it's actually
+      // resolved. Only keep entries whose status (this queue's own perspective)
+      // is a real done-category status.
+      const doneIssues = issues.filter((i: any) => i.status_category === 'done');
+
+      return json({ issues: doneIssues, total: doneIssues.length });
     } catch (e: any) {
       return json({ issues: [], total: 0 });
     }
