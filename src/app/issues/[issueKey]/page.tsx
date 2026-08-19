@@ -3297,6 +3297,18 @@ export default function IssueDetailPage() {
                                 </div>
                               </div>
                             )}
+
+                            {/* Who actually resolved it -- otherwise the only name visible
+                                anywhere near a breach badge is the CURRENT Assignee, which
+                                silently pins a late resolution on whoever holds the ticket
+                                now even if a different person's later status change (e.g.
+                                reopening and re-resolving after the due time) is what
+                                actually caused it. */}
+                            {isCompleted && s.resolvedByName && (
+                              <p className="text-[10.5px] text-gray-400 mt-2">
+                                Resolved by <span className={`font-semibold ${resolvedLate ? 'text-red-500' : 'text-gray-600'}`}>{s.resolvedByName}</span>
+                              </p>
+                            )}
                           </div>
                         );
                       })}

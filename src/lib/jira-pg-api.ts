@@ -1321,6 +1321,34 @@ async function computePausedDeptSLA(
   } catch { return null; }
 }
 
+// A resolved/breached SLA badge previously had no way to show WHO actually
+// resolved the ticket -- only the issue's current Assignee field was visible
+// nearby, which silently pins the blame for a late resolution on whoever
+// happens to be assigned now, even if a different person's later status
+// change (e.g. reopening and re-resolving after the due time) is what
+// actually caused the breach. Surface the real author of the status change
+// that last moved the ticket into its current state, from issue_history
+// (which already records who changed status and when), instead.
+async function getLastStatusChangeAuthor(issueId: string): Promise<string | null> {
+  try {
+    const r = await pool.query(
+      `SELECT "authorName" FROM issue_history WHERE "issueId" = $1 AND field = 'status' ORDER BY "createdAt" DESC LIMIT 1`,
+      [issueId]
+    );
+    return r.rows[0]?.authorName || null;
+  } catch { return null; }
+}
+
+// Attaches resolvedByName (see getLastStatusChangeAuthor) to every completed
+// SLA entry, so the frontend can show "Resolved by X" next to a
+// resolved/breached badge instead of leaving it unattributed.
+async function enrichSlaWithResolver(issueId: string, slaInstances: any[]): Promise<any[]> {
+  if (!slaInstances.some((s: any) => s.isCompleted)) return slaInstances;
+  const resolvedByName = await getLastStatusChangeAuthor(issueId);
+  if (!resolvedByName) return slaInstances;
+  return slaInstances.map((s: any) => (s.isCompleted ? { ...s, resolvedByName } : s));
+}
+
 /** Format a DB issue record to the API shape the frontend expects */
 /** Compute live SLA instances for an issue from active DB SLA policies */
 async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
@@ -6085,7 +6113,7 @@ async function _handleJiraPgApi(
     } catch { /* ignore */ }
 
     const mergedIssue = { ...issue, comments: allComments, _links: allLinks, ...rawDeptData };
-    const slaInstances = await computeIssueSLAsFromDb(mergedIssue);
+    const slaInstances = await enrichSlaWithResolver(mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue));
     return json({ ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {} });
   }
 
@@ -7029,7 +7057,7 @@ async function _handleJiraPgApi(
       );
       Object.assign(updated as any, r.rows[0] || {});
     } catch { /* non-critical */ }
-    const slaInstances = await computeIssueSLAsFromDb(updated);
+    const slaInstances = await enrichSlaWithResolver(updated.id, await computeIssueSLAsFromDb(updated));
 
     // Fire connector events (fire-and-forget)
     const _issueUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/issues/${updated.key}`;
