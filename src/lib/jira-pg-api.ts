@@ -1,4 +1,4 @@
-﻿/**
+/**
  * jira-pg-api.ts
  * PostgreSQL-backed API handler replacing the in-memory jira-dev-mock for
  * heavy data routes (auth, users, spaces, issues).
@@ -5349,18 +5349,40 @@ async function _handleJiraPgApi(
     return json(formatIssue(issue));
   }
 
+  // Resolves a "CF-####" display key to the actual internal storage key
+  // (e.g. "L2B-482"). Every route below that accepts a ticket key needs this
+  // exact same resolution -- previously each of ~11 call sites inlined it
+  // separately, and every one of them silently fell back to treating the
+  // unresolved "CF-####" as if it WERE the real key whenever this query
+  // failed (a transient DB pool hiccup -- see pg-pool.ts's own history of
+  // "Connection terminated due to connection timeout" on this exact
+  // production box). Since "CF-####" never matches any real `issues.key`
+  // value, that fallback produced a false "Issue not found" / silent no-op
+  // that looked exactly like the ticket didn't exist, self-resolving on the
+  // next attempt once the transient hiccup cleared. Retrying the resolution
+  // once before giving up fixes the actual race instead of just papering
+  // over the symptom.
+  async function resolveCfKey(key: string): Promise<string> {
+    if (!key.startsWith('CF-')) return key;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const cfRow = await pool.query<{ key: string }>(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
+        return cfRow.rows[0] ? cfRow.rows[0].key : key;
+      } catch {
+        if (attempt === 1) return key;
+      }
+    }
+    return key;
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ Department Change (COPY / PASS) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   // Original ticket stays untouched on source board.
   // A NEW ticket is created on the target board with same content, new key, RR assignee, reset status.
   // History entry is added to the original ticket.
   const issueDeptMatch = path.match(/^issues\/([^/]+)\/department$/);
   if (issueDeptMatch && method === 'PATCH') {
-    let key = issueDeptMatch[1].toUpperCase();
+    let key = await resolveCfKey(issueDeptMatch[1].toUpperCase());
     // Resolve CF-key Ã¢â€ ' Prisma key
-    if (key.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-      if (cfRow.rows[0]) key = cfRow.rows[0].key;
-    }
     const body = await readJson(req);
     const newDept = String(body.department || '');
     // targetBoard may be comma-separated (multi-board mapping) Ã¢â‚¬â€ use the first board
@@ -5945,11 +5967,7 @@ async function _handleJiraPgApi(
   const slaWaiverMatch = path.match(/^issues\/([^/]+)\/sla-waiver$/);
   if (slaWaiverMatch && method === 'PATCH') {
     if (!isAdmin) return json({ error: 'Admin only' }, 403);
-    let key = slaWaiverMatch[1].toUpperCase();
-    if (key.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-      if (cfRow.rows[0]) key = cfRow.rows[0].key;
-    }
+    let key = await resolveCfKey(slaWaiverMatch[1].toUpperCase());
     const body = await readJson(req);
     const policyId = String(body.policyId || '');
     const waived = body.waived !== false;
@@ -6004,13 +6022,8 @@ async function _handleJiraPgApi(
     const _mark = (label: string) => _perfMarks.push([label, Date.now() - _perfT0]);
     // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" Ã¢â€ ' "L2B-12718")
     let key = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-    // Resolve CF key to actual Jira key (e.g. "CF-1" Ã¢â€ ' "L2B-5112")
-    if (key.startsWith('CF-')) {
-      try {
-        const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-        if (cfRow.rows[0]) key = cfRow.rows[0].key;
-      } catch { /* fallback to original key */ }
-    }
+    key = await resolveCfKey(key);
+    _mark('resolve-cf-key');
     const issue = await db.issue.findUnique({
       where: { key },
       include: {
@@ -6397,12 +6410,7 @@ async function _handleJiraPgApi(
   if (issueKeyMatch && method === 'PATCH') {
     const rawKey = issueKeyMatch[1].toUpperCase();
     let key = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-    if (key.startsWith('CF-')) {
-      try {
-        const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-        if (cfRow.rows[0]) key = cfRow.rows[0].key;
-      } catch { /* fallback */ }
-    }
+    key = await resolveCfKey(key);
     const body = await readJson(req);
 
     // Handle recall — return ticket to its origin dept (whichever queue it started in)
@@ -7400,11 +7408,7 @@ async function _handleJiraPgApi(
   if (issueKeyMatch && method === 'DELETE') {
     const rawKey = issueKeyMatch[1].toUpperCase();
     let key = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-    // CF-xxxxx is the cf_key (raw SQL column) Ã¢â‚¬â€ resolve to the Prisma key first
-    if (key.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-      if (cfRow.rows[0]) key = cfRow.rows[0].key;
-    }
+    key = await resolveCfKey(key);
     const issue = await db.issue.findUnique({
       where: { key },
       include: { assignee: true, reporter: true, space: { select: { key: true, name: true } } },
@@ -7557,14 +7561,8 @@ async function _handleJiraPgApi(
     // could never match a real issue on either side, so it just vanished
     // instead of appearing (or erroring). Resolve CF- keys the same way
     // every other route in this file already does before using them.
-    if (sourceKey.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [sourceKey]);
-      if (cfRow.rows[0]) sourceKey = cfRow.rows[0].key;
-    }
-    if (targetKey.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [targetKey]);
-      if (cfRow.rows[0]) targetKey = cfRow.rows[0].key;
-    }
+    sourceKey = await resolveCfKey(sourceKey);
+    targetKey = await resolveCfKey(targetKey);
     const [sourceExists, targetExists] = await Promise.all([
       pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [sourceKey]),
       pool.query(`SELECT id, cf_key FROM issues WHERE key = $1 LIMIT 1`, [targetKey]),
@@ -7631,12 +7629,7 @@ async function _handleJiraPgApi(
 
   const issueComments = path.match(/^issues\/([^/]+)\/comments$/);
   if (issueComments && method === 'POST') {
-    let key = issueComments[1].toUpperCase();
-    // Resolve CF-key Ã¢â€ ' Prisma key
-    if (key.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-      if (cfRow.rows[0]) key = cfRow.rows[0].key;
-    }
+    let key = await resolveCfKey(issueComments[1].toUpperCase());
     const issue = await db.issue.findUnique({
       where: { key },
       include: {
@@ -8885,17 +8878,7 @@ async function _handleJiraPgApi(
   // POST /issues/:key/watch  Ã¢â‚¬â€ start watching
   const watchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchMatch && method === 'POST') {
-    let key = watchMatch[1].toUpperCase();
-    // Every other issue-scoped route resolves a CF-prefixed key to the real
-    // internal key before using it -- this one never did, so a watch
-    // registered from a "/issues/CF-.../watch" URL (i.e. any normal ticket
-    // page) got stored under the CF key, while notifyWatchers() always looks
-    // up by the internal key. Those watchers were never actually notified of
-    // anything, silently.
-    if (key.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-      if (cfRow.rows[0]) key = cfRow.rows[0].key;
-    }
+    let key = await resolveCfKey(watchMatch[1].toUpperCase());
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     await (db as any).issueWatch.upsert({
       where: { issueKey_userId: { issueKey: key, userId } },
@@ -8908,11 +8891,7 @@ async function _handleJiraPgApi(
   // DELETE /issues/:key/watch  Ã¢â‚¬â€ stop watching
   const unwatchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (unwatchMatch && method === 'DELETE') {
-    let key = unwatchMatch[1].toUpperCase();
-    if (key.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-      if (cfRow.rows[0]) key = cfRow.rows[0].key;
-    }
+    let key = await resolveCfKey(unwatchMatch[1].toUpperCase());
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     await (db as any).issueWatch.deleteMany({ where: { issueKey: key, userId } });
     return json({ watching: false });
@@ -8921,11 +8900,7 @@ async function _handleJiraPgApi(
   // GET /issues/:key/watch  Ã¢â‚¬â€ check if watching
   const watchCheckMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchCheckMatch && method === 'GET') {
-    let key = watchCheckMatch[1].toUpperCase();
-    if (key.startsWith('CF-')) {
-      const cfRow = await pool.query(`SELECT key FROM issues WHERE cf_key = $1 LIMIT 1`, [key]);
-      if (cfRow.rows[0]) key = cfRow.rows[0].key;
-    }
+    let key = await resolveCfKey(watchCheckMatch[1].toUpperCase());
     if (!userId) return json({ watching: false, count: 0 });
     const [watch, count] = await Promise.all([
       (db as any).issueWatch.findUnique({ where: { issueKey_userId: { issueKey: key, userId } } }),
