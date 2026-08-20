@@ -10,7 +10,12 @@ echo "==> Pulling latest code..."
 # under `set -e` before the actual rebuild ever ran. Bypass it for this one
 # git invocation instead of relying on whoever runs deploy.sh to remember to
 # unset it first.
-git -c http.proxy= -c https.proxy= pull origin fresh-start
+# Pulls whatever branch this checkout is actually on -- was hardcoded to
+# "fresh-start", so a server checked out on a different branch (e.g. a
+# feature branch under active development) would silently pull the wrong
+# branch's code on every deploy instead of the commits actually pushed.
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+git -c http.proxy= -c https.proxy= pull origin "$CURRENT_BRANCH"
 
 echo "==> Rebuilding and restarting only what changed..."
 # Previously: `docker compose down` + `up -d --build`, which unconditionally
