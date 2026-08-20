@@ -62,6 +62,14 @@ async function checkDuplicatePolicies() {
 
 async function checkReopenResume() {
   console.log('\n═══ CHECK 2: Reopen resumes the SLA clock ═══');
+  // A reopen from BEFORE the resume fix was deployed ran under the old,
+  // buggy startDeptSLA (which only touched the JSONB log, never the
+  // top-level dept_sla_started_at column) and will always look "stale" here
+  // -- that's expected old data, not evidence the current code is broken.
+  // Pass SINCE=<ISO timestamp of the deploy> to only judge reopens that
+  // happened on the fixed code.
+  const since = process.env.SINCE ? new Date(process.env.SINCE) : null;
+  if (since) console.log(`Only counting reopens at/after ${since.toISOString()} (SINCE env var).`);
   // Find tickets whose status history shows a done -> not-done transition
   // (a reopen) in the last 60 days, then check dept_sla_started_at against
   // that reopen time.
@@ -89,8 +97,10 @@ async function checkReopenResume() {
     // any other non-done->non-done move isn't a reopen and tells us nothing
     // about the resume-on-reopen fix.
     if (row.old_category !== 'done' || !row.new_category || row.new_category === 'done') continue;
-    candidates++;
+    if (since && new Date(row.reopened_at).getTime() < since.getTime()) continue;
     const dept = (row.current_department || '').trim().toLowerCase();
+    if (!dept) continue; // no department on this ticket -- there's no SLA clock to resume, not a real test case
+    candidates++;
     const log = row.dept_sla_log || {};
     const logKey = Object.keys(log).find((k) => k.toLowerCase() === dept);
     const startedAt = row.dept_sla_started_at ? new Date(row.dept_sla_started_at) : null;
