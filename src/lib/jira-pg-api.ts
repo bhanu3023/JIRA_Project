@@ -3006,6 +3006,11 @@ async function _handleJiraPgApi(
     // URL-based storage) could balloon this list response by tens of MB on its own.
     let enrichedIssues = issues.map((i: any) => formatIssue({ ...i, ...(deptMap[i.key] || {}), description: (i.description || '').slice(0, 500) }));
     let deptTotal = total;
+    // Declared up front (not just inside the SLA-breach enrichment block
+    // further down) because the dept-scoped branch immediately below needs
+    // to know whether the filter is active BEFORE it decides how to
+    // paginate its own row query -- see the comment at slaFilterActive.
+    const slaBreachedParam = url.searchParams.get('slaBreached'); // 'yes' | 'no' | null
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
       let allSpaceIds: string[] = [];
@@ -3184,7 +3189,23 @@ async function _handleJiraPgApi(
         rowParams.push(...deptExtraParams);
         const limitIdx = rowParams.length + 1;
         const offsetIdx = rowParams.length + 2;
-        rowParams.push(limit, (page - 1) * limit);
+        // SLA breach isn't a real column -- it's computed per row below (goal
+        // duration, pause statuses, priority, etc.), so it can't be pushed into
+        // this WHERE clause. Paginating with LIMIT/OFFSET BEFORE that
+        // computation, like the plain (no SLA filter) case does, would filter
+        // a single already-tiny page down to whatever fraction of it happens
+        // to be breached -- silently wrong totals/page counts and every other
+        // breached ticket outside that page invisible no matter how far you
+        // paginate. When the SLA filter is active, fetch every matching row
+        // instead (capped well above any real queue's size) so the filter
+        // below sees the whole set; pagination is then applied in JS to the
+        // FILTERED result.
+        const slaFilterActive = slaBreachedParam === 'yes' || slaBreachedParam === 'no';
+        if (slaFilterActive) {
+          rowParams.push(20000);
+        } else {
+          rowParams.push(limit, (page - 1) * limit);
+        }
         // Sorting by updatedAt made an old ticket jump to page 1 the moment anyone
         // so much as commented on it, potentially bumping a genuinely new ticket
         // off the page -- pagination should be a stable "50 newest by creation
@@ -3208,7 +3229,7 @@ async function _handleJiraPgApi(
            ${deptSearchClause}
            ${deptExtraSql}
            ORDER BY i."createdAt" DESC
-           LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+           LIMIT $${limitIdx}${slaFilterActive ? '' : ` OFFSET $${offsetIdx}`}`,
           rowParams
         );
         enrichedIssues = rows.rows.map((row: any) => formatIssue({
@@ -3248,7 +3269,6 @@ async function _handleJiraPgApi(
     // has been exceeded. Previously this only checked whether an SLA_BREACH warning
     // notification had ever been sent — stayed "No" forever if that cron missed a
     // ticket, never looked at the due date at all, and never cleared once resolved.
-    const slaBreachedParam = url.searchParams.get('slaBreached'); // 'yes' | 'no' | null
     try {
       const distinctSpaceIds = Array.from(new Set(enrichedIssues.map((i: any) => i.spaceId).filter(Boolean)));
       const policiesBySpace: Record<string, any[]> = {};
@@ -3316,6 +3336,13 @@ async function _handleJiraPgApi(
       if (slaBreachedParam === 'yes' || slaBreachedParam === 'no') {
         enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParam === 'yes' ? i.sla_breached : !i.sla_breached);
         deptTotal = enrichedIssues.length;
+        // The dept-scoped branch fetched every matching row (not just one
+        // page) so this filter would see the whole set -- now that deptTotal
+        // reflects the true breached count, apply the actual page window.
+        if (deptParam) {
+          const start = (page - 1) * limit;
+          enrichedIssues = enrichedIssues.slice(start, start + limit);
+        }
       }
     } catch { /* sla breach is best-effort */ }
 
