@@ -1522,22 +1522,25 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     const deptSlaLog: Record<string, any> = (issue as any).dept_sla_log || {};
     const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === issueDept);
     const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
-    // pauseDeptSLA always copies the CURRENT dept_sla_started_at into the log
-    // entry's own started_at at the moment it pauses -- so after pausing (or
-    // resolving) WITHOUT the ticket ever actually leaving this dept, the log
-    // entry's started_at exactly matches dept_sla_started_at, because it's a
-    // snapshot of the very same still-ongoing stint, not a separate earlier
-    // visit. Crediting its elapsed_ms as "prior debt" in that case double-
-    // counted the same elapsed time (once via startedAt itself, again as
-    // extra debt subtracted from durationMs), pulling the due time hours
-    // earlier than it really is -- a ticket resolved cleanly within its goal
-    // could read as breached. Only credit it when the log's started_at is
-    // genuinely different, i.e. from an earlier stint that a later dept
-    // re-entry (which DOES reset dept_sla_started_at) has since superseded.
-    const currentStartedRaw = (issue as any).dept_sla_started_at;
-    const isSameStint = deptLogEntry?.started_at && currentStartedRaw
-      && new Date(deptLogEntry.started_at).getTime() === new Date(currentStartedRaw).getTime();
-    const priorElapsedMs: number = (deptLogEntry && !isSameStint) ? (deptLogEntry.elapsed_ms || 0) : 0;
+    // A "same stint" guard was added here on the theory that pauseDeptSLA
+    // copying dept_sla_started_at into the log entry's own started_at (which
+    // it does on every pause/resolve, even the very first one) meant that
+    // value could get double-credited. It can't: pauseDeptSLA's elapsed_ms is
+    // already a running INCREMENTAL total (existingElapsed + time-since-
+    // startedAt, computed once per pause/resolve call), never a value that
+    // also gets added again via startedAt as a separate term -- startedAt is
+    // only ever used to measure the CURRENT stint's own remaining budget
+    // below, not re-added on top of elapsed_ms. Because startDeptSLA ALWAYS
+    // re-syncs the log entry's started_at to the fresh dept_sla_started_at on
+    // every single re-entry (see startDeptSLA), that guard's condition was
+    // true immediately after almost every pause/resolve/reopen regardless of
+    // whether the ticket had ever left -- which zeroed out the correctly
+    // accumulated elapsed_ms in the overwhelmingly common case (a ticket
+    // resolved on its very first, only stint in a department), silently
+    // erasing real breaches on resolve and re-opening the exact carryover
+    // bug (CF-29552) this elapsed_ms bookkeeping exists to fix. Reading
+    // elapsed_ms unconditionally is correct in every case.
+    const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
 
     return dedupedPolicies.map((policy: any) => {
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
@@ -5066,20 +5069,14 @@ async function _handleJiraPgApi(
               const deptSlaLog: Record<string, any> = i.dept_sla_log || {};
               const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
               const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
-              // Mirror computeSLAInstancesPure's isSameStint guard: pauseDeptSLA
-              // snapshots the CURRENT (still-ongoing) stint's started_at into the
-              // log entry the moment it pauses or resolves without the ticket
-              // ever having actually left this dept. Without this check, that
-              // snapshot's elapsed_ms gets credited as "prior debt" on top of
-              // the very same period counted again via slaStartedAt itself,
-              // pulling the computed due time hours earlier than reality --
-              // a ticket resolved cleanly within its goal could read as
-              // breached here while its own detail page (which has this
-              // guard) correctly shows it not breached.
-              const currentStartedRaw = i.dept_sla_started_at;
-              const isSameStint = deptLogEntry?.started_at && currentStartedRaw
-                && new Date(deptLogEntry.started_at).getTime() === new Date(currentStartedRaw).getTime();
-              const priorElapsedMs: number = (deptLogEntry && !isSameStint) ? (deptLogEntry.elapsed_ms || 0) : 0;
+              // No "same stint" guard here -- see the matching comment in
+              // computeSLAInstancesPure. pauseDeptSLA's elapsed_ms is already
+              // a running incremental total; it is never double-counted by
+              // also reading startedAt as a separate term, so crediting it
+              // unconditionally is correct in every case, including the most
+              // common one (a ticket resolved on its first and only stint in
+              // this department).
+              const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
               if (isResolved) {
                 // The clock is frozen -- priorElapsedMs already reflects the
                 // FULL total time logged across every period up to and
