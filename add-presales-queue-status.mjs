@@ -87,8 +87,13 @@ async function main() {
       }
     }
 
+    // Only create the Pre-Sales queue in the same space as the Dev queue --
+    // GET /department-queue?dept=<name> scans every space's custom_queues row
+    // and returns the FIRST name match, so a same-named queue created in every
+    // space would make the handoff land wherever that scan happens to find one
+    // first, not necessarily where the ticket actually came from.
     const hasPresalesQueue = queues.some((q) => (q.name || '').toLowerCase() === NEW_QUEUE_NAME.toLowerCase());
-    if (!hasPresalesQueue) {
+    if (devQueue && !hasPresalesQueue) {
       queues.push({ id: `cq_presales_${row.space_key}`, name: NEW_QUEUE_NAME, memberIds: [] });
       plan.push({ space: row.space_key, addedQueue: NEW_QUEUE_NAME });
       changed = true;
