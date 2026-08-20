@@ -25,10 +25,10 @@ const pool = new Pool({
 
 async function main() {
   console.log('========== rr_config departments mentioning Pre-Sales ==========');
-  const rr = await pool.query(`SELECT space_id, config FROM rr_config`);
+  const rr = await pool.query(`SELECT space_id, departments FROM rr_config`);
   let foundRr = false;
   for (const row of rr.rows) {
-    const depts = row.config?.departments || [];
+    const depts = row.departments || [];
     for (const d of depts) {
       if ((d.name || '').toLowerCase().includes('pre-sales') || (d.name || '').toLowerCase().includes('presales')) {
         foundRr = true;
