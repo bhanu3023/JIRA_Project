@@ -4090,7 +4090,20 @@ async function _handleJiraPgApi(
     // were the true total across the whole matching set.
     const slaBreachedParamEarly = url.searchParams.get('slaBreached');
     const needsSlaPrefilter = slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no';
-    const SLA_PREFILTER_CAP = 5000;
+    // Safety ceiling only -- the actual candidate-set size fetched below is
+    // whichever is SMALLER of this and the real matching-row count (see the
+    // `Math.min(..., SLA_PREFILTER_CAP)` call sites). A fixed 5000 silently
+    // truncated the candidate set (oldest rows first, since it's ordered by
+    // createdAt DESC) for any queue with more matching rows than that --
+    // e.g. the Dev department alone has ~15,500+ tickets and Migration has
+    // ~7,600+, both well past the old cap, so selecting either queue with
+    // the SLA Breached filter on was silently dropping every breached
+    // ticket among the ~10,000+ (Dev) / ~2,600+ (Migration) oldest rows
+    // that never made it into the candidate set at all. Sized with headroom
+    // above the whole space's current total row count (~29,000) so the
+    // no-dept branch (which can span every department in the space at
+    // once) doesn't hit the same wall.
+    const SLA_PREFILTER_CAP = 50000;
 
     // Bulk fetch by specific keys (for Viewed tab Ã¢â‚¬â€ single request instead of N calls)
     const keysParam = url.searchParams.get('keys');
@@ -4278,6 +4291,12 @@ async function _handleJiraPgApi(
         // Can't paginate at the DB level on a field that isn't a real column --
         // fetch a bounded candidate set instead; the SLA-breach block further
         // below filters it fully, and pagination happens in JS after that.
+        // Size the fetch to the REAL matching-row count (bounded by the
+        // SLA_PREFILTER_CAP safety ceiling) instead of always assuming the
+        // cap itself is enough -- otherwise a filter combination matching
+        // more rows than the cap would silently exclude its oldest rows
+        // (and any breached tickets among them) from the candidate set.
+        const candidateCount = await db.issue.count({ where: where as any });
         issues = await db.issue.findMany({
           where: where as any,
           include: {
@@ -4287,7 +4306,7 @@ async function _handleJiraPgApi(
             space: { select: { key: true, name: true } },
           },
           orderBy: { createdAt: 'desc' },
-          take: SLA_PREFILTER_CAP,
+          take: Math.min(candidateCount, SLA_PREFILTER_CAP),
         });
         total = issues.length; // placeholder -- corrected after breach filtering below
       } else {
@@ -4857,26 +4876,32 @@ async function _handleJiraPgApi(
           )`
         : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
 
-      if (needsSlaPrefilter) {
-        deptTotal = 0; // placeholder -- corrected after breach filtering below
-      } else {
-        try {
-          const countParams: any[] = [allSpaceIds, deptParam];
-          if (deptSearchParam) countParams.push(deptSearchParam);
-          countParams.push(...deptExtraParams);
-          const countRow = await pool.query(
-            `SELECT COUNT(*)::int AS cnt
-             FROM issues i
-             LEFT JOIN statuses s ON i."statusId" = s.id
-             WHERE i."spaceId" = ANY($1::text[])
-               AND ${deptDeptMatchSql}
-             ${deptSearchClause}
-             ${deptExtraSql}`,
-            countParams
-          );
-          deptTotal = countRow.rows[0]?.cnt ?? 0;
-        } catch (err) { console.error('[dept count query failed]', err); deptTotal = 0; }
-      }
+      // Needed even when needsSlaPrefilter is set: the SLA-filtered case can no
+      // longer skip this "wasted" count query (as it used to, since deptTotal
+      // was just going to be recomputed after breach filtering anyway) because
+      // the row fetch below now needs the REAL matching-row count to size its
+      // candidate-set fetch -- assuming the SLA_PREFILTER_CAP alone was always
+      // enough silently truncated the candidate set (oldest rows first) for any
+      // queue with more matching rows than the cap.
+      let deptCandidateCount = 0;
+      try {
+        const countParams: any[] = [allSpaceIds, deptParam];
+        if (deptSearchParam) countParams.push(deptSearchParam);
+        countParams.push(...deptExtraParams);
+        const countRow = await pool.query(
+          `SELECT COUNT(*)::int AS cnt
+           FROM issues i
+           LEFT JOIN statuses s ON i."statusId" = s.id
+           WHERE i."spaceId" = ANY($1::text[])
+             AND ${deptDeptMatchSql}
+           ${deptSearchClause}
+           ${deptExtraSql}`,
+          countParams
+        );
+        deptCandidateCount = countRow.rows[0]?.cnt ?? 0;
+      } catch (err) { console.error('[dept count query failed]', err); deptCandidateCount = 0; }
+      // placeholder when SLA-prefiltering -- corrected after breach filtering below
+      deptTotal = needsSlaPrefilter ? 0 : deptCandidateCount;
 
       try {
         const rowParams: any[] = [allSpaceIds, deptParam];
@@ -4888,7 +4913,9 @@ async function _handleJiraPgApi(
         // branch above -- fetch a bounded candidate set instead of the real
         // page when an SLA-breach filter is active, and let the shared
         // filtering block further below paginate the actually-filtered result.
-        rowParams.push(needsSlaPrefilter ? SLA_PREFILTER_CAP : limit, needsSlaPrefilter ? 0 : (page - 1) * limit);
+        // Sized to the real matching-row count (deptCandidateCount, bounded by
+        // SLA_PREFILTER_CAP) rather than always assuming the cap is enough.
+        rowParams.push(needsSlaPrefilter ? Math.min(deptCandidateCount, SLA_PREFILTER_CAP) : limit, needsSlaPrefilter ? 0 : (page - 1) * limit);
         // Sorting by updatedAt made an old ticket jump to page 1 the moment anyone
         // so much as commented on it, potentially bumping a genuinely new ticket
         // off the page -- pagination should be a stable "50 newest by creation
@@ -5029,7 +5056,21 @@ async function _handleJiraPgApi(
               // breached. Same remaining-budget subtraction, so the two agree.
               const deptSlaLog: Record<string, any> = i.dept_sla_log || {};
               const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
-              const priorElapsedMs: number = deptLogKey ? (deptSlaLog[deptLogKey]?.elapsed_ms || 0) : 0;
+              const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
+              // Mirror computeSLAInstancesPure's isSameStint guard: pauseDeptSLA
+              // snapshots the CURRENT (still-ongoing) stint's started_at into the
+              // log entry the moment it pauses or resolves without the ticket
+              // ever having actually left this dept. Without this check, that
+              // snapshot's elapsed_ms gets credited as "prior debt" on top of
+              // the very same period counted again via slaStartedAt itself,
+              // pulling the computed due time hours earlier than reality --
+              // a ticket resolved cleanly within its goal could read as
+              // breached here while its own detail page (which has this
+              // guard) correctly shows it not breached.
+              const currentStartedRaw = i.dept_sla_started_at;
+              const isSameStint = deptLogEntry?.started_at && currentStartedRaw
+                && new Date(deptLogEntry.started_at).getTime() === new Date(currentStartedRaw).getTime();
+              const priorElapsedMs: number = (deptLogEntry && !isSameStint) ? (deptLogEntry.elapsed_ms || 0) : 0;
               if (isResolved) {
                 // The clock is frozen -- priorElapsedMs already reflects the
                 // FULL total time logged across every period up to and
