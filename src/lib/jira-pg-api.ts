@@ -3334,7 +3334,23 @@ async function _handleJiraPgApi(
                   break;
                 }
               }
-              if (new Date(slaStartedAt).getTime() + durationMs < nowMs) { breached = true; break; }
+              // dept_sla_started_at resets to NOW() on every department handoff,
+              // including a RETURN to a dept that already burned part of its SLA
+              // budget on an earlier visit (dept_sla_log[dept].elapsed_ms -- the
+              // same bookkeeping computeSLAInstancesPure uses for the ticket
+              // detail page's own SLA panel). Adding the FULL goal duration to
+              // slaStartedAt here ignored that prior spend entirely, handing a
+              // returning dept a brand-new full countdown instead of continuing
+              // from where it left off -- which is exactly how CF-29552 (already
+              // over its 10h Migration budget the moment it landed back there,
+              // carrying ~20h burned from an earlier Dev visit) came out
+              // "not yet due" here while its own detail page correctly showed it
+              // breached. Same remaining-budget subtraction, so the two agree.
+              const deptSlaLog: Record<string, any> = i.dept_sla_log || {};
+              const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
+              const priorElapsedMs: number = deptLogKey ? (deptSlaLog[deptLogKey]?.elapsed_ms || 0) : 0;
+              const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+              if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs) { breached = true; break; }
             }
           }
         }
