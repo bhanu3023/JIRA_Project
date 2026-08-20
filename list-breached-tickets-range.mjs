@@ -103,7 +103,9 @@ async function main() {
   for (const [dept, tickets] of [...byDept.entries()].sort((a, b) => b[1].length - a[1].length)) {
     console.log(`\n═══ ${dept}: ${tickets.length} breached ═══`);
     for (const t of tickets) {
-      const status = t.status_category === 'done' ? `resolved ${new Date(t.resolvedAt).toISOString()}` : `still open (${t.status_name})`;
+      const status = t.status_category === 'done'
+        ? (t.resolvedAt ? `resolved ${new Date(t.resolvedAt).toISOString()}` : `resolved (no resolvedAt recorded -- status "${t.status_name}")`)
+        : `still open (${t.status_name})`;
       console.log(`  ${t.key}  created=${new Date(t.createdAt).toISOString()}  ${status}  priority=${t.priority || 'medium'}`);
     }
     total += tickets.length;
