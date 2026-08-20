@@ -4717,8 +4717,17 @@ async function _handleJiraPgApi(
       // instead of a plain required AND clause here — a moved-on ticket's
       // current assigneeId is no longer this user, so requiring it here would
       // filter the historical rows right back out.
+      // "Unassigned" within a department (dept_unassigned queue view: dept= +
+      // unassigned=true together) was never checked in this raw-SQL branch at
+      // all -- only the non-dept Prisma `where` above handled it, which this
+      // dept-scoped branch completely discards its results and re-queries
+      // from scratch. Since `dept` is set on every call this branch runs for,
+      // the Unassigned-in-dept queue silently showed EVERY ticket in the
+      // department (assigned or not), not just the unassigned ones.
       let historyAssigneeIdx: number | null = null;
-      if (includeHistoryParam && assignees) {
+      if (unassignedOnly) {
+        deptExtraClauses.push(`i."assigneeId" IS NULL`);
+      } else if (includeHistoryParam && assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         const resolvedIds = await resolveUserIds(ids);
         if (resolvedIds.length) {
@@ -7396,9 +7405,22 @@ async function _handleJiraPgApi(
             deptMapSet(deptStatuses, resolvingDept, { id: newStRec.id, name: newStRec.name, category: newStRec.category, color: newStRec.color });
 
             await pool.query(
-              `UPDATE issues SET current_department=$1, "assigneeId"=$2, "statusId"=COALESCE($4, "statusId"), dept_statuses=$5::jsonb, "updatedAt"=NOW() WHERE id=$3`,
+              `UPDATE issues SET current_department=$1, "assigneeId"=$2, "statusId"=COALESCE($4, "statusId"), dept_statuses=$5::jsonb, dept_sla_started_at=NOW(), "updatedAt"=NOW() WHERE id=$3`,
               [homeDept, restoreAssigneeId, issue.id, restoredStatusId, JSON.stringify(deptStatuses)]
             );
+            // Every other dept-transition path pairs its pauseDeptSLA(oldDept)
+            // call above with a startDeptSLA(newDept) here -- this auto-return-
+            // home path (resolved elsewhere, sent back to origin) had the pause
+            // but never the resume. Without it, dept_sla_started_at stayed
+            // frozen at whenever resolvingDept's own stint began (reset by
+            // startDeptSLA the last time this ticket entered resolvingDept),
+            // so the SLA breach formula measured homeDept's elapsed time from
+            // the WRONG stint's start -- either falsely breaching a ticket
+            // that just landed home, or hiding a real breach, depending on how
+            // long resolvingDept had been holding it. startDeptSLA also folds
+            // in homeDept's own prior elapsed_ms (from before it was handed
+            // away) the same way every other resume does.
+            await startDeptSLA(null, issue.id, homeDept);
             await pool.query(
               `INSERT INTO issue_dept_transitions (issue_id, space_id, from_dept, to_dept) VALUES ($1, $2, $3, $4)`,
               [issue.id, issue.spaceId, resolvingDept, homeDept]
