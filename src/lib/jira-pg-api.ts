@@ -2673,6 +2673,15 @@ async function _handleJiraPgApi(
     // away. This was doubling every department-queue-view load (most list
     // views in this app) with a wasted count + fetch of the whole space.
     const deptParamEarly = url.searchParams.get('dept');
+    // SLA breach isn't a real column (it's computed per row further down from
+    // each ticket's goal duration, pause statuses, priority, etc.), so
+    // Prisma's `where` can't filter on it and count()/skip/take here would
+    // paginate BEFORE that computation runs -- same bug as the dept-scoped
+    // branch below, just for the "no specific queue selected" case (e.g.
+    // filtering "All Spaces" with SLA Breached on). Declared this early so
+    // both this branch and the dept-scoped one further down can see it.
+    const slaBreachedParam = url.searchParams.get('slaBreached'); // 'yes' | 'no' | null
+    const slaFilterActiveEarly = slaBreachedParam === 'yes' || slaBreachedParam === 'no';
     let total = 0;
     let issues: any[] = [];
     let deptMap: Record<string, any> = {};
@@ -2688,8 +2697,11 @@ async function _handleJiraPgApi(
             space: { select: { key: true, name: true } },
             },
           orderBy: { createdAt: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
+          // Fetch every matching row (capped well above any real result set)
+          // when the SLA filter is active, instead of paginating before the
+          // breach filter runs -- see slaBreachedParam comment above. The
+          // real page window is applied in JS, after filtering, further down.
+          ...(slaFilterActiveEarly ? { take: 20000 } : { skip: (page - 1) * limit, take: limit }),
         }),
       ]);
 
@@ -3006,11 +3018,6 @@ async function _handleJiraPgApi(
     // URL-based storage) could balloon this list response by tens of MB on its own.
     let enrichedIssues = issues.map((i: any) => formatIssue({ ...i, ...(deptMap[i.key] || {}), description: (i.description || '').slice(0, 500) }));
     let deptTotal = total;
-    // Declared up front (not just inside the SLA-breach enrichment block
-    // further down) because the dept-scoped branch immediately below needs
-    // to know whether the filter is active BEFORE it decides how to
-    // paginate its own row query -- see the comment at slaFilterActive.
-    const slaBreachedParam = url.searchParams.get('slaBreached'); // 'yes' | 'no' | null
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
       let allSpaceIds: string[] = [];
@@ -3336,13 +3343,12 @@ async function _handleJiraPgApi(
       if (slaBreachedParam === 'yes' || slaBreachedParam === 'no') {
         enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParam === 'yes' ? i.sla_breached : !i.sla_breached);
         deptTotal = enrichedIssues.length;
-        // The dept-scoped branch fetched every matching row (not just one
-        // page) so this filter would see the whole set -- now that deptTotal
-        // reflects the true breached count, apply the actual page window.
-        if (deptParam) {
-          const start = (page - 1) * limit;
-          enrichedIssues = enrichedIssues.slice(start, start + limit);
-        }
+        // Both branches above fetched every matching row (not just one page)
+        // specifically because this filter was active -- now that deptTotal
+        // reflects the true breached count across all of them, apply the
+        // actual page window here instead.
+        const start = (page - 1) * limit;
+        enrichedIssues = enrichedIssues.slice(start, start + limit);
       }
     } catch { /* sla breach is best-effort */ }
 
