@@ -138,7 +138,7 @@ async function syncBoard(spaceKey, jiraKey) {
 
   const dbIssues = await prisma.issue.findMany({
     where: { spaceId: space.id },
-    select: { id: true, key: true, assigneeId: true, reporterId: true },
+    select: { id: true, key: true, assigneeId: true, reporterId: true, updatedAt: true },
   });
   if (dbIssues.length === 0) { console.log(`   âš ï¸  No issues in DB â€” skipping`); return { fixed: 0, ok: 0 }; }
 
@@ -160,7 +160,11 @@ async function syncBoard(spaceKey, jiraKey) {
     if (db.assigneeId !== assigneeId || db.reporterId !== reporterId) {
       await prisma.issue.update({
         where: { id: db.id },
-        data: { assigneeId: assigneeId ?? null, reporterId: reporterId ?? null },
+        // updatedAt is @updatedAt in the schema, so Prisma silently resets it
+        // to "now" on any update that doesn't pass it explicitly -- this is
+        // a data-correction sync, not real ticket activity, so preserve the
+        // real (Jira-sourced) updatedAt instead of stomping it.
+        data: { assigneeId: assigneeId ?? null, reporterId: reporterId ?? null, updatedAt: db.updatedAt },
       });
       fixed++;
       if (fixed <= 5) {

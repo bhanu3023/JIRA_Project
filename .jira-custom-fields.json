@@ -81,7 +81,8 @@
       "Migration|L1BOAR|",
       "Dev|L2BOARD,L3BOARD|",
       "QA|QABOAR|",
-      "Infra|INFRABOARD|"
+      "Infra|INFRABOARD|",
+      "Pre-Sales|L2BOARD,L3BOARD|"
     ],
     "spaceIds": [
       "7c4221b3-3a93-486d-a6ec-a57f33c9bc5d",
