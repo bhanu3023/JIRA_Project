@@ -773,8 +773,21 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
       status: 'running',
       paused_at: null,
     };
+    // dept_sla_started_at (the top-level column, not this dept-scoped log)
+    // is what both computeSLAInstancesPure's dueTime calculation AND this
+    // function's own counterpart pauseDeptSLA use as "when did the current
+    // running period begin" -- pauseDeptSLA measures elapsed as
+    // now-minus-this-column every time it pauses. Only writing started_at
+    // into dept_sla_log here (as before) left that column stale at whatever
+    // it was set to before this pause/resume cycle, so resuming after a
+    // reopen computed the remaining-budget due time from the WRONG start
+    // point, and the next pause would even double-count part of the
+    // already-credited elapsed time. Keeping both in sync here means every
+    // caller of startDeptSLA (dept handoffs, recalls, and both reopen paths)
+    // gets a correct resume for free instead of each having to remember to
+    // update this column itself.
     await pool.query(
-      `UPDATE issues SET dept_sla_log=$1::jsonb WHERE ${issueKey ? 'key=$2' : 'id=$2'}`,
+      `UPDATE issues SET dept_sla_log=$1::jsonb, dept_sla_started_at=NOW() WHERE ${issueKey ? 'key=$2' : 'id=$2'}`,
       [JSON.stringify(log), issueKey || issueId]
     );
     await logSlaHistory(issueKey, issueId, `${wasStartedBefore ? 'SLA resumed' : 'SLA started'} — ${dept}`);
@@ -963,10 +976,26 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
 
     // Only apply policies that target this issue's dept (or have no dept restriction)
     const issueDept = ((issue as any).current_department || '').trim().toLowerCase();
-    const policies = allPolicies.filter((p: any) => {
+    let policies = allPolicies.filter((p: any) => {
       const pDept = (p.dept_name || '').trim().toLowerCase();
       return !pDept || pDept === issueDept;
     });
+    // Two ACTIVE policies with the same name targeting the same department
+    // (e.g. two "Time to Resolution" policies both scoped to Dev) are
+    // effectively duplicate configuration, not two distinct SLAs -- mapping
+    // one instance per policy below rendered the identical countdown twice
+    // on the issue detail page. Keep only the most recently updated policy
+    // per unique name so a misconfigured duplicate never shows twice,
+    // regardless of how many active rows exist for that name.
+    const newestByName = new Map<string, any>();
+    for (const p of policies) {
+      const nameKey = (p.name || '').trim().toLowerCase();
+      const existing = newestByName.get(nameKey);
+      if (!existing || new Date(p.updatedAt).getTime() > new Date(existing.updatedAt).getTime()) {
+        newestByName.set(nameKey, p);
+      }
+    }
+    policies = [...newestByName.values()];
     if (!policies.length) return [];
 
     const priority = (issue.priority || 'medium').toLowerCase();
@@ -1033,7 +1062,21 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
       const dueTime = new Date(new Date(startedAt).getTime() + remainingBudgetMs).toISOString();
       // Paused SLAs are never breached — clock stopped
-      const isBreached = !isResolved && !isPaused && new Date(dueTime) < new Date();
+      // Resolving a ticket must never ERASE a breach that already happened
+      // before it was resolved -- forcing this to false unconditionally
+      // once resolved hid exactly that history. While still running,
+      // dueTime (computed above from the current period's own start) vs
+      // "now" is the right check. Once resolved/paused, dueTime is no
+      // longer reliable for this: priorElapsedMs at that point already
+      // includes the just-ended period (pauseDeptSLA folds it in), so
+      // reusing the running-clock formula would double-count that period
+      // on top of itself across more than one pause/resume cycle. The
+      // total elapsed time actually logged (priorElapsedMs) compared
+      // straight against the goal duration is correct regardless of how
+      // many pause/resume cycles this dept has been through.
+      const isBreached = isResolved
+        ? (!!(issue as any).jira_sla_breached || priorElapsedMs >= durationMs)
+        : !isPaused && new Date(dueTime) < new Date();
       return {
         id: `sla_${policy.id}_${issue.key}`,
         policyId: policy.id,
@@ -3305,8 +3348,13 @@ async function _handleJiraPgApi(
         // clock), but would erase the fact that Jira already recorded a
         // real breach before the ticket ever got resolved.
         let breached = !!i.jira_sla_breached;
-        if (!breached && !isResolved) {
-          if (i.dueDate && new Date(i.dueDate).getTime() < nowMs) breached = true;
+        // Resolving a ticket must never ERASE a breach that already
+        // happened before it was resolved -- gating this whole block on
+        // `!isResolved` did exactly that, since jira_sla_breached only
+        // covers tickets imported already-breached from Jira, not ones
+        // that breached live in this app before getting resolved here.
+        if (!breached) {
+          if (!isResolved && i.dueDate && new Date(i.dueDate).getTime() < nowMs) breached = true;
           // Same fallback as computeIssueSLAsFromDb: tickets never routed through a
           // department transfer have no dept_sla_started_at, so measure from creation.
           const slaStartedAt = i.dept_sla_started_at || i.createdAt;
@@ -3355,8 +3403,20 @@ async function _handleJiraPgApi(
               const deptSlaLog: Record<string, any> = i.dept_sla_log || {};
               const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
               const priorElapsedMs: number = deptLogKey ? (deptSlaLog[deptLogKey]?.elapsed_ms || 0) : 0;
-              const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
-              if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs) { breached = true; break; }
+              if (isResolved) {
+                // The clock is frozen -- priorElapsedMs already reflects the
+                // FULL total time logged across every period up to and
+                // including the one that just ended (pauseDeptSLA folds it
+                // in), so it alone tells us whether the goal was exceeded by
+                // the time this ticket was resolved. The running-clock
+                // formula below (slaStartedAt + remaining vs "now") would
+                // double-count that same just-ended period on top of itself
+                // if reused here across more than one pause/resume cycle.
+                if (priorElapsedMs >= durationMs) { breached = true; break; }
+              } else {
+                const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+                if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs) { breached = true; break; }
+              }
             }
           }
         }
@@ -5016,6 +5076,31 @@ async function _handleJiraPgApi(
           console.log(`[TicketClosed] ${issue.key}: worked-on recorded for depts: ${deptList}`);
         } catch (closeErr: any) {
           console.error(`[TicketClosed ERROR] ${issue.key}:`, closeErr?.message || closeErr);
+        }
+      } else {
+        // Reopening -- mirror image of the pause-on-close branch just above.
+        // The queue-scoped status path already resumes the SLA clock on
+        // reopen (see "SLA Resume" / queueStatusSyncedReopen further up),
+        // but this plain (real global statusId) path had no equivalent: a
+        // ticket resolved via a real status and later reopened via a real
+        // status just stayed paused in dept_sla_log forever -- it could
+        // never be flagged breached again even though it was visibly open
+        // and being worked. startDeptSLA preserves the already-logged
+        // elapsed_ms and only marks the clock running again, same as the
+        // queue-scoped branch, so the remaining budget continues from where
+        // it was paused instead of restarting fresh.
+        const oldStForReopen = (issue.space as any)?.statuses?.find((s: any) => s.id === issue.statusId);
+        if (oldStForReopen?.category === 'done' && newStForClose?.category !== 'done') {
+          try {
+            const reopenDeptRow = await pool.query(`SELECT current_department FROM issues WHERE id=$1`, [issue.id]);
+            const reopenDept: string = reopenDeptRow.rows[0]?.current_department || '';
+            if (reopenDept) {
+              await startDeptSLA(null, issue.id, reopenDept);
+              console.log(`[SLA Resume] ${issue.key}: reopened in ${reopenDept}`);
+            }
+          } catch (reopenErr: any) {
+            console.error('[SLA resume on reopen failed]', issue.key, reopenErr?.message || reopenErr);
+          }
         }
       }
     }
