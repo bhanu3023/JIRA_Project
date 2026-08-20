@@ -87,7 +87,7 @@ async function syncBoard({ prefix, jiraProjects }) {
   // Load local issues for this prefix into summary map
   const localIssues = await db.issue.findMany({
     where: { key: { startsWith: `${prefix}-` } },
-    select: { id: true, key: true, summary: true },
+    select: { id: true, key: true, summary: true, updatedAt: true },
   });
   if (!localIssues.length) { console.log(`  No local issues found, skipping`); return { updated: 0 }; }
 
@@ -117,7 +117,7 @@ async function syncBoard({ prefix, jiraProjects }) {
     const local = summaryMap.get(norm);
     if (!local) { noMatch++; continue; }
 
-    updateBatch.push({ id: local.id, description: descText });
+    updateBatch.push({ id: local.id, description: descText, updatedAt: local.updatedAt });
     updated++;
   }
 
@@ -125,7 +125,11 @@ async function syncBoard({ prefix, jiraProjects }) {
   const BATCH = 50;
   for (let i = 0; i < updateBatch.length; i += BATCH) {
     const chunk = updateBatch.slice(i, i + BATCH);
-    await Promise.all(chunk.map(u => db.issue.update({ where: { id: u.id }, data: { description: u.description } })));
+    // updatedAt is @updatedAt in the schema, so Prisma silently resets it to
+    // "now" on any update that doesn't pass it explicitly -- this is a
+    // data-correction sync, not real ticket activity, so preserve the real
+    // (Jira-sourced) updatedAt instead of stomping it.
+    await Promise.all(chunk.map(u => db.issue.update({ where: { id: u.id }, data: { description: u.description, updatedAt: u.updatedAt } })));
     process.stdout.write(`\r  Updated ${Math.min(i + BATCH, updateBatch.length)}/${updateBatch.length}...`);
   }
 

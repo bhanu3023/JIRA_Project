@@ -70,6 +70,30 @@ export default function RichTextEditor({
   // prop did become '').
   const lastEmitted = useRef<string | null>(null);
 
+  // ── Locked-content protection ─────────────────────────────────────────
+  // Any element carrying data-locked-heading (e.g. the Migration board's
+  // required description headings, see src/lib/migration-description-template.ts)
+  // must never be removable or editable, by anyone, at any time -- not via
+  // Backspace/Delete, cut, select-all-and-type-over, drag-out, or a
+  // toolbar command run over a selection that spans one. contenteditable="false"
+  // already stops the browser from placing a cursor *inside* one, but does
+  // nothing to stop the whole node being deleted/replaced from outside.
+  // Every mutation path in this component (typing, exec(), paste, drop,
+  // mention/image/file insert) converges on emit() before the new value is
+  // reported upward, so checking there is the one choke point that covers
+  // all of them: if the set of locked headings present right before the
+  // edit doesn't match what's present right after, the whole edit is
+  // reverted rather than trying to guess which part of it was legitimate.
+  const lastGoodHtmlRef = useRef<string>('');
+  const lockedSignatureRef = useRef<string | null>(null);
+  const computeLockedSignature = (): string | null => {
+    const el = editorRef.current;
+    if (!el) return null;
+    const nodes = Array.from(el.querySelectorAll('[data-locked-heading]'));
+    if (nodes.length === 0) return null; // nothing to protect for this editor instance
+    return nodes.map(n => n.textContent).join('');
+  };
+
   // Images/files are uploaded to the server and referenced by URL rather than
   // embedded as base64 inline — that used to make the description payload
   // scale with attachment size, which both tripped the reverse proxy's
@@ -151,10 +175,34 @@ export default function RichTextEditor({
     if (!el) return;
     if (value === lastEmitted.current) return; // this value came from us — DOM already reflects it
     if (el.innerHTML !== (value ?? '')) el.innerHTML = value ?? '';
+    // New content just landed from outside (e.g. switching which ticket is
+    // loaded) -- re-baseline what "intact" means before any edit can be
+    // compared against it.
+    lastGoodHtmlRef.current = el.innerHTML;
+    lockedSignatureRef.current = computeLockedSignature();
   }, [value]);
 
   /* ── Emit changes upward ─────────────────────────────────────────── */
   const emit = useCallback(() => {
+    const el = editorRef.current;
+    if (el && lockedSignatureRef.current !== null) {
+      const sig = computeLockedSignature();
+      if (sig !== lockedSignatureRef.current) {
+        // A locked heading was removed or altered -- undo this edit
+        // entirely rather than trying to patch around it.
+        el.innerHTML = lastGoodHtmlRef.current;
+        try {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          range.collapse(false);
+          const sel = window.getSelection();
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+        } catch { /* best-effort cursor placement only */ }
+      } else {
+        lastGoodHtmlRef.current = el.innerHTML;
+      }
+    }
     lastEmitted.current = editorRef.current?.innerHTML ?? '';
     onChange(lastEmitted.current);
   }, [onChange]);
@@ -686,6 +734,9 @@ export default function RichTextEditor({
           [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0
           [&_a]:text-blue-600 [&_a]:underline
           [&_img]:max-w-[220px] [&_img]:max-h-[160px] [&_img]:w-auto [&_img]:h-auto [&_img]:object-contain [&_img]:rounded-md [&_img]:my-1 [&_img]:cursor-pointer
+          [&_[data-locked-heading]]:font-bold [&_[data-locked-heading]]:bg-slate-50 [&_[data-locked-heading]]:border-l-2
+          [&_[data-locked-heading]]:border-slate-300 [&_[data-locked-heading]]:pl-2 [&_[data-locked-heading]]:py-1
+          [&_[data-locked-heading]]:my-1 [&_[data-locked-heading]]:rounded-sm [&_[data-locked-heading]]:cursor-default
           empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400
           empty:before:pointer-events-none
         `}
