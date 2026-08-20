@@ -12,6 +12,7 @@ import { api } from '@/lib/api';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
 import DeptDropdown from '@/components/ui/DeptDropdown';
 import RichTextEditor from '@/components/ui/RichTextEditor';
+import { MIGRATION_DESCRIPTION_TEMPLATE_HTML } from '@/lib/migration-description-template';
 
 interface Props {
   spaceKey: string;
@@ -228,6 +229,17 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     } else {
       setSpaceMembers(members);
       setBaseStatuses(statuses);
+    }
+  }, [selectedSpaceKey]);
+
+  // Migration board tickets must always start with the fixed, locked
+  // description headings (RichTextEditor enforces that they can't be
+  // removed/edited afterward) -- insert them the moment Migration becomes
+  // the selected space, but only while the description is still empty so a
+  // reporter's own typed content is never clobbered.
+  useEffect(() => {
+    if (selectedSpaceKey === 'L1BOAR') {
+      setForm(f => (f.description.trim() ? f : { ...f, description: MIGRATION_DESCRIPTION_TEMPLATE_HTML }));
     }
   }, [selectedSpaceKey]);
 
