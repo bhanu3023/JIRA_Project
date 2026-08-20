@@ -33,9 +33,11 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://jirauser:Neutara%402024@localhost:5432/jiradb',
 });
 
-const JIRA_BASE_URL = process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net';
-const JIRA_EMAIL = process.env.JIRA_EMAIL;
-const JIRA_TOKEN = process.env.JIRA_TOKEN;
+const JIRA_BASE_URL = (process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net').trim();
+// .trim() guards against trailing whitespace/newlines picked up from a
+// pasted multi-line env var assignment.
+const JIRA_EMAIL = (process.env.JIRA_EMAIL || '').trim();
+const JIRA_TOKEN = (process.env.JIRA_TOKEN || '').trim();
 
 async function jiraFetch(path) {
   const auth = Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString('base64');

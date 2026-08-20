@@ -7,9 +7,13 @@
  *
  * Run: JIRA_EMAIL=... JIRA_TOKEN=... node list-jira-projects.mjs
  */
-const JIRA_BASE_URL = process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net';
-const JIRA_EMAIL = process.env.JIRA_EMAIL;
-const JIRA_TOKEN = process.env.JIRA_TOKEN;
+const JIRA_BASE_URL = (process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net').trim();
+// .trim() guards against trailing whitespace/newlines that can sneak into a
+// pasted multi-line env var assignment -- curl -u with the same credentials
+// authenticated fine, so a stray character picked up here is the likely
+// explanation for an otherwise-valid token getting a 401.
+const JIRA_EMAIL = (process.env.JIRA_EMAIL || '').trim();
+const JIRA_TOKEN = (process.env.JIRA_TOKEN || '').trim();
 
 if (!JIRA_EMAIL || !JIRA_TOKEN) {
   console.error('Set JIRA_EMAIL and JIRA_TOKEN environment variables first.');
