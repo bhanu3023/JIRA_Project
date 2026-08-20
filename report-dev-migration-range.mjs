@@ -49,10 +49,10 @@ function isBreached(row, policies, nowMs) {
   const deptSlaLog = row.dept_sla_log || {};
   const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
   const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
-  const currentStartedRaw = row.dept_sla_started_at;
-  const isSameStint = deptLogEntry?.started_at && currentStartedRaw
-    && new Date(deptLogEntry.started_at).getTime() === new Date(currentStartedRaw).getTime();
-  const priorElapsedMs = (deptLogEntry && !isSameStint) ? (deptLogEntry.elapsed_ms || 0) : 0;
+  // No "same stint" guard -- see jira-pg-api.ts's comment on this same
+  // formula. pauseDeptSLA's elapsed_ms is already a running incremental
+  // total, never double-counted, so it's read unconditionally here to match.
+  const priorElapsedMs = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
 
   if (row.jira_sla_breached) return true;
 
