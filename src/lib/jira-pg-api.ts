@@ -2709,11 +2709,17 @@ async function _handleJiraPgApi(
         const issueKeys = issues.map((i: any) => i.key);
         if (issueKeys.length) {
           const deptRows = await pool.query(
-            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at FROM issues WHERE key = ANY($1::text[])`,
+            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_sla_log, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at FROM issues WHERE key = ANY($1::text[])`,
             [issueKeys]
           );
           for (const row of deptRows.rows) {
-            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at };
+            // dept_sla_log carries each department's already-burned SLA time
+            // across earlier visits (see the "remaining budget" comment further
+            // down, at the breach-computation block) -- without it here, this
+            // branch's enriched issues never see any prior elapsed time and the
+            // breach check falls back to a fresh full countdown every time,
+            // same bug as the dept-scoped branch had before that fix.
+            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_sla_log: row.dept_sla_log, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at };
           }
         }
       } catch { /* ignore */ }
