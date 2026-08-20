@@ -65,24 +65,30 @@ async function checkReopenResume() {
   // Find tickets whose status history shows a done -> not-done transition
   // (a reopen) in the last 60 days, then check dept_sla_started_at against
   // that reopen time.
+  // issue_history.oldValue/newValue for field='status' store the status NAME
+  // (see the INSERT sites in jira-pg-api.ts), not a status id -- join by name,
+  // scoped to the issue's own space since names aren't globally unique ids.
   const r = await pool.query(`
     SELECT h."issueId", i.key, i.current_department, i.dept_sla_started_at, i.dept_sla_log,
-           h."createdAt" AS reopened_at,
+           h."createdAt" AS reopened_at, h."oldValue", h."newValue",
+           s_old.category AS old_category,
            s_new.category AS new_category
     FROM issue_history h
     JOIN issues i ON i.id = h."issueId"
-    LEFT JOIN statuses s_new ON s_new.id = h."newValue"
+    LEFT JOIN statuses s_old ON s_old."spaceId" = i."spaceId" AND lower(s_old.name) = lower(h."oldValue")
+    LEFT JOIN statuses s_new ON s_new."spaceId" = i."spaceId" AND lower(s_new.name) = lower(h."newValue")
     WHERE h.field = 'status'
       AND h."createdAt" > NOW() - INTERVAL '60 days'
     ORDER BY h."createdAt" DESC
     LIMIT 2000
   `);
-  // We only have newValue as a status id in some rows and a name in others depending
-  // on how history was recorded -- filter defensively for rows we can actually classify.
   let candidates = 0, resumed = 0, stale = 0;
   const staleSamples = [];
   for (const row of r.rows) {
-    if (!row.new_category || row.new_category === 'done') continue;
+    // A reopen is specifically old status = done, new status = not done --
+    // any other non-done->non-done move isn't a reopen and tells us nothing
+    // about the resume-on-reopen fix.
+    if (row.old_category !== 'done' || !row.new_category || row.new_category === 'done') continue;
     candidates++;
     const dept = (row.current_department || '').trim().toLowerCase();
     const log = row.dept_sla_log || {};
