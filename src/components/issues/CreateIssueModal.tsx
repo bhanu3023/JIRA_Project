@@ -90,7 +90,7 @@ const COMBINATION_OPTIONS = [
   'Dropbox - OneDrive', 'Dropbox - SharePoint', 'Dropbox - MyDrive',
   'Dropbox - ShareDrive', 'Dropbox - Azure', 'Dropbox - Box', 'Dropbox - Egnyte',
   'MyDrive - OneDrive', 'MyDrive - SharePoint', 'MyDrive - Dropbox',
-  'MyDrive - Egnyte', 'MyDrive - Box',
+  'MyDrive - Egnyte', 'MyDrive - Box', 'My Drive - My Drive',
   'ShareDrive - ShareDrive', 'ShareDrive - SharePoint', 'ShareDrive - Egnyte',
   'ShareDrive - OneDrive', 'ShareDrive - Amazon S3',
   'Cirtix - OneDrive', 'Cirtix - SharePoint', 'Cirtix - MyDrive',
