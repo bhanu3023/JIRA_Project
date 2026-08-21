@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { getInitials, timeAgo } from '@/lib/utils';
+import { getInitials, timeAgo, cn } from '@/lib/utils';
 import { ROLE_LABELS as ALL_ROLE_LABELS, ROLE_COLORS as ALL_ROLE_COLORS, SELECTABLE_ROLES, can, type Permissions } from '@/lib/permissions';
 import {
   User, Bell, Monitor, Grid3X3, Rocket, Box, Globe, Users,
@@ -232,6 +232,13 @@ function SettingsContent() {
   const [createFieldType, setCreateFieldType] = useState('');
   const [createFieldName, setCreateFieldName] = useState('');
   const [createFieldDesc, setCreateFieldDesc] = useState('');
+  // Backend already accepted a `required` flag on custom fields (see the
+  // PATCH /custom-fields/:id handler's plain Object.assign) and the field
+  // detail view already had a read-only "Required" badge for it -- but
+  // nothing anywhere ever let an admin actually SET it, so every custom
+  // field silently defaulted to optional forever with no way to change that,
+  // and Create Issue never blocked on a required custom field being empty.
+  const [createFieldRequired, setCreateFieldRequired] = useState(false);
   const [createFieldError, setCreateFieldError] = useState('');
   const [createFieldOptions, setCreateFieldOptions] = useState<string[]>([]);
   const [createFieldOptionInput, setCreateFieldOptionInput] = useState('');
@@ -288,7 +295,15 @@ function SettingsContent() {
     api.getSpaces().then(setSpaces).catch(() => {});
     api.getCustomFields().then(fields => {
       setCustomFields(fields.map((f: any) => ({
-        id: f.id, name: f.name, type: f.fieldType,
+        // A field created via the "migrated field" auto-create path (see
+        // toggleBoardForField/toggleCreateIssueForField) was saved with a
+        // plain `type` property instead of `fieldType` -- reading only
+        // `f.fieldType` here silently produced `type: undefined` for that
+        // record (e.g. the real "Project Manager" field), which then threw
+        // "Cannot read properties of undefined (reading 'toLowerCase')" the
+        // moment anyone typed into the field search box, crashing this
+        // entire page. Fall back to whichever of the two the record has.
+        id: f.id, name: f.name, type: f.fieldType || f.type || '',
         required: f.required, custom: true,
         options: f.options || [], spaceIds: f.spaceIds || [],
         createIssueSpaceIds: f.createIssueSpaceIds || [],
@@ -827,11 +842,18 @@ function SettingsContent() {
                         'Project Manager': 'User', 'Root Cause': 'Text',
                         'Fix Description': 'Text',
                       };
-                      cf = await api.createCustomField({ name: fieldName, fieldType: fieldTypeMap[fieldName] || 'Text', spaceIds: newSpaceIds, createIssueSpaceIds: newCreateIds });
-                      setCustomFields(prev => [...prev, cf]);
+                      const created: any = await api.createCustomField({ name: fieldName, fieldType: fieldTypeMap[fieldName] || 'Text', spaceIds: newSpaceIds, createIssueSpaceIds: newCreateIds });
+                      // Push the raw API shape (`fieldType`) straight into state
+                      // without normalizing to `type` -- exactly what corrupted the
+                      // real "Project Manager" field and crashed the whole Fields
+                      // page ("Cannot read properties of undefined (reading
+                      // 'toLowerCase')") the moment anyone searched. Normalize here
+                      // the same way the initial load mapping does.
+                      setCustomFields(prev => [...prev, { ...created, type: created.fieldType || created.type || '', required: created.required ?? false }]);
                     } else {
-                      await api.updateCustomFieldSpaces(cf.id, newSpaceIds, newCreateIds);
-                      setCustomFields(prev => prev.map(f => f.id === cf.id ? { ...f, spaceIds: newSpaceIds, createIssueSpaceIds: newCreateIds } : f));
+                      const existingId: string = cf.id;
+                      await api.updateCustomFieldSpaces(existingId, newSpaceIds, newCreateIds);
+                      setCustomFields(prev => prev.map(f => f.id === existingId ? { ...f, spaceIds: newSpaceIds, createIssueSpaceIds: newCreateIds } : f));
                     }
                   } catch { /* non-critical */ }
                 })();
@@ -865,13 +887,15 @@ function SettingsContent() {
                 };
                 (async () => {
                   try {
-                    let cf = customFields.find(f => f.name === fieldName);
+                    const cf = customFields.find(f => f.name === fieldName);
                     if (!cf) {
-                      cf = await api.createCustomField({ name: fieldName, fieldType: fieldTypeMap[fieldName] || 'text', spaceIds: cur.spaceIds, createIssueSpaceIds: newCreateIds });
-                      setCustomFields(prev => [...prev, cf]);
+                      const created: any = await api.createCustomField({ name: fieldName, fieldType: fieldTypeMap[fieldName] || 'text', spaceIds: cur.spaceIds, createIssueSpaceIds: newCreateIds });
+                      // Same normalization as above -- see comment there.
+                      setCustomFields(prev => [...prev, { ...created, type: created.fieldType || created.type || '', required: created.required ?? false }]);
                     } else {
-                      await api.updateCustomFieldSpaces(cf.id, cf.spaceIds, newCreateIds);
-                      setCustomFields(prev => prev.map(f => f.id === cf.id ? { ...f, createIssueSpaceIds: newCreateIds } : f));
+                      const existingId: string = cf.id;
+                      await api.updateCustomFieldSpaces(existingId, cf.spaceIds, newCreateIds);
+                      setCustomFields(prev => prev.map(f => f.id === existingId ? { ...f, createIssueSpaceIds: newCreateIds } : f));
                     }
                   } catch { /* non-critical */ }
                 })();
@@ -882,6 +906,22 @@ function SettingsContent() {
               const newCreateIds = cf.createIssueSpaceIds.includes(sp.id) ? cf.createIssueSpaceIds.filter(id => id !== sp.id) : [...cf.createIssueSpaceIds, sp.id];
               setCustomFields(prev => prev.map(f => f.id === cf.id ? { ...f, createIssueSpaceIds: newCreateIds } : f));
               api.updateCustomFieldSpaces(cf.id, cf.spaceIds, newCreateIds).catch(() => {});
+            };
+
+            // Lets an admin mark an EXISTING custom field required after the
+            // fact (e.g. "Project Pool"), not just at creation time -- the
+            // field detail view already showed a "Required" badge, but
+            // nothing ever let anyone actually flip it, so every custom
+            // field stayed optional forever regardless of intent.
+            const toggleRequiredForField = (fieldName: string) => {
+              const cf = customFields.find(f => f.name === fieldName);
+              if (!cf) return;
+              const newRequired = !cf.required;
+              setCustomFields(prev => prev.map(f => f.id === cf.id ? { ...f, required: newRequired } : f));
+              api.updateCustomField(cf.id, { required: newRequired }).catch(() => {
+                // Roll back on failure so the UI doesn't lie about what's actually saved
+                setCustomFields(prev => prev.map(f => f.id === cf.id ? { ...f, required: cf.required } : f));
+              });
             };
 
             const filteredFields = FIELDS.filter(f => {
@@ -923,7 +963,22 @@ function SettingsContent() {
                         <span className={`font-medium ${detailField?.custom ? 'text-purple-600' : 'text-gray-500'}`}>
                           {detailField?.custom ? 'Custom field' : 'System field'}
                         </span>
-                        {detailField?.required && <span className="ml-2 text-[11px] font-bold bg-orange-50 text-orange-500 px-1.5 py-0.5 rounded">Required</span>}
+                        {/* System fields' required-ness is hardcoded (Summary, Status, ...) and
+                            not meant to change -- only a real custom field row can actually be
+                            PATCHed, so the toggle only renders once one exists in the DB. */}
+                        {detailField?.custom && customFields.some(f => f.name === fieldDetailName) ? (
+                          <label className="ml-2 inline-flex items-center gap-1.5 cursor-pointer select-none align-middle">
+                            <input type="checkbox" checked={Boolean(detailField?.required)}
+                              onChange={() => toggleRequiredForField(fieldDetailName)}
+                              className="w-3.5 h-3.5 rounded border-gray-300 text-orange-500 focus:ring-orange-400 cursor-pointer accent-orange-500" />
+                            <span className={cn(
+                              'text-[11px] font-bold px-1.5 py-0.5 rounded',
+                              detailField?.required ? 'bg-orange-50 text-orange-500' : 'bg-gray-100 text-gray-400',
+                            )}>Required</span>
+                          </label>
+                        ) : (
+                          detailField?.required && <span className="ml-2 text-[11px] font-bold bg-orange-50 text-orange-500 px-1.5 py-0.5 rounded">Required</span>
+                        )}
                       </p>
                     </div>
                   </div>
@@ -1473,6 +1528,7 @@ function SettingsContent() {
                         fieldType: createFieldType,
                         description: createFieldDesc,
                         options: finalOptions,
+                        required: createFieldRequired,
                         spaceIds: [],
                       });
                       if (!created?.id) throw new Error('Server returned invalid response');
@@ -1480,7 +1536,7 @@ function SettingsContent() {
                         id: created.id,
                         name: created.name,
                         type: typeLabel,
-                        required: false,
+                        required: createFieldRequired,
                         custom: true,
                         options: created.options || [],
                         spaceIds: created.spaceIds || [],
@@ -1488,7 +1544,7 @@ function SettingsContent() {
                         isDeleted: false,
                       }]);
                       setShowCreateField(false);
-                      setCreateFieldType(''); setCreateFieldName(''); setCreateFieldDesc(''); setCreateFieldOptions([]); setCreateFieldOptionInput('');
+                      setCreateFieldType(''); setCreateFieldName(''); setCreateFieldDesc(''); setCreateFieldOptions([]); setCreateFieldOptionInput(''); setCreateFieldRequired(false);
                       setDeptRoutingItems([]); setDeptRoutingInput(''); setDeptRoutingEmpInput({}); setExpandedDept(null);
                       setCreateFieldError('');
                       setMessage(`Custom field "${createFieldName}" created successfully`);
@@ -1671,6 +1727,15 @@ function SettingsContent() {
                         )}
                       </div>
                     )}
+
+                    {/* Required toggle */}
+                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                      <input type="checkbox" checked={createFieldRequired}
+                        onChange={e => setCreateFieldRequired(e.target.checked)}
+                        className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600" />
+                      <span className="text-sm font-medium text-gray-700">Required</span>
+                      <span className="text-xs text-gray-400">— tickets can't be created until this field is filled in</span>
+                    </label>
 
                     <div className="flex justify-end gap-2 pt-1">
                       <button type="button" onClick={() => setShowCreateField(false)}

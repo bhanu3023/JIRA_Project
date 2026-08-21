@@ -5,7 +5,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { WorkflowStatus, SpaceMember } from '@/types';
 import { X, ChevronDown, Info, AlertCircle, Search, Check } from 'lucide-react';
-import { getInitials } from '@/lib/utils';
+import { getInitials, cn } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import SpaceIcon from '@/components/ui/SpaceIcon';
 import { api } from '@/lib/api';
@@ -265,6 +265,12 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [combinationError, setCombinationError]     = useState(false);
   const [productTypeError, setProductTypeError]     = useState(false);
   const [projectManagerError, setProjectManagerError] = useState(false);
+  // Admin-configured custom fields (e.g. "Project Pool") each carry their own
+  // `required` flag from Settings > Custom Fields, but nothing here ever
+  // read it -- the field rendered with no asterisk and Create succeeded even
+  // when it was left blank, regardless of what the admin had configured.
+  // Keyed by field id since the set of custom fields is dynamic per space.
+  const [customFieldErrors, setCustomFieldErrors] = useState<Record<string, boolean>>({});
   const [error, setError]               = useState('');
   const [loading, setLoading]           = useState(false);
   const [uploading, setUploading]       = useState(false);
@@ -409,20 +415,23 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingCombination    = showMigrationFields && form.combination.length === 0;
     const missingProductType    = showMigrationFields && form.productType.length === 0;
     const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !skipsProjectManager;
+    const missingCustomFields = createIssueFields.filter((cf: any) => cf.required && !String(customFieldValues[cf.id] || '').trim());
 
     setSummaryError(missingSummary);
     setQueueError(missingQueue);
     setCombinationError(missingCombination);
     setProductTypeError(missingProductType);
     setProjectManagerError(missingProjectManager);
+    setCustomFieldErrors(Object.fromEntries(missingCustomFields.map((cf: any) => [cf.id, true])));
 
-    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager) {
+    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager || missingCustomFields.length > 0) {
       const missingLabels = [
         missingSummary && 'Summary',
         missingQueue && 'Queue',
         missingCombination && 'Combination',
         missingProductType && 'Product Type',
         missingProjectManager && 'Project Manager',
+        ...missingCustomFields.map((cf: any) => cf.name),
       ].filter(Boolean);
       setError(`Please fill in the required field${missingLabels.length > 1 ? 's' : ''}: ${missingLabels.join(', ')}`);
       return;
@@ -716,15 +725,24 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
             {createIssueFields.length > 0 && (
               <>
                 <hr className="my-4 border-gray-100" />
-                {createIssueFields.map((cf: any) => (
+                {createIssueFields.map((cf: any) => {
+                  const cfHasErr = Boolean(customFieldErrors[cf.id]);
+                  const setCfValue = (v: string) => {
+                    setCustomFieldValues(p => ({ ...p, [cf.id]: v }));
+                    if (v.trim()) setCustomFieldErrors(p => { const n = { ...p }; delete n[cf.id]; return n; });
+                  };
+                  const cfInputClass = (base: string) => cn(base, cfHasErr ? 'border-red-400 focus:ring-red-400' : 'border-gray-300 focus:ring-blue-500');
+                  return (
                   <div key={cf.id} className="mb-4">
-                    <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">{cf.name}</label>
+                    <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                      {cf.name} {cf.required && <span className="text-red-500">*</span>}
+                    </label>
                     {(cf.fieldType === 'select' || cf.fieldType === 'select-multi' || cf.fieldType === 'Select List (single choice)' || cf.fieldType === 'Select List (multiple choices)') && Array.isArray(cf.options) && cf.options.length > 0 ? (
                       <div className="relative">
                         <select
                           value={customFieldValues[cf.id] || ''}
-                          onChange={e => setCustomFieldValues(p => ({ ...p, [cf.id]: e.target.value }))}
-                          className="w-full px-3 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-[13px] appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          onChange={e => setCfValue(e.target.value)}
+                          className={cfInputClass("w-full px-3 pr-8 py-2 bg-white border rounded-lg text-[13px] appearance-none focus:outline-none focus:ring-2")}
                         >
                           <option value="">Select…</option>
                           {cf.options.map((o: string) => <option key={o} value={o}>{o}</option>)}
@@ -733,18 +751,18 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                       </div>
                     ) : cf.fieldType === 'date' ? (
                       <input type="date" value={customFieldValues[cf.id] || ''}
-                        onChange={e => setCustomFieldValues(p => ({ ...p, [cf.id]: e.target.value }))}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        onChange={e => setCfValue(e.target.value)}
+                        className={cfInputClass("w-full px-3 py-2 border rounded-lg text-[13px] focus:outline-none focus:ring-2")} />
                     ) : cf.fieldType === 'number' ? (
                       <input type="number" value={customFieldValues[cf.id] || ''}
-                        onChange={e => setCustomFieldValues(p => ({ ...p, [cf.id]: e.target.value }))}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        onChange={e => setCfValue(e.target.value)}
+                        className={cfInputClass("w-full px-3 py-2 border rounded-lg text-[13px] focus:outline-none focus:ring-2")} />
                     ) : (cf.type === 'User' || cf.fieldType === 'user') ? (
                       <div className="relative">
                         <select
                           value={customFieldValues[cf.id] || ''}
-                          onChange={e => setCustomFieldValues(p => ({ ...p, [cf.id]: e.target.value }))}
-                          className="w-full px-3 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-[13px] appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          onChange={e => setCfValue(e.target.value)}
+                          className={cfInputClass("w-full px-3 pr-8 py-2 bg-white border rounded-lg text-[13px] appearance-none focus:outline-none focus:ring-2")}
                         >
                           <option value="">Select user…</option>
                           {spaceMembers.map(m => (
@@ -755,12 +773,14 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                       </div>
                     ) : (
                       <input type="text" value={customFieldValues[cf.id] || ''}
-                        onChange={e => setCustomFieldValues(p => ({ ...p, [cf.id]: e.target.value }))}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        onChange={e => setCfValue(e.target.value)}
+                        className={cfInputClass("w-full px-3 py-2 border rounded-lg text-[13px] focus:outline-none focus:ring-2")}
                         placeholder={`Enter ${cf.name.toLowerCase()}…`} />
                     )}
+                    {cfHasErr && <p className="mt-1 text-[12px] text-red-600 font-medium">{cf.name} is required</p>}
                   </div>
-                ))}
+                  );
+                })}
               </>
             )}
           </div>
