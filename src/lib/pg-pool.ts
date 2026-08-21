@@ -18,7 +18,21 @@
  * of constructing its own — and never call `.end()` on it, since its
  * lifecycle is shared, not owned by any one caller.
  */
-import { Pool } from 'pg';
+import { Pool, types } from 'pg';
+
+// node-postgres has no timezone to attach to a `timestamp without time zone`
+// value (createdAt/updatedAt/dueDate on `issues` are all this type), so its
+// default parser for that type (OID 1114) falls back to interpreting the
+// naive "YYYY-MM-DD HH:MM:SS" string using the Node process's LOCAL
+// timezone instead of the UTC the database session actually stores it in --
+// silently shifting every value read back by the server's UTC offset (e.g.
+// -5:30 on a server running in IST). timestamptz columns (dept_sla_started_at,
+// resolvedAt) are unaffected since they carry their own offset. Confirmed
+// live: NOW() written into both a TIMESTAMP and a TIMESTAMPTZ column in the
+// same INSERT read back 5.5 hours apart through the default parser. Forcing
+// the naive string to be read as UTC (appending 'Z') makes it agree with the
+// timestamptz columns and with what is actually stored.
+types.setTypeParser(1114, (str: string) => new Date(str + 'Z'));
 
 declare global {
   // eslint-disable-next-line no-var
