@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
+import { isManager } from '@/lib/permissions';
 import { BarChart3, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle, LayoutGrid, Clock, Timer, Search } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 
@@ -64,7 +65,10 @@ function TaStatCard({ label, value, color }: { label: string; value: React.React
 
 export default function ReportsPage() {
   const { user } = useStore((s) => ({ user: s.user }));
-  const canViewPerformance = user?.role === 'admin' || user?.role === 'manager';
+  // Mirrors the backend's reports/* endpoints exactly (see jira-pg-api.ts) --
+  // isManager() now covers admin/lead/shift_lead, the tier the old global
+  // "manager" role occupied before it was removed.
+  const canViewPerformance = isManager(user?.role);
   // Lets a link like /reports?tab=resolution-sla&dept=Migration jump straight
   // into the right view — e.g. from the Dashboard's "Migration Report" /
   // "Dev Report" shortcuts, instead of everyone having to know to click

@@ -2244,7 +2244,7 @@ function SettingsContent() {
                         </button>
                       </td>
                       <td className="px-4 py-2.5 text-sm text-gray-500 max-w-0"><span className="block truncate">{u.email}</span></td>
-                      <td className="px-4 py-2.5 w-[160px]">
+                      <td className="px-4 py-2.5 min-w-[170px]">
                         <div className="relative inline-block">
                           <button
                             onClick={(e) => {
@@ -2253,9 +2253,9 @@ function SettingsContent() {
                               setRoleMenuPos({ top: rect.bottom + 4, left: rect.left });
                               setOpenUserMenu(u.id);
                             }}
-                            className="flex items-center gap-1 text-sm text-gray-700 hover:text-gray-900 group/role">
+                            className="flex items-center gap-1 text-sm text-gray-700 hover:text-gray-900 group/role whitespace-nowrap">
                             {ROLE_LABELS[u.role] || u.role}
-                            <ChevronDown size={12} className="text-gray-400 group-hover/role:text-gray-600" />
+                            <ChevronDown size={12} className="text-gray-400 group-hover/role:text-gray-600 flex-shrink-0" />
                           </button>
                           {openUserMenu === u.id && roleMenuPos && (
                             <>
@@ -2520,9 +2520,9 @@ function SettingsContent() {
                           setRoleMenuPos({ top: rect.bottom + 4, left: rect.left - 80 });
                           setOpenUserMenu(`drawer_${u.id}`);
                         }}
-                        className="flex items-center gap-1.5 text-sm font-medium text-gray-700 hover:text-blue-600 transition-colors">
+                        className="flex items-center gap-1.5 text-sm font-medium text-gray-700 hover:text-blue-600 transition-colors whitespace-nowrap">
                         {ROLE_LABELS[u.role] || u.role}
-                        <ChevronDown size={13} className="text-gray-400" />
+                        <ChevronDown size={13} className="text-gray-400 flex-shrink-0" />
                       </button>
                       {openUserMenu === `drawer_${u.id}` && roleMenuPos && (
                         <>
@@ -3055,7 +3055,7 @@ function SettingsContent() {
       </div>
     );
 
-    const displayRoles = ['admin', 'manager', 'migration_engineer', 'account_manager', 'qa_engineer', 'hr', 'developer', 'viewer'] as const;
+    const displayRoles = ['admin', 'migration_manager', 'migration_engineer', 'infra_lead', 'infra_engineer', 'account_manager', 'qa_engineer', 'hr', 'developer', 'viewer'] as const;
     const permRows: { label: string; key: keyof Permissions }[] = [
       { label: 'Access Settings',        key: 'accessSettings' },
       { label: 'Manage Users',           key: 'manageUsers' },

@@ -3650,7 +3650,7 @@ async function _handleJiraPgApi(
     const memberUserId = spaceMemberPatch[2];
     const sp = await db.space.findUnique({ where: { key }, include: { members: true } });
     if (!sp) return json({ error: 'Not found' }, 404);
-    const isPrivilegedGlobalPatch = ['admin', 'manager', 'lead', 'shift_lead'].includes(currentUser?.role || '');
+    const isPrivilegedGlobalPatch = ['admin', 'lead', 'shift_lead'].includes(currentUser?.role || '');
     const isSpaceAdmin = sp.members.some(m => m.userId === userId && ['admin', 'lead', 'shift_lead'].includes(m.role));
     if (!isPrivilegedGlobalPatch && !isSpaceAdmin) return json({ error: 'Forbidden' }, 403);
     const body = await readJson(req);
@@ -8305,7 +8305,7 @@ async function _handleJiraPgApi(
   }
 
   if (path === 'reports/user-performance' && method === 'GET') {
-    if (!isAdmin && currentUser?.role !== 'manager') return json({ error: 'Forbidden' }, 403);
+    if (!isAdmin && !isManager(currentUser?.role)) return json({ error: 'Forbidden' }, 403);
     const spaceKey  = url.searchParams.get('spaceKey');
     const dateFrom  = url.searchParams.get('dateFrom');
     const dateTo    = url.searchParams.get('dateTo');
@@ -8387,7 +8387,7 @@ async function _handleJiraPgApi(
   // breach check as the ticket detail page (computeSLAInstancesPure, reusing
   // its resolvedAt-vs-due-time comparison), not a separate/different rule.
   if (path === 'reports/resolution-sla' && method === 'GET') {
-    if (!isAdmin && currentUser?.role !== 'manager') return json({ error: 'Forbidden' }, 403);
+    if (!isAdmin && !isManager(currentUser?.role)) return json({ error: 'Forbidden' }, 403);
     const deptParam = url.searchParams.get('dept') || '';
     const productTypeParam = url.searchParams.get('productType') || '';
     const dateFrom = url.searchParams.get('dateFrom');
@@ -8569,7 +8569,7 @@ async function _handleJiraPgApi(
   // current_department (Migration/Dev/QA/Infra/Pre-Sales/...), which every
   // filter below groups by instead.
   if (path.startsWith('reports/team-analytics') && method === 'GET') {
-    if (!isAdmin && currentUser?.role !== 'manager') return json({ error: 'Forbidden' }, 403);
+    if (!isAdmin && !isManager(currentUser?.role)) return json({ error: 'Forbidden' }, 403);
     const scope = await loadTeamAnalyticsScope(url);
 
     if (path === 'reports/team-analytics/overview') {
