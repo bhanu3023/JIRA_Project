@@ -12,7 +12,7 @@ import { handleJiraDevMock } from '@/lib/jira-dev-mock';
 import { getNextAgent, getDefaultDepartment, getRrConfig, saveRrConfig } from '@/lib/rr-service';
 import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs } from '@/lib/connector-service';
 import { pgPool as pool } from '@/lib/pg-pool';
-import { isManager } from '@/lib/permissions';
+import { isManager, isPrivileged } from '@/lib/permissions';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 
 // 60-second in-memory cache for user role lookups so every API request
@@ -8810,7 +8810,19 @@ async function _handleJiraPgApi(
     {
       const viewedQueueParam = (url.searchParams.get('viewedQueue') || '').trim();
       if (viewedQueueParam) {
-        if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+        // Access to a given queue's dashboard: admins and generic managers see
+        // every queue (isManager already covers admin, so isPrivileged below is
+        // redundant with it but kept explicit for the isInternalJob case, which
+        // isManager(currentUser?.role) alone wouldn't catch); on top of that, the
+        // one role that manages this SPECIFIC department also gets in -- today
+        // that's only migration_manager for the Migration queue, since no
+        // equivalent dept-specific role exists for Dev (or any other queue) yet.
+        // Re-derived from currentUser.role on the server, never a client claim.
+        const callerRole = currentUser?.role;
+        const isDeptManagerForThisQueue =
+          viewedQueueParam.toLowerCase() === 'migration' && callerRole === 'migration_manager';
+        const canViewThisQueue = isAdmin || isPrivileged(callerRole) || isManager(callerRole) || isDeptManagerForThisQueue;
+        if (!canViewThisQueue) return json({ error: 'Forbidden' }, 403);
 
         const now2 = new Date();
         const fromParam2 = url.searchParams.get('from');
@@ -8878,6 +8890,59 @@ async function _handleJiraPgApi(
         const deptIssues = deptIssuesRes.rows;
         const isDeptDone = (r: any) => r.status_category === 'done';
         const openDeptIssues = deptIssues.filter((r: any) => !isDeptDone(r));
+        const isDeptWaiting = (r: any) => /wait|hold/i.test(r.status_name || '');
+        const isDeptInProgress = (r: any) => r.status_category === 'in_progress' && !isDeptWaiting(r);
+
+        // Dept-wide status breakdown (Summary sub-tab donut) -- every distinct
+        // status name this queue's tickets currently sit in, each its own
+        // entry (resolved is just whichever status name(s) are category
+        // 'done', shown the same way as every other status -- never lumped
+        // into one bucket). Exact same "group by status_name, keep the
+        // status's own color" shape as the personal dashboard's byStatus
+        // below, just scoped to the whole department instead of one user.
+        const deptStatusMap: Record<string, { count: number; color: string }> = {};
+        for (const r of deptIssues) {
+          const name = r.status_name || 'Unknown';
+          if (!deptStatusMap[name]) deptStatusMap[name] = { count: 0, color: r.status_color || '#94A3B8' };
+          deptStatusMap[name].count++;
+        }
+        const statusBreakdown = Object.entries(deptStatusMap).map(([name, v]) => ({ name, count: v.count, color: v.color }));
+
+        // Per-member current-holdings breakdown -- feeds both the User-wise
+        // Tickets table (In Progress / Resolved / the four "Waiting for X"
+        // hand-off columns) and each member's own by-status donut in the
+        // expand panel. One pass over deptIssues rather than one query/loop
+        // per member. The four "Waiting for ..." columns are computed
+        // generically from the ticket's actual status name -- these are
+        // Migration's hand-off-in-progress statuses, but nothing here assumes
+        // department == Migration; a Dev-department ticket that happened to
+        // carry one of these exact status names would count the same way, and
+        // a department that never uses them just reports 0.
+        const WAITING_HANDOFF_STATUS_NAMES: Record<string, 'waitingForDev' | 'waitingForPreSales' | 'waitingForQA' | 'waitingForInfra'> = {
+          'waiting for dev': 'waitingForDev',
+          'waiting for pre-sales': 'waitingForPreSales',
+          'waiting for qa': 'waitingForQA',
+          'waiting for infra': 'waitingForInfra',
+        };
+        const memberStatusCounts: Record<string, Record<string, { count: number; color: string }>> = {};
+        const memberCatCounts: Record<string, { resolved: number; inProgress: number; waitingForDev: number; waitingForPreSales: number; waitingForQA: number; waitingForInfra: number }> = {};
+        for (const id of memberIdSet) {
+          memberStatusCounts[id] = {};
+          memberCatCounts[id] = { resolved: 0, inProgress: 0, waitingForDev: 0, waitingForPreSales: 0, waitingForQA: 0, waitingForInfra: 0 };
+        }
+        for (const r of deptIssues) {
+          const aid = r.assigneeId;
+          if (!aid || !memberCatCounts[aid]) continue;
+          const name = r.status_name || 'Unknown';
+          const bucket = memberStatusCounts[aid];
+          if (!bucket[name]) bucket[name] = { count: 0, color: r.status_color || '#94A3B8' };
+          bucket[name].count++;
+          const cats = memberCatCounts[aid];
+          if (isDeptDone(r)) cats.resolved++;
+          else if (isDeptInProgress(r)) cats.inProgress++;
+          const handoffKey = WAITING_HANDOFF_STATUS_NAMES[name.trim().toLowerCase()];
+          if (handoffKey) cats[handoffKey]++;
+        }
 
         // SLA breach state -- computeSLAInstancesPure, the SAME accurate
         // per-ticket function the personal dashboard below and the issue
@@ -8924,9 +8989,15 @@ async function _handleJiraPgApi(
         // the personal dashboard's own slaStatus.breached convention below
         // exactly (a resolved ticket isn't "currently" anything).
         let currentlyBreached = 0;
+        // Per-member breakdown of the same "currently breached" count above --
+        // feeds the User-wise Tickets table's SLA Breached column.
+        const breachedByMember: Record<string, number> = {};
         for (const r of openDeptIssues) {
           const primary = primarySlaInstance(r);
-          if (primary && !primary.isPaused && primary.isBreached) currentlyBreached++;
+          if (primary && !primary.isPaused && primary.isBreached) {
+            currentlyBreached++;
+            if (r.assigneeId) breachedByMember[r.assigneeId] = (breachedByMember[r.assigneeId] || 0) + 1;
+          }
         }
 
         // "Due" tickets -- the separate, independently-tracked dueDate field,
@@ -8971,6 +9042,44 @@ async function _handleJiraPgApi(
           name: `${m.firstName || ''} ${m.lastName || ''}`.trim() || m.email || 'Unknown',
           count: userWiseCountByUserId[m.id] || 0,
         }));
+
+        // Per-member tickets-worked in the same statFrom/statTo range as the
+        // summary "Tickets Worked" stat above -- feeds the User-wise Tickets
+        // table's "Tickets Worked" column, grouped by user instead of totaled.
+        const ticketsWorkedByMemberRes = memberIds.length
+          ? await pool.query(
+              `SELECT user_id, COUNT(DISTINCT issue_id)::int AS n FROM user_worked_on_tickets
+               WHERE LOWER(dept) = LOWER($1) AND worked_at BETWEEN $2 AND $3 AND user_id = ANY($4::text[])
+               GROUP BY user_id`,
+              [viewedQueueParam, statFrom, statTo, memberIds]
+            )
+          : { rows: [] as any[] };
+        const ticketsWorkedByMemberId: Record<string, number> = {};
+        for (const r of ticketsWorkedByMemberRes.rows) ticketsWorkedByMemberId[r.user_id] = Number(r.n) || 0;
+
+        // User-wise Tickets sub-tab table -- one row per queue member, the 8
+        // columns the frontend renders as a real <table> (not the bar chart
+        // above, which stays as-is for the existing "current holdings" bar).
+        // statusBreakdown per row also rides along here so the per-user
+        // expand panel/modal can render that member's own by-status donut
+        // without a second round trip.
+        const userWiseTable = members.map((m: any) => {
+          const cats = memberCatCounts[m.id] || { resolved: 0, inProgress: 0, waitingForDev: 0, waitingForPreSales: 0, waitingForQA: 0, waitingForInfra: 0 };
+          const statusRows = Object.entries(memberStatusCounts[m.id] || {}).map(([name, v]) => ({ name, count: v.count, color: v.color }));
+          return {
+            userId: m.id,
+            name: `${m.firstName || ''} ${m.lastName || ''}`.trim() || m.email || 'Unknown',
+            ticketsWorked: ticketsWorkedByMemberId[m.id] || 0,
+            slaBreached: breachedByMember[m.id] || 0,
+            inProgress: cats.inProgress,
+            resolved: cats.resolved,
+            waitingForDev: cats.waitingForDev,
+            waitingForPreSales: cats.waitingForPreSales,
+            waitingForQA: cats.waitingForQA,
+            waitingForInfra: cats.waitingForInfra,
+            statusBreakdown: statusRows,
+          };
+        });
 
         // ── Week-over-week graphs (fixed last-7-days vs the 7 days before) ──
 
@@ -9031,11 +9140,62 @@ async function _handleJiraPgApi(
         for (const r of workloadRes.rows) {
           workloadByUserId[r.user_id] = { thisWeek: Number(r.this_week) || 0, lastWeek: Number(r.last_week) || 0 };
         }
+
+        // 4. Per-member SLA-breached / in-progress / open, week over week --
+        // powers the User-wise Tickets table's "Compare" toggle (Last Wk vs
+        // This Wk paired columns). This app has no historical status-snapshot
+        // table anywhere (nothing records what a ticket's status or SLA state
+        // WAS a week ago), so exactly like slaBreachRateFor's own comment
+        // above already concedes for its question, there is no perfect
+        // historical answer here either. The definition used below, chosen to
+        // match that same existing precedent as closely as possible: take the
+        // cohort of this member's tickets CREATED in the given week, then
+        // evaluate breached/in-progress/open against their CURRENT status and
+        // CURRENT SLA state (as of right now, via the same primarySlaInstance
+        // used everywhere else in this block) rather than their state back
+        // then. That means e.g. "last week's open count" can still change
+        // between two page loads if one of those tickets gets resolved today
+        // -- a real limitation, but a legible and consistent one, and it
+        // reuses the exact cohort this endpoint already builds for the SLA
+        // breach-rate graph instead of introducing a second, differently-
+        // defined cohort. Building an actual point-in-time snapshot system
+        // just for this one comparison would be well beyond what this feature
+        // needs.
+        const memberWeekStats = (fromD: Date, toD: Date) => {
+          const byMember: Record<string, { breached: number; inProgress: number; open: number }> = {};
+          for (const id of memberIds) byMember[id] = { breached: 0, inProgress: 0, open: 0 };
+          const cohort = deptIssues.filter((r: any) => {
+            const c = new Date(r.createdAt).getTime();
+            return c >= fromD.getTime() && c < toD.getTime();
+          });
+          for (const r of cohort) {
+            const aid = r.assigneeId;
+            if (!aid || !byMember[aid]) continue;
+            if (!isDeptDone(r)) {
+              byMember[aid].open++;
+              if (isDeptInProgress(r)) byMember[aid].inProgress++;
+            }
+            const primary = primarySlaInstance(r);
+            if (primary && !primary.isPaused && primary.isBreached) byMember[aid].breached++;
+          }
+          return byMember;
+        };
+        const memberWeekStatsLastWeek = memberWeekStats(lastWeekFrom, lastWeekTo);
+        const memberWeekStatsThisWeek = memberWeekStats(thisWeekFrom, thisWeekTo);
+
         const memberWorkload = members.map((m: any) => ({
           userId: m.id,
           name: `${m.firstName || ''} ${m.lastName || ''}`.trim() || m.email || 'Unknown',
           thisWeek: workloadByUserId[m.id]?.thisWeek || 0,
           lastWeek: workloadByUserId[m.id]?.lastWeek || 0,
+          // Compare-mode fields -- see memberWeekStats' comment above for the
+          // "created-that-week, evaluated as of now" definition these use.
+          breachedThisWeek: memberWeekStatsThisWeek[m.id]?.breached || 0,
+          breachedLastWeek: memberWeekStatsLastWeek[m.id]?.breached || 0,
+          inProgressThisWeek: memberWeekStatsThisWeek[m.id]?.inProgress || 0,
+          inProgressLastWeek: memberWeekStatsLastWeek[m.id]?.inProgress || 0,
+          openThisWeek: memberWeekStatsThisWeek[m.id]?.open || 0,
+          openLastWeek: memberWeekStatsLastWeek[m.id]?.open || 0,
         }));
 
         return json({
@@ -9053,7 +9213,15 @@ async function _handleJiraPgApi(
               openTickets: openCount,
               dueTickets,
             },
+            // Summary sub-tab's full status breakdown -- every distinct status
+            // name currently in use in this department, dept-wide (see
+            // deptStatusMap above).
+            statusBreakdown,
             userWiseTickets,
+            // User-wise Tickets sub-tab's table rows (8 columns) + the data
+            // each row's expand panel/modal needs for that member's own
+            // by-status donut (see userWiseTable above).
+            userWiseTable,
             weekOverWeek: {
               range: {
                 thisWeek: { from: thisWeekFrom.toISOString(), to: thisWeekTo.toISOString() },
