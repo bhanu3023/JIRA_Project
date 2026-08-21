@@ -6341,24 +6341,40 @@ async function _handleJiraPgApi(
       }
     }
 
-    // Fetch summaries for linked issues
+    // Fetch summaries for linked issues, their cf_key, and children's cf_key.
+    // These three lookups don't depend on each other -- only on linkedKeys/
+    // childIssues, which are already in hand from the Promise.all batch above
+    // -- but were previously three separate `await`s in a row, each paying
+    // its own round-trip latency serially on every single ticket open. Run
+    // them together instead, same fix as the batch above.
     const linkedKeys = deduped.map(l => l.sourceKey === key ? l.targetKey : l.sourceKey);
-    const linkedIssues = linkedKeys.length
-      ? await db.issue.findMany({ where: { key: { in: linkedKeys } }, select: { key: true, summary: true, type: true } })
-      : [];
+    const [linkedIssues, linkedCfKeys, childCfKeys] = await Promise.all([
+      linkedKeys.length
+        ? db.issue.findMany({ where: { key: { in: linkedKeys } }, select: { key: true, summary: true, type: true } })
+        : Promise.resolve([] as { key: string; summary: string; type: string }[]),
+      // cf_key is a raw ALTER TABLE column Prisma doesn't know about (same gap
+      // as childCfKeyMap below) -- without this, "Linked work items" always
+      // showed the raw internal key (e.g. "L1BOAR-2164") instead of the CF-
+      // key every other section uses, and the frontend's `li.cfKey ?? li.key`
+      // fallback silently landed on the raw key every time.
+      linkedKeys.length
+        ? pool.query<{ key: string; cf_key: string | null }>(
+            `SELECT key, cf_key FROM issues WHERE key = ANY($1::text[])`,
+            [linkedKeys]
+          )
+        : Promise.resolve({ rows: [] as { key: string; cf_key: string | null }[] }),
+      // cf_key is a raw ALTER TABLE column Prisma doesn't know about, so
+      // db.issue.findMany above never returns it for children -- fetch it
+      // separately so subtasks show their CF-#### key like every other issue,
+      // instead of falling back to the raw space-prefixed key.
+      childIssues.length
+        ? pool.query<{ id: string; cf_key: string | null }>(
+            `SELECT id, cf_key FROM issues WHERE id = ANY($1::text[])`,
+            [childIssues.map(c => c.id)]
+          )
+        : Promise.resolve({ rows: [] as { id: string; cf_key: string | null }[] }),
+    ]);
     const summaryMap = new Map(linkedIssues.map(i => [i.key, i]));
-
-    // cf_key is a raw ALTER TABLE column Prisma doesn't know about (same gap
-    // as childCfKeyMap below) -- without this, "Linked work items" always
-    // showed the raw internal key (e.g. "L1BOAR-2164") instead of the CF-
-    // key every other section uses, and the frontend's `li.cfKey ?? li.key`
-    // fallback silently landed on the raw key every time.
-    const linkedCfKeys = linkedKeys.length
-      ? await pool.query<{ key: string; cf_key: string | null }>(
-          `SELECT key, cf_key FROM issues WHERE key = ANY($1::text[])`,
-          [linkedKeys]
-        )
-      : { rows: [] as { key: string; cf_key: string | null }[] };
     const linkedCfKeyMap = new Map(linkedCfKeys.rows.map(r => [r.key, r.cf_key]));
 
     // rawDeptData (this ticket's own cf_key) isn't assembled from rawDeptRow
@@ -6377,17 +6393,6 @@ async function _handleJiraPgApi(
         _targetCfKey: l.targetKey === key ? ownCfKey : otherCfKey,
       };
     });
-
-    // cf_key is a raw ALTER TABLE column Prisma doesn't know about, so
-    // db.issue.findMany above never returns it for children -- fetch it
-    // separately so subtasks show their CF-#### key like every other issue,
-    // instead of falling back to the raw space-prefixed key.
-    const childCfKeys = childIssues.length
-      ? await pool.query<{ id: string; cf_key: string | null }>(
-          `SELECT id, cf_key FROM issues WHERE id = ANY($1::text[])`,
-          [childIssues.map(c => c.id)]
-        )
-      : { rows: [] as { id: string; cf_key: string | null }[] };
     const childCfKeyMap = new Map(childCfKeys.rows.map(r => [r.id, r.cf_key]));
 
     // Format children

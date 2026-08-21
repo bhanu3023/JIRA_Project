@@ -549,18 +549,28 @@ export default function IssueDetailPage() {
         });
         setCustomFields(applicable);
       }).catch(() => {});
-      // Load current values, then sync SLA breach status into custom fields
+      // Load current values, then sync SLA breach status into custom fields.
+      // This used to also re-fetch the WHOLE issue (api.getIssue) here purely
+      // to read `.sla` -- but `currentIssue.sla` is already the response of
+      // the loadIssue() call that just populated currentIssue a moment ago
+      // (same GET /issues/:key endpoint, same computed `sla` field), so that
+      // second full-ticket fetch was a pure duplicate of the initial page
+      // load: same DB queries re-run, same potentially-multi-MB description/
+      // comments payload re-sent over the wire, on every single ticket open,
+      // for a field already sitting in state. There's no meaningful race
+      // window between loadIssue() resolving and this effect firing (it fires
+      // synchronously off of currentIssue's own fields), so currentIssue.sla
+      // is equivalent to what the refetch would have returned.
       (async () => {
         try {
-          const [vals, freshIssue, allFields] = await Promise.all([
+          const [vals, allFields] = await Promise.all([
             api.getCustomFieldValues(currentIssue.id).catch(() => [] as any[]),
-            api.getIssue(currentIssue.key).catch(() => currentIssue as any),
             api.getCustomFields().catch(() => [] as any[])
           ]);
           const map: Record<string, string> = {};
           (vals || []).forEach((v: any) => { map[v.fieldId] = v.value; });
 
-          const sla: any[] = freshIssue.sla || currentIssue.sla || [];
+          const sla: any[] = currentIssue.sla || [];
           const now = new Date();
           // Build set of field ids that have a stored value on this issue (incl. automation-copied)
           const valFieldIds = new Set((vals || []).map((v: any) => v.fieldId).filter(Boolean));
@@ -3858,7 +3868,13 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
 
     Promise.allSettled([
       fetch(`/api/spaces/${spaceKey}/rr-config`, { headers }).then(r => r.ok ? r.json() : null),
-      fetch(`/api/custom-fields`, { headers }).then(r => r.ok ? r.json() : null),
+      // Was a raw fetch() to the exact same /api/custom-fields endpoint the
+      // rest of this page already loads via api.getCustomFields() (see the
+      // effect above) -- a bare fetch() bypasses the ApiClient's in-flight
+      // request coalescing (src/lib/api.ts), so this fired as a genuinely
+      // separate network round trip + backend query on every single ticket
+      // open instead of reusing the other call's in-flight/cached result.
+      api.getCustomFields().catch(() => null),
     ]).then(([rrRes, cfRes]) => {
       const combined: { name: string; boardKey: string }[] = [];
       let allDeptFieldsCount = 0;

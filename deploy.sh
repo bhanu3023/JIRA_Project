@@ -79,6 +79,15 @@ docker exec -i jira_postgres psql -U jirauser -d jiradb -c "
   -- issues table without these.
   CREATE INDEX IF NOT EXISTS idx_issues_cf_key ON issues (cf_key);
   CREATE INDEX IF NOT EXISTS issues_partner_key_idx ON issues (\"partnerKey\");
+  -- computeIssueSLAsFromDb runs 'SELECT id FROM notifications WHERE
+  -- \"issueKey\" = \$1 AND type = ...' on EVERY single ticket-detail-page
+  -- load (and again, batched, on the my-dashboard list) to check whether an
+  -- SLA-breach notification already fired for this ticket. notifications
+  -- only has (userId, isRead) and (userId, createdAt) indexes -- neither
+  -- covers a lookup by issueKey, so this was a full sequential scan of the
+  -- notifications table (which only grows, one row per assignment/comment/
+  -- status-change/SLA-breach event ever sent) on every ticket open.
+  CREATE INDEX IF NOT EXISTS idx_notifications_issuekey_type ON notifications (\"issueKey\", type);
   -- Historical SLA-breach data imported from Jira for L2B/L3B tickets --
   -- this app's own SLA clock never reports a breach once a ticket is
   -- resolved, which erases the fact that a ticket was already breached in
