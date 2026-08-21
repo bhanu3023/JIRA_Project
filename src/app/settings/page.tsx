@@ -2023,7 +2023,7 @@ function SettingsContent() {
     const activeCount = users.filter(u => u.isActive !== false).length;
 
     return (
-      <div className="max-w-[900px] mx-auto px-6 py-6">
+      <div className="max-w-[1600px] mx-auto px-6 py-6">
         {/* Page header */}
         <button onClick={() => navigate('main')} className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-5">
           <ArrowLeft size={14} /> Back to settings
