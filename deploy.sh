@@ -71,6 +71,14 @@ docker exec -i jira_postgres psql -U jirauser -d jiradb -c "
   -- jira-pg-api.ts's dept-filtered queries so it can use an index scan
   -- instead (confirmed via EXPLAIN ANALYZE: ~48ms scan -> ~0.5ms).
   CREATE INDEX IF NOT EXISTS idx_issues_space_dept_lower ON issues (\"spaceId\", LOWER(current_department));
+  -- The Queue Dashboard's own dept-wide queries (deptIssuesRes /
+  -- originDeptIssuesRes in jira-pg-api.ts) filter by LOWER(current_department)
+  -- ALONE, with no spaceId in the WHERE clause -- a composite index led by
+  -- spaceId (idx_issues_space_dept_lower, above) can't serve that, so these
+  -- specifically were still falling back to a full sequential scan (confirmed
+  -- via EXPLAIN ANALYZE against production: ~60ms at 15k+ rows for Dev, worse
+  -- as the table grows, and run on every queue-dashboard load/poll).
+  CREATE INDEX IF NOT EXISTS idx_issues_current_dept_lower ON issues (LOWER(current_department));
   -- cf_key and partnerKey are raw columns (not in the Prisma schema, so Prisma's
   -- own migrations never index them) but are on hot paths: cf_key is scanned with
   -- MAX(...) on every single ticket creation to assign the next CF-#### number,

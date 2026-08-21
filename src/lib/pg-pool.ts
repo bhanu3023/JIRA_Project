@@ -59,3 +59,34 @@ function createPool(): Pool {
 // Reuse across HMR reloads in development, same pattern as db.ts.
 export const pgPool: Pool = globalThis.__pgPool ?? createPool();
 if (process.env.NODE_ENV !== 'production') globalThis.__pgPool = pgPool;
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __eventLoopLagMonitorStarted: boolean | undefined;
+}
+
+// A ticket-open timeout was reported recurring across unrelated tickets, with
+// individual queries independently confirmed fast (EXPLAIN ANALYZE, sub-20ms)
+// when re-run in isolation -- so the seconds-long delays users actually saw
+// weren't the queries themselves. That leaves two candidate causes that look
+// identical from inside a single request: connection-pool queueing (covered
+// by the pgPool stats logged alongside the slow-request warning in
+// jira-pg-api.ts) and the whole Node process's event loop being blocked by
+// something CPU-bound elsewhere (a large synchronous JSON.stringify, a big
+// array loop, etc.), which would stall every in-flight request at once
+// regardless of which pool its query used. This samples loop lag every 5s
+// and logs when it's high enough to actually explain multi-second delays,
+// so the next occurrence has a real answer instead of another guess.
+if (!globalThis.__eventLoopLagMonitorStarted) {
+  globalThis.__eventLoopLagMonitorStarted = true;
+  const INTERVAL_MS = 5_000;
+  let lastTick = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const lag = now - lastTick - INTERVAL_MS;
+    lastTick = now;
+    if (lag > 300) {
+      console.warn(`[EVENT-LOOP] lag=${lag}ms -- the Node process was blocked for this long instead of processing other requests, likely by CPU-bound synchronous work somewhere.`);
+    }
+  }, INTERVAL_MS);
+}

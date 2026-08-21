@@ -6553,7 +6553,17 @@ async function _handleJiraPgApi(
     const _perfTotal = Date.now() - _perfT0;
     if (_perfTotal > 3000) {
       const breakdown = _perfMarks.map(([label, t], i) => `${label}=${t - (_perfMarks[i - 1]?.[1] ?? 0)}ms`).join(', ');
-      console.warn(`[PERF] GET /issues/${key} took ${_perfTotal}ms -- ${breakdown} (cumulative: ${_perfMarks.map(([l, t]) => `${l}@${t}ms`).join(', ')})`);
+      // A slow phase here could mean the query itself is slow, OR it could
+      // mean the phase's await sat queued behind pgPool's own connection
+      // limit (max 20, see pg-pool.ts) before the query ever started --
+      // those look identical in the breakdown above but need opposite fixes
+      // (query/index tuning vs. raising the pool size / cutting concurrent
+      // load). pgPool exposes its own live counters for exactly this --
+      // waitingCount > 0 at the moment this fires means requests were queued
+      // for a free connection, which points straight at pool contention
+      // instead of another guess.
+      const poolStats = `pgPool[total=${pool.totalCount},idle=${pool.idleCount},waiting=${pool.waitingCount}]`;
+      console.warn(`[PERF] GET /issues/${key} took ${_perfTotal}ms -- ${breakdown} (cumulative: ${_perfMarks.map(([l, t]) => `${l}@${t}ms`).join(', ')}) ${poolStats}`);
     }
 
     return json(responsePayload);
