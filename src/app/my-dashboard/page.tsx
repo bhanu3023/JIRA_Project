@@ -10,10 +10,11 @@ import { cn, priorityColors } from '@/lib/utils';
 import DotLoader from '@/components/ui/DotLoader';
 import {
   ResponsiveContainer, PieChart, Pie, Cell, Tooltip,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
 } from 'recharts';
 import {
   Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown, Calendar, BarChart3,
+  LayoutDashboard, Users,
 } from 'lucide-react';
 
 const DATE_RANGE_OPTIONS = [
@@ -174,6 +175,45 @@ function DeptBarChart({ data, color, fallbackHref }: { data: { dept: string; lab
   );
 }
 
+/* ─── grouped bar chart — 2 series per category (e.g. Last Week vs This
+ * Week), used by the queue dashboard's week-over-week comparisons below.
+ * Same recharts + Tailwind conventions as DeptBarChart above (grid, axis
+ * font sizes, tooltip), plus a Legend to distinguish the two series. */
+function GroupedBarChart({
+  data, series, fallbackHref, height = 200,
+}: {
+  data: (Record<string, any> & { label: string; href?: string })[];
+  series: { key: string; name: string; color: string }[];
+  fallbackHref: string;
+  height?: number;
+}) {
+  const router = useRouter();
+  if (!data.length) {
+    return (
+      <Link href={fallbackHref} className="flex h-[110px] w-full flex-col items-center justify-center gap-1 rounded-lg text-center transition-colors hover:bg-gray-50">
+        <span className="text-[12px] text-gray-400">No data yet — click to view</span>
+      </Link>
+    );
+  }
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={data} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+        <CartesianGrid vertical={false} stroke="#F3F4F6" />
+        <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: '#6B7280' }} axisLine={false} tickLine={false} interval={0} angle={-15} textAnchor="end" height={38} />
+        <YAxis tick={{ fontSize: 11, fill: '#6B7280' }} axisLine={false} tickLine={false} allowDecimals={false} />
+        <Tooltip cursor={{ fill: '#F9FAFB' }} />
+        <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} />
+        {series.map((s) => (
+          <Bar
+            key={s.key} dataKey={s.key} name={s.name} fill={s.color} radius={[4, 4, 0, 0]} maxBarSize={32} cursor="pointer"
+            onClick={(d: any) => { const href = d?.payload?.href; if (href) router.push(href); }}
+          />
+        ))}
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
 /* ─── admin queue-scoped "view as" dropdown ─── */
 function QueueSelect({ label, options, value, onChange }: { label: string; options: any[]; value: string; onChange: (v: string) => void }) {
   return (
@@ -212,6 +252,110 @@ function DateRangeSelect({ value, onChange }: { value: DateRangeKey; onChange: (
   );
 }
 
+/* ─── admin-only, per-queue dashboard — the whole department's numbers,
+ * shown INSTEAD OF the personal dashboard while active (never alongside it).
+ * Reuses StatTile/Card/DeptBarChart/GroupedBarChart exactly like the personal
+ * dashboard below; every stat/bar deep-links to /filters via filtersHref,
+ * same as everywhere else on this page. */
+function QueueDashboardView({ data, dateRangeLabel }: { data: any; dateRangeLabel?: string }) {
+  const dept: string = data.dept;
+  const spaceKey: string | null = data.spaceKey || null;
+  const memberIds: string[] = data.memberIds || [];
+  const summary = data.summary || {};
+  const userWiseTickets = (data.userWiseTickets || []) as { userId: string; name: string; count: number }[];
+  const wow = data.weekOverWeek || {};
+  const slaBreachRate = wow.slaBreachRate || { lastWeek: { total: 0, breached: 0, pct: 0 }, thisWeek: { total: 0, breached: 0, pct: 0 } };
+  const createdVsResolved = wow.createdVsResolved || { lastWeek: { created: 0, resolved: 0 }, thisWeek: { created: 0, resolved: 0 } };
+  const memberWorkload = (wow.memberWorkload || []) as { userId: string; name: string; thisWeek: number; lastWeek: number }[];
+
+  // Exact-space deep link when this queue name maps to exactly one board
+  // (space+queue, same params bySourceDept/journey use below); otherwise an
+  // assignee-list link across every current member — same "fall back to the
+  // closest supported filter" precedent the personal dashboard's own SLA
+  // running/breaching-soon tiles already rely on further down this file.
+  const queueFallbackHref = spaceKey
+    ? filtersHref({ space: spaceKey, queue: dept })
+    : filtersHref({ assignee: memberIds.join(',') });
+  const queueBreachedHref = spaceKey
+    ? filtersHref({ space: spaceKey, queue: dept, slaBreached: 'yes' })
+    : filtersHref({ assignee: memberIds.join(','), slaBreached: 'yes' });
+  const membersHref = filtersHref({ assignee: memberIds.join(',') });
+
+  const userWiseBarData = userWiseTickets.map((m) => ({
+    dept: m.userId, label: m.name, count: m.count, href: filtersHref({ assignee: m.userId }),
+  }));
+  const slaBreachRateBarData = [
+    { dept: 'lastWeek', label: `Last Week (${slaBreachRate.lastWeek.breached}/${slaBreachRate.lastWeek.total})`, count: slaBreachRate.lastWeek.pct, href: queueBreachedHref },
+    { dept: 'thisWeek', label: `This Week (${slaBreachRate.thisWeek.breached}/${slaBreachRate.thisWeek.total})`, count: slaBreachRate.thisWeek.pct, href: queueBreachedHref },
+  ];
+  const createdVsResolvedData = [
+    { label: 'Last Week', created: createdVsResolved.lastWeek.created, resolved: createdVsResolved.lastWeek.resolved, href: queueFallbackHref },
+    { label: 'This Week', created: createdVsResolved.thisWeek.created, resolved: createdVsResolved.thisWeek.resolved, href: queueFallbackHref },
+  ];
+  const memberWorkloadData = memberWorkload.map((m) => ({
+    label: m.name, lastWeek: m.lastWeek, thisWeek: m.thisWeek, href: filtersHref({ assignee: m.userId }),
+  }));
+
+  return (
+    <>
+      {/* Summary stat row */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+        <StatTile
+          label={`Total ${dept} Tickets`} value={summary.totalQueueTickets || 0}
+          icon={<Layers size={17} className="text-blue-600" />} iconClass="bg-blue-50" href={queueFallbackHref}
+        />
+        <StatTile
+          label="Queue Members" value={summary.membersCount || 0}
+          icon={<Users size={17} className="text-purple-600" />} iconClass="bg-purple-50" href={membersHref}
+        />
+        <StatTile
+          label={`Tickets Worked (${dateRangeLabel || 'range'})`} value={summary.ticketsWorked || 0}
+          icon={<Send size={17} className="text-teal-600" />} iconClass="bg-teal-50" href={queueFallbackHref}
+        />
+        <StatTile
+          label="Open Tickets" value={summary.openTickets || 0}
+          icon={<Hourglass size={17} className="text-orange-600" />} iconClass="bg-orange-50" href={queueFallbackHref}
+        />
+        <StatTile
+          label="SLA Breached" value={summary.slaBreached || 0}
+          icon={<AlertTriangle size={17} className="text-red-600" />} iconClass="bg-red-50" href={queueBreachedHref}
+        />
+        <StatTile
+          label="Due Tickets" value={summary.dueTickets || 0}
+          icon={<Hourglass size={17} className="text-indigo-600" />} iconClass="bg-indigo-50" href={queueFallbackHref}
+        />
+      </div>
+
+      {/* User-wise tickets */}
+      <Card title={`${dept} Tickets by Member`} subtitle="Current tickets held by each queue member">
+        <DeptBarChart data={userWiseBarData} color="#3B82F6" fallbackHref={queueFallbackHref} />
+      </Card>
+
+      {/* Week-over-week graphs */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Card title="SLA Breach Rate — Week over Week" subtitle="Last 7 days vs the 7 days before">
+          <DeptBarChart data={slaBreachRateBarData} color="#EF4444" fallbackHref={queueBreachedHref} />
+        </Card>
+        <Card title="Tickets Created vs Resolved — Week over Week" subtitle="Last 7 days vs the 7 days before">
+          <GroupedBarChart
+            data={createdVsResolvedData}
+            series={[{ key: 'created', name: 'Created', color: '#3B82F6' }, { key: 'resolved', name: 'Resolved', color: '#22C55E' }]}
+            fallbackHref={queueFallbackHref}
+          />
+        </Card>
+      </div>
+      <Card title="Per-Member Workload — Week over Week" subtitle="Tickets worked, last 7 days vs the 7 days before">
+        <GroupedBarChart
+          data={memberWorkloadData}
+          series={[{ key: 'lastWeek', name: 'Last Week', color: '#94A3B8' }, { key: 'thisWeek', name: 'This Week', color: '#8B5CF6' }]}
+          fallbackHref={queueFallbackHref}
+          height={Math.max(200, memberWorkloadData.length * 12)}
+        />
+      </Card>
+    </>
+  );
+}
+
 export default function MyDashboardPage() {
   const { user } = useStore(useShallow((s) => ({ user: s.user })));
   const isAdmin = user?.role === 'admin';
@@ -220,6 +364,11 @@ export default function MyDashboardPage() {
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [queueUsers, setQueueUsers] = useState<{ migration: any[]; dev: any[] }>({ migration: [], dev: [] });
   const [viewedUserId, setViewedUserId] = useState<string>('');
+  // Admin-only: viewing a whole queue's dashboard instead of any one person's
+  // — mutually exclusive with viewedUserId (picking one always clears the
+  // other, see the handlers below). Holds the department name, e.g.
+  // "Migration" / "Dev", sent to the backend as ?viewedQueue=.
+  const [viewedQueueDept, setViewedQueueDept] = useState<string>('');
   const [dateRangeKey, setDateRangeKey] = useState<DateRangeKey>('7d');
 
   // Admin-only: group users by their custom-queue membership (Migration / Dev) across
@@ -259,7 +408,11 @@ export default function MyDashboardPage() {
       ? new Date(to.getFullYear(), to.getMonth(), to.getDate())
       : new Date(to.getTime() - (dateRangeKey === '30d' ? 30 : 7) * 86_400_000);
     api.getMyDashboard({
-      ...(viewedUserId ? { userId: viewedUserId } : {}),
+      // Mutually exclusive: a queue-dashboard view takes over the whole
+      // request when set, exactly like userId does for one person — never
+      // both at once (viewedUserId is always cleared whenever
+      // viewedQueueDept is set, and vice versa, see the handlers below).
+      ...(viewedQueueDept ? { viewedQueue: viewedQueueDept } : viewedUserId ? { userId: viewedUserId } : {}),
       from: from.toISOString(),
       to: to.toISOString(),
     })
@@ -267,7 +420,7 @@ export default function MyDashboardPage() {
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [viewedUserId, dateRangeKey]);
+  }, [viewedUserId, viewedQueueDept, dateRangeKey]);
 
   if (loading || !data) {
     // py-24 was just top/bottom padding on a small inline element — it sat
@@ -280,6 +433,13 @@ export default function MyDashboardPage() {
       </div>
     );
   }
+
+  // Present only when ?viewedQueue= was sent (admin queue-dashboard mode) —
+  // takes over the WHOLE page body below instead of the personal dashboard;
+  // the personal fields computed after this are simply unused in that case
+  // (the response shape for the personal-dashboard case, i.e. when this is
+  // absent, is completely unchanged from before this feature existed).
+  const queueDashboard = data.queueDashboard || null;
 
   const cards = data.cards || {};
   const cardStatuses = data.cardStatuses || {};
@@ -346,10 +506,12 @@ export default function MyDashboardPage() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2 text-[22px] font-semibold text-gray-900">
-            User Level Dashboard <span>👋</span>
+            {queueDashboard ? `${queueDashboard.dept} Queue Dashboard` : 'User Level Dashboard'} <span>👋</span>
           </h1>
           <p className="mt-0.5 text-[13px] text-gray-500">
-            {viewedUserId && viewedUserId !== user?.id ? 'Viewing' : 'Welcome back,'} {viewedName}
+            {queueDashboard
+              ? `Queue-wide view across all ${queueDashboard.summary?.membersCount ?? 0} members`
+              : <>{viewedUserId && viewedUserId !== user?.id ? 'Viewing' : 'Welcome back,'} {viewedName}</>}
           </p>
         </div>
 
@@ -357,23 +519,58 @@ export default function MyDashboardPage() {
           <DateRangeSelect value={dateRangeKey} onChange={setDateRangeKey} />
           {isAdmin && (
             <>
-              {viewedUserId && (
+              {(viewedUserId || viewedQueueDept) && (
                 <button
-                  onClick={() => setViewedUserId('')}
+                  onClick={() => { setViewedUserId(''); setViewedQueueDept(''); }}
                   className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-[13px] font-medium text-gray-600 hover:bg-gray-50"
                 >
                   My Dashboard
                 </button>
               )}
-              <QueueSelect label="Migration Queue" options={queueUsers.migration} value={viewedUserId} onChange={setViewedUserId} />
-              <QueueSelect label="Dev Queue" options={queueUsers.dev} value={viewedUserId} onChange={setViewedUserId} />
-              {/* The two dropdowns above pick ONE person to view their personal
-                  dashboard as — they were never meant to show the department's
-                  own numbers, which is a completely different question people
-                  kept asking this page. These link straight to the actual
-                  Migration/Dev Resolution %, SLA %, and SLA Breach % report
-                  instead of leaving that undiscoverable behind Reports → a
-                  specific tab → a specific filter. */}
+              <QueueSelect
+                label="Migration Queue" options={queueUsers.migration} value={viewedUserId}
+                onChange={(v) => { setViewedUserId(v); setViewedQueueDept(''); }}
+              />
+              {/* Same queue, but the WHOLE department's numbers instead of one
+                  member's — distinct trigger, right next to the picker it's
+                  the "zoomed out" version of, so it's discoverable without
+                  reading any code. Selecting a person above clears this, and
+                  vice versa (see the handlers): the two views never show at
+                  once. */}
+              <button
+                onClick={() => { setViewedQueueDept('Migration'); setViewedUserId(''); }}
+                title="View the whole Migration queue's dashboard"
+                className={cn(
+                  'flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[13px] font-medium',
+                  viewedQueueDept === 'Migration'
+                    ? 'border-indigo-400 bg-indigo-100 text-indigo-700'
+                    : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100',
+                )}
+              >
+                <LayoutDashboard size={14} /> Migration Queue Dashboard
+              </button>
+              <QueueSelect
+                label="Dev Queue" options={queueUsers.dev} value={viewedUserId}
+                onChange={(v) => { setViewedUserId(v); setViewedQueueDept(''); }}
+              />
+              <button
+                onClick={() => { setViewedQueueDept('Dev'); setViewedUserId(''); }}
+                title="View the whole Dev queue's dashboard"
+                className={cn(
+                  'flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[13px] font-medium',
+                  viewedQueueDept === 'Dev'
+                    ? 'border-indigo-400 bg-indigo-100 text-indigo-700'
+                    : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100',
+                )}
+              >
+                <LayoutDashboard size={14} /> Dev Queue Dashboard
+              </button>
+              {/* These link straight to the actual Migration/Dev Resolution %,
+                  SLA %, and SLA Breach % report instead of leaving that
+                  undiscoverable behind Reports → a specific tab → a specific
+                  filter. Unlike the two buttons above, this navigates away to
+                  the standalone Reports page rather than showing the queue
+                  view here. */}
               <Link
                 href="/reports?tab=resolution-sla&dept=Migration"
                 className="flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[13px] font-medium text-blue-700 hover:bg-blue-100"
@@ -391,6 +588,13 @@ export default function MyDashboardPage() {
         </div>
       </div>
 
+      {queueDashboard && <QueueDashboardView data={queueDashboard} dateRangeLabel={dateRangeLabel} />}
+
+      {/* Everything below is the PERSONAL dashboard — untouched, and only
+          rendered when queue-dashboard mode isn't active (the two views
+          never show at once, see QueueDashboardView above for that one). */}
+      {!queueDashboard && (
+      <>
       {/* Top stat row */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
         <StatTile
@@ -499,6 +703,8 @@ export default function MyDashboardPage() {
             </div>
           </div>
         </Card>
+      )}
+      </>
       )}
     </div>
     </div>

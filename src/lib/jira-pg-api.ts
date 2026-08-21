@@ -8797,6 +8797,277 @@ async function _handleJiraPgApi(
   // endpoint's own reasonable defaults, not existing business rules.
   if (path === 'my-dashboard' && method === 'GET') {
     if (!userId) return json({ error: 'Forbidden' }, 403);
+
+    // Admin-only queue-wide view: ?viewedQueue=<department name>, e.g.
+    // "Migration" or "Dev" -- distinct from ?userId= below, which picks ONE
+    // person's personal dashboard. Returned under its own top-level
+    // "queueDashboard" key, and returned as an early exit from this whole
+    // handler, so the personal-dashboard branch below (and every existing
+    // caller of it) is completely untouched when this param is absent.
+    // Wrapped in its own block so none of its locals (including its own
+    // THIRTY_MIN_MS-equivalent constant) can collide with the personal
+    // dashboard's below.
+    {
+      const viewedQueueParam = (url.searchParams.get('viewedQueue') || '').trim();
+      if (viewedQueueParam) {
+        if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+
+        const now2 = new Date();
+        const fromParam2 = url.searchParams.get('from');
+        const toParam2 = url.searchParams.get('to');
+        // "Tickets worked" (summary stat) reuses the page's own DateRangeSelect
+        // range -- same from/to params as the personal dashboard below.
+        const statFrom = fromParam2 ? new Date(fromParam2) : new Date(now2.getTime() - 7 * 86_400_000);
+        const statTo = toParam2 ? new Date(toParam2) : now2;
+        // The week-over-week GRAPHS below always use fixed, non-calendar-aligned
+        // last-7-days vs the 7 days before that, independent of the range above
+        // (this app doesn't do Monday-aligned weeks anywhere else either).
+        const thisWeekFrom = new Date(now2.getTime() - 7 * 86_400_000);
+        const thisWeekTo = now2;
+        const lastWeekFrom = new Date(now2.getTime() - 14 * 86_400_000);
+        const lastWeekTo = thisWeekFrom;
+        const DUE_WARN_MS = 30 * 60 * 1000; // same 30-min warning window used everywhere else in this file
+
+        // Members of this queue -- resolved server-side from custom_queues
+        // across every space (never trust a client-supplied member list),
+        // exact case-insensitive name match, same convention as the existing
+        // /department-queue endpoint above.
+        const cqRows = await pool.query(`SELECT space_key, queues FROM custom_queues`);
+        const memberIdSet = new Set<string>();
+        // Which space(s) actually define a queue by this name -- if exactly
+        // one, the frontend can deep-link precisely with space+queue (same
+        // params bySourceDept/journey already use below); if the name is
+        // ambiguous across spaces, leave it null and the frontend falls back
+        // to an assignee-list link instead, same "can't always pin to one
+        // board" limitation bySourceDept/journey already accept below.
+        const matchedSpaceKeys = new Set<string>();
+        for (const row of cqRows.rows) {
+          const queues: any[] = row.queues || [];
+          for (const q of queues) {
+            if ((q.name || '').trim().toLowerCase() === viewedQueueParam.toLowerCase()) {
+              (q.memberIds || []).forEach((id: string) => memberIdSet.add(id));
+              matchedSpaceKeys.add(row.space_key);
+            }
+          }
+        }
+        const memberIds = Array.from(memberIdSet);
+        const queueSpaceKey = matchedSpaceKeys.size === 1 ? Array.from(matchedSpaceKeys)[0] : null;
+        const membersRes = memberIds.length
+          ? await pool.query(`SELECT id, "firstName", "lastName", email FROM users WHERE id = ANY($1::text[])`, [memberIds])
+          : { rows: [] as any[] };
+        const members = membersRes.rows;
+
+        // Every ticket currently sitting in this department -- the base
+        // dataset every stat/graph below is derived from. Same shape (issue +
+        // joined status) as the personal dashboard's own myIssuesRes query below.
+        // Trimmed column list instead of `i.*` -- this has no LIMIT and Dev
+        // alone currently has 15,000+ tickets in one department, some with
+        // multi-MB descriptions (base64-embedded images, flagged elsewhere in
+        // this file as a known payload-size risk). Only select what
+        // computeSLAInstancesPure and this block's own logic actually read.
+        const deptIssuesRes = await pool.query(
+          `SELECT i.id, i.key, i.cf_key, i."assigneeId", i."spaceId", i.current_department, i.priority,
+                  i."createdAt", i."resolvedAt", i."dueDate", i.dept_statuses, i.dept_sla_log,
+                  i.dept_sla_started_at, i.jira_sla_breached, i.sla_waivers,
+                  s.name AS status_name, s.category AS status_category, s.color AS status_color
+           FROM issues i
+           LEFT JOIN statuses s ON s.id = i."statusId"
+           WHERE LOWER(i.current_department) = LOWER($1)`,
+          [viewedQueueParam]
+        );
+        const deptIssues = deptIssuesRes.rows;
+        const isDeptDone = (r: any) => r.status_category === 'done';
+        const openDeptIssues = deptIssues.filter((r: any) => !isDeptDone(r));
+
+        // SLA breach state -- computeSLAInstancesPure, the SAME accurate
+        // per-ticket function the personal dashboard below and the issue
+        // detail page use (NOT a dueDate proxy). Policies + SLA-breach
+        // notification flags are batched once across every space/issue
+        // involved here, exactly like the personal dashboard does below,
+        // instead of firing one query per ticket.
+        const deptSpaceIds = Array.from(new Set(deptIssues.map((r: any) => r.spaceId).filter(Boolean)));
+        const deptPoliciesBySpace: Record<string, any[]> = {};
+        if (deptSpaceIds.length) {
+          const policyRows = await pool.query(
+            `SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`,
+            [deptSpaceIds]
+          );
+          for (const p of policyRows.rows) (deptPoliciesBySpace[p.spaceId] ??= []).push(p);
+        }
+        const deptIssueKeys = deptIssues.map((r: any) => r.cf_key || r.key).filter(Boolean);
+        const deptNotifiedKeys = new Set<string>();
+        if (deptIssueKeys.length) {
+          try {
+            const notifRows = await pool.query(
+              `SELECT DISTINCT "issueKey" FROM notifications WHERE "issueKey" = ANY($1::text[]) AND type = 'SLA_BREACH'`,
+              [deptIssueKeys]
+            );
+            for (const nr of notifRows.rows) deptNotifiedKeys.add(nr.issueKey);
+          } catch { /* notifications table may not have issueKey column */ }
+        }
+        // Most urgent applicable policy per ticket: an already-breached one
+        // first, else the soonest due -- same selection rule as below.
+        const primarySlaInstance = (r: any) => {
+          const instances = computeSLAInstancesPure(
+            { ...r, status: { name: r.status_name, category: r.status_category } },
+            deptPoliciesBySpace[r.spaceId] || [],
+            deptNotifiedKeys.has(r.cf_key || r.key),
+          );
+          if (!instances.length) return null;
+          return instances.slice().sort((a: any, b: any) => {
+            if (a.isBreached !== b.isBreached) return a.isBreached ? -1 : 1;
+            return new Date(a.dueTime).getTime() - new Date(b.dueTime).getTime();
+          })[0];
+        };
+
+        // "Currently breached" (summary stat) -- open tickets only, mirroring
+        // the personal dashboard's own slaStatus.breached convention below
+        // exactly (a resolved ticket isn't "currently" anything).
+        let currentlyBreached = 0;
+        for (const r of openDeptIssues) {
+          const primary = primarySlaInstance(r);
+          if (primary && !primary.isPaused && primary.isBreached) currentlyBreached++;
+        }
+
+        // "Due" tickets -- the separate, independently-tracked dueDate field,
+        // NOT the SLA clock (same distinction the SLA monitor job elsewhere in
+        // this file draws: "Due date approaching ... separate from SLA
+        // breach"). Already passed, or within the same 30-min warning window
+        // this app already uses everywhere else.
+        const dueTickets = openDeptIssues.filter((r: any) => {
+          if (!r.dueDate) return false;
+          return new Date(r.dueDate).getTime() - now2.getTime() <= DUE_WARN_MS;
+        }).length;
+
+        const totalQueueTickets = deptIssues.length;
+        const openCount = openDeptIssues.length;
+        const membersCount = members.length;
+
+        // Tickets worked in this dept, scoped to the page's own from/to range
+        // -- user_worked_on_tickets, the same table/columns
+        // report-dev-migration-sla.mjs already reads for this exact question.
+        const ticketsWorkedRes = await pool.query(
+          `SELECT COUNT(DISTINCT issue_id)::int AS n FROM user_worked_on_tickets
+           WHERE LOWER(dept) = LOWER($1) AND worked_at BETWEEN $2 AND $3`,
+          [viewedQueueParam, statFrom, statTo]
+        );
+        const ticketsWorked = ticketsWorkedRes.rows[0]?.n || 0;
+
+        // User-wise ticket breakdown -- one row per queue member (0 for a
+        // member currently holding none, so the bar chart always shows every
+        // member, not just the ones with tickets right now).
+        const userWiseRes = memberIds.length
+          ? await pool.query(
+              `SELECT "assigneeId", COUNT(*)::int AS cnt FROM issues
+               WHERE LOWER(current_department) = LOWER($1) AND "assigneeId" = ANY($2::text[])
+               GROUP BY "assigneeId"`,
+              [viewedQueueParam, memberIds]
+            )
+          : { rows: [] as any[] };
+        const userWiseCountByUserId: Record<string, number> = {};
+        for (const r of userWiseRes.rows) userWiseCountByUserId[r.assigneeId] = r.cnt;
+        const userWiseTickets = members.map((m: any) => ({
+          userId: m.id,
+          name: `${m.firstName || ''} ${m.lastName || ''}`.trim() || m.email || 'Unknown',
+          count: userWiseCountByUserId[m.id] || 0,
+        }));
+
+        // ── Week-over-week graphs (fixed last-7-days vs the 7 days before) ──
+
+        // 1. SLA breach rate -- bucketed by createdAt (same bucketing as
+        // "created vs resolved" below), evaluated over the FULL cohort (open +
+        // already resolved) so a ticket resolved late still counts as a
+        // breach in its week. This is deliberately a different, wider
+        // question than "currently breached" above ("of everything that
+        // arrived that week, what fraction ever breached") -- there's no
+        // historical breach snapshot anywhere in this app to answer "the
+        // breach rate as it stood a week ago" any more precisely than that.
+        const breachRateFor = (fromD: Date, toD: Date) => {
+          const cohort = deptIssues.filter((r: any) => {
+            const c = new Date(r.createdAt).getTime();
+            return c >= fromD.getTime() && c < toD.getTime();
+          });
+          if (!cohort.length) return { total: 0, breached: 0, pct: 0 };
+          let breached = 0;
+          for (const r of cohort) {
+            const primary = primarySlaInstance(r);
+            if (primary && !primary.isPaused && primary.isBreached) breached++;
+          }
+          return { total: cohort.length, breached, pct: Math.round((breached / cohort.length) * 100) };
+        };
+        const slaBreachRateLastWeek = breachRateFor(lastWeekFrom, lastWeekTo);
+        const slaBreachRateThisWeek = breachRateFor(thisWeekFrom, thisWeekTo);
+
+        // 2. Created vs resolved
+        const countCreated = (fromD: Date, toD: Date) => deptIssues.filter((r: any) => {
+          const c = new Date(r.createdAt).getTime();
+          return c >= fromD.getTime() && c < toD.getTime();
+        }).length;
+        const countResolved = (fromD: Date, toD: Date) => deptIssues.filter((r: any) => {
+          if (!r.resolvedAt) return false;
+          const c = new Date(r.resolvedAt).getTime();
+          return c >= fromD.getTime() && c < toD.getTime();
+        }).length;
+        const createdVsResolved = {
+          lastWeek: { created: countCreated(lastWeekFrom, lastWeekTo), resolved: countResolved(lastWeekFrom, lastWeekTo) },
+          thisWeek: { created: countCreated(thisWeekFrom, thisWeekTo), resolved: countResolved(thisWeekFrom, thisWeekTo) },
+        };
+
+        // 3. Per-member workload, week over week -- user_worked_on_tickets
+        // again, one query with two FILTER'd aggregates instead of two
+        // separate round trips.
+        const workloadRes = memberIds.length
+          ? await pool.query(
+              `SELECT user_id,
+                 COUNT(DISTINCT issue_id) FILTER (WHERE worked_at >= $2 AND worked_at < $3) AS this_week,
+                 COUNT(DISTINCT issue_id) FILTER (WHERE worked_at >= $4 AND worked_at < $2) AS last_week
+               FROM user_worked_on_tickets
+               WHERE LOWER(dept) = LOWER($1) AND user_id = ANY($5::text[])
+               GROUP BY user_id`,
+              [viewedQueueParam, thisWeekFrom, thisWeekTo, lastWeekFrom, memberIds]
+            )
+          : { rows: [] as any[] };
+        const workloadByUserId: Record<string, { thisWeek: number; lastWeek: number }> = {};
+        for (const r of workloadRes.rows) {
+          workloadByUserId[r.user_id] = { thisWeek: Number(r.this_week) || 0, lastWeek: Number(r.last_week) || 0 };
+        }
+        const memberWorkload = members.map((m: any) => ({
+          userId: m.id,
+          name: `${m.firstName || ''} ${m.lastName || ''}`.trim() || m.email || 'Unknown',
+          thisWeek: workloadByUserId[m.id]?.thisWeek || 0,
+          lastWeek: workloadByUserId[m.id]?.lastWeek || 0,
+        }));
+
+        return json({
+          range: { from: statFrom.toISOString(), to: statTo.toISOString() },
+          viewedQueue: viewedQueueParam,
+          queueDashboard: {
+            dept: viewedQueueParam,
+            spaceKey: queueSpaceKey,
+            memberIds,
+            summary: {
+              totalQueueTickets,
+              membersCount,
+              ticketsWorked,
+              slaBreached: currentlyBreached,
+              openTickets: openCount,
+              dueTickets,
+            },
+            userWiseTickets,
+            weekOverWeek: {
+              range: {
+                thisWeek: { from: thisWeekFrom.toISOString(), to: thisWeekTo.toISOString() },
+                lastWeek: { from: lastWeekFrom.toISOString(), to: lastWeekTo.toISOString() },
+              },
+              slaBreachRate: { lastWeek: slaBreachRateLastWeek, thisWeek: slaBreachRateThisWeek },
+              createdVsResolved,
+              memberWorkload,
+            },
+          },
+        });
+      }
+    }
+
     const requestedUserId = url.searchParams.get('userId');
     const targetUserId = (requestedUserId && isAdmin) ? requestedUserId : userId;
 
