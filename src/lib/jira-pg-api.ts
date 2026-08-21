@@ -1571,11 +1571,27 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       const startedAt = (issue as any).dept_sla_started_at
         ? new Date((issue as any).dept_sla_started_at).toISOString()
         : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
+      const resolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt) : null;
       // Remaining budget = full goal minus whatever this dept already burned
       // across earlier visits, so resuming here continues the countdown
       // instead of restarting it at the full duration.
       const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
-      const dueTime = new Date(new Date(startedAt).getTime() + remainingBudgetMs).toISOString();
+      // For a RESOLVED ticket, priorElapsedMs already includes the just-
+      // ended stint's own full duration (pauseDeptSLA folds it in the
+      // moment it resolves) -- measuring the remaining budget from
+      // startedAt (that same stint's start) then collapses the displayed
+      // due time toward (or before) the start itself as elapsed approaches
+      // the goal, e.g. a ticket resolved in 23h41m against a 24h goal
+      // showed a DUE time only 19 minutes after START instead of ~24h
+      // later. Anchoring to resolvedAt instead answers the sensible
+      // question -- "how much budget was left (or exceeded) AS OF
+      // resolving" -- and is allowed to go negative (due time before
+      // resolvedAt) to show a ticket resolved past its deadline. This is
+      // purely the DISPLAYED due time; isBreached below already compares
+      // priorElapsedMs against durationMs directly and doesn't use this.
+      const dueTime = (isResolved && resolvedAt)
+        ? new Date(resolvedAt.getTime() + (durationMs - priorElapsedMs)).toISOString()
+        : new Date(new Date(startedAt).getTime() + remainingBudgetMs).toISOString();
       // Paused SLAs are never breached — clock stopped. Resolving a ticket
       // must never ERASE a breach that already happened before it was
       // resolved -- forcing this to false unconditionally once resolved hid
@@ -1591,7 +1607,6 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       // been through. jira_sla_breached carries breach history imported
       // from Jira for tickets that were already breached before this app's
       // own SLA clock started tracking them.
-      const resolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt) : null;
       const rawIsBreached = isResolved
         ? (!!(issue as any).jira_sla_breached || priorElapsedMs >= durationMs)
         : !isPaused && new Date(dueTime) < new Date();

@@ -64,8 +64,14 @@ async function main() {
   console.log(`priorElapsedMs (logged elapsed time): ${(priorElapsedMs / 3_600_000).toFixed(2)}h`);
   console.log(`startedAt: ${startedAt.toISOString()}`);
   console.log(`remainingBudgetMs: ${(remainingBudgetMs / 3_600_000).toFixed(2)}h`);
-  console.log(`COMPUTED dueTime (with fix): ${dueTime.toISOString()}`);
-  console.log(`resolvedAt: ${row.resolvedAt ? new Date(row.resolvedAt).toISOString() : '(none)'}`);
+  console.log(`OLD dueTime formula (anchored to startedAt): ${dueTime.toISOString()}`);
+  const resolvedAtDate = row.resolvedAt ? new Date(row.resolvedAt) : null;
+  console.log(`resolvedAt: ${resolvedAtDate ? resolvedAtDate.toISOString() : '(none)'}`);
+  if (resolvedAtDate) {
+    const newDueTime = new Date(resolvedAtDate.getTime() + (durationMs - priorElapsedMs));
+    console.log(`NEW dueTime formula (anchored to resolvedAt, the actual deployed fix): ${newDueTime.toISOString()}`);
+    console.log(`(resolvedAt is ${((newDueTime.getTime() - resolvedAtDate.getTime()) / 60000).toFixed(1)} minutes ${newDueTime > resolvedAtDate ? 'before' : 'after'} the deadline)`);
+  }
   console.log(`\nSince priorElapsedMs (${(priorElapsedMs / 3_600_000).toFixed(2)}h) is already >= durationMs (${durationMs / 3_600_000}h): ${priorElapsedMs >= durationMs ? 'YES -- this ticket IS breached per the resolved-ticket formula.' : 'NO -- not breached by that check, but see remainingBudgetMs above.'}`);
 
   await pool.end();
