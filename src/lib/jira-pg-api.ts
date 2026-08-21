@@ -4146,6 +4146,7 @@ async function _handleJiraPgApi(
     const workTypeParam       = url.searchParams.get('workType');
     const productTypeParam    = url.searchParams.get('productType');
     const combinationParam    = url.searchParams.get('combination');
+    const projectPoolParam    = url.searchParams.get('projectPool');
     const testEnvParam        = url.searchParams.get('testEnvironment');
     const rootCauseParam      = url.searchParams.get('rootCause');
     const fixDescParam        = url.searchParams.get('fixDescription');
@@ -4276,6 +4277,7 @@ async function _handleJiraPgApi(
     applyMultiField(workTypeParam,       'workType');
     applyMultiField(productTypeParam,    'productType');
     applyMultiField(combinationParam,    'combination');
+    applyMultiField(projectPoolParam,    'projectPool');
     applyMultiField(testEnvParam,        'testEnvironment');
     applyMultiField(rootCauseParam,      'rootCause');
     applyMultiField(fixDescParam,        'fixDescription');
@@ -4499,6 +4501,7 @@ async function _handleJiraPgApi(
           const sentSimpleTextFields: [string | null, string][] = [
             [productTypeParam, 'productType'],
             [combinationParam, 'combination'],
+            [projectPoolParam, 'projectPool'],
             [workTypeParam, 'workType'],
             [testEnvParam, 'testEnvironment'],
             [rootCauseParam, 'rootCause'],
@@ -4621,7 +4624,7 @@ async function _handleJiraPgApi(
               testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
               customerName: row.customerName, clientName: row.clientName,
               manageClientName: row.manageClientName, customerPlan: row.customerPlan,
-              projectManager: row.projectManager,
+              projectManager: row.projectManager, projectPool: row.projectPool,
               current_department: row.current_department,
               original_dept: row.original_dept,
               dept_sla_log: row.dept_sla_log || {},
@@ -4805,6 +4808,7 @@ async function _handleJiraPgApi(
       const deptSimpleTextFields: [string | null, string][] = [
         [productTypeParam, 'productType'],
         [combinationParam, 'combination'],
+        [projectPoolParam, 'projectPool'],
         [workTypeParam, 'workType'],
         [testEnvParam, 'testEnvironment'],
         [rootCauseParam, 'rootCause'],
@@ -4987,7 +4991,7 @@ async function _handleJiraPgApi(
           testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
           customerName: row.customerName, clientName: row.clientName,
           manageClientName: row.manageClientName, customerPlan: row.customerPlan,
-          projectManager: row.projectManager,
+          projectManager: row.projectManager, projectPool: row.projectPool,
           current_department: row.current_department,
           dept_statuses: row.dept_statuses || {},
           dept_assignees: row.dept_assignees || {},

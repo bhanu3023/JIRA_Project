@@ -695,6 +695,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'combination',    label: 'Combination',     group: 'Issue' },
   { id: 'customerName',   label: 'Customer Name',   group: 'Issue' },
   { id: 'clientName',     label: 'Client Name',     group: 'Issue' },
+  { id: 'projectPool',    label: 'Project Pool',    group: 'Issue' },
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
@@ -979,6 +980,7 @@ export default function FiltersPage() {
   const [selCustomerName, setSelCustomerName] = useState('');
   const [selClientName, setSelClientName] = useState('');
   const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
+  const [selProjectPool, setSelProjectPool] = useState('');
   const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
 
   /* issues */
@@ -1016,6 +1018,7 @@ export default function FiltersPage() {
         if (key === 'customerName')   setSelCustomerName('');
         if (key === 'clientName')     setSelClientName('');
         if (key === 'projectManager') setSelProjectManager([]);
+        if (key === 'projectPool')    setSelProjectPool('');
         return prev.filter((k) => k !== key);
       }
       return [...prev, key];
@@ -1083,6 +1086,7 @@ export default function FiltersPage() {
     const rCustomerName    = urlParams?.get('rCustomerName');
     const rClientName      = urlParams?.get('rClientName');
     const rProjectManager  = urlParams?.get('rProjectManager');
+    const rProjectPool     = urlParams?.get('rProjectPool');
     const rBreached        = urlParams?.get('rBreached');
     const rQ               = urlParams?.get('rQ');
     const rExtras          = urlParams?.get('rExtras');
@@ -1104,9 +1108,26 @@ export default function FiltersPage() {
     if (rCustomerName) setSelCustomerName(rCustomerName);
     if (rClientName) setSelClientName(rClientName);
     if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
+    if (rProjectPool) setSelProjectPool(rProjectPool);
     if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
     if (rQ) setText(rQ);
-    if (rExtras) setActiveExtras(rExtras.split(','));
+    // rExtras and each field's own r* param are two SEPARATE pieces of
+    // persisted state -- a URL that sets e.g. rProjectManager without also
+    // listing 'projectManager' in rExtras (an older saved link, a deep-link
+    // built elsewhere in the app that only set the value param) silently
+    // restored the filter value while leaving its chip inactive, which in
+    // turn made the Export button drop that field's column with no visible
+    // sign anything was wrong. Whichever of these r* params is present
+    // always implies its chip should be active too, regardless of what
+    // rExtras itself says.
+    const impliedExtras = [
+      rProductType && 'productType', rCombination && 'combination', rCustomerName && 'customerName',
+      rClientName && 'clientName', rProjectManager && 'projectManager', rProjectPool && 'projectPool',
+      rDueDate && 'dueDate',
+    ].filter(Boolean) as string[];
+    if (rExtras || impliedExtras.length) {
+      setActiveExtras(Array.from(new Set([...(rExtras ? rExtras.split(',') : []), ...impliedExtras])));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1138,11 +1159,12 @@ export default function FiltersPage() {
     if (selCustomerName) p.rCustomerName = selCustomerName;
     if (selClientName) p.rClientName = selClientName;
     if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
+    if (selProjectPool) p.rProjectPool = selProjectPool;
     if (selBreached) p.rBreached = selBreached;
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1184,7 +1206,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selDueDate || selWorked || selDepartment ||
-    selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selBreached,
+    selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selProjectPool || selBreached,
   );
 
   // Builds the filter params both the live table and the CSV export send —
@@ -1266,13 +1288,14 @@ export default function FiltersPage() {
         // Joined with a delimiter that won't collide with commas already inside a
         // stored value (e.g. "Abhishikth, Abhishek" naming two people as one value).
         if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
+        if (selProjectPool)    params.projectPool    = selProjectPool;
         if (selBreached) params.slaBreached = selBreached;
 
         // Text search
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selBreached, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, text]);
 
   /* fetch issues — all filtering done server-side for accuracy */
   const fetchIssues = useCallback(() => {
@@ -1317,6 +1340,7 @@ export default function FiltersPage() {
     combination:    { label: 'Combination',     getValue: (i) => i.combination ?? '' },
     customerName:   { label: 'Customer Name',   getValue: (i) => i.customerName ?? '' },
     clientName:     { label: 'Client Name',     getValue: (i) => i.clientName ?? '' },
+    projectPool:    { label: 'Project Pool',    getValue: (i) => i.projectPool ?? '' },
     dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
   };
   const handleExport = async () => {
@@ -1326,7 +1350,30 @@ export default function FiltersPage() {
       const params = { ...buildFilterParams(), page: '1', limit: String(EXPORT_LIMIT) };
       const { issues: rows, total: matchedTotal } = await api.getIssues(params);
       const list = rows as any[];
-      const extraCols = activeExtras.filter((id) => EXPORT_EXTRA_COLUMNS[id]);
+      // Which extra fields actually have a selected value right now -- a
+      // field the user is genuinely filtering on must show up as a column
+      // even if activeExtras (the "More filters" chip-visibility list,
+      // restored wholesale from the rExtras URL param on page load) doesn't
+      // happen to list it. That desync is real: a chip's value state
+      // (selProjectManager etc.) and activeExtras are two separately
+      // persisted/restored pieces of state (rProjectManager vs rExtras) --
+      // a URL that sets one without the other (an older saved link, a
+      // deep-link built elsewhere in the app) left the filter itself
+      // working (the value still gets sent to the server) while silently
+      // dropping the column from every export, with no visible sign
+      // anything was wrong. Union instead of relying on activeExtras alone.
+      const fieldsWithSelectedValue = {
+        productType: selProductType.length > 0,
+        combination: !!selCombination,
+        customerName: !!selCustomerName,
+        clientName: !!selClientName,
+        projectManager: selProjectManager.length > 0,
+        projectPool: !!selProjectPool,
+        dueDate: !!selDueDate,
+      };
+      const extraCols = Object.keys(EXPORT_EXTRA_COLUMNS).filter(
+        (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
+      );
       const header = [
         'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department',
         'Created', 'Updated',
@@ -1388,6 +1435,7 @@ export default function FiltersPage() {
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
     setSelDepartment(''); setSelProductType([]);
     setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager([]);
+    setSelProjectPool('');
     setSelBreached('');
     setActiveExtras([]);
     setActiveFilterId(null);
@@ -1800,6 +1848,12 @@ export default function FiltersPage() {
               <div className="flex items-center gap-1">
                 <TextFilterBtn label="Client Name" value={selClientName} onChange={setSelClientName} />
                 <button onClick={() => toggleExtra('clientName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('projectPool') && (
+              <div className="flex items-center gap-1">
+                <TextFilterBtn label="Project Pool" value={selProjectPool} onChange={setSelProjectPool} />
+                <button onClick={() => toggleExtra('projectPool')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('projectManager') && (
