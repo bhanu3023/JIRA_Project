@@ -265,6 +265,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [combinationError, setCombinationError]     = useState(false);
   const [productTypeError, setProductTypeError]     = useState(false);
   const [projectManagerError, setProjectManagerError] = useState(false);
+  const [projectPoolError, setProjectPoolError]       = useState(false);
   // Admin-configured custom fields (e.g. "Project Pool") each carry their own
   // `required` flag from Settings > Custom Fields, but nothing here ever
   // read it -- the field rendered with no asterisk and Create succeeded even
@@ -415,6 +416,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingCombination    = showMigrationFields && form.combination.length === 0;
     const missingProductType    = showMigrationFields && form.productType.length === 0;
     const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !skipsProjectManager;
+    const missingProjectPool    = showMigrationFields && !form.projectPool.trim();
     const missingCustomFields = createIssueFields.filter((cf: any) => cf.required && !String(customFieldValues[cf.id] || '').trim());
 
     setSummaryError(missingSummary);
@@ -422,15 +424,17 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     setCombinationError(missingCombination);
     setProductTypeError(missingProductType);
     setProjectManagerError(missingProjectManager);
+    setProjectPoolError(missingProjectPool);
     setCustomFieldErrors(Object.fromEntries(missingCustomFields.map((cf: any) => [cf.id, true])));
 
-    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager || missingCustomFields.length > 0) {
+    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager || missingProjectPool || missingCustomFields.length > 0) {
       const missingLabels = [
         missingSummary && 'Summary',
         missingQueue && 'Queue',
         missingCombination && 'Combination',
         missingProductType && 'Product Type',
         missingProjectManager && 'Project Manager',
+        missingProjectPool && 'Project Pool',
         ...missingCustomFields.map((cf: any) => cf.name),
       ].filter(Boolean);
       setError(`Please fill in the required field${missingLabels.length > 1 ? 's' : ''}: ${missingLabels.join(', ')}`);
@@ -493,6 +497,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
     if (field === 'productType' && Array.isArray(value) && value.length > 0) setProductTypeError(false);
     if (field === 'projectManager' && Array.isArray(value) && value.length > 0) setProjectManagerError(false);
+    if (field === 'projectPool' && value) setProjectPoolError(false);
   };
 
   const selectedAssignee = spaceMembers.find(m => m.id === form.assigneeId);
@@ -686,16 +691,27 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
                 {/* Project Pool */}
                 <div className="mb-4">
-                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Project Pool</label>
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                    Project Pool <span className="text-red-500">*</span>
+                  </label>
                   <select
                     value={form.projectPool}
                     onChange={e => update('projectPool', e.target.value)}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    className={cn(
+                      "w-full rounded-lg border px-3 py-2 text-[13px] focus:outline-none focus:ring-2 bg-white",
+                      projectPoolError ? 'border-red-300 ring-2 ring-red-300 focus:ring-red-300' : 'border-gray-300 focus:ring-blue-500',
+                    )}
                   >
                     <option value="">Select Project Pool</option>
                     <option value="ENT">ENT</option>
                     <option value="SMB">SMB</option>
                   </select>
+                  {projectPoolError && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 font-medium">Project Pool is required</p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Project Manager */}
