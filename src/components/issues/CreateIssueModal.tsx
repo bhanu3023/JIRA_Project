@@ -251,6 +251,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     type: 'task', priority: 'medium',
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
     productType: [] as string[], projectManager: [] as string[], productionTicket: '',
+    projectPool: '',
   });
   // One independent rich-text value per Migration section (see
   // MIGRATION_SECTION_LABELS above for why these are separate editors
@@ -457,6 +458,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         productType: form.productType.length > 0 ? form.productType.join(', ') : undefined,
         projectManager: form.projectManager.length > 0 ? form.projectManager.join(', ') : undefined,
         productionTicket: form.productionTicket || undefined,
+        projectPool: form.projectPool || undefined,
         ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
       });
       // Save custom field values
@@ -670,6 +672,20 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     <option value="">Select Production Ticket</option>
                     <option value="Operational Support">Operational Support</option>
                     <option value="Code Fixes">Code Fixes</option>
+                  </select>
+                </div>
+
+                {/* Project Pool */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Project Pool</label>
+                  <select
+                    value={form.projectPool}
+                    onChange={e => update('projectPool', e.target.value)}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                  >
+                    <option value="">Select Project Pool</option>
+                    <option value="ENT">ENT</option>
+                    <option value="SMB">SMB</option>
                   </select>
                 </div>
 

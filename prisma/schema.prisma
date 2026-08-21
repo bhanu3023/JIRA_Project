@@ -122,6 +122,7 @@ model Issue {
   clientName       String?
   projectManager   String?
   productionTicket String?
+  projectPool      String?
 
   dueDate   DateTime?
   cf_key    String?   @map("cf_key")

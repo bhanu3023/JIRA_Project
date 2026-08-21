@@ -34,6 +34,10 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).cat
 // actually lands on the production table -- mirror it here so it reaches
 // prod on the next deploy regardless.
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "productionTicket" TEXT`).catch(() => {});
+// Project Pool (ENT / SMB) -- same belt-and-suspenders idempotent ALTER TABLE
+// as productionTicket above, so this column exists on every deploy
+// regardless of whether a formal Prisma migration for it has actually run.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "projectPool" TEXT`).catch(() => {});
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMP(3)`).catch(() => {});
 
 // Deleted-ticket trash: DELETE /issues/:key used to be a genuine hard
@@ -2131,6 +2135,7 @@ function formatIssue(issue: any) {
     clientName: issue.clientName ?? null,
     projectManager: issue.projectManager ?? null,
     productionTicket: issue.productionTicket ?? null,
+    projectPool: issue.projectPool ?? null,
     comments,
     commentCount: comments.length,
     attachments: [],
@@ -5308,6 +5313,7 @@ async function _handleJiraPgApi(
           : autoClientName ? { clientName: autoClientName } : {}),
         ...(body.projectManager !== undefined && { projectManager: body.projectManager ? String(body.projectManager) : null }),
         ...(body.productionTicket !== undefined && { productionTicket: body.productionTicket ? String(body.productionTicket) : null }),
+        ...(body.projectPool !== undefined && { projectPool: body.projectPool ? String(body.projectPool) : null }),
       },
       include: {
         status: true,
@@ -6695,6 +6701,7 @@ async function _handleJiraPgApi(
     if (body.clientName !== undefined) data.clientName = body.clientName === null ? null : String(body.clientName);
     if (body.projectManager !== undefined) data.projectManager = body.projectManager === null ? null : String(body.projectManager);
     if (body.productionTicket !== undefined) data.productionTicket = body.productionTicket === null ? null : String(body.productionTicket);
+    if (body.projectPool !== undefined) data.projectPool = body.projectPool === null ? null : String(body.projectPool);
     // Was read by POST /issues (creation) but never by this PATCH handler --
     // the ticket detail page's due-date editor called this endpoint and got
     // a 200 back with no error, but the edit was silently dropped every
