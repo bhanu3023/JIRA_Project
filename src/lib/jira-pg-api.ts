@@ -8944,13 +8944,40 @@ async function _handleJiraPgApi(
           if (handoffKey) cats[handoffKey]++;
         }
 
+        // Week-over-week "created"/"resolved"/"breach rate" further below
+        // must NOT be scoped to current_department the way the "current
+        // holdings" stats above are -- a ticket this queue actually created
+        // this week, then handed off to another department before this page
+        // was ever loaded, would silently vanish from "created this week"
+        // (and from the breach-rate cohort) if scoped that way, undercounting
+        // both and drifting further the faster tickets get routed away.
+        // original_dept is set at creation time and reliably backfilled for
+        // older rows (see the ALTER TABLE/backfill near the top of this
+        // file), so COALESCE(original_dept, current_department) answers
+        // "did this ticket ever belong to this queue" regardless of where it
+        // sits now -- same fallback pattern the personal dashboard's
+        // bySourceDept already uses below for the same column.
+        const originDeptIssuesRes = await pool.query(
+          `SELECT i.id, i.key, i.cf_key, i."assigneeId", i."spaceId", i.current_department, i.priority,
+                  i."createdAt", i."resolvedAt", i.dept_sla_log, i.dept_sla_started_at,
+                  i.jira_sla_breached, i.sla_waivers,
+                  s.name AS status_name, s.category AS status_category
+           FROM issues i
+           LEFT JOIN statuses s ON s.id = i."statusId"
+           WHERE LOWER(COALESCE(i.original_dept, i.current_department)) = LOWER($1)`,
+          [viewedQueueParam]
+        );
+        const originDeptIssues = originDeptIssuesRes.rows;
+
         // SLA breach state -- computeSLAInstancesPure, the SAME accurate
         // per-ticket function the personal dashboard below and the issue
         // detail page use (NOT a dueDate proxy). Policies + SLA-breach
         // notification flags are batched once across every space/issue
-        // involved here, exactly like the personal dashboard does below,
-        // instead of firing one query per ticket.
-        const deptSpaceIds = Array.from(new Set(deptIssues.map((r: any) => r.spaceId).filter(Boolean)));
+        // involved here (both the current-holdings cohort above and the
+        // origin-scoped cohort below share this one lookup), exactly like
+        // the personal dashboard does further down, instead of firing one
+        // query per ticket.
+        const deptSpaceIds = Array.from(new Set([...deptIssues, ...originDeptIssues].map((r: any) => r.spaceId).filter(Boolean)));
         const deptPoliciesBySpace: Record<string, any[]> = {};
         if (deptSpaceIds.length) {
           const policyRows = await pool.query(
@@ -8959,7 +8986,7 @@ async function _handleJiraPgApi(
           );
           for (const p of policyRows.rows) (deptPoliciesBySpace[p.spaceId] ??= []).push(p);
         }
-        const deptIssueKeys = deptIssues.map((r: any) => r.cf_key || r.key).filter(Boolean);
+        const deptIssueKeys = Array.from(new Set([...deptIssues, ...originDeptIssues].map((r: any) => r.cf_key || r.key).filter(Boolean)));
         const deptNotifiedKeys = new Set<string>();
         if (deptIssueKeys.length) {
           try {
@@ -8975,6 +9002,35 @@ async function _handleJiraPgApi(
         const primarySlaInstance = (r: any) => {
           const instances = computeSLAInstancesPure(
             { ...r, status: { name: r.status_name, category: r.status_category } },
+            deptPoliciesBySpace[r.spaceId] || [],
+            deptNotifiedKeys.has(r.cf_key || r.key),
+          );
+          if (!instances.length) return null;
+          return instances.slice().sort((a: any, b: any) => {
+            if (a.isBreached !== b.isBreached) return a.isBreached ? -1 : 1;
+            return new Date(a.dueTime).getTime() - new Date(b.dueTime).getTime();
+          })[0];
+        };
+
+        // Same as primarySlaInstance above, but forces the evaluation onto
+        // THIS SPECIFIC department (viewedQueueParam) instead of whichever
+        // department the ticket currently sits in. Needed for the
+        // originDeptIssues cohort below: computeSLAInstancesPure derives
+        // which policies apply and which dept_sla_log entry to read from
+        // `current_department`, so a ticket that's already moved on to
+        // another department would otherwise get judged against THAT
+        // department's SLA -- e.g. counting a ticket Migration created and
+        // handed to Dev as a "Dev breach" instead of (or as well as)
+        // Migration's own, independently-tracked breach for the time it
+        // actually spent here. Overriding current_department on a shallow
+        // clone is safe and correct: dept_sla_log is keyed by real
+        // department names regardless of which one is "current", and this
+        // exact department-locking behavior (a department's own breach
+        // freezing once a ticket leaves it) was already verified against
+        // production data earlier this session.
+        const primarySlaInstanceForQueue = (r: any) => {
+          const instances = computeSLAInstancesPure(
+            { ...r, current_department: viewedQueueParam, status: { name: r.status_name, category: r.status_category } },
             deptPoliciesBySpace[r.spaceId] || [],
             deptNotifiedKeys.has(r.cf_key || r.key),
           );
@@ -9082,6 +9138,14 @@ async function _handleJiraPgApi(
         });
 
         // ── Week-over-week graphs (fixed last-7-days vs the 7 days before) ──
+        // All three below read from originDeptIssues (ever belonged to this
+        // queue, via original_dept) rather than deptIssues (current holdings
+        // only) -- otherwise a ticket this queue created and already handed
+        // off before the page loads would silently disappear from "created
+        // this week" and from the breach-rate cohort. Breach checks use
+        // primarySlaInstanceForQueue so a moved-on ticket is still judged
+        // against THIS queue's own SLA/dept_sla_log, not whichever
+        // department it currently sits in.
 
         // 1. SLA breach rate -- bucketed by createdAt (same bucketing as
         // "created vs resolved" below), evaluated over the FULL cohort (open +
@@ -9092,14 +9156,14 @@ async function _handleJiraPgApi(
         // historical breach snapshot anywhere in this app to answer "the
         // breach rate as it stood a week ago" any more precisely than that.
         const breachRateFor = (fromD: Date, toD: Date) => {
-          const cohort = deptIssues.filter((r: any) => {
+          const cohort = originDeptIssues.filter((r: any) => {
             const c = new Date(r.createdAt).getTime();
             return c >= fromD.getTime() && c < toD.getTime();
           });
           if (!cohort.length) return { total: 0, breached: 0, pct: 0 };
           let breached = 0;
           for (const r of cohort) {
-            const primary = primarySlaInstance(r);
+            const primary = primarySlaInstanceForQueue(r);
             if (primary && !primary.isPaused && primary.isBreached) breached++;
           }
           return { total: cohort.length, breached, pct: Math.round((breached / cohort.length) * 100) };
@@ -9108,11 +9172,11 @@ async function _handleJiraPgApi(
         const slaBreachRateThisWeek = breachRateFor(thisWeekFrom, thisWeekTo);
 
         // 2. Created vs resolved
-        const countCreated = (fromD: Date, toD: Date) => deptIssues.filter((r: any) => {
+        const countCreated = (fromD: Date, toD: Date) => originDeptIssues.filter((r: any) => {
           const c = new Date(r.createdAt).getTime();
           return c >= fromD.getTime() && c < toD.getTime();
         }).length;
-        const countResolved = (fromD: Date, toD: Date) => deptIssues.filter((r: any) => {
+        const countResolved = (fromD: Date, toD: Date) => originDeptIssues.filter((r: any) => {
           if (!r.resolvedAt) return false;
           const c = new Date(r.resolvedAt).getTime();
           return c >= fromD.getTime() && c < toD.getTime();
@@ -9164,7 +9228,7 @@ async function _handleJiraPgApi(
         const memberWeekStats = (fromD: Date, toD: Date) => {
           const byMember: Record<string, { breached: number; inProgress: number; open: number }> = {};
           for (const id of memberIds) byMember[id] = { breached: 0, inProgress: 0, open: 0 };
-          const cohort = deptIssues.filter((r: any) => {
+          const cohort = originDeptIssues.filter((r: any) => {
             const c = new Date(r.createdAt).getTime();
             return c >= fromD.getTime() && c < toD.getTime();
           });
@@ -9175,7 +9239,7 @@ async function _handleJiraPgApi(
               byMember[aid].open++;
               if (isDeptInProgress(r)) byMember[aid].inProgress++;
             }
-            const primary = primarySlaInstance(r);
+            const primary = primarySlaInstanceForQueue(r);
             if (primary && !primary.isPaused && primary.isBreached) byMember[aid].breached++;
           }
           return byMember;

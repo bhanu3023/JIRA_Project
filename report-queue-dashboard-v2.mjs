@@ -127,6 +127,20 @@ async function main() {
   console.log('\n---------- Compare mode: "Open" per member, week over week ----------');
   console.log('Definition: tickets created in that week, not in a "done" status AS OF NOW.');
   console.log('(matches the tradeoff documented in jira-pg-api.ts -- no historical snapshot exists)');
+  // The real endpoint scopes this to original_dept (COALESCE'd to
+  // current_department), not current_department alone -- otherwise a
+  // ticket this queue created and has since handed off would silently drop
+  // out of "created this week" / this comparison. Separate query, matching
+  // the fix in jira-pg-api.ts, rather than reusing `issues` above (which is
+  // deliberately current-holdings-only, for the In Progress/Resolved/
+  // Waiting-for-X section above).
+  const originIssuesRes = await pool.query(
+    `SELECT i."assigneeId", i."createdAt", s.category AS status_category
+     FROM issues i LEFT JOIN statuses s ON s.id = i."statusId"
+     WHERE LOWER(COALESCE(i.original_dept, i.current_department)) = LOWER($1)`,
+    [dept]
+  );
+  const originIssues = originIssuesRes.rows;
   const now = Date.now();
   const thisWeekFrom = now - 7 * 86_400_000;
   const lastWeekFrom = now - 14 * 86_400_000;
@@ -134,11 +148,11 @@ async function main() {
   const openForWeek = (fromMs, toMs) => {
     const byMember = {};
     for (const id of memberIdList) byMember[id] = 0;
-    for (const r of issues) {
+    for (const r of originIssues) {
       const aid = r.assigneeId;
       if (!aid || !(aid in byMember)) continue;
       const c = new Date(r.createdAt).getTime();
-      if (c >= fromMs && c < toMs && !isDone(r)) byMember[aid]++;
+      if (c >= fromMs && c < toMs && r.status_category !== 'done') byMember[aid]++;
     }
     return byMember;
   };
