@@ -18,7 +18,14 @@ import {
   LayoutDashboard, Users, X, GitCompare,
 } from 'lucide-react';
 
+// 'total' is the default -- shows every member's all-time numbers with no
+// date filter applied at all, so the table has something meaningful to show
+// the moment it loads. The three fixed windows below remain purely opt-in:
+// picking one re-scopes "Tickets Worked"/"Resolved" down to that window,
+// same as before -- nothing about how those two columns compute changes,
+// only what `from` gets sent as when the user hasn't picked a window yet.
 const DATE_RANGE_OPTIONS = [
+  { key: 'total', label: 'Total', days: null },
   { key: 'today', label: 'Today', days: 0 },
   { key: '7d', label: 'Last 7 Days', days: 7 },
   { key: '30d', label: 'Last 30 Days', days: 30 },
@@ -470,7 +477,7 @@ function QueueDashboardView({ data, dateRangeLabel, lastSyncedAt }: { data: any;
               <p className="mt-0.5 text-[10.5px] text-gray-400">
                 {compareMode
                   ? 'Last 7 days vs the 7 days before, per member'
-                  : `One row per queue member${dateRangeLabel ? ` — "Tickets Worked" and "Resolved" scoped to ${dateRangeLabel}; In Progress / Waiting for X reflect current holdings` : ''}`}
+                  : `One row per queue member — "Tickets Worked" and "Resolved" ${dateRangeLabel === 'Total' ? 'show all-time totals' : `scoped to ${dateRangeLabel || 'range'}`}; In Progress / Waiting for X reflect current holdings`}
               </p>
             </div>
             {/* Compare toggle -- flips the table below between the normal
@@ -644,7 +651,7 @@ export default function MyDashboardPage() {
   // sent to the backend as ?viewedQueue=. Also doubles as the active
   // top-level tab key ('' = "My Dashboard").
   const [viewedQueueDept, setViewedQueueDept] = useState<string>('');
-  const [dateRangeKey, setDateRangeKey] = useState<DateRangeKey>('7d');
+  const [dateRangeKey, setDateRangeKey] = useState<DateRangeKey>('total');
   // Bumped to the completion time of every successful fetch while a queue
   // dashboard is active (including each 10s poll tick below) — purely so
   // QueueDashboardView's SyncIndicator can show it's really still syncing,
@@ -690,7 +697,13 @@ export default function MyDashboardPage() {
     const load = (isPoll: boolean) => {
       if (!isPoll) setLoading(true);
       const to = new Date();
-      const from = dateRangeKey === 'today'
+      // 'total' sends the widest possible `from` instead of omitting the
+      // param -- the backend already treats a missing/absent from as "last 7
+      // days" (its own default), so leaving it out here would silently give
+      // "Total" the exact same window as "Last 7 Days" instead of everything.
+      const from = dateRangeKey === 'total'
+        ? new Date(0)
+        : dateRangeKey === 'today'
         ? new Date(to.getFullYear(), to.getMonth(), to.getDate())
         : new Date(to.getTime() - (dateRangeKey === '30d' ? 30 : 7) * 86_400_000);
       return api.getMyDashboard({

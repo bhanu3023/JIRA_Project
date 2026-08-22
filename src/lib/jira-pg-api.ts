@@ -9348,8 +9348,19 @@ async function _handleJiraPgApi(
     const rangeTo = toParam ? new Date(toParam) : now;
 
     const [myIssuesRes, allSpacesRes] = await Promise.all([
+      // Trimmed column list instead of `i.*` -- same reasoning as the queue
+      // dashboard's own deptIssuesRes a bit further down in this file: `i.*`
+      // pulls every ticket's full raw description (some with multi-MB
+      // base64-embedded images) for every ticket ever assigned to this user,
+      // with no LIMIT. For someone with years of resolved tickets, that's a
+      // real, measurable amount of payload this endpoint never actually
+      // reads -- everything below only touches the columns selected here.
       pool.query(
-        `SELECT i.*, s.name AS status_name, s.category AS status_category, s.color AS status_color
+        `SELECT i.id, i.key, i.cf_key, i."spaceId", i.current_department, i.original_dept,
+                i.priority, i."statusId", i."createdAt", i."resolvedAt",
+                i.dept_statuses, i.dept_sla_log, i.dept_sla_started_at,
+                i.jira_sla_breached, i.sla_waivers,
+                s.name AS status_name, s.category AS status_category, s.color AS status_color
          FROM issues i
          LEFT JOIN statuses s ON s.id = i."statusId"
          WHERE i."assigneeId" = $1`,
