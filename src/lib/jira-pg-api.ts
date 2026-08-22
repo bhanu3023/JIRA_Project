@@ -8951,6 +8951,21 @@ async function _handleJiraPgApi(
           memberStatusCounts[id] = {};
           memberCatCounts[id] = { resolved: 0, inProgress: 0, waitingForDev: 0, waitingForPreSales: 0, waitingForQA: 0, waitingForInfra: 0 };
         }
+        // "Resolved" is the one column here that reads as a date-range stat
+        // to anyone looking at this table right under the page's own date
+        // filter (e.g. "Last 7 Days") -- but it was counting every ticket
+        // EVER resolved that still happens to sit in this department,
+        // regardless of when, which is how one person ended up showing
+        // "223 resolved" under a 7-day filter. Scope it to resolvedAt
+        // actually falling in [statFrom, statTo], same window "Tickets
+        // Worked" already uses. In Progress and the four "Waiting for X"
+        // columns are left as true current-holdings snapshots -- there's no
+        // equivalent "when did this become true" timestamp for an ongoing
+        // status the way there is for a one-time resolution event, so a
+        // "some point during the range" definition for those would need
+        // real status-history data this endpoint doesn't have.
+        const statFromMs = statFrom.getTime();
+        const statToMs = statTo.getTime();
         for (const r of deptIssues) {
           const aid = r.assigneeId;
           if (!aid || !memberCatCounts[aid]) continue;
@@ -8959,8 +8974,10 @@ async function _handleJiraPgApi(
           if (!bucket[name]) bucket[name] = { count: 0, color: r.status_color || '#94A3B8' };
           bucket[name].count++;
           const cats = memberCatCounts[aid];
-          if (isDeptDone(r)) cats.resolved++;
-          else if (isDeptInProgress(r)) cats.inProgress++;
+          if (isDeptDone(r)) {
+            const resolvedMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null;
+            if (resolvedMs !== null && resolvedMs >= statFromMs && resolvedMs <= statToMs) cats.resolved++;
+          } else if (isDeptInProgress(r)) cats.inProgress++;
           const handoffKey = WAITING_HANDOFF_STATUS_NAMES[name.trim().toLowerCase()];
           if (handoffKey) cats[handoffKey]++;
         }

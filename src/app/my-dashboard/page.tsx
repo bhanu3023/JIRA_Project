@@ -470,7 +470,7 @@ function QueueDashboardView({ data, dateRangeLabel, lastSyncedAt }: { data: any;
               <p className="mt-0.5 text-[10.5px] text-gray-400">
                 {compareMode
                   ? 'Last 7 days vs the 7 days before, per member'
-                  : `One row per queue member${dateRangeLabel ? ` — "Tickets Worked" scoped to ${dateRangeLabel}` : ''}`}
+                  : `One row per queue member${dateRangeLabel ? ` — "Tickets Worked" and "Resolved" scoped to ${dateRangeLabel}; In Progress / Waiting for X reflect current holdings` : ''}`}
               </p>
             </div>
             {/* Compare toggle -- flips the table below between the normal
