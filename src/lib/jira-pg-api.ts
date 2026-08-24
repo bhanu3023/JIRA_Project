@@ -4978,7 +4978,31 @@ async function _handleJiraPgApi(
            LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
           rowParams
         );
-        enrichedIssues = rows.rows.map((row: any) => formatIssue({
+        enrichedIssues = rows.rows.map((row: any) => {
+          // "Queue: Infra" + a "Worked" date filter is asking "who from Infra
+          // worked this while it sat here" -- but the row's assignee_id/name
+          // above always came from the ticket's CURRENT global assigneeId,
+          // whoever holds it now (possibly a different department entirely,
+          // after further handoffs). A ticket Ravi Teja worked in Infra and
+          // that later got handed to Dev showed the Dev person's name here
+          // instead of his, even though the whole point of filtering by
+          // Queue+Worked is to see Infra's own history. Same "prefer the
+          // per-dept assignee snapshot" fix already applied to the Worked-On
+          // sidebar list further up in this file (see the comment there) --
+          // just never extended to this, the main Filters-page list. Only
+          // applies in the workedRange case; every other caller of this
+          // branch (All Tickets, Unassigned, Assigned to me, ...) still means
+          // "whoever holds it right now" and is deliberately left alone.
+          let assigneeOverride: { id: string; firstName: string; lastName: string; email: string | null; avatarUrl: string | null } | null = null;
+          if (workedRange) {
+            const deptAssignees: Record<string, any> = row.dept_assignees || {};
+            const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
+            const snap = snapKey ? deptAssignees[snapKey] : null;
+            if (snap?.id) {
+              assigneeOverride = { id: snap.id, firstName: snap.firstName || '', lastName: snap.lastName || '', email: snap.email || null, avatarUrl: snap.avatarUrl || avatarRef(snap.id, null) };
+            }
+          }
+          return formatIssue({
           // Truncated — see comment above the other formatIssue list call site.
           // This branch's SELECT i.* pulls the full raw description for every
           // row; a single legacy ticket with a base64-embedded image in it can
@@ -5001,12 +5025,13 @@ async function _handleJiraPgApi(
           jira_sla_due_at: row.jira_sla_due_at,
           jira_sla_start_at: row.jira_sla_start_at,
           status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
-          assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null,
+          assignee: assigneeOverride || (row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null),
           reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) } : null,
           jira_assignee_name: row.jira_assignee_name || null,
           jira_reporter_name: row.jira_reporter_name || null,
           space: { key: row.space_key || spaceKey },
-        }));
+        });
+        });
       } catch { /* keep Prisma results as fallback */ }
     }
 
