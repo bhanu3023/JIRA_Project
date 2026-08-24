@@ -468,7 +468,7 @@ export default function Header() {
           members={(defaultSpace as any)?.members || []}
           initialDept={headerInitialDept}
           onClose={() => setShowCreateModal(false)}
-          onCreated={() => {
+          onCreated={(newIssue) => {
             setShowCreateModal(false);
             // Don't call loadIssues here — this component doesn't know the exact
             // params (dept/queue/filters/page) of whatever list view is on screen,
@@ -476,6 +476,8 @@ export default function Header() {
             // it with unfiltered data. Bump the shared version instead so the
             // mounted list view refetches with its own correct params.
             bumpIssuesVersion();
+            const navKey = newIssue?.cfKey || newIssue?.cf_key || newIssue?.key;
+            if (navKey) router.push(`/issues/${navKey}`);
           }}
         />
       )}

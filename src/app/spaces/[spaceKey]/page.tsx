@@ -167,7 +167,6 @@ function SpaceDetailContent() {
   const DEFAULT_COLS = ['reporter','assignee','priority','status','created'];
 
   const [showCreate, setShowCreate] = useState(false);
-  const [createdToast, setCreatedToast] = useState<{ key: string; cfKey: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   // Component-local fetch state — never gets stuck because cleanup always resets it
   const [isFetching, setIsFetching] = useState(false);
@@ -3422,48 +3421,14 @@ function SpaceDetailContent() {
           onCreated={(newIssue) => {
             setShowCreate(false);
             const navKey = newIssue?.cfKey || newIssue?.cf_key || newIssue?.key;
-            if (navKey) {
-              setCreatedToast({ key: newIssue.key, cfKey: navKey });
-              setTimeout(() => setCreatedToast(null), 10000);
-            }
-            // Stay on current queue — just refresh the list via the main load
-            // effect's own params instead of a partial rebuild here.
+            // Refresh the queue list in the background so it's already
+            // correct if/when the user navigates back to it.
             clearIssuesCache();
             bumpIssuesVersion();
+            if (navKey) {
+              router.push(`/issues/${navKey}`);
+            }
           }} />
-      )}
-
-      {/* Bottom-left creation toast */}
-      {createdToast && (
-        <div className="fixed bottom-6 left-6 z-50 flex items-center gap-3 bg-gray-900 text-white px-4 py-3 rounded-xl shadow-2xl animate-slide-up">
-          <div className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" />
-          <span className="text-sm">Ticket created:</span>
-          <span className="text-sm font-bold font-mono text-green-300">{createdToast.cfKey}</span>
-          <button
-            onClick={() => {
-              const text = createdToast.cfKey;
-              const doCopy = () => {
-                if (navigator.clipboard) {
-                  navigator.clipboard.writeText(text).catch(() => {
-                    const el = document.createElement('textarea');
-                    el.value = text; document.body.appendChild(el); el.select();
-                    document.execCommand('copy'); document.body.removeChild(el);
-                  });
-                } else {
-                  const el = document.createElement('textarea');
-                  el.value = text; document.body.appendChild(el); el.select();
-                  document.execCommand('copy'); document.body.removeChild(el);
-                }
-              };
-              doCopy();
-              setCreatedToast(t => t ? { ...t, copied: true } : t);
-              setTimeout(() => setCreatedToast(t => t ? { ...t, copied: false } : t), 2000);
-            }}
-            className={`ml-1 px-2 py-0.5 text-xs rounded-md transition-colors ${(createdToast as any).copied ? 'bg-green-500 text-white' : 'bg-white/10 hover:bg-white/20'}`}
-            title="Copy ticket key"
-          >{(createdToast as any).copied ? '✓ Copied!' : 'Copy'}</button>
-          <button onClick={() => setCreatedToast(null)} className="ml-1 text-white/50 hover:text-white text-lg leading-none">×</button>
-        </div>
       )}
 
       {/* Assignee required popup */}
