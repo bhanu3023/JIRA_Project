@@ -931,10 +931,16 @@ export default function IssueDetailPage() {
 
   // Combination / Product Type / Project Manager must be filled before resolving a ticket
   // OR moving it to another department — shared by handleStatusChange and department change.
+  // Infra tickets skip these three the same way CreateIssueModal already
+  // exempts them at creation time (skipsInfraOptionalFields there) -- this
+  // resolve-time check was never updated to match, so an Infra ticket could
+  // be created with those fields correctly left blank and then get
+  // permanently stuck unresolvable the moment someone tried to close it.
   const getMissingCoreFields = (): string[] => {
     if (isMandatoryFieldsExemptDept()) return [];
+    const isInfraDept = ((issue as any)?.current_department || '').trim().toLowerCase() === 'infra';
     const missing: string[] = [];
-    const alwaysRequired: { name: string; key: string }[] = [
+    const alwaysRequired: { name: string; key: string }[] = isInfraDept ? [] : [
       { name: 'Project Manager', key: 'projectManager' },
       { name: 'Product Type',    key: 'productType'    },
       { name: 'Combination',     key: 'combination'    },
