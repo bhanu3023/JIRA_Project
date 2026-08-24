@@ -2,7 +2,9 @@
  * Next.js instrumentation hook — runs once when the server starts.
  * Starts IMAP pollers from DB config and retries every 5 minutes for
  * any account that failed (e.g. OAuth tokens expired or not yet in DB).
- * Also runs the recurring SLA breach-warning check (see below).
+ * (SLA breach/due-date warnings are handled separately by runMonitorAgentScan
+ * in jira-pg-api.ts, an in-process setInterval that avoids the self-fetch
+ * auth issues this file's own jobs have to work around below.)
  *
  * IMPORTANT: register() itself must return (resolve) quickly and must never
  * await anything that depends on this same server being ready to serve
@@ -37,8 +39,13 @@ export async function register() {
   // was tried. The endpoint has no user session to check since this is a
   // background job, so it authenticates with a per-process secret instead
   // (see internal-job-secret.ts) rather than an empty/missing Authorization
-  // header -- an unauthenticated call is exactly why checkSlaBreaches above
-  // silently 401s and never actually notifies anyone.
+  // header -- an unauthenticated self-fetch like that just 401s at the
+  // blanket "no session -> Unauthorized" gate and never does anything
+  // (exactly what happened to this file's old SLA-breach-check job, which
+  // called its endpoint with no auth header at all and so never once
+  // notified anyone -- removed in favor of runMonitorAgentScan, which runs
+  // in-process in jira-pg-api.ts and never hits this auth gate to begin
+  // with).
   async function syncJiraIssues(label: string): Promise<void> {
     try {
       const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
@@ -87,23 +94,6 @@ export async function register() {
     }
   }
 
-  // POST /api/sla-breach-check finds every ticket within 30 minutes of its SLA
-  // due time and notifies the assignee/reporter/leads/managers (in-app + email)
-  // — but nothing was ever calling it. The route existed and worked, it just had
-  // no scheduler, so those 30-minute warnings never actually fired in practice.
-  async function checkSlaBreaches(label: string): Promise<number> {
-    try {
-      const res = await fetch(`${internalUrl}/api/sla-breach-check`, { method: 'POST' });
-      const data = await res.json().catch(() => ({}));
-      const notified = data.notified ?? 0;
-      if (notified > 0) console.log(`[SLA breach check] ${label} — notified: ${notified}`);
-      return notified;
-    } catch (err) {
-      console.error(`[SLA breach check] ${label} — failed:`, err);
-      return -1;
-    }
-  }
-
   // One-time catch-up: fills Client Name (from the reporter's email domain)
   // on every EXISTING ticket that predates auto-fill at creation time. The
   // endpoint itself is idempotent (checks app_settings before touching
@@ -127,7 +117,6 @@ export async function register() {
   // but do NOT await any of it here — see the note above for why.
   setTimeout(() => {
     tryRestartPollers('Boot');
-    checkSlaBreaches('Boot');
     syncJiraIssues('Boot');
     backfillClientNames('Boot');
 
@@ -135,13 +124,6 @@ export async function register() {
     // This handles OAuth token expiry, network blips, and tokens that
     // weren't in DB yet when the server first booted.
     setInterval(() => { tryRestartPollers('Periodic'); }, 5 * 60 * 1000);
-
-    // SLA breach warnings are time-sensitive (a 30-minute window), so this runs
-    // on a tighter cadence than the poller retry above — every 5 minutes gives
-    // several chances to catch a ticket before it enters and then leaves the
-    // 30-minute window, and the route's own "already notified in the last hour"
-    // check prevents repeat notifications on every tick.
-    setInterval(() => { checkSlaBreaches('Periodic'); }, 5 * 60 * 1000);
 
     // Catch up on new Jira tickets every 5 minutes. The very first run after
     // this ships processes the whole existing backlog (uncapped -- see

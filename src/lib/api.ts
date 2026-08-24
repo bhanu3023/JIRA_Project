@@ -273,7 +273,6 @@ class ApiClient {
 
   // Due date check
   triggerDueDateCheck() { return this.request<any>('/due-date-check', { method: 'POST' }); }
-  triggerSlaBreachCheck() { return this.request<any>('/sla-breach-check', { method: 'POST' }); }
   triggerMonitorAgent() { return this.request<any>('/monitor-agent', { method: 'POST' }); }
 
   // Reports

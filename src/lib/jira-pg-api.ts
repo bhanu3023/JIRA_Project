@@ -530,7 +530,7 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
   // 1. SLA breach warnings (30 min before)
   try {
     const activeIssues = await pool.query(
-      `SELECT i.*, s.category AS status_category
+      `SELECT i.*, s.category AS status_category, s.name AS status_name
        FROM issues i
        LEFT JOIN statuses s ON i."statusId" = s.id
        WHERE i.dept_sla_started_at IS NOT NULL
@@ -551,49 +551,40 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
       }
     }
 
-    const candidates: Array<{ row: any; policy: any; minsLeft: number }> = [];
+    const candidates: Array<{ row: any; policyName: string; minsLeft: number }> = [];
     // Breach itself is a live/computed state (checked fresh on every read), not a
     // discrete stored event -- so History never showed the moment a ticket actually
     // crossed its due time, only the pre-breach warning notification. Collect that
     // moment here too, logged once per issue per department visit (guarded below).
-    const justBreached: Array<{ row: any; policy: any }> = [];
+    const justBreached: Array<{ row: any; policyName: string }> = [];
     for (const row of rows) {
       const policies = policiesBySpace[row.spaceId] || [];
       if (!policies.length) continue;
-      const priority = (row.priority || 'medium').toLowerCase();
-      for (const policy of policies) {
-        let durationMs = 8 * 60 * 60 * 1000;
-        const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
-        for (const goal of goals) {
-          if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
-            const pr = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
-            if (pr?.timeValue) {
-              const val = parseFloat(pr.timeValue);
-              const unit = (pr.timeUnit || 'hours').toLowerCase();
-              durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
-              break;
-            }
-          } else if (goal.timeValue) {
-            const val = parseFloat(goal.timeValue);
-            const unit = (goal.timeUnit || 'hours').toLowerCase();
-            durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
-            break;
-          }
-        }
-        const dueAt = new Date(row.dept_sla_started_at).getTime() + durationMs;
-        const timeToBreachMs = dueAt - Date.now();
+      // Reuses the exact same due-time math the ticket detail page and Filters
+      // list already use (computeSLAInstancesPure) -- this used to hand-roll a
+      // simplified copy that ignored both department-handoff elapsed-time
+      // carryover (dept_sla_log) and the policy's own pause statuses, so a
+      // ticket that had already burned part of its budget in an earlier
+      // department visit, or was sitting in a configured pause status, could
+      // get warned late, not at all, or wrongly logged as "just breached"
+      // here while every other view of that same ticket disagreed.
+      const issueForCompute = { ...row, status: { category: row.status_category, name: row.status_name } };
+      const instances = computeSLAInstancesPure(issueForCompute, policies, false);
+      for (const inst of instances) {
+        if (inst.isPaused || inst.isCompleted) continue;
+        const timeToBreachMs = new Date(inst.dueTime).getTime() - Date.now();
         if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
-          candidates.push({ row, policy, minsLeft: Math.ceil(timeToBreachMs / 60_000) });
+          candidates.push({ row, policyName: inst.policyName, minsLeft: Math.ceil(timeToBreachMs / 60_000) });
         } else if (timeToBreachMs <= 0) {
-          justBreached.push({ row, policy });
+          justBreached.push({ row, policyName: inst.policyName });
         }
       }
     }
 
     if (justBreached.length) {
-      const byIssue = new Map<string, { row: any; policy: any }>();
+      const byIssue = new Map<string, { row: any; policyName: string }>();
       for (const c of justBreached) { if (!byIssue.has(c.row.id)) byIssue.set(c.row.id, c); }
-      for (const { row, policy } of byIssue.values()) {
+      for (const { row } of byIssue.values()) {
         const label = `SLA breached — ${row.current_department || ''}`.trim();
         try {
           const already = await (db as any).issueHistory.findFirst({ where: { issueId: row.id, field: 'sla', newValue: label } });
@@ -610,7 +601,7 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
         select: { issueKey: true },
       });
       const already = new Set(existing.map((e: any) => e.issueKey));
-      for (const { row, policy, minsLeft } of candidates) {
+      for (const { row, policyName, minsLeft } of candidates) {
         const key = row.cf_key || row.key;
         if (already.has(key)) continue;
         already.add(key); // don't double-notify if more than one policy triggers this run
@@ -618,7 +609,7 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
         await notifyUsers([row.assigneeId, row.reporterId, ...leadIds], null, {
           type: 'SLA_BREACH',
           title: `SLA breaching in ${minsLeft} min: ${key}`,
-          message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes for: ${row.summary || key}`,
+          message: `${policyName || 'SLA'} will breach in ${minsLeft} minutes for: ${row.summary || key}`,
           issueKey: key,
         });
         try {
@@ -633,7 +624,7 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
               issueSummary: row.summary || key,
               spaceKey: spaceRow.key,
               spaceName: spaceRow.name,
-              slaName: policy.name || 'SLA',
+              slaName: policyName || 'SLA',
               minsLeft,
               assigneeEmails,
             }).catch(() => {});
@@ -2989,123 +2980,6 @@ export async function handleJiraPgApi(
     // it's an internal detail, not something callers should branch on or show.
     return json({ error: isDev ? (err?.message || 'Internal server error') : 'Internal server error' }, 500);
   }
-}
-
-// Extracted so it can be called directly (in-process) from src/instrumentation.ts's
-// periodic scheduler, instead of that code making an HTTP fetch() back to this same
-// server. A self-fetch here deadlocks: Next.js's internal request-preparation gates
-// ALL request handling (including this server's own self-fetch) on instrumentation's
-// register() finishing — but register() was waiting on this exact self-fetch to
-// finish, which could never happen until prepare() unblocked it. Every real request
-// queued up behind that same block until the fetch's own timeout eventually fired.
-export async function runSlaBreachCheck(): Promise<number> {
-  const warnMs = 30 * 60 * 1000; // 30 minutes
-  let notified = 0;
-  try {
-    // Get all active issues with dept_sla_started_at set (not resolved)
-    const activeIssues = await pool.query(
-      `SELECT i.*, s.category AS status_category, s.name AS status_name
-       FROM issues i
-       LEFT JOIN statuses s ON i."statusId" = s.id
-       WHERE i.dept_sla_started_at IS NOT NULL
-         AND (s.category IS NULL OR s.category != 'done')
-       LIMIT 2000`
-    );
-    // Batch-fetch every distinct space's policies once up front instead of one
-    // query per issue (was up to 2000 sequential DB round-trips in one call).
-    const activeSpaceIds = Array.from(new Set(activeIssues.rows.map((r: any) => r.spaceId).filter(Boolean)));
-    const policiesBySpace: Record<string, any[]> = {};
-    if (activeSpaceIds.length) {
-      const policyRows = await pool.query(
-        `SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`,
-        [activeSpaceIds]
-      );
-      for (const p of policyRows.rows) { (policiesBySpace[p.spaceId] ??= []).push(p); }
-    }
-    for (const row of activeIssues.rows) {
-      const policies = { rows: (policiesBySpace[row.spaceId] || []).slice(0, 5) };
-      if (!policies.rows.length) continue;
-      const priority = (row.priority || 'medium').toLowerCase();
-      for (const policy of policies.rows) {
-        // Compute goal duration
-        let durationMs = 8 * 60 * 60 * 1000;
-        const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
-        for (const goal of goals) {
-          if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
-            const pr = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
-            if (pr?.timeValue) {
-              const val = parseFloat(pr.timeValue);
-              const unit = (pr.timeUnit || 'hours').toLowerCase();
-              durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
-              break;
-            }
-          } else if (goal.timeValue) {
-            const val = parseFloat(goal.timeValue);
-            const unit = (goal.timeUnit || 'hours').toLowerCase();
-            durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
-            break;
-          }
-        }
-        const startedAt = new Date(row.dept_sla_started_at).getTime();
-        const dueAt = startedAt + durationMs;
-        const now = Date.now();
-        const timeToBreachMs = dueAt - now;
-        // Warn if breach within 30 min (and not already breached)
-        if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
-          // Every issue is shown to users only by its CF-prefixed display key
-          // -- row.key is the internal column. runMonitorAgentScan's own
-          // SLA_BREACH notifications already key off cf_key || key (both for
-          // display AND for this exact dedup lookup); this scanner used the
-          // raw internal key for both, so the two scanners' notification
-          // rows never matched each other and could double-notify the same
-          // breach on top of showing the wrong key.
-          const displayKey = row.cf_key || row.key;
-          // Avoid duplicate notifications within 1 hour
-          const already = await (db as any).notification.findFirst({
-            where: { issueKey: displayKey, type: 'SLA_BREACH',
-              createdAt: { gte: new Date(now - 60 * 60 * 1000) } },
-          });
-          if (already) continue;
-          const leadIds = await getSpaceLeadUserIds(row.spaceId);
-          const managerMembers = await db.spaceMember.findMany({
-            where: { spaceId: row.spaceId, role: 'manager' },
-            select: { userId: true },
-          }).catch(() => []);
-          const managerIds = managerMembers.map((m: any) => m.userId).filter(Boolean);
-          const recipients = [row.assigneeId, row.reporterId, ...leadIds, ...managerIds].filter(Boolean);
-          const minsLeft = Math.ceil(timeToBreachMs / 60_000);
-          await notifyUsers(recipients, null, {
-            type: 'SLA_BREACH',
-            title: `SLA breaching in ${minsLeft} min: ${displayKey}`,
-            message: `${policy.name || 'SLA'} will breach in ${minsLeft} minutes. Issue: ${row.summary || displayKey}`,
-            issueKey: displayKey,
-          });
-          // Also send email notification to assignee, shift leads, and managers
-          const allEmailUserIds = [row.assigneeId, ...leadIds, ...managerIds].filter(Boolean);
-          const uniqueEmailUserIds = [...new Set(allEmailUserIds)];
-          const emailRecipients = await db.user.findMany({
-            where: { id: { in: uniqueEmailUserIds } },
-            select: { email: true },
-          });
-          const assigneeEmails = emailRecipients.map((u: any) => u.email).filter(Boolean);
-          const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
-          if (assigneeEmails.length && spaceRow) {
-            notifySLABreach({
-              issueKey: displayKey,
-              issueSummary: row.summary || displayKey,
-              spaceKey: spaceRow.key,
-              spaceName: spaceRow.name,
-              slaName: policy.name || 'SLA',
-              minsLeft,
-              assigneeEmails,
-            }).catch(() => {});
-          }
-          notified++;
-        }
-      }
-    }
-  } catch (e: any) { console.error('[SLA breach check]', e?.message); }
-  return notified;
 }
 
 async function _handleJiraPgApi(
@@ -10035,12 +9909,6 @@ async function _handleJiraPgApi(
       [spaceKey, JSON.stringify(nextQueues)]
     );
     return json({ ok: true, queue: updated });
-  }
-
-  // POST /sla-breach-check Ã¢â‚¬â€ notify assignee, reporter, leads/shift leads 30 min before breach
-  if (path === 'sla-breach-check' && method === 'POST') {
-    const notified = await runSlaBreachCheck();
-    return json({ notified });
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ SLA routes Ã¢â‚¬â€ persisted to PostgreSQL via raw pg (avoids Prisma cache issues) Ã¢â€â‚¬
