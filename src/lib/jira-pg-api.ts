@@ -5175,6 +5175,37 @@ async function _handleJiraPgApi(
       }
     } catch { /* sla breach is best-effort */ }
 
+    // Who a breached ticket's "SLA Breached: Yes" actually belongs to -- the
+    // Assignee column shows whoever CURRENTLY holds the ticket, which for a
+    // ticket resolved late and later reassigned (or handed off after the
+    // fact) attributes the breach to the wrong person entirely. The ticket
+    // detail page's own SLA panel already solves this correctly for a single
+    // issue (enrichSlaWithResolver: the author of that issue's last 'status'
+    // history row, i.e. whoever's change put it into its current state) --
+    // this mirrors that same definition in bulk, for just the breached rows
+    // on this page, so it's one small extra query instead of N. Only makes
+    // sense for a RESOLVED ticket -- one still open and merely overdue
+    // hasn't been "caused" by anyone yet, so attributing it to whoever most
+    // recently touched its (still not-done) status would just be noise.
+    try {
+      const breachedIds = enrichedIssues
+        .filter((i: any) => i.sla_breached && i.status?.category === 'done')
+        .map((i: any) => i.id);
+      if (breachedIds.length) {
+        const breachHistRows = await pool.query(
+          `SELECT "issueId", "authorName", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'status' ORDER BY "issueId", "createdAt" ASC`,
+          [breachedIds]
+        );
+        const lastAuthorByIssue: Record<string, string> = {};
+        for (const h of breachHistRows.rows) {
+          if (h.authorName) lastAuthorByIssue[h.issueId] = h.authorName;
+        }
+        enrichedIssues = enrichedIssues.map((i: any) =>
+          i.sla_breached ? { ...i, sla_breached_by: lastAuthorByIssue[i.id] || null } : i
+        );
+      }
+    } catch { /* attribution is best-effort — never block the list on it */ }
+
     if (includeTimeSpentParam && enrichedIssues.length) {
       try {
         const histIds = enrichedIssues.map((i: any) => i.id);

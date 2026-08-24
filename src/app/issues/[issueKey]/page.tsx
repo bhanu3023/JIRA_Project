@@ -2281,6 +2281,24 @@ export default function IssueDetailPage() {
                                 </>
                               )}
                               <span className="text-gray-400 text-[11px] ml-1">{formatJiraDateTime(a.createdAt)}</span>
+                              {/* Flags the specific status change that resolved this
+                                  ticket past its SLA due time, right on its own History
+                                  entry -- otherwise the only place that attribution
+                                  shows at all is the separate SLA panel above, with no
+                                  link back to which of possibly several status changes
+                                  in this list actually caused it. Matched by exact
+                                  timestamp since both this activity entry and the SLA
+                                  panel's resolution history are built from the very
+                                  same issue_history row. */}
+                              {a.field === 'status' && Array.isArray(issue.sla) && issue.sla.some((s: any) =>
+                                Array.isArray(s.history) && s.history.some((h: any) =>
+                                  h.wasBreached && new Date(h.resolvedAt).getTime() === new Date(a.createdAt).getTime()
+                                )
+                              ) && (
+                                <span className="inline-flex items-center gap-1 text-[9.5px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-full px-1.5 py-0.5">
+                                  <AlertTriangle size={9} /> SLA Breached
+                                </span>
+                              )}
                             </div>
                             {/* Old → New value (skip for comments, created, and SLA events) */}
                             {a.field !== 'comment' && a.field !== 'created' && a.field !== 'sla' && (

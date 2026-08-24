@@ -1375,7 +1375,7 @@ export default function FiltersPage() {
         (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
       );
       const header = [
-        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'Department',
+        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'Department',
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
@@ -1390,6 +1390,7 @@ export default function FiltersPage() {
           issue.status?.name ?? '',
           issue.priority ?? '',
           issue.sla_breached == null ? 'N/A' : issue.sla_breached ? 'Yes' : 'No',
+          issue.sla_breached ? (issue.sla_breached_by ?? '') : '',
           issue.current_department ?? '',
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
           issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
@@ -2012,7 +2013,21 @@ export default function FiltersPage() {
                       // it's fine", when there's really nothing being measured.
                       <span className="inline-flex items-center rounded-full bg-gray-50 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-300" title="No SLA policy is configured for this ticket's department">—</span>
                     ) : issue.sla_breached ? (
-                      <span className="inline-flex items-center rounded-full bg-red-100 border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-600">Yes</span>
+                      <div className="flex flex-col items-start gap-0.5">
+                        <span className="inline-flex items-center rounded-full bg-red-100 border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-600">Yes</span>
+                        {/* Whoever currently holds the ticket (the Assignee column)
+                            isn't necessarily who caused this -- a ticket resolved
+                            late and reassigned afterward would otherwise pin the
+                            breach on the wrong person. This is the author of the
+                            status change that actually put it in its current
+                            state, same definition the ticket detail page's own
+                            SLA panel already uses for "Resolved by". */}
+                        {issue.sla_breached_by && (
+                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Author of the status change that resolved this ticket">
+                            by {issue.sla_breached_by}
+                          </span>
+                        )}
+                      </div>
                     ) : (
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
                     )}
