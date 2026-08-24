@@ -707,6 +707,99 @@ export default function RichTextEditor({
     });
   };
 
+  // Pasted rich HTML (Word/Confluence/ChatGPT/any webpage) can carry <img>
+  // tags whose src is a data: URI (the full image inlined as base64) or a
+  // blob: URI (a reference into the SOURCE page's own memory, meaningless
+  // outside that exact document). Inserted as-is, a data: image bloats the
+  // ticket description by megabytes of inline text -- the same "legacy
+  // ticket with a base64-embedded image" bloat problem this file's own
+  // upload pipeline exists to avoid -- and a blob: image is dead the instant
+  // it lands here, permanently, since the tab/document it was created in is
+  // gone. Swap both out for an "Uploading..." placeholder before insertion,
+  // then resolve them below through the same upload-and-host pipeline real
+  // file uploads use. Ordinary http(s) image URLs are left untouched: they
+  // already work today and re-fetching them client-side risks breaking on
+  // cross-origin CORS restrictions the current image doesn't hit.
+  const extractEmbeddedImages = (html: string): { html: string; images: { placeholderId: string; src: string }[] } => {
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    const images: { placeholderId: string; src: string }[] = [];
+    container.querySelectorAll('img').forEach((img) => {
+      const src = img.getAttribute('src') || '';
+      if (!/^(data|blob):/i.test(src)) return;
+      const placeholderId = `up-${Math.random().toString(36).slice(2)}`;
+      const placeholder = document.createElement('span');
+      placeholder.id = placeholderId;
+      placeholder.setAttribute('contenteditable', 'false');
+      placeholder.style.cssText = 'display:inline-block;padding:4px 8px;background:#f1f5f9;border-radius:6px;color:#64748b;font-size:12px;';
+      placeholder.textContent = 'Uploading pasted image…';
+      img.replaceWith(placeholder);
+      images.push({ placeholderId, src });
+    });
+    return { html: container.innerHTML, images };
+  };
+
+  // data: URIs are decoded locally (atob) rather than via fetch(): the app's
+  // own CSP sets connect-src to 'self' https: (no data:/blob:), so
+  // fetch('data:...') is blocked outright even though the same URI displays
+  // fine in an <img> src (img-src separately allows data:). blob: URLs have
+  // no local-decode equivalent -- they're opaque handles into a browser's
+  // blob store, not self-contained data -- and one pasted from another
+  // page's document is already invalid here regardless of CSP, so those
+  // fall through to the catch below and get removed with an explanation.
+  const dataUriToBlob = (dataUri: string): Blob => {
+    const comma = dataUri.indexOf(',');
+    const header = dataUri.slice(5, comma); // after "data:"
+    const isBase64 = header.endsWith(';base64');
+    const mime = (isBase64 ? header.slice(0, -';base64'.length) : header) || 'application/octet-stream';
+    const data = dataUri.slice(comma + 1);
+    const binary = isBase64 ? atob(data) : decodeURIComponent(data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  };
+
+  const uploadEmbeddedImage = async (placeholderId: string, src: string) => {
+    beginUpload();
+    try {
+      const blob = src.startsWith('data:') ? dataUriToBlob(src) : await (async () => {
+        const resp = await fetch(src);
+        if (!resp.ok) throw new Error('fetch failed');
+        return resp.blob();
+      })();
+      if (blob.size > MAX_UPLOAD_BYTES) throw new Error('too large');
+      const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/gif' ? 'gif' : 'jpg';
+      const file = new File([blob], `pasted-image.${ext}`, { type: blob.type || 'image/png' });
+      const result = await uploadFile(file);
+      const el = document.getElementById(placeholderId);
+      if (!result) { el?.remove(); emit(); return; }
+      const imgEl = document.createElement('img');
+      imgEl.src = result.url;
+      imgEl.alt = 'Pasted image';
+      imgEl.style.cssText = 'max-width:220px;max-height:160px;width:auto;height:auto;border-radius:6px;margin:6px 0;display:block;cursor:pointer;object-fit:contain;';
+      const wrap = document.createElement('span');
+      wrap.setAttribute('data-rte-img-wrap', '');
+      wrap.setAttribute('contenteditable', 'false');
+      wrap.className = 'group relative inline-block align-top';
+      wrap.appendChild(imgEl);
+      const removeBtn = document.createElement('span');
+      removeBtn.setAttribute('data-rte-img-remove', '');
+      removeBtn.title = 'Remove image';
+      removeBtn.className = 'hidden group-hover:flex';
+      removeBtn.style.cssText = 'position:absolute;top:4px;right:4px;width:20px;height:20px;align-items:center;justify-content:center;background:rgba(15,23,42,0.75);color:#fff;border-radius:9999px;font-size:13px;line-height:1;cursor:pointer;';
+      removeBtn.textContent = '×';
+      wrap.appendChild(removeBtn);
+      el?.replaceWith(wrap);
+      emit();
+    } catch {
+      document.getElementById(placeholderId)?.remove();
+      warn('Could not load a pasted image — it referenced another page and could not be copied here.');
+      emit();
+    } finally {
+      endUpload();
+    }
+  };
+
   // Office (Excel/Word) clipboard HTML wraps the actual content between these
   // markers, alongside a <head> full of mso-* styles and XML namespace junk —
   // extract just the real fragment instead of dumping the whole document in.
@@ -786,8 +879,10 @@ export default function RichTextEditor({
     if (htmlContent) {
       e.preventDefault();
       editorRef.current?.focus();
-      document.execCommand('insertHTML', false, sanitizeOfficeHtml(htmlContent));
+      const { html: withoutEmbeddedImages, images } = extractEmbeddedImages(sanitizeOfficeHtml(htmlContent));
+      document.execCommand('insertHTML', false, withoutEmbeddedImages);
       emit();
+      images.forEach(({ placeholderId, src }) => uploadEmbeddedImage(placeholderId, src));
       return;
     }
     // Plain text: preserve indentation and repeated spaces exactly as pasted.
