@@ -5063,6 +5063,18 @@ async function _handleJiraPgApi(
         // clock), but would erase the fact that Jira already recorded a
         // real breach before the ticket ever got resolved.
         let breached = !!i.jira_sla_breached;
+        // A department nobody has configured an SLA policy for (e.g. Infra,
+        // which never had one set up) previously still showed a hard "No" in
+        // the SLA Breached column -- indistinguishable from "there IS an SLA
+        // and it's fine", when the truth is there's no SLA to even measure
+        // against. Track whether any policy actually applies to this
+        // ticket's department so the final value below can report "N/A"
+        // instead of a misleading "not breached".
+        const dept = (i.current_department || '').trim().toLowerCase();
+        const hasApplicablePolicy = (policiesBySpace[i.spaceId] || []).some((p: any) => {
+          const pDept = (p.dept_name || '').trim().toLowerCase();
+          return !pDept || pDept === dept;
+        });
         // Resolving a ticket must never ERASE a breach that already
         // happened before it was resolved -- gating this whole block on
         // `!isResolved` did exactly that, since jira_sla_breached only
@@ -5074,7 +5086,6 @@ async function _handleJiraPgApi(
           // department transfer have no dept_sla_started_at, so measure from creation.
           const slaStartedAt = i.dept_sla_started_at || i.createdAt;
           if (!breached && slaStartedAt) {
-            const dept = (i.current_department || '').trim().toLowerCase();
             const priority = (i.priority || 'medium').toLowerCase();
             const currentStatusName = (i.status?.name || '').trim().toLowerCase();
             const policies = (policiesBySpace[i.spaceId] || []).filter((p: any) => {
@@ -5143,7 +5154,13 @@ async function _handleJiraPgApi(
             }
           }
         }
-        return { ...i, sla_breached: breached };
+        // No policy configured for this department, and nothing else (a real
+        // imported Jira breach) already forced a true -- there's genuinely no
+        // SLA to have breached or not, so report that honestly (frontend
+        // renders this as "-") instead of the misleading "No" a department
+        // like Infra (no SLA ever set up for it) showed before.
+        const slaBreached = hasApplicablePolicy || i.jira_sla_breached ? breached : null;
+        return { ...i, sla_breached: slaBreached };
       });
       if (slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no') {
         enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParamEarly === 'yes' ? i.sla_breached : !i.sla_breached);

@@ -1389,7 +1389,7 @@ export default function FiltersPage() {
           issue.reporter ? `${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim() : '',
           issue.status?.name ?? '',
           issue.priority ?? '',
-          issue.sla_breached ? 'Yes' : 'No',
+          issue.sla_breached == null ? 'N/A' : issue.sla_breached ? 'Yes' : 'No',
           issue.current_department ?? '',
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
           issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
@@ -2005,7 +2005,13 @@ export default function FiltersPage() {
                     <PriorityIcon priority={issue.priority} size={14} />
                   </td>
                   <td className="px-2 py-2.5">
-                    {issue.sla_breached ? (
+                    {issue.sla_breached == null ? (
+                      // No SLA policy applies to this ticket's department at all
+                      // (e.g. a queue like Infra that's never had one configured)
+                      // -- "No" would misleadingly read as "there's an SLA and
+                      // it's fine", when there's really nothing being measured.
+                      <span className="inline-flex items-center rounded-full bg-gray-50 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-300" title="No SLA policy is configured for this ticket's department">—</span>
+                    ) : issue.sla_breached ? (
                       <span className="inline-flex items-center rounded-full bg-red-100 border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-600">Yes</span>
                     ) : (
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
