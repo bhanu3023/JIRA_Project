@@ -4016,7 +4016,15 @@ async function _handleJiraPgApi(
     // to be fetched, and reported that filtered subset's own size as if it
     // were the true total across the whole matching set.
     const slaBreachedParamEarly = url.searchParams.get('slaBreached');
-    const needsSlaPrefilter = slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no';
+    // Overdue -- the ticket's own dueDate field crossing "now" while still
+    // open, unrelated to any SLA policy's clock -- is a real DB column but
+    // still needs the SAME widened-candidate-set treatment as SLA breach
+    // below: "is it overdue" also depends on status category (excludes
+    // done tickets), which isn't filterable in the same query alongside
+    // pagination without re-deriving it per issue exactly like sla_breached.
+    const overdueParamEarly = url.searchParams.get('overdue');
+    const needsSlaPrefilter = slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no'
+      || overdueParamEarly === 'yes' || overdueParamEarly === 'no';
     // Safety ceiling only -- the actual candidate-set size fetched below is
     // whichever is SMALLER of this and the real matching-row count (see the
     // `Math.min(..., SLA_PREFILTER_CAP)` call sites). A fixed 5000 silently
@@ -5064,10 +5072,21 @@ async function _handleJiraPgApi(
         // renders this as "-") instead of the misleading "No" a department
         // like Infra (no SLA ever set up for it) showed before.
         const slaBreached = hasApplicablePolicy || i.jira_sla_breached ? breached : null;
-        return { ...i, sla_breached: slaBreached };
+        // Overdue: the ticket's own dueDate field, unrelated to any SLA
+        // policy's clock -- a ticket can be overdue with no SLA configured
+        // at all, or have an active SLA but no dueDate set. Only meaningful
+        // while still open; a resolved ticket isn't "overdue" regardless of
+        // whether it was resolved late (that's what SLA Breached captures).
+        const isOverdue = !isResolved && !!i.dueDate && new Date(i.dueDate).getTime() < nowMs;
+        return { ...i, sla_breached: slaBreached, overdue: isOverdue };
       });
       if (slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no') {
         enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParamEarly === 'yes' ? i.sla_breached : !i.sla_breached);
+      }
+      if (overdueParamEarly === 'yes' || overdueParamEarly === 'no') {
+        enrichedIssues = enrichedIssues.filter((i: any) => overdueParamEarly === 'yes' ? i.overdue : !i.overdue);
+      }
+      if (needsSlaPrefilter) {
         // Now the TRUE total across the full (up to SLA_PREFILTER_CAP)
         // candidate set fetched above, not just whatever page would have
         // been fetched under normal DB-level pagination. Slice to the

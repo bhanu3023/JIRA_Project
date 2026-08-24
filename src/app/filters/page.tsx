@@ -887,7 +887,13 @@ function MoreFiltersBtn({
 }
 
 /* ─── SLA Breached single-select button ─── */
-function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChange: (v: 'yes' | 'no' | '') => void }) {
+// Generalized from what used to be SLA-Breached-only (SlaBreachedBtn) so the
+// same Yes/No quick-filter chrome can drive a second, independent condition
+// (Overdue) without duplicating this whole dropdown.
+function YesNoFilterBtn({ value, onChange, label: baseLabel, yesLabel, noLabel }: {
+  value: 'yes' | 'no' | ''; onChange: (v: 'yes' | 'no' | '') => void;
+  label: string; yesLabel: string; noLabel: string;
+}) {
   const [open, setOpen] = useState(false);
   const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
@@ -910,7 +916,7 @@ function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChang
   };
 
   const active = Boolean(value);
-  const label = value === 'yes' ? 'SLA Breached: Yes' : value === 'no' ? 'SLA Breached: No' : 'SLA Breached';
+  const label = value === 'yes' ? `${baseLabel}: Yes` : value === 'no' ? `${baseLabel}: No` : baseLabel;
 
   return (
     <div ref={ref} className="flex-shrink-0">
@@ -931,7 +937,7 @@ function SlaBreachedBtn({ value, onChange }: { value: 'yes' | 'no' | ''; onChang
           style={{ top: dropPos.top, left: dropPos.left }}
           onMouseDown={e => e.stopPropagation()}>
           <div className="py-1">
-            {([['yes', 'Yes — Breached', 'text-red-600', 'bg-red-50'], ['no', 'No — Not Breached', 'text-gray-700', 'bg-gray-50']] as const).map(([v, lbl, textCls, bgCls]) => (
+            {([['yes', yesLabel, 'text-red-600', 'bg-red-50'], ['no', noLabel, 'text-gray-700', 'bg-gray-50']] as const).map(([v, lbl, textCls, bgCls]) => (
               <button key={v} onClick={() => { onChange(value === v ? '' : v); setOpen(false); }}
                 className={cn('flex w-full items-center gap-2.5 px-3 py-2.5 text-[12.5px] transition-colors hover:bg-gray-50', value === v && bgCls)}>
                 <div className={cn('h-4 w-4 flex-shrink-0 rounded border flex items-center justify-center', value === v ? 'border-blue-600 bg-blue-600' : 'border-gray-300')}>
@@ -982,6 +988,7 @@ export default function FiltersPage() {
   const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
   const [selProjectPool, setSelProjectPool] = useState('');
   const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
+  const [selOverdue, setSelOverdue] = useState<'yes' | 'no' | ''>('');
 
   /* issues */
   const [issues, setIssues]   = useState<any[]>([]);
@@ -1048,6 +1055,7 @@ export default function FiltersPage() {
     // load, so a link built with slaBreached=yes silently showed every one
     // of that person's tickets instead of just the breached ones.
     const qpSlaBreached = urlParams?.get('slaBreached');
+    const qpOverdue = urlParams?.get('overdue');
 
     if (qpAssignee) setSelAssignees(qpAssignee.split(','));
     if (qpReporter) {
@@ -1065,6 +1073,7 @@ export default function FiltersPage() {
     // filters"), so unlike reporter/priority above there's no activeExtras
     // entry to also flip for it to become visible.
     if (qpSlaBreached === 'yes' || qpSlaBreached === 'no') setSelBreached(qpSlaBreached);
+    if (qpOverdue === 'yes' || qpOverdue === 'no') setSelOverdue(qpOverdue);
 
     // Full self-persistence round-trip (written by the sync effect below,
     // using its own distinct param names so it never collides with the
@@ -1088,6 +1097,7 @@ export default function FiltersPage() {
     const rProjectManager  = urlParams?.get('rProjectManager');
     const rProjectPool     = urlParams?.get('rProjectPool');
     const rBreached        = urlParams?.get('rBreached');
+    const rOverdue         = urlParams?.get('rOverdue');
     const rQ               = urlParams?.get('rQ');
     const rExtras          = urlParams?.get('rExtras');
 
@@ -1110,6 +1120,7 @@ export default function FiltersPage() {
     if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
     if (rProjectPool) setSelProjectPool(rProjectPool);
     if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
+    if (rOverdue === 'yes' || rOverdue === 'no') setSelOverdue(rOverdue);
     if (rQ) setText(rQ);
     // rExtras and each field's own r* param are two SEPARATE pieces of
     // persisted state -- a URL that sets e.g. rProjectManager without also
@@ -1161,10 +1172,11 @@ export default function FiltersPage() {
     if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
     if (selProjectPool) p.rProjectPool = selProjectPool;
     if (selBreached) p.rBreached = selBreached;
+    if (selOverdue) p.rOverdue = selOverdue;
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1206,7 +1218,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selDueDate || selWorked || selDepartment ||
-    selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selProjectPool || selBreached,
+    selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selProjectPool || selBreached || selOverdue,
   );
 
   // Builds the filter params both the live table and the CSV export send —
@@ -1290,12 +1302,13 @@ export default function FiltersPage() {
         if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
         if (selProjectPool)    params.projectPool    = selProjectPool;
         if (selBreached) params.slaBreached = selBreached;
+        if (selOverdue) params.overdue = selOverdue;
 
         // Text search
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy */
   const fetchIssues = useCallback(() => {
@@ -1375,7 +1388,7 @@ export default function FiltersPage() {
         (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
       );
       const header = [
-        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'Department',
+        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'Overdue', 'Department',
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
@@ -1391,6 +1404,7 @@ export default function FiltersPage() {
           issue.priority ?? '',
           issue.sla_breached == null ? 'N/A' : issue.sla_breached ? 'Yes' : 'No',
           issue.sla_breached ? (issue.sla_breached_by ?? '') : '',
+          issue.overdue ? 'Yes' : 'No',
           issue.current_department ?? '',
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
           issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
@@ -1438,6 +1452,7 @@ export default function FiltersPage() {
     setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager([]);
     setSelProjectPool('');
     setSelBreached('');
+    setSelOverdue('');
     setActiveExtras([]);
     setActiveFilterId(null);
   };
@@ -1757,7 +1772,13 @@ export default function FiltersPage() {
           <DropBtn label="Status" options={availableStatuses} selected={selStatuses} onChange={setSelStatuses} />
 
           {/* SLA Breached filter */}
-          <SlaBreachedBtn value={selBreached} onChange={setSelBreached} />
+          <YesNoFilterBtn value={selBreached} onChange={setSelBreached} label="SLA Breached" yesLabel="Yes — Breached" noLabel="No — Not Breached" />
+
+          {/* Overdue filter -- distinct from SLA Breached: this is the ticket's
+              own dueDate field crossing "now" while still open, unrelated to
+              any SLA policy's own duration clock (see the dueDate-vs-SLA
+              comment on the Monitoring Agent's due-date section). */}
+          <YesNoFilterBtn value={selOverdue} onChange={setSelOverdue} label="Overdue" yesLabel="Yes — Overdue" noLabel="No — Not Overdue" />
 
           <div className="flex items-center gap-2 ml-auto flex-shrink-0">
             {/* More filters — adds extras to row 2 */}
@@ -1935,6 +1956,7 @@ export default function FiltersPage() {
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20 hidden md:table-cell">Priority</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">SLA Breached</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">Overdue</th>
                 <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24 hidden md:table-cell">Time Spent</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
               </tr>
@@ -2028,6 +2050,16 @@ export default function FiltersPage() {
                           </span>
                         )}
                       </div>
+                    ) : (
+                      <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2.5">
+                    {/* The ticket's own dueDate crossing "now" while still open --
+                        independent of SLA Breached, which is the fact this exact
+                        column used to be confused with (see YesNoFilterBtn above). */}
+                    {issue.overdue ? (
+                      <span className="inline-flex items-center rounded-full bg-orange-100 border border-orange-200 px-2 py-0.5 text-[11px] font-semibold text-orange-600">Yes</span>
                     ) : (
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
                     )}
