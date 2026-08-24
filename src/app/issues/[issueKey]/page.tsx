@@ -2955,7 +2955,6 @@ export default function IssueDetailPage() {
               spaceKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
               spaceId={issue.spaceId}
               currentBoardKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
-              currentStatusName={issueStat?.name}
               onChanged={() => loadIssue(issueKey)}
               onDeptChangeBlocked={() => setDeptBlockModal(true)}
               onRequestDeptChange={(dept, execute) => {
@@ -2965,14 +2964,6 @@ export default function IssueDetailPage() {
                   return;
                 }
                 setPendingDeptChange({ dept, execute });
-              }}
-              onSetWaitingStatus={async (deptName: string) => {
-                const waitingStatus = spaceStatuses.find((s: any) =>
-                  (s.name || '').toLowerCase() === `waiting for ${deptName.toLowerCase()}`
-                );
-                if (waitingStatus) {
-                  await handleStatusChange(waitingStatus.id, waitingStatus);
-                }
               }}
             />
 
@@ -3848,17 +3839,15 @@ export default function IssueDetailPage() {
 }
 
 /* ===== Department Field ===== */
-function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, currentStatusName, canEdit = true, onChanged, onDeptChangeBlocked, onSetWaitingStatus, onRequestDeptChange }: {
+function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, currentBoardKey, canEdit = true, onChanged, onDeptChangeBlocked, onRequestDeptChange }: {
   issueKey: string;
   currentDepartment: string | null;
   spaceKey: string;
   spaceId?: string;
   currentBoardKey?: string;
-  currentStatusName?: string;
   canEdit?: boolean;
   onChanged: () => void;
   onDeptChangeBlocked?: () => void;
-  onSetWaitingStatus?: (deptName: string) => Promise<void>;
   onRequestDeptChange?: (dept: { name: string; boardKey: string }, execute: () => void) => void;
 }) {
   const router = useRouter();
@@ -3970,14 +3959,20 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
     setDeptError(null);
     const prevDept = optimisticDept ?? currentDepartment;
     setOptimisticDept(dept.name);
-    // Only set waiting status if not already in it (avoids redundant reload)
-    const alreadyWaiting = (currentStatusName || '').toLowerCase() === `waiting for ${dept.name.toLowerCase()}`;
-    // Fire the "waiting status" update alongside the actual transfer instead of
-    // waiting for it first — the transfer endpoint doesn't depend on the status
-    // already being set, so sequencing them just doubled the wait for no reason.
-    const waitingStatusPromise = alreadyWaiting
-      ? Promise.resolve()
-      : Promise.resolve(onSetWaitingStatus?.(dept.name)).catch(() => {});
+    // Used to also fire onSetWaitingStatus (a real status-change call) "alongside"
+    // this PATCH, on the theory that the transfer endpoint doesn't depend on the
+    // status already being set. True, but that status is a "Waiting for X" queue
+    // status, and setting one of those server-side triggers its OWN complete
+    // department handoff (performDeptHandoff) -- pausing/starting dept_sla_log
+    // for both depts exactly like this PATCH's own /department handler already
+    // does. Racing the two meant this dept's SLA clock got paused-and-resumed
+    // TWICE for one transfer, and since pausing re-reads and re-adds the
+    // elapsed-since-start delta each time, the second call re-added nearly the
+    // whole first stint's duration on top of itself -- a ticket that had
+    // genuinely spent ~14h in Dev came out logged with ~28h, well past its SLA
+    // goal when it never actually was. This PATCH alone already does the
+    // complete, correct handoff (see the department-change route below), so
+    // the separate status call was never needed for the transfer to work.
     try {
       const res = await fetch(`/api/issues/${issueKey}/department`, {
         method: 'PATCH',
@@ -4014,7 +4009,6 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
       setOptimisticDept(prevDept);
       setDeptError('Network error — could not reach the server. Please try again.');
     }
-    await waitingStatusPromise;
     setSaving(false);
   };
 
