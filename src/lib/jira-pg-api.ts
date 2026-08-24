@@ -1152,15 +1152,46 @@ async function performDeptHandoff(
   // it has one, or carry the done status straight through on a first
   // arrival -- only defaulting to "In Progress" when the ticket isn't done.
   const isDoneNow = priorStatus?.category === 'done';
-  const oldDeptStatusObj = priorStatus
-    ? { id: priorStatus.id, name: priorStatus.name, category: priorStatus.category, color: priorStatus.color }
-    : { id: '', name: 'Unknown', category: 'todo', color: '#6B7280' };
 
-  // Record the OLD dept's status exactly as it was right before the handoff --
-  // not the "Waiting for <targetDept>" transit marker, which discarded that
-  // info (same fix already applied to the manual endpoint's own oldDept
-  // recording, for the same "Sent/Watching needs to show what it actually
-  // was" reason).
+  // Fetched once, used to find both the OLD dept's own "in progress" status
+  // (below) and the target dept's arrival status (further down) -- was two
+  // separate identical queries before.
+  let allQueueRows: { rows: any[] } = { rows: [] };
+  try { allQueueRows = await pool.query(`SELECT queues FROM custom_queues`); } catch {}
+  const queueStatusesFor = (deptName: string): any[] => {
+    for (const row of allQueueRows.rows) {
+      const queues: any[] = row.queues || [];
+      const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === deptName.toLowerCase());
+      if (matchedQ?.queueStatuses?.length) return matchedQ.queueStatuses;
+    }
+    return [];
+  };
+
+  // Record the OLD dept's status right before the handoff. A ticket actually
+  // resolved/closed IN this dept before being routed onward (e.g. forwarded
+  // for review) keeps that real status -- that's genuinely what happened
+  // here. But a STILL-OPEN ticket being handed off is no longer idly sitting
+  // in this dept; it's out being worked elsewhere now, so recording its
+  // literal prior status understates that -- especially a ticket handed off
+  // moments after creation, whose prior status is an untouched "Open" this
+  // dept never really worked at all. Forcing "In Progress" here (this dept's
+  // own configured in-progress status, same lookup the target side already
+  // uses) is also what makes a LATER done+return visit's restoringOwnSnapshot
+  // below correctly restore "In Progress" instead of resurrecting that stale
+  // "Open" from before this dept ever started on it.
+  let oldDeptStatusObj: any;
+  if (isDoneNow) {
+    oldDeptStatusObj = priorStatus
+      ? { id: priorStatus.id, name: priorStatus.name, category: priorStatus.category, color: priorStatus.color }
+      : { id: '', name: 'Unknown', category: 'todo', color: '#6B7280' };
+  } else {
+    const oldQueueStatuses = oldDept ? queueStatusesFor(oldDept) : [];
+    const inProgressSt = oldQueueStatuses.find((s: any) => s.category === 'in_progress')
+      || oldQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'));
+    oldDeptStatusObj = inProgressSt
+      ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
+      : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+  }
   deptMapSet(deptStatuses, oldDept, oldDeptStatusObj);
 
   const restoringOwnSnapshot = isDoneNow && deptMapGet(deptStatuses, targetDept) != null;
@@ -1179,15 +1210,7 @@ async function performDeptHandoff(
     // it," so both get "In Progress" -- only a still-open ticket arriving at a
     // dept for the very first time gets the untouched "Open" default.
     const isReturningToDept = deptMapGet(deptStatuses, targetDept) != null;
-    let targetQueueStatuses: any[] = [];
-    try {
-      const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
-      for (const row of allQueueRows.rows) {
-        const queues: any[] = row.queues || [];
-        const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === targetDept.toLowerCase());
-        if (matchedQ?.queueStatuses?.length) { targetQueueStatuses = matchedQ.queueStatuses; break; }
-      }
-    } catch {}
+    const targetQueueStatuses = queueStatusesFor(targetDept);
     if (isDoneNow || isReturningToDept) {
       const inProgressSt = targetQueueStatuses.find((s: any) => s.category === 'in_progress')
         || targetQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'));
@@ -5612,15 +5635,17 @@ async function _handleJiraPgApi(
       // Returning ticket (dept visited before) => In Progress; first arrival => Waiting for newDept
       const isReturningToDept = deptMapGet(deptStatuses, newDept) != null;
 
-      let newDeptQueueStatuses: any[] = [];
-      try {
-        const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
+      let allQueueRows: { rows: any[] } = { rows: [] };
+      try { allQueueRows = await pool.query(`SELECT queues FROM custom_queues`); } catch {}
+      const queueStatusesFor = (deptName: string): any[] => {
         for (const row of allQueueRows.rows) {
           const queues: any[] = row.queues || [];
-          const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === newDept.toLowerCase());
-          if (matchedQ?.queueStatuses?.length) { newDeptQueueStatuses = matchedQ.queueStatuses; break; }
+          const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === deptName.toLowerCase());
+          if (matchedQ?.queueStatuses?.length) return matchedQ.queueStatuses;
         }
-      } catch {}
+        return [];
+      };
+      const newDeptQueueStatuses = queueStatusesFor(newDept);
 
       // Every department tracks its own status independently -- a status like
       // Resolved belongs to whichever dept actually resolved it, not to a dept
@@ -5669,13 +5694,29 @@ async function _handleJiraPgApi(
         if (realMatch) newStatusId = realMatch.id;
       }
 
-      // Record the OLD dept's status exactly as it was right before the transfer —
-      // not the "Waiting for <newDept>" transit marker, which discarded that info
-      // (Sent/Watching needs to show what it was actually at before leaving).
+      // Record the OLD dept's status right before the transfer. Actually
+      // resolved/closed there (isDoneNow) keeps that real status -- genuinely
+      // accurate, not a discarded "Waiting for <newDept>" transit marker like
+      // this used to write. But a STILL-OPEN ticket being handed off is no
+      // longer idly sitting in this dept -- it's out being worked elsewhere
+      // now, so recording its literal prior status understates that,
+      // especially a ticket handed off moments after creation whose prior
+      // status is an untouched "Open" this dept never actually worked.
+      // Forcing "In Progress" here (this dept's own configured in-progress
+      // status) is also what makes a LATER done+return visit's
+      // restoringOwnSnapshot above correctly restore "In Progress" instead of
+      // resurrecting that stale "Open" from before this dept ever started.
       if (oldDept) {
-        deptMapSet(deptStatuses, oldDept, issue.status
-          ? { id: issue.status.id, name: issue.status.name, category: issue.status.category, color: issue.status.color }
-          : oldDeptStatusObj);
+        let oldDeptStatusToRecord = oldDeptStatusObj;
+        if (!isDoneNow) {
+          const oldQueueStatuses = queueStatusesFor(oldDept);
+          const inProgressSt = oldQueueStatuses.find((s: any) => s.category === 'in_progress')
+            || oldQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'));
+          oldDeptStatusToRecord = inProgressSt
+            ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
+            : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+        }
+        deptMapSet(deptStatuses, oldDept, oldDeptStatusToRecord);
       }
       deptMapSet(deptStatuses, newDept, newDeptStatusObj);
 
