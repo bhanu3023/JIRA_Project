@@ -2750,6 +2750,36 @@ async function ensureJiraSourceKeyUniqueIndex(): Promise<void> {
   );
 }
 
+// The next CF- display key used to be computed by scanning the ENTIRE issues
+// table on every single ticket creation -- SELECT MAX(CAST(SUBSTRING(cf_key
+// FROM 4) AS INTEGER)) FROM issues WHERE cf_key LIKE 'CF-%', with no index
+// able to help a per-row string-slice-and-cast expression like that. As the
+// table grows this scan only gets slower, and it ran unconditionally on
+// every create -- directly the "clicking Create takes too long" complaint.
+// A real Postgres sequence answers "what's next" in O(1) with no scan at
+// all, and is atomically collision-free (no retry loop needed, unlike the
+// MAX+1 approach it replaces). The one-time seed (reading the current max)
+// still has to scan the table once, but only ONCE ever -- guarded by
+// to_regclass so it runs on the very first call after this ships and never
+// again, not on every subsequent create.
+async function ensureCfKeySequence(): Promise<void> {
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF to_regclass('public.cf_key_seq') IS NULL THEN
+        CREATE SEQUENCE cf_key_seq;
+        PERFORM setval('cf_key_seq', (SELECT COALESCE(MAX(CAST(SUBSTRING(cf_key FROM 4) AS INTEGER)), 0) FROM issues WHERE cf_key LIKE 'CF-%'));
+      END IF;
+    END $$;
+  `);
+}
+
+async function nextCfKey(): Promise<string> {
+  await ensureCfKeySequence();
+  const r = await pool.query(`SELECT nextval('cf_key_seq') AS n`);
+  return `CF-${r.rows[0].n}`;
+}
+
 // The sync checkpoint is the highest Jira issue-number already pulled in for
 // a project. Deliberately NOT based on "created" timestamp: `ORDER BY
 // created ASC` on this Jira instance returns issues wildly out of key order
@@ -5446,9 +5476,7 @@ async function _handleJiraPgApi(
           );
         }
         // Assign next sequential CF key
-        const maxRow = await pool.query(`SELECT MAX(CAST(SUBSTRING(cf_key FROM 4) AS INTEGER)) AS mx FROM issues WHERE cf_key LIKE 'CF-%'`);
-        const nextNum = (maxRow.rows[0]?.mx ?? 0) + 1;
-        const cfKey = `CF-${nextNum}`;
+        const cfKey = await nextCfKey();
         await pool.query(`UPDATE issues SET cf_key = $1 WHERE id = $2`, [cfKey, issue.id]);
         (issue as any).cf_key = cfKey;
       }
@@ -6071,9 +6099,7 @@ async function _handleJiraPgApi(
       // every notification and history entry about it, never the CF- key
       // shown everywhere else in the app.
       try {
-        const maxRow = await pool.query(`SELECT MAX(CAST(SUBSTRING(cf_key FROM 4) AS INTEGER)) AS mx FROM issues WHERE cf_key LIKE 'CF-%'`);
-        const nextNum = (maxRow.rows[0]?.mx ?? 0) + 1;
-        newCfKey = `CF-${nextNum}`;
+        newCfKey = await nextCfKey();
         await pool.query(`UPDATE issues SET cf_key = $1 WHERE id = $2`, [newCfKey, newId]);
       } catch { newCfKey = null; }
     }
