@@ -48,6 +48,34 @@ const mkPolicy = (name: string, startCond: string, pauseCond: string, stopCond: 
   goals: ALL_PRIORITIES.map(p => ({ id: `g_${Date.now()}_${p}`, priority: p, timeValue: '', timeUnit: 'hours' })),
 });
 
+// Converts a raw sla_definitions row (the canonical DB shape this page
+// writes via createSLA/updateSLA) into the UI's SLAPolicy shape. Only the
+// isPriorityGroup goal entry is understood here -- that's the only shape
+// this page itself ever writes -- a row with some other goal shape (e.g.
+// imported from Jira with per-goal JQL/calendar fields) just shows up with
+// its priority rows empty rather than crashing.
+const dbRowToPolicy = (row: any): SLAPolicy => {
+  const rawGoals = Array.isArray(row.goals) ? row.goals : [];
+  const priorityGroup = rawGoals.find((g: any) => g?.isPriorityGroup && Array.isArray(g.priorityRows));
+  const byPriority: Record<string, { timeValue: string; timeUnit: string }> = {};
+  (priorityGroup?.priorityRows || []).forEach((r: any) => {
+    byPriority[String(r.priority || '').toLowerCase()] = { timeValue: String(r.timeValue ?? ''), timeUnit: r.timeUnit || 'hours' };
+  });
+  return {
+    id: row.id,
+    name: row.name,
+    startCondition: row.startCondition || undefined,
+    stopCondition: row.stopCondition || undefined,
+    enabled: row.status !== 'inactive',
+    goals: ALL_PRIORITIES.map(p => ({
+      id: `g_${row.id}_${p}`,
+      priority: p,
+      timeValue: byPriority[p.toLowerCase()]?.timeValue || '',
+      timeUnit: (byPriority[p.toLowerCase()]?.timeUnit as 'minutes' | 'hours' | 'days') || 'hours',
+    })),
+  };
+};
+
 /* ─── Create SLA Modal ─── */
 function CreateSLAModal({ onClose, onCreate }: { onClose: () => void; onCreate: (p: SLAPolicy) => void }) {
   const [name, setName] = useState('');
@@ -1027,27 +1055,47 @@ export default function QueueSettingsPage() {
   const [dbSlaIds, setDbSlaIds] = useState<Record<string, string>>({}); // policyId → DB id
 
   useEffect(() => {
-    api.request<any[]>(`custom-queues/${spaceKey}`).then((queues) => {
-      if (Array.isArray(queues)) {
-        const q = queues.find((q: any) => q.id === queueId);
-        if (q) { setQueue(q); setPolicies(q.slaPolicies || []); }
-      }
-    }).catch(() => {
+    let cancelled = false;
+    (async () => {
+      let q: CustomQueue | null = null;
       try {
-        const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
-        if (stored) {
-          const queues: CustomQueue[] = JSON.parse(stored);
-          const q = queues.find(q => q.id === queueId);
-          if (q) { setQueue(q); setPolicies(q.slaPolicies || []); }
-        }
-      } catch {}
-    });
-    // Also load from DB to get DB ids for update/delete
-    api.getSLAs(spaceKey).then((rows: any[]) => {
-      const map: Record<string, string> = {};
-      rows.forEach(r => { if (r.dept_name) map[r.dept_name + ':' + r.name] = r.id; });
-      setDbSlaIds(map);
-    }).catch(() => {});
+        const queues = await api.request<any[]>(`custom-queues/${spaceKey}`);
+        if (Array.isArray(queues)) q = queues.find((x: any) => x.id === queueId) || null;
+      } catch {
+        try {
+          const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
+          if (stored) {
+            const queues: CustomQueue[] = JSON.parse(stored);
+            q = queues.find(x => x.id === queueId) || null;
+          }
+        } catch {}
+      }
+      if (cancelled || !q) return;
+      setQueue(q);
+
+      // sla_definitions (matched by dept_name, i.e. the queue's name) is the
+      // canonical SLA source -- it's what breach tracking everywhere else in
+      // the app actually reads. queue.slaPolicies is only a denormalized
+      // copy this page writes alongside it for its own convenience; a queue
+      // that got recreated/restored under a new id (this one's id ends in
+      // "_restored2") starts with that copy empty even though its real SLA
+      // definitions are untouched in the DB -- which showed "No SLAs
+      // configured" here for a queue whose SLA was actively enforcing
+      // elsewhere. Load from the DB and treat it as ground truth; fall back
+      // to the queue's own cached copy only if the DB fetch itself fails.
+      try {
+        const rows = await api.getSLAs(spaceKey);
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        rows.forEach(r => { if (r.dept_name) map[r.dept_name + ':' + r.name] = r.id; });
+        setDbSlaIds(map);
+        const deptRows = rows.filter(r => (r.dept_name || '').toLowerCase() === q!.name.toLowerCase());
+        setPolicies(deptRows.length ? deptRows.map(dbRowToPolicy) : (q!.slaPolicies || []));
+      } catch {
+        setPolicies(q.slaPolicies || []);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [spaceKey, queueId]);
 
   useEffect(() => {
