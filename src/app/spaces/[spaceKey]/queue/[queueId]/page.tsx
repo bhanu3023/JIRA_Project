@@ -871,7 +871,7 @@ function RoundRobinTab({ spaceKey, queueName, spaceMembers }: {
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white ${avatarColor(mb.firstName||'')}`}>{mkInitials(mb.firstName||'',mb.lastName||'')}</div>
                 <div className="flex-1 min-w-0">
                   <p className="text-[13px] font-medium text-gray-800">{mb.firstName} {mb.lastName}</p>
-                  <p className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                  <p data-hj-suppress className="text-[11.5px] text-gray-400">{mb.email||''}</p>
                 </div>
                 <span className="text-[12px] text-blue-600 font-medium">+ Add</span>
               </div>
@@ -906,7 +906,7 @@ function RoundRobinTab({ spaceKey, queueName, spaceMembers }: {
                 </div>
                 <div>
                   <p className={`text-[13px] font-medium ${agent.isActive ? 'text-gray-800' : 'text-gray-400'}`}>{agent.name}</p>
-                  <p className="text-[11px] text-gray-400">{agent.email}</p>
+                  <p data-hj-suppress className="text-[11px] text-gray-400">{agent.email}</p>
                 </div>
               </div>
               <div>
@@ -980,7 +980,7 @@ function RoundRobinTab({ spaceKey, queueName, spaceMembers }: {
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white ${avatarColor(mb.firstName||'')}`}>{mkInitials(mb.firstName||'',mb.lastName||'')}</div>
                       <div className="flex-1 min-w-0">
                         <p className="text-[13px] font-medium text-gray-800">{mb.firstName} {mb.lastName}</p>
-                        <p className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                        <p data-hj-suppress className="text-[11.5px] text-gray-400">{mb.email||''}</p>
                       </div>
                       <span className="text-[12px] text-blue-600 font-medium">+ Assign</span>
                     </div>
@@ -1289,7 +1289,7 @@ export default function QueueSettingsPage() {
                           <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white ${avatarColor(mb.firstName||'')}`}>{mkInitials(mb.firstName||'',mb.lastName||'')}</div>
                           <div className="flex-1 min-w-0">
                             <p className="text-[13px] font-medium text-gray-800">{mb.firstName} {mb.lastName}</p>
-                            <p className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                            <p data-hj-suppress className="text-[11.5px] text-gray-400">{mb.email||''}</p>
                           </div>
                           <span className="text-[12px] text-blue-600 font-medium">+ Add</span>
                         </div>
@@ -1327,7 +1327,7 @@ export default function QueueSettingsPage() {
                               </div>
                               <div>
                                 <p className={`text-[13px] font-medium ${isSuspended ? 'text-gray-400' : 'text-gray-800'}`}>{mb.firstName} {mb.lastName}</p>
-                                <p className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                                <p data-hj-suppress className="text-[11.5px] text-gray-400">{mb.email||''}</p>
                               </div>
                             </div>
                           </td>

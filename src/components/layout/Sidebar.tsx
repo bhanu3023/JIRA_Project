@@ -1456,7 +1456,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                               <p className={`text-[13px] font-medium truncate ${isSuspended ? 'text-gray-400' : 'text-gray-800'}`}>{mb.firstName} {mb.lastName}</p>
                               {isSuspended && <span className="text-[10px] font-semibold text-amber-600 bg-amber-100 border border-amber-200 rounded-full px-2 py-0.5 flex-shrink-0">Suspended</span>}
                             </div>
-                            <p className="text-[11.5px] text-gray-400 truncate">{mb.email || ''}</p>
+                            <p data-hj-suppress className="text-[11.5px] text-gray-400 truncate">{mb.email || ''}</p>
                           </div>
                           {/* Role badge */}
                           <span className="text-[11px] text-gray-500 bg-white border border-gray-200 rounded-md px-2 py-1 flex-shrink-0">Member</span>
@@ -1556,7 +1556,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                                 </div>
                                 <div className="flex-1 min-w-0">
                                   <p className="text-[13px] font-medium text-gray-800 truncate">{mb.firstName} {mb.lastName}</p>
-                                  <p className="text-[11.5px] text-gray-400 truncate">{mb.email||''}</p>
+                                  <p data-hj-suppress className="text-[11.5px] text-gray-400 truncate">{mb.email||''}</p>
                                 </div>
                                 <div className="flex items-center gap-1.5 text-[12px] font-medium text-gray-400 group-hover:text-blue-600 transition-colors flex-shrink-0">
                                   <Plus size={14} />

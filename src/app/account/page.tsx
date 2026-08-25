@@ -244,8 +244,8 @@ export default function AccountPage() {
 
             {/* Name + email below avatar in white area */}
             <div className="pb-5">
-              <h1 className="text-[18px] font-bold text-gray-900">{fullName || user.email}</h1>
-              <p className="text-[12.5px] text-gray-500 mt-0.5">{user.email}</p>
+              <h1 data-hj-suppress className="text-[18px] font-bold text-gray-900">{fullName || user.email}</h1>
+              <p data-hj-suppress className="text-[12.5px] text-gray-500 mt-0.5">{user.email}</p>
               <span className="inline-flex items-center mt-2 px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold bg-blue-100 text-blue-700 capitalize">
                 {(user as any).role || 'member'}
               </span>
@@ -314,6 +314,7 @@ export default function AccountPage() {
                 <div className="relative">
                   <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                   <input
+                    data-hj-suppress
                     value={user.email}
                     readOnly
                     className="input-field pl-8 bg-gray-50 text-gray-500 cursor-not-allowed"
