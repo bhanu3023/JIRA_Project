@@ -957,6 +957,12 @@ function SpaceDetailContent() {
   };
 
   const [commentingOn, setCommentingOn] = useState<string | null>(null); // issueKey
+  // Which comment (if any) the currently-open composer is replying to --
+  // null means it's a plain new top-level comment, opened via "Add a
+  // comment...". Lets the same composer render either inline right under a
+  // specific comment (Reply) or at the bottom of the thread (Add a comment),
+  // matching where the ticket detail page's own Reply now opens too.
+  const [replyingToCommentId, setReplyingToCommentId] = useState<string | null>(null);
   const [commentText, setCommentText] = useState('');
   const [richCommentHtml, setRichCommentHtml] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
@@ -985,6 +991,7 @@ function SpaceDetailContent() {
     setCommentText('');
     setRichCommentHtml('');
     setCommentingOn(null);
+    setReplyingToCommentId(null);
     setSubmittingComment(true);
     try {
       const saved = await api.addComment(issueKey, { body });
@@ -3009,51 +3016,12 @@ function SpaceDetailContent() {
                       </div>
                     )}
 
-                    {/* Full comment thread */}
-                    {comments.length > 0 && (
-                      <div className="mx-4 mb-3 flex flex-col gap-1.5">
-                        {comments.map((c: any, ci: number) => {
-                          const firstName = c.author?.firstName || c.authorName?.split(' ')[0] || '?';
-                          const initials = firstName[0]?.toUpperCase() || '?';
-                          const cleanBody = (c.body || '').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/\s+/g,' ').trim();
-                          return (
-                            <div key={c.id || ci} className="flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-100 group/comment">
-                              <div className="w-5 h-5 rounded-full bg-blue-200 flex items-center justify-center text-[8px] font-bold text-blue-700 flex-shrink-0 mt-0.5">
-                                {initials}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-1.5 mb-0.5">
-                                  <span className="text-[11px] font-semibold text-blue-700">{firstName}</span>
-                                  <span className="text-[11px] text-blue-400">·</span>
-                                  <span className="text-[11px] text-blue-400">{timeAgo(c.createdAt)}</span>
-                                </div>
-                                <p className="text-[12px] text-gray-700 whitespace-pre-wrap break-words">{cleanBody || '...'}</p>
-                                {/* Jira-style reply -- no real threading here either, same
-                                    @mention convention as the main ticket page's own Reply. */}
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    const authorId = c.author?.id || c.authorId;
-                                    const mentionHtml = authorId
-                                      ? buildMentionHtml({ id: authorId, firstName: c.author?.firstName, lastName: c.author?.lastName, email: c.author?.email ?? c.authorEmail })
-                                      : (firstName !== '?' ? `@${firstName} ` : '');
-                                    setCommentingOn(issue.key);
-                                    setRichCommentHtml(mentionHtml);
-                                    setCommentText(mentionHtml.replace(/<[^>]+>/g, '').trim());
-                                  }}
-                                  className="mt-0.5 text-[10.5px] text-blue-400 hover:text-blue-600 opacity-0 group-hover/comment:opacity-100 transition-opacity"
-                                >
-                                  Reply
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                    {/* Inline comment area */}
-                    <div className="mx-4 mb-3" onClick={e => e.stopPropagation()}>
-                      {commentingOn === issue.key ? (
+                    {/* Composer, reused for both the general "Add a comment" slot at
+                        the bottom and an inline Reply opened right under a specific
+                        comment -- same instance either way, just a different mount
+                        point, so Cancel/Send/upload-state never has to know which. */}
+                    {(() => {
+                      const renderComposer = () => (
                         <div className="border border-blue-200 rounded-xl overflow-hidden shadow-sm bg-white">
                           <RichTextEditor
                             value={richCommentHtml}
@@ -3068,7 +3036,7 @@ function SpaceDetailContent() {
                             <span className="text-[11px] text-gray-400">Ctrl+Enter to send · Esc to cancel</span>
                             <div className="flex gap-2">
                               <button
-                                onClick={() => { setCommentingOn(null); setCommentText(''); setRichCommentHtml(''); }}
+                                onClick={() => { setCommentingOn(null); setReplyingToCommentId(null); setCommentText(''); setRichCommentHtml(''); }}
                                 className="px-3 py-1.5 text-[12px] text-gray-500 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors">
                                 Cancel
                               </button>
@@ -3082,17 +3050,80 @@ function SpaceDetailContent() {
                             </div>
                           </div>
                         </div>
-                      ) : (
-                        <button
-                          onClick={() => { setCommentingOn(issue.key); setCommentText(''); setRichCommentHtml(''); }}
-                          className="flex items-center gap-2 w-full px-3 py-2 rounded-xl border border-dashed border-gray-200 text-[12.5px] text-gray-400 hover:border-blue-300 hover:text-blue-500 hover:bg-blue-50 transition-colors group/cmt">
-                          <div className="w-6 h-6 rounded-full bg-gray-100 group-hover/cmt:bg-blue-100 flex items-center justify-center flex-shrink-0 transition-colors">
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                      );
+                      return (
+                        <>
+                          {/* Full comment thread */}
+                          {comments.length > 0 && (
+                            <div className="mx-4 mb-3 flex flex-col gap-1.5">
+                              {comments.map((c: any, ci: number) => {
+                                const firstName = c.author?.firstName || c.authorName?.split(' ')[0] || '?';
+                                const initials = firstName[0]?.toUpperCase() || '?';
+                                const cleanBody = (c.body || '').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/\s+/g,' ').trim();
+                                return (
+                                  <div key={c.id || ci}>
+                                    <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-100 group/comment">
+                                      <div className="w-5 h-5 rounded-full bg-blue-200 flex items-center justify-center text-[8px] font-bold text-blue-700 flex-shrink-0 mt-0.5">
+                                        {initials}
+                                      </div>
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-1.5 mb-0.5">
+                                          <span className="text-[11px] font-semibold text-blue-700">{firstName}</span>
+                                          <span className="text-[11px] text-blue-400">·</span>
+                                          <span className="text-[11px] text-blue-400">{timeAgo(c.createdAt)}</span>
+                                        </div>
+                                        <p className="text-[12px] text-gray-700 whitespace-pre-wrap break-words">{cleanBody || '...'}</p>
+                                        {/* Jira-style reply -- no real threading here either, same
+                                            @mention convention as the main ticket page's own Reply. */}
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const authorId = c.author?.id || c.authorId;
+                                            const mentionHtml = authorId
+                                              ? buildMentionHtml({ id: authorId, firstName: c.author?.firstName, lastName: c.author?.lastName, email: c.author?.email ?? c.authorEmail })
+                                              : (firstName !== '?' ? `@${firstName} ` : '');
+                                            setCommentingOn(issue.key);
+                                            setReplyingToCommentId(c.id);
+                                            setRichCommentHtml(mentionHtml);
+                                            setCommentText(mentionHtml.replace(/<[^>]+>/g, '').trim());
+                                          }}
+                                          className="mt-0.5 text-[10.5px] text-blue-400 hover:text-blue-600 opacity-0 group-hover/comment:opacity-100 transition-opacity"
+                                        >
+                                          Reply
+                                        </button>
+                                      </div>
+                                    </div>
+                                    {/* Inline reply box -- directly under THIS comment. */}
+                                    {commentingOn === issue.key && replyingToCommentId === c.id && (
+                                      <div className="mt-1.5" onClick={e => e.stopPropagation()}>
+                                        {renderComposer()}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {/* General "Add a comment" slot -- only shows the composer here
+                              when it's a plain new comment, not a reply to a specific one
+                              (that renders inline above instead). */}
+                          <div className="mx-4 mb-3" onClick={e => e.stopPropagation()}>
+                            {commentingOn === issue.key && replyingToCommentId === null ? (
+                              renderComposer()
+                            ) : commentingOn !== issue.key ? (
+                              <button
+                                onClick={() => { setCommentingOn(issue.key); setReplyingToCommentId(null); setCommentText(''); setRichCommentHtml(''); }}
+                                className="flex items-center gap-2 w-full px-3 py-2 rounded-xl border border-dashed border-gray-200 text-[12.5px] text-gray-400 hover:border-blue-300 hover:text-blue-500 hover:bg-blue-50 transition-colors group/cmt">
+                                <div className="w-6 h-6 rounded-full bg-gray-100 group-hover/cmt:bg-blue-100 flex items-center justify-center flex-shrink-0 transition-colors">
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                </div>
+                                <span>Add a comment…</span>
+                              </button>
+                            ) : null}
                           </div>
-                          <span>Add a comment…</span>
-                        </button>
-                      )}
-                    </div>
+                        </>
+                      );
+                    })()}
                   </div>
                 );
               })}

@@ -121,7 +121,14 @@ export default function IssueDetailPage() {
   const [isUploadingComment, setIsUploadingComment] = useState(false);
   const [isUploadingDescription, setIsUploadingDescription] = useState(false);
   const [isUploadingEditComment, setIsUploadingEditComment] = useState(false);
-  const commentComposerRef = useRef<HTMLDivElement>(null);
+  // Inline reply box -- opens directly under the comment being replied to
+  // (matching Jira's own placement) instead of jumping to the main composer
+  // at the top, which put the reply nowhere near the comment it referenced
+  // in a list of any real length.
+  const [replyingToCommentId, setReplyingToCommentId] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const [submittingReply, setSubmittingReply] = useState(false);
+  const [isUploadingReply, setIsUploadingReply] = useState(false);
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
@@ -706,19 +713,67 @@ export default function IssueDetailPage() {
   }, [currentIssue?.spaceKey, currentIssue?.id, issueKey]);
 
   // Jira-style "Reply" -- this app has no real threaded comments, just the
-  // same convention Jira itself uses: seed the composer with an @mention of
-  // whoever you're replying to and scroll it into view, rather than nesting
-  // a reply under its parent. A comment authored without a linked user
-  // account (rare, but possible for an imported/legacy comment) has no id to
-  // mention -- fall back to plain, unlinked "@Name" text so Reply still does
-  // something sensible instead of silently no-op'ing.
+  // same convention Jira itself uses: open a small composer directly under
+  // the comment being replied to (not the main composer at the top, which
+  // put the reply nowhere near the comment it referenced in any list of
+  // real length), seeded with an @mention of whoever you're replying to. A
+  // comment authored without a linked user account (rare, but possible for
+  // an imported/legacy comment) has no id to mention -- fall back to plain,
+  // unlinked "@Name" text so Reply still does something sensible instead of
+  // silently no-op'ing.
   const handleReplyToComment = (comment: any) => {
     const authorId = comment.author?.id || comment.authorId;
     const mentionHtml = authorId
       ? buildMentionHtml({ id: authorId, firstName: comment.author?.firstName, lastName: comment.author?.lastName, email: comment.author?.email ?? comment.authorEmail })
       : `${(comment.author?.firstName ? `${comment.author.firstName} ${comment.author.lastName ?? ''}`.trim() : comment.authorName) ? `@${comment.author?.firstName ? `${comment.author.firstName} ${comment.author.lastName ?? ''}`.trim() : comment.authorName} ` : ''}`;
-    setCommentText(prev => mentionHtml + prev);
-    commentComposerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setReplyingToCommentId(comment.id);
+    setReplyText(mentionHtml);
+  };
+
+  // Submits the inline reply box the same way handleAddComment submits the
+  // main composer (optimistic append, background refresh) -- kept separate
+  // since both can't share one text/submitting state without one clobbering
+  // the other if a reply and the main composer are both mid-flight.
+  const handleSubmitReply = async () => {
+    if (!replyText.trim() || submittingReply) return;
+    setSubmittingReply(true);
+    const textToSubmit = replyText;
+    const tempId = `opt-${Date.now()}`;
+    setReplyText('');
+    setReplyingToCommentId(null);
+    const optimisticComment = {
+      id: tempId,
+      body: textToSubmit,
+      isInternal: false,
+      authorName: `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email || 'You',
+      author: user,
+      createdAt: new Date().toISOString(),
+    };
+    useStore.setState((s) => ({
+      currentIssue: s.currentIssue
+        ? { ...s.currentIssue, comments: [...(s.currentIssue.comments || []), optimisticComment] }
+        : s.currentIssue,
+    }));
+    try {
+      const saved = await api.addComment(issueKey, { body: textToSubmit, isInternal: false });
+      if (saved?.id) knownCommentIds.current.add(saved.id);
+      useStore.setState((s) => ({
+        currentIssue: s.currentIssue
+          ? { ...s.currentIssue, comments: (s.currentIssue.comments || []).map((c: any) => c.id === tempId ? (saved || c) : c) }
+          : s.currentIssue,
+      }));
+      loadIssue(issueKey);
+    } catch (err: any) {
+      if (!err?.message?.includes('Duplicate comment')) {
+        console.error(err);
+        useStore.setState((s) => ({
+          currentIssue: s.currentIssue
+            ? { ...s.currentIssue, comments: (s.currentIssue.comments || []).filter((c: any) => c.id !== tempId) }
+            : s.currentIssue,
+        }));
+      }
+    }
+    finally { setSubmittingReply(false); }
   };
 
   const handleAddComment = async () => {
@@ -2134,7 +2189,7 @@ export default function IssueDetailPage() {
             {activeTab === 'comments' && (
               <div className="pt-5 space-y-4">
                 {/* Comment input */}
-                <div ref={commentComposerRef} className="flex gap-2.5">
+                <div className="flex gap-2.5">
                   <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-[11px] flex-shrink-0 mt-0.5 font-semibold">
                     {getInitials(user?.firstName, user?.lastName)}
                   </div>
@@ -2254,6 +2309,31 @@ export default function IssueDetailPage() {
                               Delete
                             </button>
                           </div>
+                          {/* Inline reply box -- directly under THIS comment, not the
+                              main composer at the top. */}
+                          {replyingToCommentId === comment.id && (
+                            <div className="mt-2">
+                              <RichTextEditor
+                                value={replyText}
+                                onChange={setReplyText}
+                                minHeight="70px"
+                                compact={true}
+                                members={allMembers}
+                                onUploadingChange={setIsUploadingReply}
+                              />
+                              <div className="flex gap-2 mt-1.5">
+                                <button
+                                  onClick={handleSubmitReply}
+                                  disabled={!replyText.trim() || submittingReply || isUploadingReply}
+                                  className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                                >{isUploadingReply ? 'Uploading…' : submittingReply ? 'Saving…' : 'Save'}</button>
+                                <button
+                                  onClick={() => { setReplyingToCommentId(null); setReplyText(''); }}
+                                  className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100"
+                                >Cancel</button>
+                              </div>
+                            </div>
+                          )}
                         </>
                       )}
                     </div>
