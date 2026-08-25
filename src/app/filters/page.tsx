@@ -1949,14 +1949,14 @@ export default function FiltersPage() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
-                <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Key</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Work</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Assignee</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">Reported By</th>
+                <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[32%]">Work</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Assignee</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Reported By</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20 hidden md:table-cell">Priority</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">SLA Breached</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">Overdue</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16 hidden md:table-cell">Priority</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
                 <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24 hidden md:table-cell">Time Spent</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
               </tr>
@@ -1975,7 +1975,7 @@ export default function FiltersPage() {
                       </Link>
                     </div>
                   </td>
-                  <td className="px-2 py-2.5 max-w-0">
+                  <td className="px-2 py-2.5 w-[32%]">
                     <Link
                       href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
                       className="block truncate text-[13px] text-gray-900 hover:text-blue-600 transition-colors"
