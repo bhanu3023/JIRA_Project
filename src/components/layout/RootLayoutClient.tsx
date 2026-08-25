@@ -4,14 +4,16 @@ import { useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
+import { initHotjar, identifyHotjarUser } from '@/analytics/hotjar';
 import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
 import DotLoader from '@/components/ui/DotLoader';
 import NavigationLoader from '@/components/ui/NavigationLoader';
 
 export default function RootLayoutClient({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, initializing, loadUser, sidebarOpen } = useStore(
+  const { user, isAuthenticated, initializing, loadUser, sidebarOpen } = useStore(
     useShallow((s) => ({
+      user: s.user,
       isAuthenticated: s.isAuthenticated,
       initializing: s.initializing,
       loadUser: s.loadUser,
@@ -25,6 +27,21 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
   useEffect(() => {
     loadUser();
   }, [loadUser]);
+
+  // Session recording. No-ops when no Hotjar site ID is configured, which is the default.
+  // Runs above the isAuthPage early return so /auth/login and /auth/register are recorded too --
+  // a session that never gets past the login form is one of the more useful ones to watch.
+  useEffect(() => {
+    initHotjar();
+  }, []);
+
+  // Attributed here rather than on mount because `user` is null until loadUser()'s /api/me-
+  // equivalent resolves. Fires for any signed-in user, including one whose role is missing or
+  // unrecognised -- those sessions are often the interesting ones, since they mean somebody was
+  // granted access that never actually reached them.
+  useEffect(() => {
+    if (user?.id) identifyHotjarUser(user);
+  }, [user]);
 
   // Auto-reconnect IMAP pollers once per authenticated session (not on auth pages)
   useEffect(() => {

@@ -479,7 +479,7 @@ export default function ReportsPage() {
                                     </div>
                                     <div>
                                       <p className="text-[13px] font-medium text-gray-800">{u.name}</p>
-                                      <p className="text-[11px] text-gray-400">{u.email}</p>
+                                      <p data-hj-suppress className="text-[11px] text-gray-400">{u.email}</p>
                                     </div>
                                   </div>
                                 </td>
@@ -640,7 +640,7 @@ export default function ReportsPage() {
                                     </div>
                                     <div>
                                       <p className="text-[13.5px] font-medium text-[#2b2d42]">{m.name}</p>
-                                      <p className="text-[12px] text-[#6b7280]">{m.email}</p>
+                                      <p data-hj-suppress className="text-[12px] text-[#6b7280]">{m.email}</p>
                                     </div>
                                   </div>
                                 </td>

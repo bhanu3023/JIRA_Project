@@ -374,7 +374,7 @@ export default function DashboardPage() {
                             {r.name}
                           </Link>
                         </td>
-                        <td className="px-2 py-2.5 text-[12.5px] text-gray-600">{r.email || '—'}</td>
+                        <td data-hj-suppress className="px-2 py-2.5 text-[12.5px] text-gray-600">{r.email || '—'}</td>
                         <td className="px-2 py-2.5 text-[12.5px] text-gray-900 font-medium">{r.ticketCount}</td>
                         <td className="whitespace-nowrap px-4 py-2.5 text-[11px] text-gray-500">
                           {r.lastActivity ? timeAgo(r.lastActivity) : '—'}

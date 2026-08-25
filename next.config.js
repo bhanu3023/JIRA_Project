@@ -26,7 +26,12 @@ const nextConfig = {
           { key: 'X-XSS-Protection', value: '1; mode=block' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
           { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
-          { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https:; frame-ancestors 'none';" },
+          // Hotjar needs every one of the hotjar.com/hotjar.io entries below; with a partial
+          // list the snippet fails in a way that looks like it simply never loaded. frame-src and
+          // worker-src are spelled out because without them both fall back to default-src 'self',
+          // which blocks Hotjar's consent iframe and its blob: worker. frame-ancestors stays
+          // 'none' -- it governs who may embed THIS app, which Hotjar does not need.
+          { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://static.hotjar.com https://script.hotjar.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https://script.hotjar.com; connect-src 'self' https: https://*.hotjar.com https://*.hotjar.io wss://*.hotjar.com; frame-src 'self' https://vars.hotjar.com; worker-src 'self' blob:; frame-ancestors 'none';" },
         ],
       },
       {

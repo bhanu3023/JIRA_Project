@@ -211,7 +211,7 @@ export default function MyAssignedPage() {
                   <div className="min-w-0 flex-1">
                     <h2 className="text-xl font-semibold tracking-tight text-jira-dark">{label}</h2>
                     {section.assignee?.email && (
-                      <p className="mt-0.5 truncate text-[12px] text-gray-500">{section.assignee.email}</p>
+                      <p data-hj-suppress className="mt-0.5 truncate text-[12px] text-gray-500">{section.assignee.email}</p>
                     )}
                   </div>
                   <div className="flex flex-col items-end gap-0.5 pr-1">

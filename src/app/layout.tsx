@@ -2,6 +2,7 @@ import './globals.css';
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
+import Script from 'next/script';
 import RootLayoutClient from '@/components/layout/RootLayoutClient';
 
 const inter = Inter({ subsets: ['latin'] });
@@ -21,6 +22,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className={`${inter.className} antialiased bg-gray-50 text-gray-900 min-h-screen overflow-x-hidden`}>
+        {/* Serves public/runtime-config.js, which sets window.__APP_CONFIG__. beforeInteractive so
+            it runs before the app bundle evaluates src/config/runtimeConfig.ts -- with any later
+            strategy the bundle would read an undefined config and fall back to the baked-in
+            build-time value, defeating the point of a runtime-editable file. */}
+        <Script src="/runtime-config.js" strategy="beforeInteractive" />
         <Suspense
           fallback={
             <div className="min-h-screen bg-gray-50 flex items-center justify-center">

@@ -2058,7 +2058,7 @@ function SettingsContent() {
                   Are you sure you want to permanently delete <span className="font-semibold">{deleteConfirmUser.firstName} {deleteConfirmUser.lastName}</span>?
                 </p>
                 <p className="text-[12px] text-gray-500 mt-1.5">
-                  Email: <span className="font-medium">{deleteConfirmUser.email}</span>
+                  Email: <span data-hj-suppress className="font-medium">{deleteConfirmUser.email}</span>
                 </p>
                 <p className="text-[12px] text-red-500 mt-2">
                   This will remove the user from all boards and delete their account permanently.
@@ -2243,7 +2243,7 @@ function SettingsContent() {
                           <span className="text-sm font-medium text-gray-900 hover:text-blue-600 transition-colors truncate">{u.firstName} {u.lastName}</span>
                         </button>
                       </td>
-                      <td className="px-4 py-2.5 text-sm text-gray-500 max-w-0"><span className="block truncate">{u.email}</span></td>
+                      <td className="px-4 py-2.5 text-sm text-gray-500 max-w-0"><span data-hj-suppress className="block truncate">{u.email}</span></td>
                       <td className="px-4 py-2.5 min-w-[170px]">
                         <div className="relative inline-block">
                           <button
@@ -2491,7 +2491,7 @@ function SettingsContent() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-base font-bold text-gray-900 truncate">{u.firstName} {u.lastName}</p>
-                    <p className="text-sm text-gray-500 truncate">{u.email}</p>
+                    <p data-hj-suppress className="text-sm text-gray-500 truncate">{u.email}</p>
                     <span className={`inline-flex items-center gap-1 mt-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold ${ROLE_COLORS[u.role] || 'bg-gray-100 text-gray-600'}`}>
                       {ROLE_LABELS[u.role] || u.role}
                     </span>
@@ -2552,7 +2552,7 @@ function SettingsContent() {
                   {/* Email */}
                   <div className="py-3 border-b border-gray-50">
                     <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1">Email</span>
-                    <span className="text-sm text-gray-700 break-all">{u.email}</span>
+                    <span data-hj-suppress className="text-sm text-gray-700 break-all">{u.email}</span>
                   </div>
 
                   {/* Member since */}
@@ -3325,7 +3325,7 @@ function ApiTokensView({ navigate, user }: { navigate: (v: any) => void; user: a
                 </div>
                 <p className="text-sm text-gray-500 mb-4">Copy this token now. <span className="font-semibold text-gray-700">You won't be able to see it again.</span></p>
                 <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 mb-5">
-                  <code className="flex-1 text-xs font-mono text-gray-800 break-all select-all">{createdToken}</code>
+                  <code data-hj-suppress className="flex-1 text-xs font-mono text-gray-800 break-all select-all">{createdToken}</code>
                   <button onClick={copyToken} className="flex-shrink-0 text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
                     {copied ? <><Check size={12} /> Copied</> : 'Copy'}
                   </button>

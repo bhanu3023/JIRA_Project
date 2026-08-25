@@ -549,7 +549,7 @@ function PeopleSection({
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className={`text-[13px] font-semibold ${isSel ? 'text-blue-700' : 'text-gray-900'}`}>{u.firstName} {u.lastName}</p>
-                          <p className="text-[11.5px] text-gray-400 truncate">{u.email}</p>
+                          <p data-hj-suppress className="text-[11.5px] text-gray-400 truncate">{u.email}</p>
                         </div>
                       </button>
                     );
@@ -3153,7 +3153,7 @@ function RoundRobinTab({ spaceKey, spaceMembers }: { spaceKey: string; spaceMemb
                               </div>
                               <div className="flex-1 min-w-0">
                                 <div className="font-semibold text-gray-800 truncate">{name}</div>
-                                <div className="text-gray-400 truncate">{u.email}</div>
+                                <div data-hj-suppress className="text-gray-400 truncate">{u.email}</div>
                               </div>
                             </button>
                           );
