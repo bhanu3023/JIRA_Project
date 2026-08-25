@@ -2315,37 +2315,13 @@ export default function IssueDetailPage() {
 
             {activeTab === 'comments' && (
               <div className="pt-5 space-y-4">
-                {/* Comment input */}
-                <div className="flex gap-2.5">
-                  <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-[11px] flex-shrink-0 mt-0.5 font-semibold">
-                    {getInitials(user?.firstName, user?.lastName)}
-                  </div>
-                  <div className="flex-1 relative">
-                    <RichTextEditor
-                      value={commentText}
-                      onChange={setCommentText}
-                      placeholder="Add a comment… paste/drag images, attach files, type @ to mention"
-                      minHeight="100px"
-                      compact={true}
-                      members={allMembers}
-                      onUploadingChange={setIsUploadingComment}
-                    />
-                    <div className="flex items-center gap-3 mt-2">
-                      <button onClick={handleAddComment} disabled={!commentText.trim() || submittingComment || isUploadingComment}
-                        className="bg-blue-600 text-white text-[13px] font-medium px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5">
-                        {submittingComment && <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                        {submittingComment ? 'Saving…' : isUploadingComment ? 'Uploading…' : 'Save'}
-                      </button>
-                      <label className="flex items-center gap-1.5 text-[12px] text-gray-500 cursor-pointer select-none">
-                        <input type="checkbox" checked={isInternal} onChange={e => setIsInternal(e.target.checked)} className="rounded border-gray-300" />
-                        Internal note
-                      </label>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Existing comments — newest first (exclude System auto-comments) */}
-                {[...(issue.comments || [])].filter(c => c.authorName !== 'System' && c.author?.email !== 'system').reverse().map(comment => (
+                {/* Existing comments — oldest first, same as Jira's own comment thread
+                    order. A "Reply" here only seeds an @mention on a new top-level
+                    comment (no real threading, see handleReplyToComment) rather than
+                    nesting under the original -- with a newest-first list that made a
+                    reply LOOK like it was replying "backward" to something below it, so
+                    it needs to land after (not above) the comment it references. */}
+                {[...(issue.comments || [])].filter(c => c.authorName !== 'System' && c.author?.email !== 'system').map(comment => (
                   <div key={comment.id} className="flex gap-2.5 group/comment">
                     <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-[11px] flex-shrink-0 font-semibold mt-0.5">
                       {getInitials(comment.author?.firstName ?? (comment.authorName ?? '').split(' ')[0], comment.author?.lastName ?? (comment.authorName ?? '').split(' ').slice(1).join(' '))}
@@ -2475,6 +2451,37 @@ export default function IssueDetailPage() {
                 {(!issue.comments || issue.comments.length === 0) && (
                   <p className="text-[13px] text-gray-400 py-6 text-center">No comments yet</p>
                 )}
+
+                {/* Comment input — below the thread now that comments render
+                    oldest-first, so a newly saved comment appears right where it
+                    was typed instead of jumping away to the top of the list. */}
+                <div className="flex gap-2.5">
+                  <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-[11px] flex-shrink-0 mt-0.5 font-semibold">
+                    {getInitials(user?.firstName, user?.lastName)}
+                  </div>
+                  <div className="flex-1 relative">
+                    <RichTextEditor
+                      value={commentText}
+                      onChange={setCommentText}
+                      placeholder="Add a comment… paste/drag images, attach files, type @ to mention"
+                      minHeight="100px"
+                      compact={true}
+                      members={allMembers}
+                      onUploadingChange={setIsUploadingComment}
+                    />
+                    <div className="flex items-center gap-3 mt-2">
+                      <button onClick={handleAddComment} disabled={!commentText.trim() || submittingComment || isUploadingComment}
+                        className="bg-blue-600 text-white text-[13px] font-medium px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5">
+                        {submittingComment && <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
+                        {submittingComment ? 'Saving…' : isUploadingComment ? 'Uploading…' : 'Save'}
+                      </button>
+                      <label className="flex items-center gap-1.5 text-[12px] text-gray-500 cursor-pointer select-none">
+                        <input type="checkbox" checked={isInternal} onChange={e => setIsInternal(e.target.checked)} className="rounded border-gray-300" />
+                        Internal note
+                      </label>
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
