@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor, getDeptColor } from '@/lib/utils';
+import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor, getDeptColor, buildMentionHtml } from '@/lib/utils';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
@@ -3017,7 +3017,7 @@ function SpaceDetailContent() {
                           const initials = firstName[0]?.toUpperCase() || '?';
                           const cleanBody = (c.body || '').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/\s+/g,' ').trim();
                           return (
-                            <div key={c.id || ci} className="flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-100">
+                            <div key={c.id || ci} className="flex items-start gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-100 group/comment">
                               <div className="w-5 h-5 rounded-full bg-blue-200 flex items-center justify-center text-[8px] font-bold text-blue-700 flex-shrink-0 mt-0.5">
                                 {initials}
                               </div>
@@ -3028,6 +3028,23 @@ function SpaceDetailContent() {
                                   <span className="text-[11px] text-blue-400">{timeAgo(c.createdAt)}</span>
                                 </div>
                                 <p className="text-[12px] text-gray-700 whitespace-pre-wrap break-words">{cleanBody || '...'}</p>
+                                {/* Jira-style reply -- no real threading here either, same
+                                    @mention convention as the main ticket page's own Reply. */}
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const authorId = c.author?.id || c.authorId;
+                                    const mentionHtml = authorId
+                                      ? buildMentionHtml({ id: authorId, firstName: c.author?.firstName, lastName: c.author?.lastName, email: c.author?.email ?? c.authorEmail })
+                                      : (firstName !== '?' ? `@${firstName} ` : '');
+                                    setCommentingOn(issue.key);
+                                    setRichCommentHtml(mentionHtml);
+                                    setCommentText(mentionHtml.replace(/<[^>]+>/g, '').trim());
+                                  }}
+                                  className="mt-0.5 text-[10.5px] text-blue-400 hover:text-blue-600 opacity-0 group-hover/comment:opacity-100 transition-opacity"
+                                >
+                                  Reply
+                                </button>
                               </div>
                             </div>
                           );

@@ -34,6 +34,19 @@ export function getInitials(firstName?: string, lastName?: string): string {
   return `${(firstName || '')[0] || ''}${(lastName || '')[0] || ''}`.toUpperCase();
 }
 
+// Builds the exact same mention markup RichTextEditor's own insertMention()
+// produces when someone types "@" and picks a person -- a "Reply" button on
+// an existing comment seeds this into the composer instead (this app has no
+// real threaded replies, just Jira's own convention of @mentioning whoever
+// you're replying to). Matching the markup exactly matters: the comment
+// POST handler detects who to notify by regex-matching data-userid="..." in
+// the body, and renderCommentBody's own styling keys off the "mention"
+// class -- a differently-shaped span would neither notify nor render right.
+export function buildMentionHtml(member: { id: string; firstName?: string | null; lastName?: string | null; email?: string | null }): string {
+  const name = `${member.firstName || ''} ${member.lastName || ''}`.trim() || member.email || 'User';
+  return `<span class="mention" data-userid="${member.id}" contenteditable="false" style="color:#0052CC;background:#DEEBFF;border-radius:3px;padding:1px 6px;font-weight:600;font-size:13px;cursor:pointer;" title="${member.email || name}">@${name}</span>&nbsp;`;
+}
+
 export function formatDate(date: string | undefined): string {
   if (!date) return '';
   return new Date(date).toLocaleDateString('en-US', {

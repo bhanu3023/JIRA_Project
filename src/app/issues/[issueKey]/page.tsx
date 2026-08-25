@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getEffectiveIssueStatus, resolveStatusColor, getDeptColor } from '@/lib/utils';
+import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getEffectiveIssueStatus, resolveStatusColor, getDeptColor, buildMentionHtml } from '@/lib/utils';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
 import RichTextEditor from '@/components/ui/RichTextEditor';
@@ -121,6 +121,7 @@ export default function IssueDetailPage() {
   const [isUploadingComment, setIsUploadingComment] = useState(false);
   const [isUploadingDescription, setIsUploadingDescription] = useState(false);
   const [isUploadingEditComment, setIsUploadingEditComment] = useState(false);
+  const commentComposerRef = useRef<HTMLDivElement>(null);
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
@@ -703,6 +704,22 @@ export default function IssueDetailPage() {
     return () => clearInterval(poll);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentIssue?.spaceKey, currentIssue?.id, issueKey]);
+
+  // Jira-style "Reply" -- this app has no real threaded comments, just the
+  // same convention Jira itself uses: seed the composer with an @mention of
+  // whoever you're replying to and scroll it into view, rather than nesting
+  // a reply under its parent. A comment authored without a linked user
+  // account (rare, but possible for an imported/legacy comment) has no id to
+  // mention -- fall back to plain, unlinked "@Name" text so Reply still does
+  // something sensible instead of silently no-op'ing.
+  const handleReplyToComment = (comment: any) => {
+    const authorId = comment.author?.id || comment.authorId;
+    const mentionHtml = authorId
+      ? buildMentionHtml({ id: authorId, firstName: comment.author?.firstName, lastName: comment.author?.lastName, email: comment.author?.email ?? comment.authorEmail })
+      : `${(comment.author?.firstName ? `${comment.author.firstName} ${comment.author.lastName ?? ''}`.trim() : comment.authorName) ? `@${comment.author?.firstName ? `${comment.author.firstName} ${comment.author.lastName ?? ''}`.trim() : comment.authorName} ` : ''}`;
+    setCommentText(prev => mentionHtml + prev);
+    commentComposerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
 
   const handleAddComment = async () => {
     if (!commentText.trim() || submittingComment) return;
@@ -2117,7 +2134,7 @@ export default function IssueDetailPage() {
             {activeTab === 'comments' && (
               <div className="pt-5 space-y-4">
                 {/* Comment input */}
-                <div className="flex gap-2.5">
+                <div ref={commentComposerRef} className="flex gap-2.5">
                   <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-[11px] flex-shrink-0 mt-0.5 font-semibold">
                     {getInitials(user?.firstName, user?.lastName)}
                   </div>
@@ -2211,8 +2228,16 @@ export default function IssueDetailPage() {
                       ) : (
                         <>
                           {renderCommentBody(comment.body)}
-                          {/* Edit · Delete actions — show on hover */}
+                          {/* Reply · Edit · Delete actions — show on hover */}
                           <div className="flex gap-3 mt-1">
+                            <button
+                              onClick={() => handleReplyToComment(comment)}
+                              className="text-[11px] text-gray-400 hover:text-blue-600 flex items-center gap-0.5 transition-colors"
+                            >
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17L4 12M4 12L9 7M4 12H16C18.2091 12 20 13.7909 20 16V18" /></svg>
+                              Reply
+                            </button>
+                            <span className="text-gray-300 text-[11px]">·</span>
                             <button
                               onClick={() => { setEditingCommentId(comment.id); setEditingCommentText(comment.body); }}
                               className="text-[11px] text-gray-400 hover:text-blue-600 flex items-center gap-0.5 transition-colors"
