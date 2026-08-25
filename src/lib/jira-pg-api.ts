@@ -8106,13 +8106,47 @@ async function _handleJiraPgApi(
     const body = await readJson(req);
     const emoji = String(body.emoji || '').trim();
     if (!emoji) return json({ error: 'emoji required' }, 400);
-    const row = await pool.query(`SELECT reactions FROM comments WHERE id=$1`, [commentId]);
+    const row = await pool.query(`SELECT reactions, "authorId", "issueId", body FROM comments WHERE id=$1`, [commentId]);
     if (!row.rows[0]) return json({ error: 'Comment not found' }, 404);
     const reactions: Record<string, string[]> = row.rows[0].reactions || {};
     const existing: string[] = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
-    const nextUsers = existing.includes(userId) ? existing.filter((id) => id !== userId) : [...existing, userId];
+    const wasAdded = !existing.includes(userId);
+    const nextUsers = wasAdded ? [...existing, userId] : existing.filter((id) => id !== userId);
     if (nextUsers.length) reactions[emoji] = nextUsers; else delete reactions[emoji];
     await pool.query(`UPDATE comments SET reactions=$1::jsonb WHERE id=$2`, [JSON.stringify(reactions), commentId]);
+
+    // Notify the comment's author when someone reacts to it (not on removal,
+    // and not when reacting to your own comment) -- fire-and-forget, same
+    // pattern as the comment-added notifications above, so the toggle
+    // response isn't held up waiting on notification lookups.
+    const commentAuthorId = row.rows[0].authorId;
+    if (wasAdded && commentAuthorId && commentAuthorId !== userId) {
+      (async () => { try {
+        const [actor, issueRow] = await Promise.all([
+          getCachedUser(userId),
+          pool.query(`SELECT key, cf_key FROM issues WHERE id=$1`, [row.rows[0].issueId]),
+        ]);
+        const actorName = actor ? `${actor.firstName} ${actor.lastName}`.trim() : 'Someone';
+        const issueDisplayKey = issueRow.rows[0]?.cf_key || issueRow.rows[0]?.key;
+        const commentPreview = row.rows[0].body
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 80);
+        await notifyUsers([commentAuthorId], userId, {
+          type: 'REACTED',
+          title: `${actorName} reacted ${emoji} to your comment${issueDisplayKey ? ` on ${issueDisplayKey}` : ''}`,
+          message: commentPreview,
+          issueKey: issueDisplayKey,
+        });
+      } catch (err: any) { console.error('[Reaction notification] Failed:', err?.message || err); } })();
+    }
+
     return json({ id: commentId, reactions });
   }
 

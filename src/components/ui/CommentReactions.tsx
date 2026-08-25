@@ -34,11 +34,11 @@ export default function CommentReactions({
             key={emoji}
             onClick={(e) => { e.stopPropagation(); onToggle(emoji); }}
             title={mine ? 'Remove your reaction' : 'React'}
-            className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] border transition-colors ${
+            className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[13px] border transition-colors ${
               mine ? 'bg-blue-50 border-blue-300 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
             }`}
           >
-            <span>{emoji}</span>
+            <span className="text-[15px] leading-none">{emoji}</span>
             <span className="font-medium">{users.length}</span>
           </button>
         );
@@ -47,7 +47,7 @@ export default function CommentReactions({
       <button
         onClick={(e) => { e.stopPropagation(); setPickerOpen((v) => !v); }}
         title="Add reaction"
-        className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[12px] text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors ${entries.length === 0 ? 'opacity-0 group-hover/comment:opacity-100' : ''}`}
+        className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-[18px] leading-none text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors ${entries.length === 0 ? 'opacity-0 group-hover/comment:opacity-100' : ''}`}
       >
         {entries.length === 0 ? '☺' : '+'}
       </button>
@@ -57,7 +57,7 @@ export default function CommentReactions({
             <button
               key={emoji}
               onClick={(e) => { e.stopPropagation(); onToggle(emoji); setPickerOpen(false); }}
-              className="text-[16px] hover:scale-125 transition-transform"
+              className="text-[20px] hover:scale-125 transition-transform"
             >
               {emoji}
             </button>
