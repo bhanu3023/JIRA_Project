@@ -173,8 +173,25 @@ export const useStore = create<AppState>((set, get) => ({
     if (!force && get().currentSpace?.key?.toUpperCase() === key?.toUpperCase()) return;
     // Don't clear currentSpace before fetch — keep showing whatever was there so the
     // page never blocks on a spinner just because the user switched boards
+    //
+    // For a genuinely fresh page load (or the first visit to this space this
+    // session), currentSpace starts out null with nothing to fall back on, so the
+    // page still blocks on the full-page spinner until this fetch resolves. Seed
+    // it from the last successful fetch for this exact space (sessionStorage) so
+    // the page renders instantly instead — the fetch below still always runs and
+    // overwrites it with fresh data a moment later, correcting anything stale
+    // (membership changes, new statuses, etc.), so this is stale-while-revalidate,
+    // not a substitute for the real fetch.
+    const cacheKey = `space_v1:${key.toUpperCase()}`;
+    if (!force) {
+      try {
+        const cached = typeof window !== 'undefined' ? sessionStorage.getItem(cacheKey) : null;
+        if (cached) set({ currentSpace: JSON.parse(cached) });
+      } catch { /* corrupt/unavailable cache entry — fall through to the network fetch */ }
+    }
     const space = await api.getSpace(key);
     set({ currentSpace: space });
+    try { if (typeof window !== 'undefined') sessionStorage.setItem(cacheKey, JSON.stringify(space)); } catch { /* storage full/unavailable — non-critical */ }
   },
   createSpace: async (data) => {
     await api.createSpace(data);
