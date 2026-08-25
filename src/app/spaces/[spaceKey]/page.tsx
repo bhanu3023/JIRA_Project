@@ -7,6 +7,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
 import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor, getDeptColor, buildMentionHtml } from '@/lib/utils';
+import CommentReactions from '@/components/ui/CommentReactions';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
@@ -1026,6 +1027,30 @@ function SpaceDetailContent() {
       useStore.setState({ issues: prevIssues });
     }
     finally { setSubmittingComment(false); }
+  };
+
+  const handleToggleReaction = async (issueKey: string, commentId: string, emoji: string) => {
+    const myId = user?.id;
+    const applyReaction = (c: any) => {
+      if (c.id !== commentId) return c;
+      const reactions = { ...(c.reactions || {}) };
+      const existing: string[] = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+      const already = myId && existing.includes(myId);
+      const next = already ? existing.filter((id) => id !== myId) : [...existing, myId].filter(Boolean);
+      if (next.length) reactions[emoji] = next; else delete reactions[emoji];
+      return { ...c, reactions };
+    };
+    useStore.setState(s => ({
+      issues: s.issues.map((i: any) => i.key === issueKey ? { ...i, comments: ((i as any).comments || []).map(applyReaction) } : i),
+    }));
+    try {
+      const result = await api.toggleCommentReaction(commentId, emoji);
+      useStore.setState(s => ({
+        issues: s.issues.map((i: any) => i.key === issueKey
+          ? { ...i, comments: ((i as any).comments || []).map((c: any) => c.id === commentId ? { ...c, reactions: result?.reactions ?? c.reactions } : c) }
+          : i),
+      }));
+    } catch { /* optimistic state stands; next reload will correct it if this truly failed */ }
   };
 
   const toggleDropdown = (e: React.MouseEvent, key: string, field: 'status' | 'priority' | 'assignee') => {
@@ -3073,6 +3098,12 @@ function SpaceDetailContent() {
                                           <span className="text-[11px] text-blue-400">{timeAgo(c.createdAt)}</span>
                                         </div>
                                         <p className="text-[12px] text-gray-700 whitespace-pre-wrap break-words">{cleanBody || '...'}</p>
+                                        <CommentReactions
+                                          reactions={c.reactions}
+                                          currentUserId={user?.id}
+                                          onToggle={(emoji) => handleToggleReaction(issue.key, c.id, emoji)}
+                                          className="mt-0.5"
+                                        />
                                         {/* Jira-style reply -- no real threading here either, same
                                             @mention convention as the main ticket page's own Reply. */}
                                         <button

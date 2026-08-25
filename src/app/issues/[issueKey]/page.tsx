@@ -10,6 +10,7 @@ import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, get
 import { trackRecentItem } from '@/lib/recent-items';
 import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
 import RichTextEditor from '@/components/ui/RichTextEditor';
+import CommentReactions from '@/components/ui/CommentReactions';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import {
@@ -824,6 +825,37 @@ export default function IssueDetailPage() {
       }
     }
     finally { setSubmittingComment(false); }
+  };
+
+  // Optimistic toggle, then reconcile with the server's actual reactions map
+  // (source of truth for concurrent reactors) rather than trusting the local
+  // guess -- two people reacting to the same comment within the same second
+  // would otherwise have each browser's optimistic state stomp the other's.
+  const handleToggleReaction = async (commentId: string, emoji: string) => {
+    const myId = user?.id;
+    useStore.setState((s) => {
+      if (!s.currentIssue) return s;
+      const comments = (s.currentIssue.comments || []).map((c: any) => {
+        if (c.id !== commentId) return c;
+        const reactions = { ...(c.reactions || {}) };
+        const existing: string[] = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+        const already = myId && existing.includes(myId);
+        const next = already ? existing.filter((id) => id !== myId) : [...existing, myId].filter(Boolean);
+        if (next.length) reactions[emoji] = next; else delete reactions[emoji];
+        return { ...c, reactions };
+      });
+      return { currentIssue: { ...s.currentIssue, comments } };
+    });
+    try {
+      const result = await api.toggleCommentReaction(commentId, emoji);
+      useStore.setState((s) => {
+        if (!s.currentIssue) return s;
+        const comments = (s.currentIssue.comments || []).map((c: any) =>
+          c.id === commentId ? { ...c, reactions: result?.reactions ?? c.reactions } : c
+        );
+        return { currentIssue: { ...s.currentIssue, comments } };
+      });
+    } catch { /* optimistic state stands; next full reload will correct it if this truly failed */ }
   };
 
   // displayPatch covers relational fields (assignee, status) whose visible name/avatar
@@ -2219,7 +2251,7 @@ export default function IssueDetailPage() {
 
                 {/* Existing comments — newest first (exclude System auto-comments) */}
                 {[...(issue.comments || [])].filter(c => c.authorName !== 'System' && c.author?.email !== 'system').reverse().map(comment => (
-                  <div key={comment.id} className="flex gap-2.5">
+                  <div key={comment.id} className="flex gap-2.5 group/comment">
                     <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-[11px] flex-shrink-0 font-semibold mt-0.5">
                       {getInitials(comment.author?.firstName ?? (comment.authorName ?? '').split(' ')[0], comment.author?.lastName ?? (comment.authorName ?? '').split(' ').slice(1).join(' '))}
                     </div>
@@ -2283,6 +2315,12 @@ export default function IssueDetailPage() {
                       ) : (
                         <>
                           {renderCommentBody(comment.body)}
+                          <CommentReactions
+                            reactions={comment.reactions}
+                            currentUserId={user?.id}
+                            onToggle={(emoji) => handleToggleReaction(comment.id, emoji)}
+                            className="mt-1"
+                          />
                           {/* Reply · Edit · Delete actions — show on hover */}
                           <div className="flex gap-3 mt-1">
                             <button

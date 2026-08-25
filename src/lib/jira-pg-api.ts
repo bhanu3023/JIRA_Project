@@ -328,6 +328,11 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "resolvedAt" TIMESTAMPTZ
 // ticket can be tracked against more than one SLA policy at once.
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS sla_waivers JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`).catch(() => {});
+// Emoji reactions on a comment, Jira-style -- {"👍": ["userId1","userId2"], ...}.
+// A plain map keyed by emoji rather than a separate reactions table since a
+// comment realistically has a handful of distinct reactions at most; no need
+// for the join-table machinery a genuinely large fan-out would justify.
+pool.query(`ALTER TABLE comments ADD COLUMN IF NOT EXISTS reactions JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
 pool.query(`ALTER TABLE space_members ADD COLUMN IF NOT EXISTS department VARCHAR(100)`).catch(() => {});
 
@@ -2105,6 +2110,7 @@ function formatIssue(issue: any) {
       : { id: '', firstName: c.authorName ?? 'Unknown', lastName: '', email: c.authorEmail ?? '' },
     createdAt: c.createdAt instanceof Date ? c.createdAt.toISOString() : (c.createdAt ?? nowIso()),
     updatedAt: c.updatedAt instanceof Date ? c.updatedAt.toISOString() : (c.updatedAt ?? nowIso()),
+    reactions: c.reactions || {},
   }));
 
   const issueNum = parseInt(String(issue.key || '').split('-').pop() || '1', 10) || 1;
@@ -4548,6 +4554,7 @@ async function _handleJiraPgApi(
                 id: c.id, body: c.body, createdAt: toIso(c.createdAt), updatedAt: toIso(c.updatedAt),
                 author: c.authorId ? { id: c.authorId, firstName: c.firstName, lastName: c.lastName, email: c.user_email, avatarUrl: avatarRef(c.authorId, c.avatarUrl) } : null,
                 authorName: c.authorName, authorEmail: c.authorEmail,
+                reactions: c.reactions || {},
               });
             }
           }
@@ -6536,6 +6543,21 @@ async function _handleJiraPgApi(
       allComments = allComments.filter((c: any) => { if (seen.has(c.id)) return false; seen.add(c.id); return true; });
       allComments.sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     } catch { /* ignore */ }
+    // reactions is a raw column (see the ALTER TABLE near the top of this
+    // file) -- every db.comment.* call above went through Prisma, which has
+    // no idea it exists, so it's missing from every comment object fetched
+    // so far. One batched query for however many comments this issue has,
+    // not one per comment.
+    try {
+      if (allComments.length) {
+        const reactionRows = await pool.query(
+          `SELECT id, reactions FROM comments WHERE id = ANY($1::text[])`,
+          [allComments.map((c: any) => c.id)]
+        );
+        const reactionsById = new Map(reactionRows.rows.map((r: any) => [r.id, r.reactions || {}]));
+        allComments = allComments.map((c: any) => ({ ...c, reactions: reactionsById.get(c.id) || {} }));
+      }
+    } catch { /* reactions are best-effort -- never block the issue load */ }
     _mark('partner-comments-merge');
 
     const mergedIssue = { ...issue, comments: allComments, _links: allLinks, ...rawDeptData };
@@ -8067,10 +8089,32 @@ async function _handleJiraPgApi(
         : { id: '', firstName: comment.authorName ?? 'Unknown', lastName: '', email: comment.authorEmail ?? '' },
       createdAt: comment.createdAt.toISOString(),
       updatedAt: comment.updatedAt.toISOString(),
+      reactions: {},
     });
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Comment Update / Delete Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+
+  // POST /comments/:id/reactions -- toggle an emoji reaction for the caller.
+  // reactions is a raw column ({"👍": [userId, ...]}) Prisma doesn't know
+  // about (same as cf_key/current_department elsewhere in this file), so
+  // both read and write go through pool directly rather than db.comment.*.
+  const commentReaction = path.match(/^comments\/([^/]+)\/reactions$/);
+  if (commentReaction && method === 'POST') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const commentId = commentReaction[1];
+    const body = await readJson(req);
+    const emoji = String(body.emoji || '').trim();
+    if (!emoji) return json({ error: 'emoji required' }, 400);
+    const row = await pool.query(`SELECT reactions FROM comments WHERE id=$1`, [commentId]);
+    if (!row.rows[0]) return json({ error: 'Comment not found' }, 404);
+    const reactions: Record<string, string[]> = row.rows[0].reactions || {};
+    const existing: string[] = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+    const nextUsers = existing.includes(userId) ? existing.filter((id) => id !== userId) : [...existing, userId];
+    if (nextUsers.length) reactions[emoji] = nextUsers; else delete reactions[emoji];
+    await pool.query(`UPDATE comments SET reactions=$1::jsonb WHERE id=$2`, [JSON.stringify(reactions), commentId]);
+    return json({ id: commentId, reactions });
+  }
 
   const commentById = path.match(/^comments\/([^/]+)$/);
   if (commentById) {
@@ -8114,6 +8158,11 @@ async function _handleJiraPgApi(
           });
         } catch { /* history tracking should never break the main response */ }
       }
+      // reactions is a raw column db.comment.update() above doesn't touch or
+      // return -- editing a comment's body doesn't change its reactions, but
+      // omitting the field here would make the client's post-edit swap drop
+      // whatever reactions it already had.
+      const reactionsRow = await pool.query(`SELECT reactions FROM comments WHERE id=$1`, [commentId]).catch(() => null);
       return json({
         id: updated.id, body: updated.body,
         author: updated.author
@@ -8121,6 +8170,7 @@ async function _handleJiraPgApi(
           : { id: '', firstName: updated.authorName ?? 'Unknown', lastName: '', email: updated.authorEmail ?? '' },
         createdAt: updated.createdAt.toISOString(),
         updatedAt: updated.updatedAt.toISOString(),
+        reactions: reactionsRow?.rows[0]?.reactions || {},
       });
     }
     if (method === 'DELETE') {

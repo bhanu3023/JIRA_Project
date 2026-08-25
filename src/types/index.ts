@@ -86,6 +86,7 @@ export interface Comment {
   authorName?: string;
   createdAt: string;
   updatedAt: string;
+  reactions?: Record<string, string[]>;
 }
 
 export interface Label {
