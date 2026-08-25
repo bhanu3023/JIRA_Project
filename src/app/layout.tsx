@@ -21,7 +21,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className={`${inter.className} antialiased bg-white text-gray-900 min-h-screen overflow-x-hidden`}>
+      <body className={`${inter.className} antialiased bg-[#F4F5F7] text-[#172B4D] min-h-screen overflow-x-hidden`}>
         {/* Serves public/runtime-config.js, which sets window.__APP_CONFIG__. beforeInteractive so
             it runs before the app bundle evaluates src/config/runtimeConfig.ts -- with any later
             strategy the bundle would read an undefined config and fall back to the baked-in

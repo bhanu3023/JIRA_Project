@@ -85,7 +85,7 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
         {isAuthenticated && <Header />}
         <div className="relative flex-1 overflow-hidden">
           <NavigationLoader />
-          <main className="h-full overflow-auto bg-white">{children}</main>
+          <main className="h-full overflow-auto bg-[#FAFBFC]">{children}</main>
         </div>
       </div>
     </div>

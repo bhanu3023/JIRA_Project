@@ -649,7 +649,7 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="fixed left-0 top-0 z-40 flex h-full w-72 select-none flex-col border-r border-gray-200 bg-white shadow-sm">
+    <aside className="fixed left-0 top-0 z-40 flex h-full w-72 select-none flex-col border-r border-[#DFE1E6] bg-[#F7F8F9] shadow-sm">
       <div className="flex h-14 flex-shrink-0 items-center bg-[#0129AC] px-4">
         <Link href="/dashboard" className="flex min-w-0 flex-1 items-center gap-2.5">
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md bg-white/15">
