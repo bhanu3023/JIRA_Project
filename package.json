@@ -8,7 +8,8 @@
     "dev:clean": "npm run clean && next dev -p 8080",
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 8080",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --test --experimental-strip-types --import ./scripts/ts-test-resolver.mjs \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",

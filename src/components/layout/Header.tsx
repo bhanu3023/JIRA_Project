@@ -399,7 +399,7 @@ export default function Header() {
                       <p className="truncate text-[14px] font-semibold text-jira-dark">
                         {user?.firstName} {user?.lastName}
                       </p>
-                      <p className="truncate text-[12px] text-gray-500">{user?.email}</p>
+                      <p data-hj-suppress className="truncate text-[12px] text-gray-500">{user?.email}</p>
                     </div>
                   </div>
                 </div>
