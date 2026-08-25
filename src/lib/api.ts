@@ -214,6 +214,7 @@ class ApiClient {
   updateComment(commentId: string, data: { body: string }) { return this.request<any>(`/comments/${commentId}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteComment(commentId: string) { return this.request<any>(`/comments/${commentId}`, { method: 'DELETE' }); }
   toggleCommentReaction(commentId: string, emoji: string) { return this.request<any>(`/comments/${commentId}/reactions`, { method: 'POST', body: JSON.stringify({ emoji }) }); }
+  resyncFromJira(key: string) { return this.request<any>(`/issues/${key}/resync-from-jira`, { method: 'POST' }); }
   addLink(key: string, data: any) { return this.request<any>(`/issues/${key}/links`, { method: 'POST', body: JSON.stringify(data) }); }
   addIssueLink(key: string, data: { targetKey: string; linkType: string }) { return this.addLink(key, data); }
   deleteIssueLink(linkId: string) { return this.request<any>(`/issues/links/${linkId}`, { method: 'DELETE' }); }

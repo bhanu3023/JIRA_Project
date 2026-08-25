@@ -1237,6 +1237,20 @@ export default function IssueDetailPage() {
 
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [resyncingJira, setResyncingJira] = useState(false);
+  const handleResyncFromJira = async () => {
+    if (resyncingJira) return;
+    setResyncingJira(true);
+    try {
+      const result = await api.resyncFromJira(issueKey);
+      await loadIssue(issueKey);
+      alert(`Resynced from Jira — ${result.commentCount} comment(s), ${result.attachmentCount} attachment(s).`);
+    } catch (e: any) {
+      alert(e?.message || 'Resync failed. Please try again.');
+    } finally {
+      setResyncingJira(false);
+    }
+  };
   const [previewAttach, setPreviewAttach] = useState<{url: string; name: string; mime: string} | null>(null);
   // CSV has no browser-native inline renderer -- pointing an <iframe> or a
   // direct navigation at one just triggers a download, which is exactly the
@@ -1548,6 +1562,12 @@ export default function IssueDetailPage() {
             </button>
             {showMoreMenu && (
               <Dropdown onClose={() => setShowMoreMenu(false)} width="w-52" align="right-0">
+                <button onClick={() => { setShowMoreMenu(false); handleResyncFromJira(); }}
+                  disabled={resyncingJira}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50">
+                  <RefreshCw size={14} className={resyncingJira ? 'animate-spin' : ''} />
+                  {resyncingJira ? 'Resyncing…' : 'Resync from Jira'}
+                </button>
                 <button onClick={() => { setShowMoreMenu(false); setShowDeleteModal(true); }}
                   className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm text-red-600 hover:bg-red-50 transition-colors">
                   <Trash2 size={14} /> Delete issue

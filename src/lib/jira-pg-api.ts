@@ -2113,6 +2113,18 @@ function formatIssue(issue: any) {
     reactions: c.reactions || {},
   }));
 
+  // Most callers pass their own already-fetched attachments in and override
+  // this field on the returned object afterward (formatIssue is usually
+  // called before a separate, purpose-built attachments query even runs) --
+  // this is only the fallback for callers that DO include attachments in
+  // what they hand in here (e.g. the on-demand Jira import path, whose
+  // return value is served directly as the API response with no such
+  // override), so it was never just safe to hardcode empty.
+  const attachments = (issue.attachments || []).map((a: any) => ({
+    id: a.id, url: a.url, originalName: a.filename, mimeType: a.mimeType, size: a.size,
+    createdAt: a.createdAt instanceof Date ? a.createdAt.toISOString() : (a.createdAt ?? nowIso()),
+  }));
+
   const issueNum = parseInt(String(issue.key || '').split('-').pop() || '1', 10) || 1;
 
   // Normalize key: strip Jira sub-issue colon suffix (e.g. "L2B-12718:1" Ã¢â€ ' "L2B-12718")
@@ -2158,8 +2170,8 @@ function formatIssue(issue: any) {
     projectPool: issue.projectPool ?? null,
     comments,
     commentCount: comments.length,
-    attachments: [],
-    attachmentCount: 0,
+    attachments,
+    attachmentCount: attachments.length,
     links: (issue._links || []).map((lnk: any) => {
       const sk = lnk.sourceKey?.includes(':') ? lnk.sourceKey.split(':')[0] : lnk.sourceKey;
       const tk = lnk.targetKey?.includes(':') ? lnk.targetKey.split(':')[0] : lnk.targetKey;
@@ -2382,6 +2394,43 @@ function adfNodeToHtml(node: any): string {
   return (node.content || []).map(adfNodeToHtml).join('');
 }
 
+// Downloads each Jira attachment's real bytes (the issue-fields response only
+// carries metadata + a content URL, both of which need the same auth header
+// as everything else in this file) and stores it the exact same way the
+// app's own POST /issues/:key/attachments upload endpoint does -- written to
+// public/uploads, one Attachment row per file. Keyed by the Jira attachment's
+// own id (jiraId) so re-running an import (e.g. importIssueFromJira updating
+// an existing ticket) never re-downloads or duplicates a file already synced.
+async function importJiraAttachments(issueId: string, jiraAttachments: any[], authHdr: string): Promise<void> {
+  if (!jiraAttachments.length) return;
+  const { writeFile, mkdir } = await import('fs/promises');
+  const { join, extname } = await import('path');
+  const uploadDir = join(process.cwd(), 'public', 'uploads');
+  await mkdir(uploadDir, { recursive: true });
+  for (const att of jiraAttachments) {
+    try {
+      if (att.id) {
+        const existing = await (db as any).attachment.findFirst({ where: { issueId, jiraId: String(att.id) } });
+        if (existing) continue;
+      }
+      const res = await fetch(att.content, { headers: { Authorization: authHdr } });
+      if (!res.ok) { console.error(`[importJiraAttachments] Failed to download ${att.filename}: ${res.status}`); continue; }
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const ext = extname(att.filename || '') || '';
+      const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+      await writeFile(join(uploadDir, uniqueName), buffer);
+      await (db as any).attachment.create({
+        data: {
+          issueId, filename: att.filename || uniqueName, url: `/uploads/${uniqueName}`,
+          mimeType: att.mimeType || null, size: att.size || buffer.length,
+          jiraId: att.id ? String(att.id) : null,
+          createdAt: att.created ? new Date(att.created) : undefined,
+        },
+      });
+    } catch (e: any) { console.error(`[importJiraAttachments] Failed for ${att.filename}:`, e?.message || e); }
+  }
+}
+
 async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?: string }): Promise<ReturnType<typeof formatIssue> | null> {
   try {
     const prefix = localKey.split('-')[0];
@@ -2394,7 +2443,7 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
     const jiraKey = localKey; // key prefix matches Jira project for all other boards
 
     const creds = await getJiraCredentials();
-    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,created,updated,${JIRA_CUSTOM_FIELDS}`;
+    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,attachment,created,updated,${JIRA_CUSTOM_FIELDS}`;
     const url = `${creds.base}/rest/api/3/issue/${jiraKey}?fields=${fields}&expand=changelog`;
     // This fetch had no timeout, so whenever an issue (very often a stale or
     // broken linked-ticket key) isn't found locally, GET /issues/:key would
@@ -2562,6 +2611,12 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
       if (histRecs.length > 0) await db.issueHistory.createMany({ data: histRecs });
     }
 
+    // Import attachments -- Jira's own binary content, not just the metadata
+    // this fields list already carried; downloaded and stored the same way
+    // the app's own attachment-upload endpoint does.
+    const jiraAttachments: any[] = f.attachment || [];
+    await importJiraAttachments(issueId, jiraAttachments, creds.authHdr);
+
     // Return the full issue
     const fullIssue = await db.issue.findUnique({
       where: { key: localKey },
@@ -2569,10 +2624,11 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
         status: true, assignee: true, reporter: true,
         space: { select: { key: true, name: true } },
         comments: { include: { author: true }, orderBy: { createdAt: 'asc' } },
+        attachments: { orderBy: { createdAt: 'asc' } },
       },
     });
     if (!fullIssue) return null;
-    return formatIssue({ ...fullIssue, _links: [], attachments: [], history: [] });
+    return formatIssue({ ...fullIssue, _links: [], history: [] });
   } catch (e) {
     console.error('[importIssueFromJira] error:', e);
     return null;
@@ -9743,6 +9799,26 @@ async function _handleJiraPgApi(
   // Ã¢â€â‚¬Ã¢â€â‚¬ Issue Watch / Unwatch Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   // POST /issues/:key/watch  Ã¢â‚¬â€ start watching
+  // POST /issues/:key/resync-from-jira -- re-pull an already-imported ticket's
+  // comments and attachments from Jira. Needed because a batch of tickets
+  // imported before attachments were even fetched (see importJiraAttachments)
+  // never picked them up, and the periodic catch-up sync only looks at NEW
+  // tickets past its checkpoint, never revisiting ones already imported --
+  // so an old ticket missing its Jira attachments stays missing them forever
+  // without an explicit, on-demand re-pull like this one.
+  const resyncMatch = path.match(/^issues\/([^/]+)\/resync-from-jira$/);
+  if (resyncMatch && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    const key = await resolveCfKey(resyncMatch[1].toUpperCase());
+    const prefix = key.split('-')[0];
+    if (!PREFIX_TO_META[prefix] || prefix === 'L1BOAR') {
+      return json({ error: 'Resync from Jira is not supported for this ticket\'s board.' }, 400);
+    }
+    const result = await importIssueFromJira(key);
+    if (!result) return json({ error: 'Could not fetch this ticket from Jira. It may not exist there, or the Jira connection is unavailable.' }, 502);
+    return json({ ok: true, commentCount: result.commentCount, attachmentCount: result.attachmentCount });
+  }
+
   const watchMatch = path.match(/^issues\/([^/]+)\/watch$/);
   if (watchMatch && method === 'POST') {
     let key = await resolveCfKey(watchMatch[1].toUpperCase());
