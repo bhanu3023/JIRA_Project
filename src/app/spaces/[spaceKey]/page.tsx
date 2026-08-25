@@ -1405,7 +1405,7 @@ function SpaceDetailContent() {
     <div className="flex flex-col h-full">
 
       {/* ── Page Header ── */}
-      <div className="px-6 pt-5 pb-4 bg-white border-b border-gray-200">
+      <div className="px-6 pt-5 pb-4 bg-[#FAFBFC] border-b border-[#DFE1E6]">
         {/* Breadcrumb */}
         <div className="flex items-center gap-1.5 text-[11.5px] text-gray-400 mb-3">
           <Link href="/spaces" className="hover:text-blue-600 transition-colors">Spaces</Link>
@@ -2005,7 +2005,7 @@ function SpaceDetailContent() {
       })()}
 
       {/* ── Filters bar ── */}
-      {queueFilter !== 'summary' && queueFilter !== 'queues' && <div className="px-6 py-2.5 bg-white border-b border-gray-200 flex items-center gap-2 overflow-x-auto scrollbar-hide min-h-[44px]">
+      {queueFilter !== 'summary' && queueFilter !== 'queues' && <div className="px-6 py-2.5 bg-[#FAFBFC] border-b border-[#DFE1E6] flex items-center gap-2 overflow-x-auto scrollbar-hide min-h-[44px]">
         {/* Search */}
         <div className="relative">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -2859,10 +2859,10 @@ function SpaceDetailContent() {
       ) : null; })()}
 
       {/* ── Table ── */}
-      <div className="flex-1 overflow-auto bg-gray-50">
+      <div className="flex-1 overflow-auto bg-[#F4F5F7]">
         <div style={{ minWidth: `${tableMinWidth}px` }}>
           {/* Table header */}
-          <div className="grid items-center px-4 py-2 bg-white border-b border-gray-200 sticky top-0 z-10"
+          <div className="grid items-center px-4 py-2 bg-[#FAFBFC] border-b border-[#DFE1E6] sticky top-0 z-10"
             style={{ gridTemplateColumns: gridCols }}>
             <div className="flex items-center justify-center" onClick={isAdmin ? toggleAll : undefined}>
               {isAdmin && (() => {
@@ -3180,7 +3180,7 @@ function SpaceDetailContent() {
                 <div key={issue.id}
                   className={`grid items-center px-4 py-2.5 cursor-pointer transition-colors group
                     ${isUpdating ? 'opacity-50' : ''}
-                    ${isSelected ? 'bg-blue-50' : 'bg-white hover:bg-gray-50'}`}
+                    ${isSelected ? 'bg-blue-50' : 'bg-[#FAFBFC] hover:bg-gray-50'}`}
                   style={{ gridTemplateColumns: gridCols }}
                   onClick={(e) => {
                     if (e.ctrlKey || e.metaKey) {
