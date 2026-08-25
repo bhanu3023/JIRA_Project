@@ -1581,7 +1581,7 @@ export default function IssueDetailPage() {
       {/* ── Main two-column area (both scroll independently) ── */}
       <div className="flex flex-1 overflow-hidden">
         {/* ===== LEFT: Main Content — scrollable ===== */}
-        <div className="flex-1 min-w-0 overflow-y-auto px-6 py-5 bg-white">
+        <div className="flex-1 min-w-0 overflow-y-auto px-6 py-5 bg-[#FAFBFC]">
           {/* Title */}
           {editing === 'summary' ? (
             <div className="flex items-start gap-2 mb-5">
@@ -2672,7 +2672,7 @@ export default function IssueDetailPage() {
         </div>
 
         {/* ===== RIGHT SIDEBAR ===== */}
-        <div style={{ width: sidebarWidth }} className="flex-shrink-0 border-l border-[#DFE1E6] overflow-y-auto bg-white">
+        <div style={{ width: sidebarWidth }} className="flex-shrink-0 border-l border-[#DFE1E6] overflow-y-auto bg-[#FAFBFC]">
 
           {/* Status selector — Jira style */}
           <div className="px-4 pt-4 pb-3">
