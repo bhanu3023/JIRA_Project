@@ -360,7 +360,7 @@ export default function IssueDetailPage() {
     if (/<[a-z][\s\S]*>/i.test(body)) {
       // HTML content — render directly, intercept all link clicks to force new tab
       return <div
-        className="text-[14px] text-[#172B4D] leading-relaxed break-words [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
+        className="text-[14px] text-[#172B4D] leading-relaxed break-words [&_*]:![float:none] [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
         dangerouslySetInnerHTML={{ __html: linkifyHtml(body) }}
         onClick={(e) => {
           const target = e.target as HTMLElement;
@@ -1690,6 +1690,7 @@ export default function IssueDetailPage() {
                 /<[a-z][\s\S]*>/i.test(renderHtml) ? (
                 <div
                   className="text-[14px] text-[#172B4D] px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer break-words
+                    [&_*]:![float:none]
                     [&_h2]:font-bold [&_h2]:text-base [&_h2]:mt-2 [&_h2]:mb-1
                     [&_h3]:font-bold [&_h3]:text-sm  [&_h3]:mt-2 [&_h3]:mb-1
                     [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1

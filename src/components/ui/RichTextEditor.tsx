@@ -842,6 +842,18 @@ export default function RichTextEditor({
         if (['TABLE', 'TD', 'TH', 'TR', 'THEAD', 'TBODY'].includes(el.tagName)) return;
         for (const prop of borderProps) (el.style as any)[prop] = '';
         el.removeAttribute('bordercolor');
+        // A page/tool a screenshot or table was copied from often floats or
+        // absolutely-positions its own images (a right-rail figure, a sticky
+        // header cell, etc). Kept as-is, that positioning survives the paste
+        // and applies here too, where nothing on the page is laid out to
+        // expect it -- the image floats past the (usually much shorter)
+        // pasted text, leaving a tall empty gap below before the next real
+        // element in the flow (reported from a screenshot: a comment's image
+        // floating right of its text, with a large blank gap beneath both
+        // before the Reply/Edit/Delete row). Comments/descriptions render as
+        // plain flow content; nothing here is meant to float or self-position.
+        el.style.float = '';
+        if (el.style.position === 'absolute' || el.style.position === 'fixed') el.style.position = '';
       });
       cleaned = container.innerHTML;
     } catch { /* if DOM parsing itself fails, fall back to the regex-cleaned string as-is */ }
