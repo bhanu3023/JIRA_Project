@@ -2505,6 +2505,15 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
       if (opts?.defaultDepartment) {
         await pool.query(`UPDATE issues SET current_department = $1 WHERE id = $2`, [opts.defaultDepartment, issueId]);
       }
+      // A ticket imported from Jira never got a CF-#### display key at all --
+      // every other place a ticket comes into existence (manual creation, the
+      // cross-board handoff insert) assigns one immediately, but this sync
+      // path was missed. Left null, it falls back to showing its raw Jira key
+      // (e.g. "L2B-15915") everywhere the UI expects a CF- key instead.
+      try {
+        const cfKey = await nextCfKey();
+        await pool.query(`UPDATE issues SET cf_key = $1 WHERE id = $2`, [cfKey, issueId]);
+      } catch { /* non-critical -- ticket still imports without one */ }
     }
 
     // Import comments
@@ -2702,6 +2711,15 @@ async function importCfitsIssue(cfitsKey: string): Promise<string | null> {
       }
       throw e;
     }
+
+    // Same gap as importIssueFromJira -- a CFITS-imported ticket never got a
+    // CF-#### display key, only its local L1BOAR- key, so every view that
+    // expects a CF- key (notifications, most of the UI) fell back to showing
+    // the raw internal one instead.
+    try {
+      const cfKey = await nextCfKey();
+      await pool.query(`UPDATE issues SET cf_key = $1 WHERE id = $2`, [cfKey, created.id]);
+    } catch { /* non-critical -- ticket still imports without one */ }
 
     const jiraComments: any[] = f.comment?.comments || [];
     for (const jc of jiraComments) {
