@@ -37,6 +37,38 @@ const DEFAULT_QUEUE_STATUSES = [
 // formatting the rich text editor added) — as plain text, so it needs
 // stripping down to just the readable text first or it prints the markup
 // literally (e.g. `<span class="mention" data-userid="...">`).
+// Minimal RFC 4180 CSV parser -- handles quoted fields, embedded commas,
+// escaped ("") quotes, and both \n and \r\n line endings. Good enough for
+// an inline preview table; not meant to replace a real CSV library for
+// anything downstream that actually processes the data.
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field); field = '';
+    } else if (ch === '\r') {
+      // consume, \n (if present) below closes the row
+    } else if (ch === '\n') {
+      row.push(field); field = ''; rows.push(row); row = [];
+    } else {
+      field += ch;
+    }
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  return rows.filter(r => !(r.length === 1 && r[0] === ''));
+}
+
 function stripHtmlToText(html: string): string {
   if (typeof document === 'undefined') return html.replace(/<[^>]*>/g, '');
   const div = document.createElement('div');
@@ -1206,6 +1238,23 @@ export default function IssueDetailPage() {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [previewAttach, setPreviewAttach] = useState<{url: string; name: string; mime: string} | null>(null);
+  // CSV has no browser-native inline renderer -- pointing an <iframe> or a
+  // direct navigation at one just triggers a download, which is exactly the
+  // "clicking opens the ticket then silently downloads" bug this fixes.
+  // Fetch and parse it ourselves so it can render as an actual table.
+  const [csvPreviewRows, setCsvPreviewRows] = useState<string[][] | null>(null);
+  const [csvPreviewError, setCsvPreviewError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!previewAttach || previewAttach.mime !== 'text/csv') { setCsvPreviewRows(null); setCsvPreviewError(null); return; }
+    setCsvPreviewRows(null);
+    setCsvPreviewError(null);
+    let cancelled = false;
+    fetch(previewAttach.url)
+      .then(res => { if (!res.ok) throw new Error(`Failed to load file (${res.status})`); return res.text(); })
+      .then(text => { if (!cancelled) setCsvPreviewRows(parseCsv(text)); })
+      .catch(err => { if (!cancelled) setCsvPreviewError(err.message || 'Failed to load preview'); });
+    return () => { cancelled = true; };
+  }, [previewAttach]);
 
   // Opens the same inline preview modal the dedicated Attachments section
   // uses (image vs iframe fallback, plus a Download button) for a file
@@ -1219,6 +1268,8 @@ export default function IssueDetailPage() {
       ? `image/${name.split('.').pop()!.toLowerCase().replace('jpg', 'jpeg')}`
       : /\.pdf$/i.test(name)
       ? 'application/pdf'
+      : /\.csv$/i.test(name)
+      ? 'text/csv'
       : 'application/octet-stream';
     setPreviewAttach({ url, name, mime });
   };
@@ -1961,7 +2012,13 @@ export default function IssueDetailPage() {
                   const isImage = a.mimeType?.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(a.originalName || '');
                   const handleOpen = (e: React.MouseEvent) => {
                     e.preventDefault();
-                    const mime = a.mimeType || (a.originalName?.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+                    // CSV always wins over a.mimeType -- uploads commonly land as a
+                    // generic "application/octet-stream" or "application/vnd.ms-excel"
+                    // stored type, which would otherwise fall through to the
+                    // no-inline-preview branch below instead of the CSV table view.
+                    const mime = /\.csv$/i.test(a.originalName || '')
+                      ? 'text/csv'
+                      : a.mimeType || (a.originalName?.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
                     let url = a.url || '';
                     if (url.startsWith('data:')) {
                       try {
@@ -2019,8 +2076,46 @@ export default function IssueDetailPage() {
                   <div className="w-full h-full flex items-center justify-center p-6">
                     <img src={previewAttach.url} alt={previewAttach.name} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" />
                   </div>
-                ) : (
+                ) : previewAttach.mime === 'application/pdf' ? (
                   <iframe src={previewAttach.url} className="w-full h-full border-0" title={previewAttach.name} />
+                ) : previewAttach.mime === 'text/csv' ? (
+                  <div className="w-full h-full overflow-auto bg-white p-4">
+                    {csvPreviewError ? (
+                      <p className="text-sm text-red-600">{csvPreviewError}</p>
+                    ) : !csvPreviewRows ? (
+                      <p className="text-sm text-gray-400">Loading preview…</p>
+                    ) : csvPreviewRows.length === 0 ? (
+                      <p className="text-sm text-gray-400">This file is empty.</p>
+                    ) : (
+                      <table className="text-[12px] border-collapse">
+                        <thead>
+                          <tr>
+                            {csvPreviewRows[0].map((cell, i) => (
+                              <th key={i} className="border border-gray-200 bg-gray-50 px-2 py-1 text-left font-semibold text-gray-700 whitespace-nowrap sticky top-0">{cell}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {csvPreviewRows.slice(1).map((r, ri) => (
+                            <tr key={ri} className="hover:bg-gray-50">
+                              {r.map((cell, ci) => (
+                                <td key={ci} className="border border-gray-200 px-2 py-1 text-gray-600 whitespace-nowrap">{cell}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-gray-400">
+                    <Paperclip size={28} />
+                    <p className="text-sm">No inline preview available for this file type.</p>
+                    <a href={previewAttach.url} download={previewAttach.name}
+                      className="px-3 py-1.5 text-xs text-white bg-indigo-600 hover:bg-indigo-700 rounded-md transition-colors">
+                      Download {previewAttach.name}
+                    </a>
+                  </div>
                 )}
               </div>
             </div>
