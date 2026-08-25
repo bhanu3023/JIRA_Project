@@ -360,7 +360,7 @@ export default function IssueDetailPage() {
     if (/<[a-z][\s\S]*>/i.test(body)) {
       // HTML content — render directly, intercept all link clicks to force new tab
       return <div
-        className="text-[13px] text-gray-700 leading-relaxed break-words [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
+        className="text-[14px] text-[#172B4D] leading-relaxed break-words [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
         dangerouslySetInnerHTML={{ __html: linkifyHtml(body) }}
         onClick={(e) => {
           const target = e.target as HTMLElement;
@@ -385,7 +385,7 @@ export default function IssueDetailPage() {
     // Plain text — auto-link URLs and highlight @mentions
     const linked = autoLinkText(body);
     const parts = linked.split(/(@\w[\w ]*)/g);
-    return <p className="text-[13px] text-gray-700 whitespace-pre-wrap break-words leading-relaxed">{parts.map((part, i) =>
+    return <p className="text-[14px] text-[#172B4D] whitespace-pre-wrap break-words leading-relaxed">{parts.map((part, i) =>
       part.startsWith('@') ? (
         <span key={i} className="text-indigo-600 font-semibold bg-indigo-50 rounded px-0.5">{part}</span>
       ) : <span key={i} dangerouslySetInnerHTML={{ __html: part }} />
@@ -1586,13 +1586,13 @@ export default function IssueDetailPage() {
           {editing === 'summary' ? (
             <div className="flex items-start gap-2 mb-5">
               <input type="text" value={editValue} onChange={e => setEditValue(e.target.value)}
-                className="flex-1 text-[22px] font-bold border-2 border-indigo-400 rounded-lg px-4 py-2 focus:outline-none focus:ring-4 focus:ring-indigo-100 text-gray-900" autoFocus
+                className="flex-1 text-[20px] font-semibold border-2 border-indigo-400 rounded-lg px-4 py-2 focus:outline-none focus:ring-4 focus:ring-indigo-100 text-[#172B4D]" autoFocus
                 onKeyDown={e => { if (e.key === 'Enter') handleUpdate('summary', editValue); if (e.key === 'Escape') setEditing(null); }} />
               <button onClick={() => handleUpdate('summary', editValue)} className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg mt-1 transition-colors"><Check size={20} /></button>
               <button onClick={() => setEditing(null)} className="p-2 text-gray-400 hover:bg-gray-100 rounded-lg mt-1 transition-colors"><X size={20} /></button>
             </div>
           ) : (
-            <h1 className="text-[22px] font-bold text-gray-900 cursor-pointer hover:bg-indigo-50/50 px-2 py-1.5 -mx-2 rounded-lg transition-all mb-5 leading-snug"
+            <h1 className="text-[20px] font-semibold text-[#172B4D] cursor-pointer hover:bg-indigo-50/50 px-2 py-1.5 -mx-2 rounded-lg transition-all mb-5 leading-snug"
               onClick={() => { setEditing('summary'); setEditValue(issue.summary); }}>
               {issue.summary}
             </h1>
@@ -1646,7 +1646,7 @@ export default function IssueDetailPage() {
           {/* Description Section */}
           <div className="mb-6">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">Description</h3>
+              <h3 className="text-[12px] font-semibold text-[#6B778C] uppercase tracking-wider">Description</h3>
             </div>
             {editing === 'description' ? (
               <div>
@@ -1689,7 +1689,7 @@ export default function IssueDetailPage() {
                 return (
                 /<[a-z][\s\S]*>/i.test(renderHtml) ? (
                 <div
-                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer break-words
+                  className="text-[14px] text-[#172B4D] px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer break-words
                     [&_h2]:font-bold [&_h2]:text-base [&_h2]:mt-2 [&_h2]:mb-1
                     [&_h3]:font-bold [&_h3]:text-sm  [&_h3]:mt-2 [&_h3]:mb-1
                     [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1
@@ -1730,7 +1730,7 @@ export default function IssueDetailPage() {
                 />
                 ) : (
                 <div
-                  className="text-[13px] text-gray-700 px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer break-words"
+                  className="text-[14px] text-[#172B4D] px-3 py-2.5 rounded border border-transparent hover:border-gray-200 min-h-[40px] leading-relaxed cursor-pointer break-words"
                   dangerouslySetInnerHTML={{ __html: renderHtml }}
                   onClick={() => { setEditing('description'); setEditValue(protectMigrationHeaders(issue.description || '')); }}
                 />
@@ -2348,8 +2348,8 @@ export default function IssueDetailPage() {
                     </div>
                     <div className={`flex-1 ${comment.isInternal ? 'bg-yellow-50 border border-yellow-200 rounded p-3' : ''}`}>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[13px] font-semibold text-gray-900">{comment.author?.firstName ? `${comment.author.firstName} ${comment.author.lastName ?? ''}`.trim() : (comment.authorName || 'Unknown')}</span>
-                        <span className="text-[11px] text-gray-400">{formatJiraDateTime(comment.createdAt)}</span>
+                        <span className="text-[14px] font-semibold text-[#172B4D]">{comment.author?.firstName ? `${comment.author.firstName} ${comment.author.lastName ?? ''}`.trim() : (comment.authorName || 'Unknown')}</span>
+                        <span className="text-[12px] text-[#6B778C]">{formatJiraDateTime(comment.createdAt)}</span>
                         {comment.isInternal && <span className="text-[10px] font-semibold bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">Internal</span>}
                         {comment.updatedAt && comment.updatedAt !== comment.createdAt && (
                           <span className="text-[10px] text-gray-400 italic">edited</span>
@@ -2675,7 +2675,7 @@ export default function IssueDetailPage() {
 
           {/* Status selector — Jira style */}
           <div className="px-4 pt-4 pb-3">
-            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2">Status</p>
+            <p className="text-[11px] font-semibold text-[#6B778C] uppercase tracking-widest mb-2">Status</p>
             {isHistoricalDeptView && (
               <p className="text-[10.5px] text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mb-2">
                 Showing {viewDeptParam}'s own status — this ticket has since moved to {currentDeptForView || 'another queue'}.
@@ -2784,7 +2784,7 @@ export default function IssueDetailPage() {
 
           {/* Properties */}
           <div className={`px-4 py-3 space-y-0 ${!canEdit ? 'pointer-events-none opacity-70' : ''}`}>
-            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-3">Properties</p>
+            <p className="text-[11px] font-semibold text-[#6B778C] uppercase tracking-widest mb-3">Properties</p>
             {!canEdit && (
               <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 mb-2 -mt-1">
                 This ticket has moved to another queue — you can view and comment, but only that queue can edit it.
@@ -4456,7 +4456,7 @@ function PropRow({ label, children, pinned, onPin }: { label: string; children: 
   return (
     <div className={`grid grid-cols-[100px_1fr] items-center min-h-[32px] py-1 border-b border-gray-100 last:border-0 group relative ${pinned ? 'bg-blue-50/40' : ''}`}>
       <div className="flex items-center gap-1 self-start pt-[7px]">
-        <span className="text-[11px] font-medium text-gray-400 leading-none">{label}</span>
+        <span className="text-[12px] font-medium text-[#6B778C] leading-none">{label}</span>
         {onPin && (
           <button
             onClick={onPin}
