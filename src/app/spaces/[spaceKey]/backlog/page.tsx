@@ -77,7 +77,7 @@ export default function BacklogPage() {
     return (
       <div key={issue.id} className="flex items-center gap-3 py-2 px-3 hover:bg-gray-50 border-b border-gray-100 group">
         <IssueTypeIcon type={issue.type || 'task'} size={14} />
-        <Link href={`/issues/${issue.key}`} className="text-sm text-blue-600 font-medium hover:underline w-20">{issue.key}</Link>
+        <Link href={`/issues/${issue.cfKey ?? issue.key}`} className="text-sm text-blue-600 font-medium hover:underline w-20">{issue.key}</Link>
         <span className="text-sm text-gray-900 flex-1 truncate">{issue.summary}</span>
         <span className="badge text-white text-[10px]" style={{ backgroundColor: st.color }}>{st.name}</span>
         <PriorityIcon priority={issue.priority} size={16} />

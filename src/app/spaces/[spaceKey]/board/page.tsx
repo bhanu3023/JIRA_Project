@@ -100,7 +100,7 @@ export default function BoardPage() {
                     <div className="flex items-center justify-between mt-3">
                       <div className="flex items-center gap-1.5">
                         <IssueTypeIcon type={issue.type || 'task'} size={14} />
-                        <Link href={`/issues/${issue.key}`} className="text-xs text-gray-500 hover:text-blue-600">{issue.key}</Link>
+                        <Link href={`/issues/${(issue as any).cfKey ?? issue.key}`} className="text-xs text-gray-500 hover:text-blue-600">{issue.key}</Link>
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="w-4 h-1.5 rounded-full" style={{ backgroundColor: priorityColors[issue.priority] }} title={issue.priority} />

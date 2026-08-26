@@ -387,14 +387,14 @@ export default function BreachedPage() {
                         return (
                           <tr key={issue.key} className="border-b border-gray-50 hover:bg-red-50/20 transition-colors group">
                             <td className="px-4 py-3">
-                              <Link href={`/issues/${issue.key}`} className="text-blue-600 hover:underline font-semibold text-xs">
+                              <Link href={`/issues/${(issue as any).cfKey ?? issue.key}`} className="text-blue-600 hover:underline font-semibold text-xs">
                                 {issue.key}
                               </Link>
                             </td>
                             <td className="px-4 py-3 max-w-[220px]">
                               <div className="flex items-center gap-2">
                                 <IssueTypeIcon type={issue.issueType} size={14} />
-                                <Link href={`/issues/${issue.key}`} className="text-gray-800 hover:text-blue-600 hover:underline line-clamp-1 text-[13px] font-medium">
+                                <Link href={`/issues/${(issue as any).cfKey ?? issue.key}`} className="text-gray-800 hover:text-blue-600 hover:underline line-clamp-1 text-[13px] font-medium">
                                   {issue.summary}
                                 </Link>
                               </div>

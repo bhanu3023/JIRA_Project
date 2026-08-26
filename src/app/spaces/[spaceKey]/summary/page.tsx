@@ -677,7 +677,7 @@ export default function SummaryPage() {
                   return (
                     <Link
                       key={issue.id}
-                      href={`/issues/${issue.key}`}
+                      href={`/issues/${issue.cfKey ?? issue.key}`}
                       className="flex items-center gap-3 py-2.5 hover:bg-gray-50 -mx-5 px-5 transition-colors rounded"
                     >
                       <IssueTypeIcon type={issue.type || 'task'} size={14} />
