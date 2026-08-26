@@ -1064,7 +1064,14 @@ export default function IssueDetailPage() {
   // Defined as a function (not evaluated inline) since `issue` itself isn't
   // declared until later in this component — same reason getMissingCoreFields
   // below is a function rather than a plain value.
-  const isMandatoryFieldsExemptDept = () => (issue?.spaceKey || '').toUpperCase() === 'IA';
+  // QA gets the same full exemption as the IA space -- by request, resolving
+  // a QA-queue ticket was blocking on Project Pool/Project Manager/etc. the
+  // same way IA's own tickets used to before that exemption existed above.
+  const isMandatoryFieldsExemptDept = () => {
+    if ((issue?.spaceKey || '').toUpperCase() === 'IA') return true;
+    const dept = ((issue as any)?.current_department || '').trim().toLowerCase();
+    return dept === 'qa';
+  };
 
   // Combination / Product Type / Project Manager must be filled before resolving a ticket
   // OR moving it to another department — shared by handleStatusChange and department change.
