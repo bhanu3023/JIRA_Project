@@ -746,31 +746,30 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   )}
                 </div>
 
-                {/* Infra Issue Type -- only relevant when the ticket is going to Infra */}
-                {skipsInfraOptionalFields && (
-                  <div className="mb-4">
-                    <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                      Infra Issue Type <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={form.infraIssueType}
-                      onChange={e => update('infraIssueType', e.target.value)}
-                      className={cn(
-                        "w-full rounded-lg border px-3 py-2 text-[13px] focus:outline-none focus:ring-2 bg-white",
-                        infraIssueTypeError ? 'border-red-300 ring-2 ring-red-300 focus:ring-red-300' : 'border-gray-300 focus:ring-blue-500',
-                      )}
-                    >
-                      <option value="">Select Infra Issue Type</option>
-                      {INFRA_ISSUE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                    </select>
-                    {infraIssueTypeError && (
-                      <div className="flex items-center gap-1.5 mt-1.5">
-                        <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
-                        <p className="text-[12px] text-red-600 font-medium">Infra Issue Type is required</p>
-                      </div>
+                {/* Infra Issue Type -- shown on every ticket (by request), required
+                    only when the ticket is actually going to Infra */}
+                <div className="mb-4">
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                    Infra Issue Type {skipsInfraOptionalFields && <span className="text-red-500">*</span>}
+                  </label>
+                  <select
+                    value={form.infraIssueType}
+                    onChange={e => update('infraIssueType', e.target.value)}
+                    className={cn(
+                      "w-full rounded-lg border px-3 py-2 text-[13px] focus:outline-none focus:ring-2 bg-white",
+                      infraIssueTypeError ? 'border-red-300 ring-2 ring-red-300 focus:ring-red-300' : 'border-gray-300 focus:ring-blue-500',
                     )}
-                  </div>
-                )}
+                  >
+                    <option value="">Select Infra Issue Type</option>
+                    {INFRA_ISSUE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  {infraIssueTypeError && (
+                    <div className="flex items-center gap-1.5 mt-1.5">
+                      <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 font-medium">Infra Issue Type is required</p>
+                    </div>
+                  )}
+                </div>
 
                 {/* Project Manager */}
                 <div className="mb-4">

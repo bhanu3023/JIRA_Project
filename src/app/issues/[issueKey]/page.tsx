@@ -3346,15 +3346,8 @@ export default function IssueDetailPage() {
                 { key: 'projectManager', label: 'Project Manager', type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Others'] },
                 { key: 'customerName',   label: 'Customer Name',   type: 'multiselect', options: ['Ab-Inbev','CloudFuze','CMS','Epiq_Global','EPIQ-GLOBAL','Global-V','Manypets','MarmicFire','NoahMedical','Thirdpacket'] },
                 { key: 'clientName',     label: 'Client Name',     type: 'multiselect', options: L1_CLIENT_OPTIONS },
+                { key: 'infraIssueType', label: 'Infra Issue Type', type: 'select',     options: INFRA_ISSUE_TYPES },
               ];
-              // Infra Issue Type only makes sense for tickets actually in the Infra
-              // department -- shown alongside the rest of these fields (which don't
-              // filter by department) rather than a whole separate block, but only
-              // when relevant, same as it's only asked for on the create form when
-              // Infra is the selected queue.
-              if ((((issue as any).current_department || '') as string).trim().toLowerCase() === 'infra' || !!(issue as any).infraIssueType) {
-                l1bFields.push({ key: 'infraIssueType', label: 'Infra Issue Type', type: 'select', options: INFRA_ISSUE_TYPES });
-              }
               return l1bFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'l1b'));
             })()}
 
