@@ -77,6 +77,26 @@ const MIGRATION_SECTION_LABELS = [
 // kind of non-migration board, so it gets the same exemption.
 const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB']);
 
+// Only shown/required for the Infra department -- distinguishes what kind of
+// Infra work a ticket actually needs (DB access vs. a server rebuild vs. a
+// Grafana/Metabase change, etc.), which nothing else on the form captures.
+export const INFRA_ISSUE_TYPES = [
+  'DB Access',
+  'Server Creation',
+  'Server Decommission',
+  'Server Utilization Control',
+  'Grafana',
+  'Migrate Agent Deployment in Content, Message, Email',
+  'Prod and Non-Prod Deployment',
+  'Reporting Container Deployment',
+  'Restarting the Tomcats',
+  'Priority Tomcat Creation for Content, Message, Email Combinations',
+  'Collection Creation in DB',
+  'Index Adding',
+  'Permission Cache Removing',
+  'Metabase Update',
+];
+
 const WORK_TYPES = [
   { value: 'task',            label: 'Task' },
   { value: 'bug',             label: 'Bug' },
@@ -251,7 +271,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     type: 'task', priority: 'medium',
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
     productType: [] as string[], projectManager: [] as string[], productionTicket: '',
-    projectPool: '',
+    projectPool: '', infraIssueType: '',
   });
   // One independent rich-text value per Migration section (see
   // MIGRATION_SECTION_LABELS above for why these are separate editors
@@ -266,6 +286,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [productTypeError, setProductTypeError]     = useState(false);
   const [projectManagerError, setProjectManagerError] = useState(false);
   const [projectPoolError, setProjectPoolError]       = useState(false);
+  const [infraIssueTypeError, setInfraIssueTypeError] = useState(false);
   // Admin-configured custom fields (e.g. "Project Pool") each carry their own
   // `required` flag from Settings > Custom Fields, but nothing here ever
   // read it -- the field rendered with no asterisk and Create succeeded even
@@ -423,6 +444,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingProductType    = showMigrationFields && !skipsInfraOptionalFields && form.productType.length === 0;
     const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !skipsProjectManager;
     const missingProjectPool    = showMigrationFields && !skipsInfraOptionalFields && !form.projectPool.trim();
+    const missingInfraIssueType = skipsInfraOptionalFields && !form.infraIssueType.trim();
     const missingCustomFields = createIssueFields.filter((cf: any) => cf.required && !String(customFieldValues[cf.id] || '').trim());
 
     setSummaryError(missingSummary);
@@ -431,9 +453,10 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     setProductTypeError(missingProductType);
     setProjectManagerError(missingProjectManager);
     setProjectPoolError(missingProjectPool);
+    setInfraIssueTypeError(missingInfraIssueType);
     setCustomFieldErrors(Object.fromEntries(missingCustomFields.map((cf: any) => [cf.id, true])));
 
-    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager || missingProjectPool || missingCustomFields.length > 0) {
+    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager || missingProjectPool || missingInfraIssueType || missingCustomFields.length > 0) {
       const missingLabels = [
         missingSummary && 'Summary',
         missingQueue && 'Queue',
@@ -441,6 +464,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         missingProductType && 'Product Type',
         missingProjectManager && 'Project Manager',
         missingProjectPool && 'Project Pool',
+        missingInfraIssueType && 'Infra Issue Type',
         ...missingCustomFields.map((cf: any) => cf.name),
       ].filter(Boolean);
       setError(`Please fill in the required field${missingLabels.length > 1 ? 's' : ''}: ${missingLabels.join(', ')}`);
@@ -478,6 +502,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         projectManager: form.projectManager.length > 0 ? form.projectManager.join(', ') : undefined,
         productionTicket: form.productionTicket || undefined,
         projectPool: form.projectPool || undefined,
+        infraIssueType: form.infraIssueType || undefined,
         ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
       });
       // Save custom field values
@@ -504,6 +529,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     if (field === 'productType' && Array.isArray(value) && value.length > 0) setProductTypeError(false);
     if (field === 'projectManager' && Array.isArray(value) && value.length > 0) setProjectManagerError(false);
     if (field === 'projectPool' && value) setProjectPoolError(false);
+    if (field === 'infraIssueType' && value) setInfraIssueTypeError(false);
   };
 
   const selectedAssignee = spaceMembers.find(m => m.id === form.assigneeId);
@@ -719,6 +745,32 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     </div>
                   )}
                 </div>
+
+                {/* Infra Issue Type -- only relevant when the ticket is going to Infra */}
+                {skipsInfraOptionalFields && (
+                  <div className="mb-4">
+                    <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
+                      Infra Issue Type <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      value={form.infraIssueType}
+                      onChange={e => update('infraIssueType', e.target.value)}
+                      className={cn(
+                        "w-full rounded-lg border px-3 py-2 text-[13px] focus:outline-none focus:ring-2 bg-white",
+                        infraIssueTypeError ? 'border-red-300 ring-2 ring-red-300 focus:ring-red-300' : 'border-gray-300 focus:ring-blue-500',
+                      )}
+                    >
+                      <option value="">Select Infra Issue Type</option>
+                      {INFRA_ISSUE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                    {infraIssueTypeError && (
+                      <div className="flex items-center gap-1.5 mt-1.5">
+                        <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                        <p className="text-[12px] text-red-600 font-medium">Infra Issue Type is required</p>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Project Manager */}
                 <div className="mb-4">

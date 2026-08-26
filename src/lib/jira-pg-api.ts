@@ -38,6 +38,9 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "productionTicket" TEXT`
 // as productionTicket above, so this column exists on every deploy
 // regardless of whether a formal Prisma migration for it has actually run.
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "projectPool" TEXT`).catch(() => {});
+// Infra Issue Type (DB access / server creation / Grafana / etc.) -- same
+// belt-and-suspenders idempotent ALTER TABLE as projectPool above.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "infraIssueType" TEXT`).catch(() => {});
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMP(3)`).catch(() => {});
 
 // Deleted-ticket trash: DELETE /issues/:key used to be a genuine hard
@@ -2168,6 +2171,7 @@ function formatIssue(issue: any) {
     projectManager: issue.projectManager ?? null,
     productionTicket: issue.productionTicket ?? null,
     projectPool: issue.projectPool ?? null,
+    infraIssueType: issue.infraIssueType ?? null,
     comments,
     commentCount: comments.length,
     attachments,
@@ -4640,7 +4644,7 @@ async function _handleJiraPgApi(
               testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
               customerName: row.customerName, clientName: row.clientName,
               manageClientName: row.manageClientName, customerPlan: row.customerPlan,
-              projectManager: row.projectManager, projectPool: row.projectPool,
+              projectManager: row.projectManager, projectPool: row.projectPool, infraIssueType: row.infraIssueType,
               current_department: row.current_department,
               original_dept: row.original_dept,
               dept_sla_log: row.dept_sla_log || {},
@@ -5031,7 +5035,7 @@ async function _handleJiraPgApi(
           testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
           customerName: row.customerName, clientName: row.clientName,
           manageClientName: row.manageClientName, customerPlan: row.customerPlan,
-          projectManager: row.projectManager, projectPool: row.projectPool,
+          projectManager: row.projectManager, projectPool: row.projectPool, infraIssueType: row.infraIssueType,
           current_department: row.current_department,
           dept_statuses: row.dept_statuses || {},
           dept_assignees: row.dept_assignees || {},
@@ -5418,6 +5422,7 @@ async function _handleJiraPgApi(
         ...(body.projectManager !== undefined && { projectManager: body.projectManager ? String(body.projectManager) : null }),
         ...(body.productionTicket !== undefined && { productionTicket: body.productionTicket ? String(body.productionTicket) : null }),
         ...(body.projectPool !== undefined && { projectPool: body.projectPool ? String(body.projectPool) : null }),
+        ...(body.infraIssueType !== undefined && { infraIssueType: body.infraIssueType ? String(body.infraIssueType) : null }),
       },
       include: {
         status: true,
@@ -6845,6 +6850,7 @@ async function _handleJiraPgApi(
     if (body.projectManager !== undefined) data.projectManager = body.projectManager === null ? null : String(body.projectManager);
     if (body.productionTicket !== undefined) data.productionTicket = body.productionTicket === null ? null : String(body.productionTicket);
     if (body.projectPool !== undefined) data.projectPool = body.projectPool === null ? null : String(body.projectPool);
+    if (body.infraIssueType !== undefined) data.infraIssueType = body.infraIssueType === null ? null : String(body.infraIssueType);
     // Was read by POST /issues (creation) but never by this PATCH handler --
     // the ticket detail page's due-date editor called this endpoint and got
     // a 200 back with no error, but the edit was silently dropped every
