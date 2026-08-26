@@ -175,7 +175,6 @@ export default function IssueDetailPage() {
   const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
   const [detailsExpanded, setDetailsExpanded] = useState(true);
   const [slaExpanded, setSlaExpanded] = useState(true);
-  const [slaNow, setSlaNow] = useState(() => Date.now());
   // Wider default (was 280 -- cramped enough that Priority/Due Date/Product
   // Type/etc. values wrapped awkwardly) and persisted across tickets/reloads
   // via localStorage -- previously this reset to the default every single
@@ -413,12 +412,6 @@ export default function IssueDetailPage() {
     api.getWatch(issueKey).then(r => { setWatching(r.watching); setWatchCount(r.count); }).catch(() => {});
     return () => { setIssueLoadDone(false); };
   }, [issueKey, loadIssue]);
-
-  // Live SLA countdown — tick every second when SLA panel is visible
-  useEffect(() => {
-    const t = setInterval(() => setSlaNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   // Redirect to CF key URL if issue loaded with original Jira key
   useEffect(() => {
@@ -3526,266 +3519,16 @@ export default function IssueDetailPage() {
           </div>
 
           {/* SLA Section — Jira style */}
-          {issue.sla && issue.sla.length > 0 && (() => {
-            // ── helpers ────────────────────────────────────────────────────────
-            const fmtTime = (d: Date) =>
-              d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
-
-            const fmtRemaining = (ms: number) => {
-              if (ms <= 0) return null;
-              const totalSecs = Math.floor(ms / 1000);
-              const s = totalSecs % 60;
-              const totalMins = Math.floor(totalSecs / 60);
-              const m = totalMins % 60;
-              const h = Math.floor(totalMins / 60);
-              if (h > 0) return `${h}h ${m}m remaining`;
-              if (m > 0) return `${m}m ${s}s remaining`;
-              return `${s}s remaining`;
-            };
-
-            const fmtOverdue = (ms: number) => {
-              const totalSecs = Math.floor(Math.abs(ms) / 1000);
-              const totalMins = Math.floor(totalSecs / 60);
-              const m = totalMins % 60;
-              const h = Math.floor(totalMins / 60);
-              if (h > 0) return `${h}h ${m}m overdue`;
-              if (m > 0) return `${m}m overdue`;
-              return `${totalSecs}s overdue`;
-            };
-
-            const fmtGoal = (ms: number) => {
-              const m = Math.round(ms / 60000);
-              if (m < 60) return `${m}m`;
-              const h = Math.round(ms / 3600000);
-              if (h < 24) return `${h}h`;
-              return `${Math.round(ms / 86400000)}d`;
-            };
-
-            // ── top-level SLA entries — show every SLA that applies to this ticket's dept ──
-            const seen = new Set<string>();
-            const dedupedEntries = (issue.sla as any[])
-              .sort((a, b) => Number(b.isBreached) - Number(a.isBreached))
-              .filter(s => {
-                const k = s.policyId || s.policyName || s.id;
-                if (seen.has(k)) return false;
-                seen.add(k);
-                return true;
-              });
-            // The API already scopes issue.sla to this ticket's department (plus any
-            // space-wide, no-dept SLAs), so every deduped entry is relevant — show them all
-            // instead of collapsing down to a single "best match".
-            const finalEntries = dedupedEntries;
-
-            // Any SLA breached (live check, or resolved late)? A completed
-            // ticket's due time is frozen in the past, which would read as
-            // breached forever from the raw dueTime<=now fallback alone --
-            // only trust that fallback for still-open entries. But the
-            // backend's own s.isBreached flag now correctly stays true for a
-            // ticket resolved AFTER its due time (see computeSLAInstancesPure),
-            // so a late resolution should still flag this header, not just an
-            // actively-open one.
-            const anyBreached = finalEntries.some(s => !s.isPaused && (s.isBreached || (!s.isCompleted && new Date(s.dueTime).getTime() - slaNow <= 0)));
-
-            return (
-              <>
-                <div className="h-px bg-gray-200 mx-4" />
-                <div className="px-4 py-3">
-                  {/* Header */}
-                  <button
-                    onClick={() => setSlaExpanded(v => !v)}
-                    className="flex items-center gap-1.5 w-full mb-2.5 group"
-                  >
-                    <ChevronDown size={13} className={`transition-transform duration-150 ${anyBreached ? 'text-red-500' : 'text-gray-500'} ${slaExpanded ? '' : '-rotate-90'}`} />
-                    <span className={`text-[12.5px] font-semibold ${anyBreached ? 'text-red-600' : 'text-gray-700 group-hover:text-gray-900'}`}>SLAs</span>
-                    {anyBreached && (
-                      <span className="ml-1 flex items-center gap-1 text-[10.5px] font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full animate-pulse">
-                        ⚠ BREACHED
-                      </span>
-                    )}
-                  </button>
-
-                  {slaExpanded && (
-                    <div className="space-y-2">
-                      {finalEntries.map((s: any) => {
-                        const startedAt = s.startedAt ? new Date(s.startedAt) : null;
-                        const dueAt = new Date(s.dueTime);
-                        const resolvedAt = s.resolvedAt ? new Date(s.resolvedAt) : null;
-                        const remainingMs = dueAt.getTime() - slaNow;
-                        const isPaused = s.isPaused === true;
-                        const isCompleted = s.isCompleted === true;
-                        // Backend flags isBreached=true for a resolved ticket too, if it
-                        // was resolved AFTER its due time -- distinguish "still open and
-                        // actively overdue right now" from "was resolved, but late" so a
-                        // late resolution doesn't get whitewashed into a clean on-time
-                        // completion just because it's done now.
-                        const resolvedLate = isCompleted && s.isBreached === true;
-                        const isBreached = !isPaused && !isCompleted && (s.isBreached || remainingMs <= 0);
-                        const goalMs: number = s.goalDurationMs || 0;
-                        // Paused: freeze elapsed at pause time. Completed: freeze at the
-                        // actual resolution moment (previously kept counting up against
-                        // "now" forever after resolution, so a ticket resolved on time
-                        // eventually showed 100%+ elapsed as if it had run over anyway).
-                        const elapsedMs = isPaused
-                          ? dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()) + (goalMs - Math.max(0, dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime())))
-                          : isCompleted && resolvedAt
-                          ? resolvedAt.getTime() - (startedAt?.getTime() ?? resolvedAt.getTime())
-                          : slaNow - (startedAt?.getTime() ?? slaNow);
-                        const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
-                        const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');
-
-                        const warnMs = 30 * 60 * 1000;
-                        const isNotified = s.isNotified === true && (remainingMs <= warnMs);
-                        // Same 30-min threshold the SLA_BREACH notification already
-                        // warns at — this badge used to jump straight from green
-                        // "RUNNING" to red "BREACHED" the instant the due time passed,
-                        // with no visual cue in between even though a warning
-                        // notification had already gone out. The progress bar alone
-                        // turning amber past 80% elapsed was too easy to miss (and,
-                        // for a long-duration goal, unrelated to how close to the
-                        // actual due time it is) -- add an explicit orange
-                        // "breaching soon" badge state for the same last-30-minutes
-                        // window the notification uses.
-                        const isBreachingSoon = !isPaused && !isCompleted && !isBreached && remainingMs > 0 && remainingMs <= warnMs;
-                        const showAsBreach = isBreached || resolvedLate;
-
-                        return (
-                          <div key={s.id} className={`rounded-xl border p-3 ${showAsBreach ? 'border-red-300 bg-red-50' : isCompleted ? 'border-emerald-300 bg-emerald-50' : isPaused ? 'border-amber-300 bg-amber-50' : isBreachingSoon ? 'border-orange-300 bg-orange-50' : 'border-gray-200 bg-white'}`}>
-
-                            {/* Row 1: policy name + status badges */}
-                            <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <Clock size={13} className={showAsBreach ? 'text-red-500' : isCompleted ? 'text-emerald-500' : isPaused ? 'text-amber-500' : isBreachingSoon ? 'text-orange-500' : 'text-blue-500'} />
-                                <span className="text-[12px] font-semibold text-gray-800">{baseName}</span>
-                                {goalMs > 0 && (
-                                  <span className="text-[10px] text-gray-400 font-medium">({fmtGoal(goalMs)})</span>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1.5 flex-shrink-0">
-                                {isNotified && (
-                                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
-                                    🔔 NOTIFIED
-                                  </span>
-                                )}
-                                <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
-                                  isBreached ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse'
-                                  : resolvedLate ? 'bg-red-100 text-red-700 border border-red-200'
-                                  : isCompleted ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-                                  : isPaused ? 'bg-amber-100 text-amber-700 border border-amber-200'
-                                  : isBreachingSoon ? 'bg-orange-100 text-orange-700 border border-orange-200 animate-pulse'
-                                  : 'bg-green-100 text-green-700'
-                                }`}>
-                                  {isBreached ? '⚠ BREACHED' : resolvedLate ? '✓ RESOLVED (Breached)' : isCompleted ? '✓ RESOLVED' : isPaused ? '⏸ PAUSED' : isBreachingSoon ? '⚠ BREACHING SOON' : '● RUNNING'}
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Row 2: countdown / paused / overdue / resolved time — a
-                                resolved ticket must stop counting down, not keep ticking
-                                toward (or past) its due time forever. */}
-                            <div className={`text-[17px] font-bold tabular-nums mb-2 ${showAsBreach ? 'text-red-600' : isCompleted ? 'text-emerald-600' : isPaused ? 'text-amber-600' : isBreachingSoon ? 'text-orange-600' : 'text-gray-900'}`}>
-                              {resolvedLate ? 'Resolved late' : isCompleted ? 'Resolved' : isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
-                            </div>
-
-                            {/* Row 3: progress bar */}
-                            {goalMs > 0 && (
-                              <div className="w-full h-1.5 rounded-full bg-gray-200 overflow-hidden mb-3">
-                                <div
-                                  className={`h-1.5 rounded-full transition-none ${showAsBreach ? 'bg-red-500' : isCompleted ? 'bg-emerald-500' : isPaused ? 'bg-amber-400' : isBreachingSoon ? 'bg-orange-500' : pct > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
-                                  style={{ width: `${Math.min(pct, 100)}%` }}
-                                />
-                              </div>
-                            )}
-
-                            {/* Row 4: Start time / Due time — always visible, stacked */}
-                            {startedAt && (
-                              <div className="grid grid-cols-2 gap-2 mt-1">
-                                <div className="bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                  <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Start</p>
-                                  <p className="text-[11px] font-semibold text-gray-700">{fmtTime(startedAt)}</p>
-                                </div>
-                                <div className={`rounded-lg px-2.5 py-1.5 ${showAsBreach ? 'bg-red-100' : 'bg-gray-50'}`}>
-                                  <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Due</p>
-                                  <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* Who actually resolved it -- otherwise the only name visible
-                                anywhere near a breach badge is the CURRENT Assignee, which
-                                silently pins a late resolution on whoever holds the ticket
-                                now even if a different person's later status change (e.g.
-                                reopening and re-resolving after the due time) is what
-                                actually caused it. When the ticket was resolved more than
-                                once (resolved, reopened, resolved again by someone else),
-                                show every attempt with its own date and on-time/late verdict
-                                instead of collapsing them into one badge that only reflects
-                                whichever attempt happened last. */}
-                            {isCompleted && Array.isArray(s.history) && s.history.length > 0 && (
-                              s.history.length === 1 ? (
-                                <p className="text-[10.5px] text-gray-400 mt-2">
-                                  Resolved by <span className={`font-semibold ${s.history[0].wasBreached ? 'text-red-500' : 'text-gray-600'}`}>{s.history[0].resolvedByName}</span>
-                                </p>
-                              ) : (
-                                <div className="mt-2 pt-2 border-t border-gray-100">
-                                  <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-1">Resolution history</p>
-                                  <div className="space-y-1">
-                                    {s.history.map((h: any, i: number) => (
-                                      <p key={i} className="text-[10.5px] text-gray-500 flex items-center gap-1.5">
-                                        <span className={`font-semibold ${h.wasBreached ? 'text-red-500' : 'text-emerald-600'}`}>{h.resolvedByName}</span>
-                                        <span className="text-gray-300">·</span>
-                                        <span>{fmtTime(new Date(h.resolvedAt))}</span>
-                                        <span className={`ml-auto text-[9.5px] font-bold px-1.5 py-0.5 rounded-full ${h.wasBreached ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}`}>
-                                          {h.wasBreached ? 'Late' : 'On time'}
-                                        </span>
-                                      </p>
-                                    ))}
-                                  </div>
-                                </div>
-                              )
-                            )}
-
-                            {/* Admin override: a breach can be waived (e.g. resolved late
-                                for a reason outside anyone's control) so the ticket stops
-                                reading as breached without altering its actual recorded
-                                dates/history -- the waiver itself stays visible here for
-                                accountability instead of silently erasing the breach. */}
-                            {s.waived ? (
-                              <div className="mt-2 pt-2 border-t border-gray-100 flex items-start justify-between gap-2">
-                                <p className="text-[10.5px] text-emerald-600">
-                                  ✓ Breach waived by <span className="font-semibold">{s.waivedByName}</span>
-                                  {s.waivedReason && <span className="text-gray-400"> — {s.waivedReason}</span>}
-                                </p>
-                                {user?.role === 'admin' && (
-                                  <button
-                                    onClick={() => handleSlaWaiver(s.policyId, false)}
-                                    disabled={slaWaiverBusyId === s.policyId}
-                                    className="text-[10px] font-semibold text-gray-400 hover:text-red-500 flex-shrink-0 disabled:opacity-50"
-                                  >
-                                    {slaWaiverBusyId === s.policyId ? 'Removing…' : 'Remove waiver'}
-                                  </button>
-                                )}
-                              </div>
-                            ) : resolvedLate && user?.role === 'admin' && (
-                              <div className="mt-2 pt-2 border-t border-gray-100">
-                                <button
-                                  onClick={() => handleSlaWaiver(s.policyId, true)}
-                                  disabled={slaWaiverBusyId === s.policyId}
-                                  className="text-[10.5px] font-semibold text-gray-400 hover:text-emerald-600 disabled:opacity-50"
-                                >
-                                  {slaWaiverBusyId === s.policyId ? 'Waiving…' : 'Waive this breach'}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-
-                    </div>
-                  )}
-                </div>
-              </>
-            );
-          })()}
+          {issue.sla && issue.sla.length > 0 && (
+            <SlaPanel
+              issue={issue}
+              slaExpanded={slaExpanded}
+              setSlaExpanded={setSlaExpanded}
+              user={user}
+              slaWaiverBusyId={slaWaiverBusyId}
+              handleSlaWaiver={handleSlaWaiver}
+            />
+          )}
 
           {/* Timestamps */}
           <div className="h-px bg-gray-200 mx-4" />
@@ -4115,6 +3858,288 @@ export default function IssueDetailPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/* ===== SLA Panel =====
+ * Split out from the main issue page specifically because its countdown
+ * tick (setInterval, once a second) used to live as top-level state on the
+ * whole page component -- every tick re-rendered the ENTIRE ticket page
+ * (comments, properties, rich text editors, everything) once a second,
+ * which is what made any open dropdown or an in-progress scroll visibly
+ * flicker/jump. Owning `slaNow` here instead means that per-second
+ * re-render is contained to just this panel. */
+function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, handleSlaWaiver }: {
+  issue: any;
+  slaExpanded: boolean;
+  setSlaExpanded: React.Dispatch<React.SetStateAction<boolean>>;
+  user: any;
+  slaWaiverBusyId: string | null;
+  handleSlaWaiver: (policyId: string, waive: boolean) => void;
+}) {
+  const [slaNow, setSlaNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setSlaNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // ── helpers ────────────────────────────────────────────────────────
+  const fmtTime = (d: Date) =>
+    d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+
+  const fmtRemaining = (ms: number) => {
+    if (ms <= 0) return null;
+    const totalSecs = Math.floor(ms / 1000);
+    const s = totalSecs % 60;
+    const totalMins = Math.floor(totalSecs / 60);
+    const m = totalMins % 60;
+    const h = Math.floor(totalMins / 60);
+    if (h > 0) return `${h}h ${m}m remaining`;
+    if (m > 0) return `${m}m ${s}s remaining`;
+    return `${s}s remaining`;
+  };
+
+  const fmtOverdue = (ms: number) => {
+    const totalSecs = Math.floor(Math.abs(ms) / 1000);
+    const totalMins = Math.floor(totalSecs / 60);
+    const m = totalMins % 60;
+    const h = Math.floor(totalMins / 60);
+    if (h > 0) return `${h}h ${m}m overdue`;
+    if (m > 0) return `${m}m overdue`;
+    return `${totalSecs}s overdue`;
+  };
+
+  const fmtGoal = (ms: number) => {
+    const m = Math.round(ms / 60000);
+    if (m < 60) return `${m}m`;
+    const h = Math.round(ms / 3600000);
+    if (h < 24) return `${h}h`;
+    return `${Math.round(ms / 86400000)}d`;
+  };
+
+  // ── top-level SLA entries — show every SLA that applies to this ticket's dept ──
+  const seen = new Set<string>();
+  const dedupedEntries = (issue.sla as any[])
+    .sort((a, b) => Number(b.isBreached) - Number(a.isBreached))
+    .filter(s => {
+      const k = s.policyId || s.policyName || s.id;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  // The API already scopes issue.sla to this ticket's department (plus any
+  // space-wide, no-dept SLAs), so every deduped entry is relevant — show them all
+  // instead of collapsing down to a single "best match".
+  const finalEntries = dedupedEntries;
+
+  // Any SLA breached (live check, or resolved late)? A completed
+  // ticket's due time is frozen in the past, which would read as
+  // breached forever from the raw dueTime<=now fallback alone --
+  // only trust that fallback for still-open entries. But the
+  // backend's own s.isBreached flag now correctly stays true for a
+  // ticket resolved AFTER its due time (see computeSLAInstancesPure),
+  // so a late resolution should still flag this header, not just an
+  // actively-open one.
+  const anyBreached = finalEntries.some(s => !s.isPaused && (s.isBreached || (!s.isCompleted && new Date(s.dueTime).getTime() - slaNow <= 0)));
+
+  return (
+    <>
+      <div className="h-px bg-gray-200 mx-4" />
+      <div className="px-4 py-3">
+        {/* Header */}
+        <button
+          onClick={() => setSlaExpanded(v => !v)}
+          className="flex items-center gap-1.5 w-full mb-2.5 group"
+        >
+          <ChevronDown size={13} className={`transition-transform duration-150 ${anyBreached ? 'text-red-500' : 'text-gray-500'} ${slaExpanded ? '' : '-rotate-90'}`} />
+          <span className={`text-[12.5px] font-semibold ${anyBreached ? 'text-red-600' : 'text-gray-700 group-hover:text-gray-900'}`}>SLAs</span>
+          {anyBreached && (
+            <span className="ml-1 flex items-center gap-1 text-[10.5px] font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full animate-pulse">
+              ⚠ BREACHED
+            </span>
+          )}
+        </button>
+
+        {slaExpanded && (
+          <div className="space-y-2">
+            {finalEntries.map((s: any) => {
+              const startedAt = s.startedAt ? new Date(s.startedAt) : null;
+              const dueAt = new Date(s.dueTime);
+              const resolvedAt = s.resolvedAt ? new Date(s.resolvedAt) : null;
+              const remainingMs = dueAt.getTime() - slaNow;
+              const isPaused = s.isPaused === true;
+              const isCompleted = s.isCompleted === true;
+              // Backend flags isBreached=true for a resolved ticket too, if it
+              // was resolved AFTER its due time -- distinguish "still open and
+              // actively overdue right now" from "was resolved, but late" so a
+              // late resolution doesn't get whitewashed into a clean on-time
+              // completion just because it's done now.
+              const resolvedLate = isCompleted && s.isBreached === true;
+              const isBreached = !isPaused && !isCompleted && (s.isBreached || remainingMs <= 0);
+              const goalMs: number = s.goalDurationMs || 0;
+              // Paused: freeze elapsed at pause time. Completed: freeze at the
+              // actual resolution moment (previously kept counting up against
+              // "now" forever after resolution, so a ticket resolved on time
+              // eventually showed 100%+ elapsed as if it had run over anyway).
+              const elapsedMs = isPaused
+                ? dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()) + (goalMs - Math.max(0, dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime())))
+                : isCompleted && resolvedAt
+                ? resolvedAt.getTime() - (startedAt?.getTime() ?? resolvedAt.getTime())
+                : slaNow - (startedAt?.getTime() ?? slaNow);
+              const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
+              const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');
+
+              const warnMs = 30 * 60 * 1000;
+              const isNotified = s.isNotified === true && (remainingMs <= warnMs);
+              // Same 30-min threshold the SLA_BREACH notification already
+              // warns at — this badge used to jump straight from green
+              // "RUNNING" to red "BREACHED" the instant the due time passed,
+              // with no visual cue in between even though a warning
+              // notification had already gone out. The progress bar alone
+              // turning amber past 80% elapsed was too easy to miss (and,
+              // for a long-duration goal, unrelated to how close to the
+              // actual due time it is) -- add an explicit orange
+              // "breaching soon" badge state for the same last-30-minutes
+              // window the notification uses.
+              const isBreachingSoon = !isPaused && !isCompleted && !isBreached && remainingMs > 0 && remainingMs <= warnMs;
+              const showAsBreach = isBreached || resolvedLate;
+
+              return (
+                <div key={s.id} className={`rounded-xl border p-3 ${showAsBreach ? 'border-red-300 bg-red-50' : isCompleted ? 'border-emerald-300 bg-emerald-50' : isPaused ? 'border-amber-300 bg-amber-50' : isBreachingSoon ? 'border-orange-300 bg-orange-50' : 'border-gray-200 bg-white'}`}>
+
+                  {/* Row 1: policy name + status badges */}
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <Clock size={13} className={showAsBreach ? 'text-red-500' : isCompleted ? 'text-emerald-500' : isPaused ? 'text-amber-500' : isBreachingSoon ? 'text-orange-500' : 'text-blue-500'} />
+                      <span className="text-[12px] font-semibold text-gray-800">{baseName}</span>
+                      {goalMs > 0 && (
+                        <span className="text-[10px] text-gray-400 font-medium">({fmtGoal(goalMs)})</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      {isNotified && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
+                          🔔 NOTIFIED
+                        </span>
+                      )}
+                      <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
+                        isBreached ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse'
+                        : resolvedLate ? 'bg-red-100 text-red-700 border border-red-200'
+                        : isCompleted ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                        : isPaused ? 'bg-amber-100 text-amber-700 border border-amber-200'
+                        : isBreachingSoon ? 'bg-orange-100 text-orange-700 border border-orange-200 animate-pulse'
+                        : 'bg-green-100 text-green-700'
+                      }`}>
+                        {isBreached ? '⚠ BREACHED' : resolvedLate ? '✓ RESOLVED (Breached)' : isCompleted ? '✓ RESOLVED' : isPaused ? '⏸ PAUSED' : isBreachingSoon ? '⚠ BREACHING SOON' : '● RUNNING'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Row 2: countdown / paused / overdue / resolved time — a
+                      resolved ticket must stop counting down, not keep ticking
+                      toward (or past) its due time forever. */}
+                  <div className={`text-[17px] font-bold tabular-nums mb-2 ${showAsBreach ? 'text-red-600' : isCompleted ? 'text-emerald-600' : isPaused ? 'text-amber-600' : isBreachingSoon ? 'text-orange-600' : 'text-gray-900'}`}>
+                    {resolvedLate ? 'Resolved late' : isCompleted ? 'Resolved' : isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
+                  </div>
+
+                  {/* Row 3: progress bar */}
+                  {goalMs > 0 && (
+                    <div className="w-full h-1.5 rounded-full bg-gray-200 overflow-hidden mb-3">
+                      <div
+                        className={`h-1.5 rounded-full transition-none ${showAsBreach ? 'bg-red-500' : isCompleted ? 'bg-emerald-500' : isPaused ? 'bg-amber-400' : isBreachingSoon ? 'bg-orange-500' : pct > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
+                        style={{ width: `${Math.min(pct, 100)}%` }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Row 4: Start time / Due time — always visible, stacked */}
+                  {startedAt && (
+                    <div className="grid grid-cols-2 gap-2 mt-1">
+                      <div className="bg-gray-50 rounded-lg px-2.5 py-1.5">
+                        <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Start</p>
+                        <p className="text-[11px] font-semibold text-gray-700">{fmtTime(startedAt)}</p>
+                      </div>
+                      <div className={`rounded-lg px-2.5 py-1.5 ${showAsBreach ? 'bg-red-100' : 'bg-gray-50'}`}>
+                        <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Due</p>
+                        <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Who actually resolved it -- otherwise the only name visible
+                      anywhere near a breach badge is the CURRENT Assignee, which
+                      silently pins a late resolution on whoever holds the ticket
+                      now even if a different person's later status change (e.g.
+                      reopening and re-resolving after the due time) is what
+                      actually caused it. When the ticket was resolved more than
+                      once (resolved, reopened, resolved again by someone else),
+                      show every attempt with its own date and on-time/late verdict
+                      instead of collapsing them into one badge that only reflects
+                      whichever attempt happened last. */}
+                  {isCompleted && Array.isArray(s.history) && s.history.length > 0 && (
+                    s.history.length === 1 ? (
+                      <p className="text-[10.5px] text-gray-400 mt-2">
+                        Resolved by <span className={`font-semibold ${s.history[0].wasBreached ? 'text-red-500' : 'text-gray-600'}`}>{s.history[0].resolvedByName}</span>
+                      </p>
+                    ) : (
+                      <div className="mt-2 pt-2 border-t border-gray-100">
+                        <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-1">Resolution history</p>
+                        <div className="space-y-1">
+                          {s.history.map((h: any, i: number) => (
+                            <p key={i} className="text-[10.5px] text-gray-500 flex items-center gap-1.5">
+                              <span className={`font-semibold ${h.wasBreached ? 'text-red-500' : 'text-emerald-600'}`}>{h.resolvedByName}</span>
+                              <span className="text-gray-300">·</span>
+                              <span>{fmtTime(new Date(h.resolvedAt))}</span>
+                              <span className={`ml-auto text-[9.5px] font-bold px-1.5 py-0.5 rounded-full ${h.wasBreached ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}`}>
+                                {h.wasBreached ? 'Late' : 'On time'}
+                              </span>
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  )}
+
+                  {/* Admin override: a breach can be waived (e.g. resolved late
+                      for a reason outside anyone's control) so the ticket stops
+                      reading as breached without altering its actual recorded
+                      dates/history -- the waiver itself stays visible here for
+                      accountability instead of silently erasing the breach. */}
+                  {s.waived ? (
+                    <div className="mt-2 pt-2 border-t border-gray-100 flex items-start justify-between gap-2">
+                      <p className="text-[10.5px] text-emerald-600">
+                        ✓ Breach waived by <span className="font-semibold">{s.waivedByName}</span>
+                        {s.waivedReason && <span className="text-gray-400"> — {s.waivedReason}</span>}
+                      </p>
+                      {user?.role === 'admin' && (
+                        <button
+                          onClick={() => handleSlaWaiver(s.policyId, false)}
+                          disabled={slaWaiverBusyId === s.policyId}
+                          className="text-[10px] font-semibold text-gray-400 hover:text-red-500 flex-shrink-0 disabled:opacity-50"
+                        >
+                          {slaWaiverBusyId === s.policyId ? 'Removing…' : 'Remove waiver'}
+                        </button>
+                      )}
+                    </div>
+                  ) : resolvedLate && user?.role === 'admin' && (
+                    <div className="mt-2 pt-2 border-t border-gray-100">
+                      <button
+                        onClick={() => handleSlaWaiver(s.policyId, true)}
+                        disabled={slaWaiverBusyId === s.policyId}
+                        className="text-[10.5px] font-semibold text-gray-400 hover:text-emerald-600 disabled:opacity-50"
+                      >
+                        {slaWaiverBusyId === s.policyId ? 'Waiving…' : 'Waive this breach'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
