@@ -256,6 +256,24 @@ export const useStore = create<AppState>((set, get) => ({
   },
   loadIssue: async (key) => {
     activeIssueKey = key;
+    // Seed from the last successful load of this exact ticket (sessionStorage)
+    // before the fetch, same stale-while-revalidate fix already applied to
+    // loadSpace -- without it, every single ticket open (even re-opening one
+    // just viewed moments ago) blocked on the full "Loading issue..."
+    // spinner, because the page's own cleanup effect wipes currentIssue to
+    // null on every unmount/navigation with nothing to fall back to. The
+    // fetch below still always runs and overwrites this with fresh data.
+    const cacheKey = `issue_v1:${key.toUpperCase()}`;
+    let seeded = false;
+    try {
+      const cached = typeof window !== 'undefined' ? sessionStorage.getItem(cacheKey) : null;
+      if (cached) { set({ currentIssue: JSON.parse(cached), currentIssueError: null }); seeded = true; }
+    } catch { /* corrupt/unavailable cache entry — fall through to the network fetch */ }
+    // No cache for this specific ticket -- if whatever's currently in state
+    // belongs to a DIFFERENT ticket (e.g. just navigated from one issue to
+    // another with neither previously cached), clear it instead of leaving
+    // the wrong ticket's content on screen while this one loads.
+    if (!seeded && get().currentIssue?.key !== key) set({ currentIssue: null });
     if (activeIssueKey === key) set({ currentIssueError: null });
     try {
       const issue = await api.getIssue(key);
@@ -264,6 +282,7 @@ export const useStore = create<AppState>((set, get) => ({
       // already navigated away from can win the race and overwrite the
       // ticket that's actually on screen now.
       if (activeIssueKey === key) set({ currentIssue: issue, currentIssueError: null });
+      try { if (typeof window !== 'undefined') sessionStorage.setItem(cacheKey, JSON.stringify(issue)); } catch { /* storage full/unavailable — non-critical */ }
     } catch (err: any) {
       if (activeIssueKey === key) set({ currentIssue: null, currentIssueError: err?.message || 'Failed to load this ticket.' });
     }

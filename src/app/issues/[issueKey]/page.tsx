@@ -129,12 +129,11 @@ export default function IssueDetailPage() {
   // Normalize key: strip Jira sub-issue colon suffix (e.g. L2B-12718:1 → L2B-12718)
   const rawKey = (params.issueKey as string).toUpperCase();
   const issueKey = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-  const { currentIssue, currentIssueError, loadIssue, clearCurrentIssue, user, spaces } = useStore(
+  const { currentIssue, currentIssueError, loadIssue, user, spaces } = useStore(
     useShallow((s) => ({
       currentIssue: s.currentIssue,
       currentIssueError: s.currentIssueError,
       loadIssue: s.loadIssue,
-      clearCurrentIssue: s.clearCurrentIssue,
       user: s.user,
       spaces: s.spaces,
     })),
@@ -403,11 +402,17 @@ export default function IssueDetailPage() {
 
   useEffect(() => {
     setIssueLoadDone(false);
+    // loadIssue itself now handles seeding from cache (instant, if this
+    // ticket was viewed before) vs. clearing to a spinner (only when
+    // switching to a DIFFERENT, never-cached ticket) -- clearing
+    // currentIssue here unconditionally on every unmount used to wipe that
+    // seeded data out from under it, forcing the full "Loading issue..."
+    // spinner on every single ticket open, even one just viewed moments ago.
     loadIssue(issueKey).finally(() => setIssueLoadDone(true));
     // Load watch status
     api.getWatch(issueKey).then(r => { setWatching(r.watching); setWatchCount(r.count); }).catch(() => {});
-    return () => { clearCurrentIssue(); setIssueLoadDone(false); };
-  }, [issueKey, loadIssue, clearCurrentIssue]);
+    return () => { setIssueLoadDone(false); };
+  }, [issueKey, loadIssue]);
 
   // Live SLA countdown — tick every second when SLA panel is visible
   useEffect(() => {
