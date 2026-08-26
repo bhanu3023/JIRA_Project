@@ -2936,7 +2936,7 @@ function SpaceDetailContent() {
                 return (
                   <div key={issue.id}
                     className="bg-white rounded-xl border border-gray-150 shadow-sm hover:shadow-md hover:border-blue-200 transition-all cursor-pointer group"
-                    onClick={() => { window.location.href = `/issues/${issue.cfKey ?? issue.key}`; }}>
+                    onClick={() => { router.push(`/issues/${issue.cfKey ?? issue.key}`); }}>
                     {/* Card top row */}
                     <div className="flex items-start gap-3 px-4 pt-4 pb-3">
                       {/* Main content */}
@@ -3186,7 +3186,7 @@ function SpaceDetailContent() {
                     if (e.ctrlKey || e.metaKey) {
                       window.open(`/issues/${issue.cfKey ?? issue.key}`, '_blank');
                     } else {
-                      window.location.href = `/issues/${issue.cfKey ?? issue.key}`;
+                      router.push(`/issues/${issue.cfKey ?? issue.key}`);
                     }
                   }}>
 
