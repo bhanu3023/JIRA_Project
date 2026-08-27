@@ -1011,26 +1011,16 @@ function SpaceDetailContent() {
           ? { ...i, comments: ((i as any).comments || []).map((c: any) => c.id === tempId ? (saved || c) : c) }
           : i),
       }));
-      // Reload with current queue params in the background (not a hardcoded reporter filter)
-      const params: Record<string, string> = { spaceKey, page: '1', limit: '100' };
-      if (queueFilter === 'sent-watching') {
-        if (deptParam) params.sentDept = deptParam;
-      } else if (queueFilter === 'dept_unassigned' || queueFilter === 'dept_assigned') {
-        params.excludeDone = 'true';
-        if (deptParam) params.dept = deptParam;
-      } else if (queueFilter === 'dept_all') {
-        if (deptParam) params.dept = deptParam;
-      } else if (queueFilter === 'assigned' || queueFilter === 'unassigned') {
-        params.excludeDone = 'true';
-      } else if (queueFilter.startsWith('cq_') && activeCustomQueue?.name) {
-        params.dept = activeCustomQueue.name;
-        params.page = String(currentPage);
-        params.limit = String(PAGE_SIZE);
-      } else {
-        params.reporter = user?.id || '';
-      }
-      clearIssuesCache(params);
-      loadIssues(params);
+      // The optimistic update above already swapped the placeholder comment
+      // for the real saved one directly in the visible `issues` list, and
+      // nothing else this list displays (summary/assignee/status/SLA) is
+      // affected by adding a comment -- a background loadIssues() used to run
+      // here too "to be safe", but clearIssuesCache() right before it forced
+      // loadIssues into its own no-cache branch (issues: [], loading: true),
+      // blanking the whole list and showing a full spinner for a second just
+      // to redraw the exact same rows, including the comment already visible.
+      // Reported as "adding a comment shows a loader" -- removed both; the
+      // optimistic update is already the correct, final state here.
     } catch (e) {
       console.error(e);
       useStore.setState({ issues: prevIssues });
