@@ -432,6 +432,73 @@ async function notifyUsers(userIds: (string | null | undefined)[], actorId: stri
   }
 }
 
+// Extract mentioned user IDs from a comment body -- data-userid on the rich
+// text editor's mention spans is the reliable path; a plain-text @name is a
+// fallback for comments that never went through the editor (e.g. imported
+// from Jira).
+async function extractMentionedUserIds(commentBody: string): Promise<Set<string>> {
+  const mentionedUserIds = new Set<string>();
+  const dataUserMatches = commentBody.matchAll(/data-userid="([^"]+)"/g);
+  for (const m of dataUserMatches) { if (m[1]) mentionedUserIds.add(m[1]); }
+  if (mentionedUserIds.size === 0) {
+    const textMatches = commentBody.replace(/<[^>]+>/g, '').match(/@([^\s@,]+)/g) || [];
+    for (const mention of textMatches) {
+      const username = mention.slice(1);
+      const found = await db.user.findFirst({
+        where: { OR: [{ email: { contains: username, mode: 'insensitive' } }, { firstName: { equals: username, mode: 'insensitive' } }] }
+      });
+      if (found) mentionedUserIds.add(found.id);
+    }
+  }
+  return mentionedUserIds;
+}
+
+// Sends the in-app + email "mentioned you" notification for every @mention in
+// commentBody, skipping the actor and anything in alreadyNotifiedIds -- the
+// latter matters for comment EDITS, where re-scanning the full (now-edited)
+// body would otherwise re-notify someone for a mention that was already there
+// before the edit and already got its notification the first time.
+async function notifyCommentMentions(commentBody: string, opts: {
+  actorUserId: string | null | undefined; actorName: string; issueDisplayKey: string; issue: any;
+  alreadyNotifiedIds?: Set<string>;
+}) {
+  const mentionedUserIds = await extractMentionedUserIds(commentBody);
+  if (mentionedUserIds.size === 0) return;
+  const mentionPreview = commentBody
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+  for (const mentionedId of mentionedUserIds) {
+    if (mentionedId === opts.actorUserId) continue;
+    if (opts.alreadyNotifiedIds?.has(mentionedId)) continue;
+    const mentionedUser = await db.user.findUnique({ where: { id: mentionedId } });
+    if (!mentionedUser) continue;
+    await createNotification({
+      userId: mentionedId, type: 'MENTIONED',
+      title: `${opts.actorName} mentioned you in ${opts.issueDisplayKey}`,
+      message: mentionPreview, issueKey: opts.issueDisplayKey,
+    });
+    if (mentionedUser.email) {
+      notifyMentioned({
+        mentionedEmail: mentionedUser.email,
+        mentionedName: `${mentionedUser.firstName} ${mentionedUser.lastName}`.trim(),
+        mentionedBy: opts.actorName,
+        issueKey: opts.issueDisplayKey,
+        issueSummary: opts.issue.summary,
+        spaceKey: opts.issue.space?.key ?? '',
+        spaceName: opts.issue.space?.name ?? '',
+        commentPreview: `${opts.actorName}: ${mentionPreview}`,
+      }).catch((err: any) => console.error('[Mention Email] Failed:', err?.message));
+    }
+  }
+}
+
 // Get all lead/shift_lead member userIds for a space
 async function getSpaceLeadUserIds(spaceId: string, dept?: string | null): Promise<string[]> {
   try {
@@ -8084,62 +8151,7 @@ async function _handleJiraPgApi(
     );
     await notifyWatchers(issue.key, userId, { title: `New comment on ${issueDisplayKey}`, message: commentPreview });
 
-    // Detect @mentions Ã¢â‚¬â€ extract data-userid from mention spans (most reliable)
-    // Falls back to regex on plain text for non-rich-text comments
-    const mentionedUserIds = new Set<string>();
-    // 1. Extract from <span data-userid="..."> HTML mentions
-    const dataUserMatches = comment.body.matchAll(/data-userid="([^"]+)"/g);
-    for (const m of dataUserMatches) { if (m[1]) mentionedUserIds.add(m[1]); }
-    // 2. Fallback: regex on text for plain @name mentions (single word)
-    if (mentionedUserIds.size === 0) {
-      const textMatches = comment.body.replace(/<[^>]+>/g, '').match(/@([^\s@,]+)/g) || [];
-      for (const mention of textMatches) {
-        const username = mention.slice(1);
-        const found = await db.user.findFirst({
-          where: { OR: [{ email: { contains: username, mode: 'insensitive' } }, { firstName: { equals: username, mode: 'insensitive' } }] }
-        });
-        if (found) mentionedUserIds.add(found.id);
-      }
-    }
-    // Send in-app + email notification to each mentioned user
-    // Stripping tags alone leaves entities like the literal "&nbsp;" the rich
-    // text editor inserts right after a mention span (to guarantee a following
-    // space) sitting in the plain-text preview as visible "&nbsp;" characters.
-    // Same decode used for comment previews elsewhere (spaces/[spaceKey]/page.tsx).
-    const mentionPreview = comment.body
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 200);
-    for (const mentionedId of mentionedUserIds) {
-      if (mentionedId === userId) continue; // don't notify self
-      const mentionedUser = await db.user.findUnique({ where: { id: mentionedId } });
-      if (!mentionedUser) continue;
-      // In-app notification
-      await createNotification({
-        userId: mentionedId, type: 'MENTIONED',
-        title: `${commenterName} mentioned you in ${issueDisplayKey}`,
-        message: mentionPreview, issueKey: issueDisplayKey,
-      });
-      // Email notification
-      if (mentionedUser.email) {
-        notifyMentioned({
-          mentionedEmail: mentionedUser.email,
-          mentionedName: `${mentionedUser.firstName} ${mentionedUser.lastName}`.trim(),
-          mentionedBy: commenterName,
-          issueKey: issueDisplayKey,
-          issueSummary: issue.summary,
-          spaceKey: issue.space?.key ?? '',
-          spaceName: issue.space?.name ?? '',
-          commentPreview,
-        }).catch((err: any) => console.error('[Mention Email] Failed:', err?.message));
-      }
-    }
+    await notifyCommentMentions(comment.body, { actorUserId: userId, actorName: commenterName, issueDisplayKey, issue });
     } catch (err: any) { console.error('[Comment notifications] Failed:', err?.message || err); } })();
 
     return json({
@@ -8253,6 +8265,27 @@ async function _handleJiraPgApi(
             },
           });
         } catch { /* history tracking should never break the main response */ }
+      }
+      // A mention added while EDITING a comment (as opposed to typing it in
+      // fresh) previously never notified anyone -- only comment creation ran
+      // the mention scan. Re-scan on every edit too, but skip anything that
+      // was already mentioned in the comment's prior body so re-saving an
+      // edit that didn't touch the mention doesn't re-notify the same person.
+      if (before && before.body !== updated.body) {
+        (async () => { try {
+          const alreadyMentioned = await extractMentionedUserIds(before.body);
+          const issueForMention = await db.issue.findUnique({ where: { id: before.issueId }, include: { space: true } });
+          if (issueForMention) {
+            const actorName = currentUser
+              ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+              : 'Unknown';
+            await notifyCommentMentions(updated.body, {
+              actorUserId: userId, actorName,
+              issueDisplayKey: (issueForMention as any).cf_key || issueForMention.key,
+              issue: issueForMention, alreadyNotifiedIds: alreadyMentioned,
+            });
+          }
+        } catch (err: any) { console.error('[Comment edit mentions] Failed:', err?.message || err); } })();
       }
       // reactions is a raw column db.comment.update() above doesn't touch or
       // return -- editing a comment's body doesn't change its reactions, but
