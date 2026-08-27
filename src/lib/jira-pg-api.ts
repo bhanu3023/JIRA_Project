@@ -8781,6 +8781,115 @@ async function _handleJiraPgApi(
     return json({ error: 'Not found' }, 404);
   }
 
+  // GET /reports/mbr?department=&dateFrom=&dateTo=&staleDays= — admin-only MBR tab:
+  // backlog + SLA + per-person hygiene, grouped by the app's own current_department
+  // column (not a hardcoded team roster). Two grouped aggregate queries instead of
+  // a per-person loop — this app has 29k+ issues / 370+ users, so an N+1 pattern
+  // (like reports/user-performance above) wouldn't scale to full-department volume.
+  if (path === 'reports/mbr' && method === 'GET') {
+    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+
+    const department = url.searchParams.get('department') || '';
+    const dateFrom   = url.searchParams.get('dateFrom') || '';
+    const dateTo     = url.searchParams.get('dateTo') || '';
+    const staleDays  = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
+
+    const filterParams: any[] = [];
+    let dateClause = '';
+    if (dateFrom) {
+      filterParams.push(new Date(dateFrom).toISOString());
+      dateClause += ` AND i."updatedAt" >= $${filterParams.length}`;
+    }
+    if (dateTo) {
+      const toExclusive = new Date(dateTo);
+      toExclusive.setDate(toExclusive.getDate() + 1);
+      filterParams.push(toExclusive.toISOString());
+      dateClause += ` AND i."updatedAt" < $${filterParams.length}`;
+    }
+    let deptClause = '';
+    if (department) {
+      filterParams.push(department);
+      deptClause = ` AND i.current_department = $${filterParams.length}`;
+    }
+
+    const deptRows = await pool.query(`
+      SELECT i.current_department AS dept,
+        COUNT(*) FILTER (WHERE s.category != 'done') AS open,
+        COUNT(*) FILTER (WHERE s.category != 'done' AND i."assigneeId" IS NULL) AS unassigned,
+        COUNT(*) FILTER (WHERE s.category != 'done' AND i."createdAt" <= now() - interval '30 days') AS old30,
+        COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
+        COUNT(*) FILTER (WHERE i.jira_sla_breached = true
+                            OR (s.category != 'done' AND i."dueDate" < now())) AS sla_breached
+      FROM issues i LEFT JOIN statuses s ON i."statusId" = s.id
+      WHERE i.current_department IS NOT NULL AND i.current_department != ''
+        ${dateClause}${deptClause}
+      GROUP BY i.current_department
+      ORDER BY open DESC
+    `, filterParams);
+
+    const staleParams = [...filterParams, staleDays];
+    const staleParamIdx = staleParams.length;
+
+    const personRows = await pool.query(`
+      SELECT i.current_department AS dept, i."assigneeId" AS assignee_id,
+        u."firstName" AS "firstName", u."lastName" AS "lastName", u.email AS email,
+        COUNT(*) FILTER (WHERE s.category != 'done') AS open_count,
+        COUNT(*) FILTER (WHERE s.category != 'done' AND i."updatedAt" <= now() - make_interval(days => $${staleParamIdx}::int)) AS stale,
+        COUNT(*) FILTER (WHERE s.category != 'done' AND (i.priority IS NULL OR i."dueDate" IS NULL OR array_length(i.labels,1) IS NULL)) AS missing,
+        COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
+        COUNT(*) FILTER (WHERE s.category = 'done') AS closed,
+        COUNT(*) FILTER (WHERE s.category = 'done' AND LOWER(s.name) NOT IN ('closed','resolved','done','cancelled','declined')) AS no_closure,
+        COUNT(*) FILTER (WHERE s.category = 'done' AND EXISTS (
+           SELECT 1 FROM attachments a WHERE a."issueId" = i.id AND a."mimeType" LIKE 'image/%')) AS screenshots
+      FROM issues i
+      LEFT JOIN statuses s ON i."statusId" = s.id
+      LEFT JOIN users u ON u.id = i."assigneeId"
+      WHERE i."assigneeId" IS NOT NULL AND i.current_department IS NOT NULL AND i.current_department != ''
+        ${dateClause}${deptClause}
+      GROUP BY i.current_department, i."assigneeId", u."firstName", u."lastName", u.email
+    `, staleParams);
+
+    const departments = deptRows.rows.map((r: any) => ({
+      dept: r.dept,
+      open: Number(r.open) || 0,
+      unassigned: Number(r.unassigned) || 0,
+      old30: Number(r.old30) || 0,
+      overdue: Number(r.overdue) || 0,
+      slaBreached: Number(r.sla_breached) || 0,
+    }));
+
+    const people = personRows.rows.map((r: any) => {
+      const stale = Number(r.stale) || 0;
+      const missing = Number(r.missing) || 0;
+      const overdue = Number(r.overdue) || 0;
+      const closed = Number(r.closed) || 0;
+      const noClosure = Number(r.no_closure) || 0;
+      const screenshots = Number(r.screenshots) || 0;
+      let score = 100;
+      score -= Math.min(30, stale * 5);
+      score -= Math.min(20, missing * 5);
+      score -= Math.min(24, overdue * 8);
+      score -= Math.min(18, noClosure * 6);
+      score -= Math.min(30, Math.max(0, closed - screenshots) * 10);
+      score = Math.max(0, Math.round(score));
+      const grade = score >= 80 ? 'great' : score >= 55 ? 'ok' : 'poor';
+      const name = `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email || 'Unknown';
+      return {
+        dept: r.dept,
+        assigneeId: r.assignee_id,
+        name,
+        email: r.email,
+        openCount: Number(r.open_count) || 0,
+        stale, missing, overdue, closed, noClosure, screenshots,
+        screenshotPct: closed > 0 ? Math.round((screenshots / closed) * 100) : null,
+        hygieneScore: score,
+        grade,
+      };
+    });
+
+    return json({ departments, people });
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ Workflow Routes (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   // GET /workflows?spaceKey=XXX  Ã¢â€ ' return "virtual" workflow for the space
