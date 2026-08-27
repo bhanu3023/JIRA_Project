@@ -99,6 +99,7 @@ export const INFRA_ISSUE_TYPES = [
   'Troubleshooting UI Login',
   'Troubleshooting DB Connection',
   'Troubleshooting Jobs Stuck Issue',
+  'Troubleshooting',
 ];
 
 const WORK_TYPES = [
