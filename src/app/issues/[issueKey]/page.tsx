@@ -77,6 +77,20 @@ function stripHtmlToText(html: string): string {
   return div.textContent || '';
 }
 
+// Used by the History tab's "SLA Breached" badge to show how far past the
+// SLA's own due time a resolution landed, e.g. "2h 14m". Mirrors SlaPanel's
+// own fmtOverdue, but that one is scoped inside SlaPanel and always appends
+// "overdue" -- this is a bare duration the caller composes its own label
+// around ("Breached by …").
+function fmtSlaOverBy(ms: number): string {
+  const totalMins = Math.max(0, Math.round(Math.abs(ms) / 60000));
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return '<1m';
+}
+
 // A bare URL typed as plain text (e.g. "Server - https://qarelease...") only
 // ever got auto-linked when the whole description/comment had literally no
 // HTML tags at all — but content saved from the rich text editor always has
@@ -2567,16 +2581,31 @@ export default function IssueDetailPage() {
                                   in this list actually caused it. Matched by exact
                                   timestamp since both this activity entry and the SLA
                                   panel's resolution history are built from the very
-                                  same issue_history row. */}
-                              {a.field === 'status' && Array.isArray(issue.sla) && issue.sla.some((s: any) =>
-                                Array.isArray(s.history) && s.history.some((h: any) =>
-                                  h.wasBreached && new Date(h.resolvedAt).getTime() === new Date(a.createdAt).getTime()
-                                )
-                              ) && (
-                                <span className="inline-flex items-center gap-1 text-[9.5px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-full px-1.5 py-0.5">
-                                  <AlertTriangle size={9} /> SLA Breached
-                                </span>
-                              )}
+                                  same issue_history row. Now also surfaces how far past
+                                  the due time this landed (resolvedAt - that SLA's own
+                                  dueTime, the same reference point SlaPanel's own
+                                  Late/On-time verdict already uses) and which
+                                  department's SLA it was -- department-scoped SLA
+                                  policies carry their own dept on `s.deptName`, so the
+                                  breach is attributed to the policy that actually
+                                  breached, not just whichever department currently
+                                  holds the ticket. A single status change can resolve
+                                  more than one SLA policy at once (e.g. a dept-scoped
+                                  one and a space-wide one), so every match renders its
+                                  own badge instead of collapsing to one. */}
+                              {a.field === 'status' && Array.isArray(issue.sla) && issue.sla.flatMap((s: any) =>
+                                (Array.isArray(s.history) ? s.history : [])
+                                  .filter((h: any) => h.wasBreached && new Date(h.resolvedAt).getTime() === new Date(a.createdAt).getTime())
+                                  .map((h: any) => ({ s, h }))
+                              ).map(({ s, h }: any, i: number) => {
+                                const overMs = new Date(h.resolvedAt).getTime() - new Date(s.dueTime).getTime();
+                                const dept = s.deptName || (issue as any).current_department || null;
+                                return (
+                                  <span key={`${s.policyId}_${i}`} className="inline-flex items-center gap-1 text-[9.5px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-full px-1.5 py-0.5">
+                                    <AlertTriangle size={9} /> SLA Breached by {fmtSlaOverBy(overMs)}{dept ? ` — ${dept}` : ''}
+                                  </span>
+                                );
+                              })}
                             </div>
                             {/* Old → New value (skip for comments, created, and SLA events) */}
                             {a.field !== 'comment' && a.field !== 'created' && a.field !== 'sla' && (
