@@ -630,6 +630,7 @@ export default function Sidebar() {
           { href: '/search', icon: <Search size={16} />, match: pathname === '/search' },
           { href: '/my-dashboard', icon: <LayoutDashboard size={16} />, match: pathname === '/my-dashboard' },
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
+          ...(isPrivileged ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
         ].map((item, i) => (
           <Link
             key={i}
@@ -684,6 +685,9 @@ export default function Sidebar() {
             <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
             {isPrivileged && (
               <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
+            )}
+            {isPrivileged && (
+              <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
             )}
           </div>
 

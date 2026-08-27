@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jira_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jirauser
+      POSTGRES_PASSWORD: "Neutara@2024"
+      POSTGRES_DB: jiradb
+    ports:
+      - "5434:5432"
+    volumes:
+      - jira_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  jira_postgres_data:

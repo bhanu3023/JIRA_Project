@@ -247,6 +247,15 @@ class ApiClient {
     const qs = params.toString();
     return this.request<any[]>(`/reports/user-performance${qs ? `?${qs}` : ''}`);
   }
+  getMbrData(department?: string, dateFrom?: string, dateTo?: string, staleDays?: number) {
+    const params = new URLSearchParams();
+    if (department) params.set('department', department);
+    if (dateFrom)    params.set('dateFrom',   dateFrom);
+    if (dateTo)      params.set('dateTo',     dateTo);
+    if (staleDays)   params.set('staleDays',  String(staleDays));
+    const qs = params.toString();
+    return this.request<{ departments: any[]; people: any[] }>(`/reports/mbr${qs ? `?${qs}` : ''}`);
+  }
 
   // Custom Fields
   getCustomFields() { return this.request<any[]>('/custom-fields'); }
