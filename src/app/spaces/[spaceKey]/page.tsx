@@ -120,9 +120,10 @@ function SpaceDetailContent() {
       : Array.isArray(rawKey)
         ? (rawKey[0] || '').toUpperCase()
         : '';
-  const { currentSpace, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion, bumpIssuesVersion } = useStore(
+  const { currentSpace, currentSpaceError, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion, bumpIssuesVersion } = useStore(
     useShallow((s) => ({
       currentSpace: s.currentSpace,
+      currentSpaceError: s.currentSpaceError,
       loadSpace: s.loadSpace,
       issues: s.issues,
       issueTotal: s.issueTotal,
@@ -526,10 +527,18 @@ function SpaceDetailContent() {
   // Always load space metadata (needed for breadcrumb etc.)
   useEffect(() => {
     if (!spaceKey) return;
-    loadSpace(spaceKey).catch(() => {
-      router.replace('/spaces');
-    });
-  }, [spaceKey, loadSpace, router]);
+    loadSpace(spaceKey);
+  }, [spaceKey, loadSpace]);
+
+  // loadSpace no longer rejects on failure (it sets currentSpaceError in the
+  // store instead, so a slow/failed fetch doesn't leave every OTHER caller
+  // silently swallowing a rejection with no visible state change) -- redirect
+  // here instead, on the error actually appearing, so a space that 404s or
+  // times out still lands back on the spaces list instead of spinning on the
+  // "Loading space..." screen forever with nothing to ever break out of it.
+  useEffect(() => {
+    if (currentSpaceError) router.replace('/spaces');
+  }, [currentSpaceError, router]);
 
   useEffect(() => {
     if (!spaceKey || queueFilter === 'queues') return;

@@ -38,6 +38,7 @@ interface AppState {
   // Spaces
   spaces: Space[];
   currentSpace: Space | null;
+  currentSpaceError: string | null;
   loadSpaces: () => Promise<void>;
   loadSpace: (key: string, force?: boolean) => Promise<void>;
   createSpace: (data: any) => Promise<void>;
@@ -152,6 +153,7 @@ export const useStore = create<AppState>((set, get) => ({
   // Spaces
   spaces: [],
   currentSpace: null,
+  currentSpaceError: null,
   loadSpaces: async () => {
     if (loadSpacesInflight) return loadSpacesInflight;
     loadSpacesInflight = (async () => {
@@ -186,12 +188,23 @@ export const useStore = create<AppState>((set, get) => ({
     if (!force) {
       try {
         const cached = typeof window !== 'undefined' ? sessionStorage.getItem(cacheKey) : null;
-        if (cached) set({ currentSpace: JSON.parse(cached) });
+        if (cached) set({ currentSpace: JSON.parse(cached), currentSpaceError: null });
       } catch { /* corrupt/unavailable cache entry — fall through to the network fetch */ }
     }
-    const space = await api.getSpace(key);
-    set({ currentSpace: space });
-    try { if (typeof window !== 'undefined') sessionStorage.setItem(cacheKey, JSON.stringify(space)); } catch { /* storage full/unavailable — non-critical */ }
+    // The fetch itself had no error handling at all -- a 404 (space doesn't
+    // exist / was deleted / a stale link) or any network failure just
+    // rejected this promise, and every caller does loadSpace(key).catch(() =>
+    // {}), silently swallowing it with no state change. With nothing cached
+    // for this key, currentSpace stays null forever with no error set either,
+    // so the page's own "!currentSpace && !loadError" branch has no way out
+    // and spins indefinitely instead of ever showing a real error.
+    try {
+      const space = await api.getSpace(key);
+      set({ currentSpace: space, currentSpaceError: null });
+      try { if (typeof window !== 'undefined') sessionStorage.setItem(cacheKey, JSON.stringify(space)); } catch { /* storage full/unavailable — non-critical */ }
+    } catch (err: any) {
+      set({ currentSpaceError: err?.message || 'Failed to load this space.' });
+    }
   },
   createSpace: async (data) => {
     await api.createSpace(data);
