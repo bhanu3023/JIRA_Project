@@ -87,7 +87,8 @@ export const INFRA_ISSUE_TYPES = [
   'Server Utilization Control',
   'Grafana',
   'Migrate Agent Deployment in Content, Message, Email',
-  'Prod and Non-Prod Deployment',
+  'Prod Deployment',
+  'Non-Prod Deployment',
   'Reporting Container Deployment',
   'Restarting the Tomcats',
   'Priority Tomcat Creation for Content, Message, Email Combinations',
@@ -95,6 +96,9 @@ export const INFRA_ISSUE_TYPES = [
   'Index Adding',
   'Permission Cache Removing',
   'Metabase Update',
+  'Troubleshooting UI Login',
+  'Troubleshooting DB Connection',
+  'Troubleshooting Jobs Stuck Issue',
 ];
 
 const WORK_TYPES = [
