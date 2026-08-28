@@ -8890,7 +8890,29 @@ async function _handleJiraPgApi(
       slaBreached: Number(r.sla_breached) || 0,
     }));
 
-    const people = personRows.rows.map((r: any) => {
+    // Selecting a department's per-person list should only show people who
+    // actually have access to that department's queue, not everyone who ever
+    // got assigned a ticket carrying that department label -- same rule
+    // already applied to my-dashboard/reports (see the deptMemberSets comment
+    // on loadTeamAnalyticsScope above). Most department labels have no
+    // configured queue at all, so this only restricts the ones that do.
+    const cqRows = await pool.query(`SELECT queues FROM custom_queues`);
+    const deptMemberSets: Record<string, Set<string>> = {};
+    for (const row of cqRows.rows) {
+      const queues = Array.isArray(row.queues) ? row.queues : [];
+      for (const q of queues) {
+        const name = String(q?.name || '').trim().toLowerCase();
+        if (!name) continue;
+        const members: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+        const set = (deptMemberSets[name] ??= new Set<string>());
+        for (const m of members) set.add(m);
+      }
+    }
+
+    const people = personRows.rows.filter((r: any) => {
+      const memberSet = deptMemberSets[String(r.dept || '').trim().toLowerCase()];
+      return !memberSet || memberSet.size === 0 || memberSet.has(r.assignee_id);
+    }).map((r: any) => {
       const stale = Number(r.stale) || 0;
       const missing = Number(r.missing) || 0;
       const overdue = Number(r.overdue) || 0;
