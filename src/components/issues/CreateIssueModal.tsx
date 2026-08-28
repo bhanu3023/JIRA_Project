@@ -100,6 +100,9 @@ export const INFRA_ISSUE_TYPES = [
   'Troubleshooting DB Connection',
   'Troubleshooting Jobs Stuck Issue',
   'Troubleshooting',
+  'Agent Deployment',
+  'Bitbucket Repo Access',
+  'Test Account Creation',
 ];
 
 const WORK_TYPES = [
