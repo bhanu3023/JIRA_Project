@@ -8851,8 +8851,7 @@ async function _handleJiraPgApi(
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."assigneeId" IS NULL) AS unassigned,
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."createdAt" <= now() - interval '30 days') AS old30,
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
-        COUNT(*) FILTER (WHERE i.jira_sla_breached = true
-                            OR (s.category != 'done' AND i."dueDate" < now())) AS sla_breached
+        COUNT(*) FILTER (WHERE s.category != 'done' AND (i.jira_sla_breached = true OR i."dueDate" < now())) AS sla_breached
       FROM issues i LEFT JOIN statuses s ON i."statusId" = s.id
       WHERE i.current_department IS NOT NULL AND i.current_department != ''
         ${dateClause}${deptClause}
