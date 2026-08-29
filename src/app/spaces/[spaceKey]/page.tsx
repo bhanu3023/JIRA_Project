@@ -2027,8 +2027,18 @@ function SpaceDetailContent() {
           const deptQueueForAssignee = deptParam
             ? allCustomQueues.find((q) => (q.name || '').toLowerCase() === deptParam.toLowerCase())
             : undefined;
+          // Admins aren't added to a queue's memberIds anywhere in this app --
+          // they get access through their role, not membership -- but every
+          // server-side check that gates on queue membership (status changes,
+          // department transfers, isUserAuthorizedForDeptQueue) already lets
+          // an admin through regardless. This filter list was scoping down to
+          // memberIds alone with no such bypass, so an admin who legitimately
+          // holds a ticket in this queue (assigned directly, or via
+          // round-robin) couldn't even be selected to filter by, even though
+          // every other queue-access rule in the app already treats admins as
+          // implicitly authorized everywhere.
           const assigneeFilterMembers = (deptQueueForAssignee?.memberIds?.length)
-            ? allMembers.filter((mb: any) => deptQueueForAssignee.memberIds.includes(mb.id))
+            ? allMembers.filter((mb: any) => deptQueueForAssignee.memberIds.includes(mb.id) || mb.role === 'admin')
             : allMembers;
 
           // Assignee, Status, and Request type (Type) each get their own standalone
