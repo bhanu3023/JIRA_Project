@@ -8944,6 +8944,66 @@ async function _handleJiraPgApi(
     return json({ departments, people });
   }
 
+  // GET /admin/file-health -- admin-only: scans every uploaded file this app
+  // knows about and reports which ones are actually missing from disk vs.
+  // just referenced. Two entirely different places a file reference can
+  // live: a real Attachment row (the dedicated Attachments section, plus
+  // Jira-imported attachments), or a bare link embedded directly in a
+  // ticket's description/comment HTML with no Attachment row at all (the
+  // rich text editor's inline paste/drop uploads) -- see the CF-29857
+  // investigation, where the file was only ever text inside the
+  // description, so a check that only looked at the attachments table would
+  // have reported it as fine. Storage root also differs by upload path:
+  // public/uploads for the former, uploads/tmp/<id>/<name> (NOT public/,
+  // served through its own API route) for the latter.
+  if (path === 'admin/file-health' && method === 'GET') {
+    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+    const { access } = await import('fs/promises');
+    const { join } = await import('path');
+
+    const diskPathFor = (relUrl: string): string | null => {
+      if (relUrl.startsWith('/api/uploads/')) return join(process.cwd(), relUrl.replace(/^\/api\/uploads\//, 'uploads/'));
+      if (relUrl.startsWith('/uploads/')) return join(process.cwd(), 'public', relUrl);
+      return null; // not a locally-stored file (e.g. an external URL) -- nothing to check
+    };
+
+    type Candidate = { ticketKey: string; filename: string; url: string; source: string };
+    const candidates: Candidate[] = [];
+
+    const attRows = await pool.query(`
+      SELECT a.filename, a.url, i.key, i.cf_key
+      FROM attachments a JOIN issues i ON i.id = a."issueId"
+    `);
+    for (const row of attRows.rows) {
+      candidates.push({ ticketKey: row.cf_key || row.key, filename: row.filename, url: row.url, source: 'attachment' });
+    }
+
+    // LIKE '%/uploads/%' is just a cheap prefilter to avoid regex-scanning
+    // every description/comment in the whole system -- both real storage
+    // roots contain "/uploads/" as a substring.
+    const urlRe = /\/(?:api\/uploads\/tmp|uploads)\/[^"'\s)<>]+/g;
+    const extractInline = (text: string, ticketKey: string, source: string) => {
+      const matches = Array.from(new Set(String(text || '').match(urlRe) || []));
+      for (const url of matches) candidates.push({ ticketKey, filename: url.split('/').pop() || url, url, source });
+    };
+    const descRows = await pool.query(`SELECT key, cf_key, description FROM issues WHERE description LIKE '%/uploads/%'`);
+    for (const row of descRows.rows) extractInline(row.description, row.cf_key || row.key, 'description');
+
+    const commentRows = await pool.query(`
+      SELECT c.body, i.key, i.cf_key FROM comments c JOIN issues i ON i.id = c."issueId" WHERE c.body LIKE '%/uploads/%'
+    `);
+    for (const row of commentRows.rows) extractInline(row.body, row.cf_key || row.key, 'comment');
+
+    const checked = await Promise.all(candidates.map(async (c) => {
+      const diskPath = diskPathFor(c.url);
+      if (!diskPath) return { ...c, exists: true };
+      try { await access(diskPath); return { ...c, exists: true }; }
+      catch { return { ...c, exists: false }; }
+    }));
+
+    const missing = checked.filter((c) => !c.exists).map(({ exists, ...rest }) => rest);
+    return json({ totalChecked: checked.length, missingCount: missing.length, missing });
+  }
   // Ã¢â€â‚¬Ã¢â€â‚¬ Workflow Routes (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   // GET /workflows?spaceKey=XXX  Ã¢â€ ' return "virtual" workflow for the space

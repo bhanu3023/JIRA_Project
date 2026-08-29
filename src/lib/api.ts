@@ -331,6 +331,9 @@ class ApiClient {
     const qs = params.toString();
     return this.request<{ departments: any[]; people: any[] }>(`/reports/mbr${qs ? `?${qs}` : ''}`);
   }
+  getFileHealth() {
+    return this.request<{ totalChecked: number; missingCount: number; missing: Array<{ ticketKey: string; filename: string; url: string; source: string }> }>('/admin/file-health');
+  }
 
   // Custom Fields
   getCustomFields() { return this.request<any[]>('/custom-fields'); }
