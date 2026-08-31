@@ -7227,7 +7227,7 @@ async function _handleJiraPgApi(
             let queueHandoffOldDept = '';
             let queueHandoffTargetDept = '';
             let queueHandoffDone = false;
-            const waitMatchQueue = String(body.queueStatusName || '').match(/^waiting\s+for\s+(.+)$/i);
+            const waitMatchQueue = String(body.queueStatusName || '').match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
             if (waitMatchQueue) {
               queueHandoffTargetDept = waitMatchQueue[1].trim();
               try {
@@ -7426,7 +7426,7 @@ async function _handleJiraPgApi(
         ? await db.status.findUnique({ where: { id: String(data.statusId) } })
         : null;
       const newStatusNameForHandoff = (newStForHandoff?.name || '').trim();
-      const waitMatchHandoff = newStatusNameForHandoff.match(/^waiting\s+for\s+(.+)$/i);
+      const waitMatchHandoff = newStatusNameForHandoff.match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
       if (waitMatchHandoff) {
         handoffTargetDept = waitMatchHandoff[1].trim();
         try {
