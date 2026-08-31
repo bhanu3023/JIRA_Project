@@ -2831,6 +2831,23 @@ export default function IssueDetailPage() {
 
                 // If the workflow has transitions from this status, show only those targets.
                 // Otherwise fall back to showing all other statuses (unconstrained workflow).
+                // The ticket's dept_statuses snapshot can carry an id from
+                // either source depending on how it was last set: a real
+                // statuses-table id (from a plain status change, synced by
+                // the backend's "keep dept_statuses in sync" block) or a
+                // queue-scoped qst_... id (from picking a custom queue
+                // status directly) -- these don't necessarily match this
+                // queue's OWN id for what's conceptually the same status
+                // (e.g. dept_statuses held "status_qa_inprogress" while this
+                // queue's own "In Progress" entry is "qst_migration_
+                // inprogress"), so an id-only comparison silently failed to
+                // recognize the ticket was already on that status and kept
+                // offering it as a "move to" option. Also compare by name
+                // (case-insensitive) as a fallback -- two statuses conceptually
+                // named "In Progress" are the same status regardless of which
+                // id happens to be attached to the snapshot right now.
+                const issueStatNameLower = (issueStat.name || '').trim().toLowerCase();
+                const isCurrentStatus = (s: any) => s.id === issueStat.id || (s.name || '').trim().toLowerCase() === issueStatNameLower;
                 const options: { status: any; transitionName: string }[] =
                   validToIds.length > 0
                     ? (validToIds
@@ -2840,9 +2857,9 @@ export default function IssueDetailPage() {
                           return status ? { status, transitionName: tr?.name || '' } : null;
                         })
                         .filter(Boolean) as { status: any; transitionName: string }[])
-                        .filter(o => o.status.id !== issueStat.id)
+                        .filter(o => !isCurrentStatus(o.status))
                     : spaceStatuses
-                        .filter((s: any) => s.id !== issueStat.id)
+                        .filter((s: any) => !isCurrentStatus(s))
                         .map((s: any) => ({ status: s, transitionName: '' }));
 
                 return (
