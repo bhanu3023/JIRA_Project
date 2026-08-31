@@ -27,8 +27,11 @@ const DRY_RUN = !process.argv.includes('--live');
 
 function extractDeptFromChange(newValue) {
   if (!newValue) return null;
-  // Observed formats: "Transferred to Migration", "Handed to Dev — SLA started"
-  const m = String(newValue).match(/(?:Transferred to|Handed to)\s+([^—-]+)/i);
+  // Observed formats: "Transferred to Migration", "Handed to Dev — SLA started".
+  // Excluding a plain hyphen from the capture (as an earlier version did) truncates
+  // any department whose own name contains one -- "Pre-Sales" came back as "Pre".
+  // Only the em-dash that introduces the "— SLA started" suffix should stop the match.
+  const m = String(newValue).match(/(?:Transferred to|Handed to)\s+([^—]+)/i);
   if (m) return m[1].trim();
   return null;
 }
