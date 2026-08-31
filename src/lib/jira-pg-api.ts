@@ -5009,7 +5009,17 @@ async function _handleJiraPgApi(
              ))
            )`
         : null;
-      const originDeptMatchSql = createdRange
+      // Scoped to queueMembersOnlyParam, not just createdRange being present --
+      // the department queue board pages (All Tickets, Assigned to me, etc.)
+      // ALSO send createdRange (their own "Created" filter chip) but never set
+      // queueMembersOnly, and "All Tickets — Dev" + a Created filter is
+      // supposed to mean "currently in Dev, created in this window", not
+      // "originated in Dev" -- origin-matching there would have silently
+      // changed what a board's own core "All Tickets" semantic means the
+      // moment someone added a Created filter. queueMembersOnly is only ever
+      // sent by the Filters page, which is the one place origin-matching was
+      // actually intended to apply.
+      const originDeptMatchSql = createdRange && queueMembersOnlyParam
         ? `LOWER(COALESCE(
              (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
              i.current_department
