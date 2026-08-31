@@ -1433,14 +1433,18 @@ export default function FiltersPage() {
   // EXPORT_EXTRA_COLUMNS but never actually rendered in the on-screen table
   // itself -- filtering by one of these told you which tickets matched, but
   // not what value each ticket actually had, without exporting just to look.
-  // Tried gating these on "the matching filter chip is active" first, same
-  // as the export does -- but that meant filtering by Queue+Worked (not
-  // Product Type) hid them again, which is exactly the "why isn't it
-  // showing" complaint this was meant to fix. Always show them instead,
-  // like Assignee/Reported By/Status already are, regardless of which
-  // filters happen to be selected.
+  // Mirrors the export's own "chip active OR a value is currently selected"
+  // rule exactly, so a field shows as a column in the table the moment
+  // you've added it as a filter, and shows the same way in the CSV export --
+  // not tied to some other unrelated filter (e.g. Queue+Worked) being set.
   const TABLE_EXTRA_COLUMN_IDS = ['productType', 'combination', 'projectManager'] as const;
-  const tableExtraCols = TABLE_EXTRA_COLUMN_IDS;
+  const tableExtraCols = TABLE_EXTRA_COLUMN_IDS.filter((id) => {
+    if (activeExtras.includes(id)) return true;
+    if (id === 'productType') return selProductType.length > 0;
+    if (id === 'combination') return !!selCombination;
+    if (id === 'projectManager') return selProjectManager.length > 0;
+    return false;
+  });
 
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
