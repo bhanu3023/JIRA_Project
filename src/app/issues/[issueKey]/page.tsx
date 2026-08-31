@@ -14,6 +14,10 @@ import CommentReactions from '@/components/ui/CommentReactions';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
+import * as XLSX from 'xlsx';
+
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const XLS_MIME  = 'application/vnd.ms-excel';
 import {
   MessageSquare, Paperclip, Link2, Clock, AlertTriangle,
   Trash2, ChevronDown, ChevronRight, User, Check, X, Plus, Search,
@@ -427,12 +431,20 @@ export default function IssueDetailPage() {
     return () => { setIssueLoadDone(false); };
   }, [issueKey, loadIssue]);
 
-  // Redirect to CF key URL if issue loaded with original Jira key
+  // Redirect to CF key URL if issue loaded with original Jira key. Must
+  // confirm currentIssue.key actually matches the URL's issueKey before
+  // redirecting -- without that check, this fires on the STALE previous
+  // ticket's data too: clicking from Ticket A to Ticket B updates issueKey
+  // immediately, but currentIssue is still Ticket A's (loadIssue's fetch for
+  // B hasn't resolved yet) for at least one render. That render sees
+  // issueKey (B's key) !== currentIssue.cfKey (A's cfKey) and was
+  // redirecting straight back to Ticket A's URL -- exactly what read as
+  // "opening a ticket briefly shows a different ticket's details."
   useEffect(() => {
-    if (currentIssue?.cfKey && issueKey !== currentIssue.cfKey) {
+    if (currentIssue?.cfKey && currentIssue.key === issueKey && issueKey !== currentIssue.cfKey) {
       router.replace(`/issues/${currentIssue.cfKey}`);
     }
-  }, [currentIssue?.cfKey, issueKey]);
+  }, [currentIssue?.cfKey, currentIssue?.key, issueKey]);
 
   // Track recently viewed issue — per user so different users don't share history
   useEffect(() => {
@@ -451,6 +463,15 @@ export default function IssueDetailPage() {
   useEffect(() => {
     if (currentIssue?.spaceKey) {
       const dept = (currentIssue as any).current_department as string | undefined;
+      // Only the department that actually raised this ticket may resolve it
+      // (enforced server-side on the PATCH handler) -- hide any done-category
+      // status from the dropdown here for every OTHER department it's
+      // currently sitting in, instead of only rejecting the click after the
+      // fact. originDepartment comes straight off the issue response (see
+      // GET /issues/:key), computed from its own department-change history.
+      const originDept = (currentIssue as any).originDepartment as string | undefined;
+      const isOriginDept = !dept || !originDept || dept.trim().toLowerCase() === originDept.trim().toLowerCase();
+      const applyStatuses = (list: any[]) => setSpaceStatuses(isOriginDept ? list : (list || []).filter((s: any) => s.category !== 'done'));
 
       // When a ticket is routed to a department, find the dept_queue space that owns
       // the custom queue with that name, and load statuses/workflow from THAT space.
@@ -461,7 +482,7 @@ export default function IssueDetailPage() {
           const filtered = statusIds?.length
             ? allStatuses.filter((s: any) => statusIds.includes(s.id))
             : allStatuses;
-          setSpaceStatuses(filtered);
+          applyStatuses(filtered);
           setSpaceMembers(space.members || []);
           api.request<any>(`workflows/wf_${spaceKey}/statuses`).then(wf => {
             setWorkflowTransitions(wf.transitions || space.transitions || []);
@@ -501,7 +522,7 @@ export default function IssueDetailPage() {
                 const qSt = matchedQueue.queueStatuses;
                 const qTr = matchedQueue.queueTransitions;
                 if (qSt?.length) {
-                  setSpaceStatuses(qSt);
+                  applyStatuses(qSt);
                   setWorkflowTransitions((qTr || []).map((t: any) => ({
                     fromStatusId: t.fromStatusId ?? t.from,
                     toStatusId: t.toStatusId ?? t.to,
@@ -510,7 +531,7 @@ export default function IssueDetailPage() {
                   const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
                   loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
                 } else {
-                  setSpaceStatuses(DEFAULT_QUEUE_STATUSES);
+                  applyStatuses(DEFAULT_QUEUE_STATUSES);
                   setWorkflowTransitions([]);
                 }
                 resolvedFromCache = true;
@@ -536,7 +557,7 @@ export default function IssueDetailPage() {
               const qSt = matchedQueue.queueStatuses;
               const qTr = matchedQueue.queueTransitions;
               if (qSt?.length) {
-                setSpaceStatuses(qSt);
+                applyStatuses(qSt);
                 setWorkflowTransitions((qTr || []).map((t: any) => ({
                   fromStatusId: t.fromStatusId ?? t.from,
                   toStatusId: t.toStatusId ?? t.to,
@@ -548,7 +569,7 @@ export default function IssueDetailPage() {
                 loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
                 return;
               }
-              setSpaceStatuses(DEFAULT_QUEUE_STATUSES);
+              applyStatuses(DEFAULT_QUEUE_STATUSES);
               setWorkflowTransitions([]);
               return;
             }
@@ -1290,6 +1311,33 @@ export default function IssueDetailPage() {
     return () => { cancelled = true; };
   }, [previewAttach]);
 
+  // Same rationale as the CSV preview above -- an .xlsx/.xls has no browser-
+  // native inline renderer either (it's a binary/zip format, not plain
+  // text), so a direct link just downloads it instead of showing anything.
+  // Parse the first sheet into the same row-of-cells shape parseCsv already
+  // produces, so it can reuse the exact same table markup.
+  const isXlsxPreview = previewAttach?.mime === XLSX_MIME || previewAttach?.mime === XLS_MIME;
+  const [xlsxPreviewRows, setXlsxPreviewRows] = useState<string[][] | null>(null);
+  const [xlsxPreviewError, setXlsxPreviewError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isXlsxPreview) { setXlsxPreviewRows(null); setXlsxPreviewError(null); return; }
+    setXlsxPreviewRows(null);
+    setXlsxPreviewError(null);
+    let cancelled = false;
+    fetch(previewAttach!.url)
+      .then(res => { if (!res.ok) throw new Error(`Failed to load file (${res.status})`); return res.arrayBuffer(); })
+      .then(buf => {
+        if (cancelled) return;
+        const wb = XLSX.read(buf, { type: 'array' });
+        const firstSheet = wb.Sheets[wb.SheetNames[0]];
+        const rows: string[][] = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: false, defval: '' });
+        setXlsxPreviewRows(rows.map(r => r.map(c => String(c))));
+      })
+      .catch(err => { if (!cancelled) setXlsxPreviewError(err.message || 'Failed to load preview'); });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isXlsxPreview, previewAttach?.url]);
+
   // Opens the same inline preview modal the dedicated Attachments section
   // uses (image vs iframe fallback, plus a Download button) for a file
   // chip clicked inside Description or a comment -- those links previously
@@ -1304,6 +1352,10 @@ export default function IssueDetailPage() {
       ? 'application/pdf'
       : /\.csv$/i.test(name)
       ? 'text/csv'
+      : /\.xlsx$/i.test(name)
+      ? XLSX_MIME
+      : /\.xls$/i.test(name)
+      ? XLS_MIME
       : 'application/octet-stream';
     setPreviewAttach({ url, name, mime });
   };
@@ -2053,12 +2105,17 @@ export default function IssueDetailPage() {
                   const isImage = a.mimeType?.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(a.originalName || '');
                   const handleOpen = (e: React.MouseEvent) => {
                     e.preventDefault();
-                    // CSV always wins over a.mimeType -- uploads commonly land as a
-                    // generic "application/octet-stream" or "application/vnd.ms-excel"
-                    // stored type, which would otherwise fall through to the
-                    // no-inline-preview branch below instead of the CSV table view.
+                    // CSV/XLSX/XLS always win over a.mimeType -- uploads commonly land
+                    // as a generic "application/octet-stream" or (for a real .xlsx)
+                    // the legacy "application/vnd.ms-excel" stored type, which would
+                    // otherwise fall through to the no-inline-preview branch below
+                    // instead of the table view.
                     const mime = /\.csv$/i.test(a.originalName || '')
                       ? 'text/csv'
+                      : /\.xlsx$/i.test(a.originalName || '')
+                      ? XLSX_MIME
+                      : /\.xls$/i.test(a.originalName || '')
+                      ? XLS_MIME
                       : a.mimeType || (a.originalName?.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
                     let url = a.url || '';
                     if (url.startsWith('data:')) {
@@ -2138,6 +2195,35 @@ export default function IssueDetailPage() {
                         </thead>
                         <tbody>
                           {csvPreviewRows.slice(1).map((r, ri) => (
+                            <tr key={ri} className="hover:bg-gray-50">
+                              {r.map((cell, ci) => (
+                                <td key={ci} className="border border-gray-200 px-2 py-1 text-gray-600 whitespace-nowrap">{cell}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                ) : isXlsxPreview ? (
+                  <div className="w-full h-full overflow-auto bg-white p-4">
+                    {xlsxPreviewError ? (
+                      <p className="text-sm text-red-600">{xlsxPreviewError}</p>
+                    ) : !xlsxPreviewRows ? (
+                      <p className="text-sm text-gray-400">Loading preview…</p>
+                    ) : xlsxPreviewRows.length === 0 ? (
+                      <p className="text-sm text-gray-400">This file is empty.</p>
+                    ) : (
+                      <table className="text-[12px] border-collapse">
+                        <thead>
+                          <tr>
+                            {xlsxPreviewRows[0].map((cell, i) => (
+                              <th key={i} className="border border-gray-200 bg-gray-50 px-2 py-1 text-left font-semibold text-gray-700 whitespace-nowrap sticky top-0">{cell}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {xlsxPreviewRows.slice(1).map((r, ri) => (
                             <tr key={ri} className="hover:bg-gray-50">
                               {r.map((cell, ci) => (
                                 <td key={ci} className="border border-gray-200 px-2 py-1 text-gray-600 whitespace-nowrap">{cell}</td>

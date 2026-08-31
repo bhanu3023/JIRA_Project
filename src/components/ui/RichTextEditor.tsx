@@ -634,6 +634,19 @@ export default function RichTextEditor({
           imgEl.src = result.url;
           imgEl.alt = file.name;
           imgEl.title = file.name;
+          // Reserve the actual display box via real width/height ATTRIBUTES
+          // (not just the CSS max-width/max-height below) so the browser
+          // knows this image's aspect ratio and lays out its final space
+          // immediately, before the image itself has downloaded -- without
+          // this, every image starts at ~0 height and then snaps to its real
+          // size the moment it loads, shoving everything below it down. That
+          // shift landing mid-scroll (multiple images finishing one after
+          // another as a ticket with several screenshots renders) is what
+          // reads as the page "jumping" while scrolling. w/h here are the
+          // already-resized (MAX=1600) dimensions from the canvas step above.
+          const dispScale = Math.min(220 / w, 160 / h, 1);
+          imgEl.width = Math.round(w * dispScale);
+          imgEl.height = Math.round(h * dispScale);
           imgEl.style.cssText = 'max-width:220px;max-height:160px;width:auto;height:auto;border-radius:6px;margin:6px 0;display:block;cursor:pointer;object-fit:contain;';
           // Wrapped so a small "x" can float over the top of the image on
           // hover, to remove it directly rather than having to place a
@@ -770,12 +783,31 @@ export default function RichTextEditor({
       if (blob.size > MAX_UPLOAD_BYTES) throw new Error('too large');
       const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/gif' ? 'gif' : 'jpg';
       const file = new File([blob], `pasted-image.${ext}`, { type: blob.type || 'image/png' });
+      // Same box-reservation fix as the file-upload path above -- without a
+      // width/height attribute the browser can't reserve this image's space
+      // before it downloads, so it snaps in at its real size and shoves
+      // everything below it down (the "page jumps while scrolling" report,
+      // most visible on a ticket with several pasted screenshots loading in
+      // one after another). Measured from the blob itself since this path
+      // (paste of rich HTML from Word/Confluence/etc.) has no img.onload
+      // dimensions already in scope like the drag-and-drop path does.
+      const dims = await new Promise<{ w: number; h: number } | null>((resolve) => {
+        const probe = new Image();
+        probe.onload = () => resolve({ w: probe.naturalWidth, h: probe.naturalHeight });
+        probe.onerror = () => resolve(null);
+        probe.src = URL.createObjectURL(blob);
+      });
       const result = await uploadFile(file);
       const el = document.getElementById(placeholderId);
       if (!result) { el?.remove(); emit(); return; }
       const imgEl = document.createElement('img');
       imgEl.src = result.url;
       imgEl.alt = 'Pasted image';
+      if (dims && dims.w > 0 && dims.h > 0) {
+        const dispScale = Math.min(220 / dims.w, 160 / dims.h, 1);
+        imgEl.width = Math.round(dims.w * dispScale);
+        imgEl.height = Math.round(dims.h * dispScale);
+      }
       imgEl.style.cssText = 'max-width:220px;max-height:160px;width:auto;height:auto;border-radius:6px;margin:6px 0;display:block;cursor:pointer;object-fit:contain;';
       const wrap = document.createElement('span');
       wrap.setAttribute('data-rte-img-wrap', '');

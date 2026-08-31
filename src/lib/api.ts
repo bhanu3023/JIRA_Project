@@ -338,6 +338,9 @@ class ApiClient {
     if (person)   params.set('person',   person);
     return this.request<{ people: any[]; monthly: any[]; summary: any; tickets: any[]; totalMatched: number }>(`/reports/mbr-static?${params}`);
   }
+  getFileHealth() {
+    return this.request<{ totalChecked: number; missingCount: number; missing: Array<{ ticketKey: string; filename: string; url: string; source: string }> }>('/admin/file-health');
+  }
 
   // Custom Fields
   getCustomFields() { return this.request<any[]>('/custom-fields'); }

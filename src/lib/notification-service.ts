@@ -217,11 +217,27 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
 }
 
 // ── Find best sender email (any connected OAuth account) ───────────────────────
+// Used for generic notifications with no ticket-specific inbox to send from
+// (e.g. a @mention email) -- this used to just take whichever OAuth account
+// connected FIRST (array order), with no regard for whether that's actually
+// meant to be a shared sender identity. Whoever that happened to be (a real
+// individual's personal mailbox, e.g. someone who connected email for an
+// unrelated per-space reason) then became the "From" on every such
+// notification -- and Microsoft Graph/Exchange typically shows the real
+// mailbox's own configured display name to recipients regardless of the
+// FROM_NAME this app puts in the send request, so it read as that person
+// personally emailing, not "CloudFuze Support" as intended. Prefer an
+// explicit override (DEFAULT_NOTIFICATION_SENDER) if set, then any connected
+// account that looks like a shared/support mailbox by its address, before
+// falling back to the old first-connected behavior as a last resort.
 async function getBestSenderEmail(): Promise<string | null> {
   try {
     const { getAllOAuthEmails } = await import('@/lib/oauth-service');
     const emails = getAllOAuthEmails();
-    return emails[0] || null;
+    const override = (process.env.DEFAULT_NOTIFICATION_SENDER || '').toLowerCase().trim();
+    if (override && emails.includes(override)) return override;
+    const sharedLooking = emails.find((e) => /^(support|helpdesk|help-desk|l1board|noreply|no-reply|ticket)/i.test(e.split('@')[0]));
+    return sharedLooking || emails[0] || null;
   } catch { return null; }
 }
 

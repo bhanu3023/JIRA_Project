@@ -699,7 +699,6 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
-  { id: 'worked',         label: 'Worked (real activity, needs a Queue selected)', group: 'Date' },
 ];
 
 /* ─── Simple text filter button ─── */
@@ -976,10 +975,6 @@ export default function FiltersPage() {
   const [selCreated, setSelCreated]       = useState('');
   const [selUpdated, setSelUpdated]       = useState('');
   const [selDueDate, setSelDueDate]       = useState('');
-  // Only meaningful together with a single selected Queue -- backed by
-  // user_worked_on_tickets, so it counts a ticket once someone with access
-  // actually picked it up and worked it, not just whenever it was created.
-  const [selWorked, setSelWorked]         = useState('');
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
   const [selCombination, setSelCombination] = useState('');
@@ -1010,25 +1005,39 @@ export default function FiltersPage() {
   // single time wasn't discoverable; it can still be removed via its own X.
   const [activeExtras, setActiveExtras]         = useState<string[]>(['created']);
 
+  // Created/Updated/Due Date all filter by a different date column --
+  // keeping these mutually exclusive avoids the same "two date filters
+  // silently combine into a number that doesn't mean what either one
+  // alone would suggest" problem that came up with Created+Worked
+  // (Worked has since been removed from this page entirely).
+  const DATE_GROUP_KEYS = ['created', 'updated', 'dueDate'];
+  const clearExtraValue = (key: string) => {
+    if (key === 'created')        setSelCreated('');
+    if (key === 'updated')        setSelUpdated('');
+    if (key === 'dueDate')        setSelDueDate('');
+    if (key === 'reporter')       setSelReporters([]);
+    if (key === 'priority')       setSelPriorities([]);
+    if (key === 'department')     setSelDepartment('');
+    if (key === 'productType')    setSelProductType([]);
+    if (key === 'combination')    setSelCombination('');
+    if (key === 'customerName')   setSelCustomerName('');
+    if (key === 'clientName')     setSelClientName('');
+    if (key === 'projectManager') setSelProjectManager([]);
+    if (key === 'projectPool')    setSelProjectPool('');
+  };
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
       if (prev.includes(key)) {
-        if (key === 'created')        setSelCreated('');
-        if (key === 'updated')        setSelUpdated('');
-        if (key === 'dueDate')        setSelDueDate('');
-        if (key === 'worked')         setSelWorked('');
-        if (key === 'reporter')       setSelReporters([]);
-        if (key === 'priority')       setSelPriorities([]);
-        if (key === 'department')     setSelDepartment('');
-        if (key === 'productType')    setSelProductType([]);
-        if (key === 'combination')    setSelCombination('');
-        if (key === 'customerName')   setSelCustomerName('');
-        if (key === 'clientName')     setSelClientName('');
-        if (key === 'projectManager') setSelProjectManager([]);
-        if (key === 'projectPool')    setSelProjectPool('');
+        clearExtraValue(key);
         return prev.filter((k) => k !== key);
       }
-      return [...prev, key];
+      let next = [...prev, key];
+      if (DATE_GROUP_KEYS.includes(key)) {
+        const others = DATE_GROUP_KEYS.filter((k) => k !== key && prev.includes(k));
+        others.forEach(clearExtraValue);
+        next = next.filter((k) => !others.includes(k));
+      }
+      return next;
     });
   };
 
@@ -1088,7 +1097,6 @@ export default function FiltersPage() {
     const rCreated         = urlParams?.get('rCreated');
     const rUpdated         = urlParams?.get('rUpdated');
     const rDueDate         = urlParams?.get('rDueDate');
-    const rWorked          = urlParams?.get('rWorked');
     const rDepartment      = urlParams?.get('rDepartment');
     const rProductType     = urlParams?.get('rProductType');
     const rCombination     = urlParams?.get('rCombination');
@@ -1111,7 +1119,6 @@ export default function FiltersPage() {
     if (rCreated) setSelCreated(rCreated);
     if (rUpdated) setSelUpdated(rUpdated);
     if (rDueDate) setSelDueDate(rDueDate);
-    if (rWorked) setSelWorked(rWorked);
     if (rDepartment) setSelDepartment(rDepartment);
     if (rProductType) setSelProductType(rProductType.split(','));
     if (rCombination) setSelCombination(rCombination);
@@ -1163,7 +1170,6 @@ export default function FiltersPage() {
     if (selCreated) p.rCreated = selCreated;
     if (selUpdated) p.rUpdated = selUpdated;
     if (selDueDate) p.rDueDate = selDueDate;
-    if (selWorked) p.rWorked = selWorked;
     if (selDepartment) p.rDepartment = selDepartment;
     if (selProductType.length) p.rProductType = selProductType.join(',');
     if (selCombination) p.rCombination = selCombination;
@@ -1176,7 +1182,7 @@ export default function FiltersPage() {
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1217,7 +1223,7 @@ export default function FiltersPage() {
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
-    selCreated || selUpdated || selDueDate || selWorked || selDepartment ||
+    selCreated || selUpdated || selDueDate || selDepartment ||
     selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selProjectPool || selBreached || selOverdue,
   );
 
@@ -1262,6 +1268,16 @@ export default function FiltersPage() {
 
         if (selAssignees.length) {
           params.assignees = Array.from(new Set(selAssignees.flatMap(expandMember))).join(',');
+          // Queue + Assignee together should mean "did this person work this
+          // dept's tickets", not "is this person the ticket's CURRENT owner
+          // right now" -- without this, a ticket this person genuinely
+          // worked here (e.g. resolved it) but which has since moved to
+          // another department and been reassigned there silently drops out,
+          // even though it's exactly the kind of ticket this combination is
+          // meant to surface. Backend already supports this (includeHistory
+          // folds in user_worked_on_tickets alongside the plain current-
+          // assignee match) -- just never wired up from this page before.
+          if (selQueue) params.includeHistory = 'true';
         }
 
         if (selReporters.length) {
@@ -1281,10 +1297,6 @@ export default function FiltersPage() {
         if (selCreated) params.createdRange = selCreated;
         if (selUpdated) params.updatedRange = selUpdated;
         if (selDueDate) params.dueDateRange = selDueDate;
-        // Only meaningful together with a single selected Queue -- the backend
-        // only reads workedRange inside the dept-scoped branch (i.e. when
-        // params.dept is set), so this is a no-op without a Queue selected.
-        if (selWorked && params.dept) params.workedRange = selWorked;
 
         // Hours actually spent in an "In Progress"-type status per ticket --
         // needs an extra issue_history query on the backend, so opt-in rather
@@ -1308,7 +1320,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy */
   const fetchIssues = useCallback(() => {
@@ -1428,6 +1440,23 @@ export default function FiltersPage() {
     }
     setExporting(false);
   };
+
+  // Product Type / Combination / Project Manager were exportable via
+  // EXPORT_EXTRA_COLUMNS but never actually rendered in the on-screen table
+  // itself -- filtering by one of these told you which tickets matched, but
+  // not what value each ticket actually had, without exporting just to look.
+  // Mirrors the export's own "chip active OR a value is currently selected"
+  // rule exactly, so a field shows as a column in the table the moment
+  // you've added it as a filter, and shows the same way in the CSV export --
+  // not tied to some other unrelated filter (e.g. Queue+Worked) being set.
+  const TABLE_EXTRA_COLUMN_IDS = ['productType', 'combination', 'projectManager'] as const;
+  const tableExtraCols = TABLE_EXTRA_COLUMN_IDS.filter((id) => {
+    if (activeExtras.includes(id)) return true;
+    if (id === 'productType') return selProductType.length > 0;
+    if (id === 'combination') return !!selCombination;
+    if (id === 'projectManager') return selProjectManager.length > 0;
+    return false;
+  });
 
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
@@ -1913,15 +1942,6 @@ export default function FiltersPage() {
                 <button onClick={() => toggleExtra('dueDate')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
-            {activeExtras.includes('worked') && (
-              <div className="flex items-center gap-1">
-                <DateDropBtn label="Worked" selected={selWorked} onChange={setSelWorked} />
-                <button onClick={() => toggleExtra('worked')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
-                {!selQueue && (
-                  <span className="text-[11px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Select a Queue for this to apply</span>
-                )}
-              </div>
-            )}
           </div>
         )}
       </div>}
@@ -1946,17 +1966,22 @@ export default function FiltersPage() {
             </p>
           </div>
         ) : (
-          <table className="w-full">
+          <table className="w-full table-fixed">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[32%]">Work</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Assignee</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Reported By</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Work</th>
+                {tableExtraCols.map((id) => (
+                  <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
+                    {EXPORT_EXTRA_COLUMNS[id].label}
+                  </th>
+                ))}
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44 hidden sm:table-cell">Assignee</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44 hidden sm:table-cell">Reported By</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28 hidden sm:table-cell">Status</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16 hidden md:table-cell">Priority</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20 hidden sm:table-cell">SLA Breached</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16 hidden sm:table-cell">Overdue</th>
                 <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24 hidden md:table-cell">Time Spent</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
               </tr>
@@ -1975,7 +2000,7 @@ export default function FiltersPage() {
                       </Link>
                     </div>
                   </td>
-                  <td className="px-2 py-2.5 w-[32%]">
+                  <td className="px-2 py-2.5">
                     <Link
                       href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
                       className="block truncate text-[13px] text-gray-900 hover:text-blue-600 transition-colors"
@@ -1983,7 +2008,14 @@ export default function FiltersPage() {
                       {issue.summary}
                     </Link>
                   </td>
-                  <td className="px-2 py-2.5">
+                  {tableExtraCols.map((id) => (
+                    <td key={id} className="px-2 py-2.5">
+                      <span className="text-[11.5px] text-gray-600 truncate">
+                        {EXPORT_EXTRA_COLUMNS[id].getValue(issue) || '—'}
+                      </span>
+                    </td>
+                  ))}
+                  <td className="px-2 py-2.5 hidden sm:table-cell">
                     {issue.assignee ? (
                       <div className="flex items-center gap-1.5">
                         <div className="h-6 w-6 flex-shrink-0 rounded-full bg-blue-500 flex items-center justify-center text-[9px] font-bold text-white">
@@ -1997,7 +2029,7 @@ export default function FiltersPage() {
                       <span className="text-[11.5px] text-gray-300">Unassigned</span>
                     )}
                   </td>
-                  <td className="px-2 py-2.5">
+                  <td className="px-2 py-2.5 hidden sm:table-cell">
                     {issue.reporter ? (
                       <div className="flex items-center gap-1.5">
                         <div className="h-6 w-6 flex-shrink-0 rounded-full bg-purple-500 flex items-center justify-center text-[9px] font-bold text-white">
@@ -2011,7 +2043,7 @@ export default function FiltersPage() {
                       <span className="text-[11.5px] text-gray-300">—</span>
                     )}
                   </td>
-                  <td className="px-2 py-2.5">
+                  <td className="px-2 py-2.5 hidden sm:table-cell">
                     {(() => {
                       const effectiveStatus = getEffectiveIssueStatus(issue);
                       return (
@@ -2027,7 +2059,7 @@ export default function FiltersPage() {
                   <td className="px-2 py-2.5 hidden md:table-cell">
                     <PriorityIcon priority={issue.priority} size={14} />
                   </td>
-                  <td className="px-2 py-2.5">
+                  <td className="px-2 py-2.5 hidden sm:table-cell">
                     {issue.sla_breached == null ? (
                       // No SLA policy applies to this ticket's department at all
                       // (e.g. a queue like Infra that's never had one configured)
@@ -2054,7 +2086,7 @@ export default function FiltersPage() {
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
                     )}
                   </td>
-                  <td className="px-2 py-2.5">
+                  <td className="px-2 py-2.5 hidden sm:table-cell">
                     {/* The ticket's own dueDate crossing "now" while still open --
                         independent of SLA Breached, which is the fact this exact
                         column used to be confused with (see YesNoFilterBtn above). */}

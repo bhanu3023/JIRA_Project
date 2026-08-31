@@ -433,6 +433,73 @@ async function notifyUsers(userIds: (string | null | undefined)[], actorId: stri
   }
 }
 
+// Extract mentioned user IDs from a comment body -- data-userid on the rich
+// text editor's mention spans is the reliable path; a plain-text @name is a
+// fallback for comments that never went through the editor (e.g. imported
+// from Jira).
+async function extractMentionedUserIds(commentBody: string): Promise<Set<string>> {
+  const mentionedUserIds = new Set<string>();
+  const dataUserMatches = commentBody.matchAll(/data-userid="([^"]+)"/g);
+  for (const m of dataUserMatches) { if (m[1]) mentionedUserIds.add(m[1]); }
+  if (mentionedUserIds.size === 0) {
+    const textMatches = commentBody.replace(/<[^>]+>/g, '').match(/@([^\s@,]+)/g) || [];
+    for (const mention of textMatches) {
+      const username = mention.slice(1);
+      const found = await db.user.findFirst({
+        where: { OR: [{ email: { contains: username, mode: 'insensitive' } }, { firstName: { equals: username, mode: 'insensitive' } }] }
+      });
+      if (found) mentionedUserIds.add(found.id);
+    }
+  }
+  return mentionedUserIds;
+}
+
+// Sends the in-app + email "mentioned you" notification for every @mention in
+// commentBody, skipping the actor and anything in alreadyNotifiedIds -- the
+// latter matters for comment EDITS, where re-scanning the full (now-edited)
+// body would otherwise re-notify someone for a mention that was already there
+// before the edit and already got its notification the first time.
+async function notifyCommentMentions(commentBody: string, opts: {
+  actorUserId: string | null | undefined; actorName: string; issueDisplayKey: string; issue: any;
+  alreadyNotifiedIds?: Set<string>;
+}) {
+  const mentionedUserIds = await extractMentionedUserIds(commentBody);
+  if (mentionedUserIds.size === 0) return;
+  const mentionPreview = commentBody
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+  for (const mentionedId of mentionedUserIds) {
+    if (mentionedId === opts.actorUserId) continue;
+    if (opts.alreadyNotifiedIds?.has(mentionedId)) continue;
+    const mentionedUser = await db.user.findUnique({ where: { id: mentionedId } });
+    if (!mentionedUser) continue;
+    await createNotification({
+      userId: mentionedId, type: 'MENTIONED',
+      title: `${opts.actorName} mentioned you in ${opts.issueDisplayKey}`,
+      message: mentionPreview, issueKey: opts.issueDisplayKey,
+    });
+    if (mentionedUser.email) {
+      notifyMentioned({
+        mentionedEmail: mentionedUser.email,
+        mentionedName: `${mentionedUser.firstName} ${mentionedUser.lastName}`.trim(),
+        mentionedBy: opts.actorName,
+        issueKey: opts.issueDisplayKey,
+        issueSummary: opts.issue.summary,
+        spaceKey: opts.issue.space?.key ?? '',
+        spaceName: opts.issue.space?.name ?? '',
+        commentPreview: `${opts.actorName}: ${mentionPreview}`,
+      }).catch((err: any) => console.error('[Mention Email] Failed:', err?.message));
+    }
+  }
+}
+
 // Get all lead/shift_lead member userIds for a space
 async function getSpaceLeadUserIds(spaceId: string, dept?: string | null): Promise<string[]> {
   try {
@@ -1743,29 +1810,18 @@ async function loadTeamAnalyticsScope(url: URL) {
     if (depts && depts.length) {
       workedClause += ` AND LOWER(w.dept) = ANY($${idx++}::text[])`;
       params.push(depts.map((d) => d.toLowerCase()));
-      // Only count work by someone who currently has access to that specific
-      // queue -- e.g. selecting "Dev" shouldn't credit a ticket to Dev's
-      // worked-count just because SOME person touched it while it briefly
-      // carried that department label; it must have been a real Dev-access
-      // person who did the work. Built as a dept(lowercased) -> memberIds
-      // jsonb map so each selected department is checked against its own
-      // configured list -- a department with no queue config at all (most
-      // of them; see the comment on deptMemberSets above) imposes no
-      // restriction, same "no config = no restriction" rule used elsewhere.
-      const cqW = await pool.query(`SELECT queues FROM custom_queues`);
-      const memberMap: Record<string, string[]> = {};
-      for (const row of cqW.rows) {
-        const queuesW = Array.isArray(row.queues) ? row.queues : [];
-        for (const q of queuesW) {
-          const name = String(q?.name || '').trim().toLowerCase();
-          if (!name) continue;
-          const members: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
-          (memberMap[name] ??= []).push(...members);
-        }
-      }
-      workedClause += ` AND (NOT ($${idx}::jsonb ? LOWER(w.dept)) OR ($${idx}::jsonb -> LOWER(w.dept)) @> to_jsonb(w.user_id))`;
-      params.push(JSON.stringify(memberMap));
-      idx++;
+      // Previously also required the worker to be on that queue's CURRENT
+      // configured memberIds list, on the theory that someone off the list
+      // could only have "briefly touched" the ticket. Checked against real
+      // production data and that's wrong: user_worked_on_tickets is already
+      // the authoritative record of a real pass/return/close event -- it
+      // doesn't fire on a brief touch. The membership list just drifts out
+      // of sync with who's actually done the work (people added to a queue
+      // after they did the work, name variants, etc.), so this was silently
+      // dropping real workers from the "Worked" filter and its export --
+      // confirmed 10 real Dev workers and 3 real Migration workers hidden
+      // this way in a single week of production data. Removed; the dept
+      // match above is enough scoping.
     }
     workedClause += `)`;
     whereClauses.push(workedClause);
@@ -4772,8 +4828,24 @@ async function _handleJiraPgApi(
       // the Unassigned-in-dept queue silently showed EVERY ticket in the
       // department (assigned or not), not just the unassigned ones.
       let historyAssigneeIdx: number | null = null;
+      // Assignee, under a "Worked" date filter, means "who did the work" --
+      // folded into workedRangeSql below as a w.user_id check -- not "who
+      // currently owns the ticket". A ticket worked in this dept and then
+      // handed to another department (and reassigned there) still has this
+      // dept's own worker's name on it as far as "worked" is concerned, even
+      // though i."assigneeId" now points at whoever holds it now. Requiring
+      // i."assigneeId" to match here (the plain non-worked case, below) was
+      // silently filtering out every ticket the selected person had actually
+      // worked but since moved on from -- confirmed for real: CF-29889 was
+      // worked in Dev by Ravi Srivastava, then resolved and handed to
+      // Migration under a different assignee, so "Queue: Dev + Assignee:
+      // Ravi" could never find it.
+      let workedAssigneeIds: string[] | null = null;
       if (unassignedOnly) {
         deptExtraClauses.push(`i."assigneeId" IS NULL`);
+      } else if (workedRange && assignees) {
+        const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
+        workedAssigneeIds = await resolveUserIds(ids);
       } else if (includeHistoryParam && assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         const resolvedIds = await resolveUserIds(ids);
@@ -4875,24 +4947,24 @@ async function _handleJiraPgApi(
         const workedToIdx = deptParamIdx++;
         deptExtraParams.push(workedFrom, workedTo);
         workedRangeSql = ` AND w.worked_at >= $${workedFromIdx} AND w.worked_at <= $${workedToIdx}`;
-        // Only count work by someone who currently has access to this queue --
-        // e.g. selecting "Dev" shouldn't credit a ticket to Dev's worked-count
-        // just because SOME person touched it while it briefly carried that
-        // department label; it must have been a real Dev-access person who
-        // did the work. Same "no config = no restriction" rule as
-        // queueMembersOnly above -- a department with no queue config at all
-        // imposes no restriction here either.
-        try {
-          const cqW = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
-          const queuesW: any[] = cqW.rows[0]?.queues || [];
-          const qW = queuesW.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
-          const memberIdsW: string[] = Array.isArray(qW?.memberIds) ? qW.memberIds : [];
-          if (memberIdsW.length) {
-            const memberIdx = deptParamIdx++;
-            deptExtraParams.push(memberIdsW);
-            workedRangeSql += ` AND w.user_id = ANY($${memberIdx}::text[])`;
-          }
-        } catch { /* ignore -- no restriction if lookup fails */ }
+        // Previously also required the worker to be on that queue's CURRENT
+        // configured memberIds list. Checked against real production data
+        // (same investigation as loadTeamAnalyticsScope's identical rule) and
+        // that's wrong: user_worked_on_tickets only gets a row on a real
+        // pass/return/close event, never a brief touch, so it's already the
+        // authoritative signal -- the membership list just drifts out of sync
+        // with who's actually done the work. Confirmed real workers were
+        // being silently dropped from this exact query. Removed.
+        //
+        // When a specific assignee was selected alongside "Worked", scope to
+        // that person's own work instead (see workedAssigneeIds above) --
+        // this is what actually answers "did THIS person work this ticket in
+        // this dept", not "does this ticket's current owner match".
+        if (workedAssigneeIds) {
+          const assigneeIdx = deptParamIdx++;
+          deptExtraParams.push(workedAssigneeIds.length ? workedAssigneeIds : ['__none__']);
+          workedRangeSql += ` AND w.user_id = ANY($${assigneeIdx}::text[])`;
+        }
       }
 
       const deptDoneClause = deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : '';
@@ -4914,7 +4986,21 @@ async function _handleJiraPgApi(
       // live status while still current here, or its frozen dept_statuses
       // snapshot (case-insensitive key match, same as every other per-dept
       // snapshot read in this file) once it's moved on to another dept.
-      const deptDeptMatchSql = workedRange
+      // "Created" range + Queue (Filters page: Queue: Migration + Created:
+      // last 7 days) previously required the ticket to ALSO still be
+      // CURRENTLY in that dept -- so a ticket created in Migration and since
+      // moved to Dev (or anywhere else) silently dropped out, even though it
+      // genuinely was created there. Checked against real data: "created in
+      // Migration last week" came back 93 this way vs the true 99 counting
+      // each ticket's actual origin department. Match against origin instead
+      // (the earliest department-change event's oldValue, i.e. what it
+      // started as; current_department if it never moved) whenever Created
+      // is the active date filter alongside a Queue -- this mirrors
+      // workedRange's same "opt-in override for the Filters page's own
+      // semantics" pattern, and leaves the plain per-department queue board
+      // views (All Tickets, Assigned to me, etc., which never send
+      // createdRange) on the original current-department behavior.
+      const workedDeptMatchSql = workedRange
         ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})
            AND (
              (LOWER(i.current_department) = LOWER($2) AND s.category = 'done')
@@ -4923,15 +5009,53 @@ async function _handleJiraPgApi(
                WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
              ))
            )`
-        : historyAssigneeIdx
+        : null;
+      // Scoped to queueMembersOnlyParam, not just createdRange being present --
+      // the department queue board pages (All Tickets, Assigned to me, etc.)
+      // ALSO send createdRange (their own "Created" filter chip) but never set
+      // queueMembersOnly, and "All Tickets — Dev" + a Created filter is
+      // supposed to mean "currently in Dev, created in this window", not
+      // "originated in Dev" -- origin-matching there would have silently
+      // changed what a board's own core "All Tickets" semantic means the
+      // moment someone added a Created filter. queueMembersOnly is only ever
+      // sent by the Filters page, which is the one place origin-matching was
+      // actually intended to apply.
+      const originDeptMatchSql = createdRange && queueMembersOnlyParam
+        ? `LOWER(COALESCE(
+             (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+             i.current_department
+           )) = LOWER($2)`
+        : null;
+      // Department-scope (which of the three modes above decides "does this
+      // ticket belong to dept $2") and assignee-scope (does the selected
+      // person match, optionally including their historical work here) are
+      // two independent concerns -- ANDed together below, rather than the
+      // single nested ternary this used to be, which silently dropped
+      // includeHistory's historical-assignee matching whenever Created was
+      // ALSO active (createdRange's branch won the ternary and never
+      // consulted historyAssigneeIdx at all) even though Created is this
+      // page's own default always-on filter, making that the common case,
+      // not an edge case -- confirmed for real: Queue: Dev + Assignee: Ravi
+      // + Created (the default) returned 0 issues for a ticket he'd
+      // genuinely worked in Dev before it moved on, exactly the CF-29889
+      // scenario this session already fixed once for the Worked filter.
+      const deptScopeSql = workedDeptMatchSql
+        ? workedDeptMatchSql
+        : originDeptMatchSql
+        ? `${originDeptMatchSql} ${deptDoneClause}`
+        : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
+      const assigneeScopeSql = historyAssigneeIdx
         ? `(
-            (LOWER(i.current_department) = LOWER($2) AND i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) ${deptDoneClause})
+            i."assigneeId" = ANY($${historyAssigneeIdx}::text[])
             OR EXISTS (
               SELECT 1 FROM user_worked_on_tickets w
               WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2)
             )
           )`
-        : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
+        : null;
+      const deptDeptMatchSql = assigneeScopeSql
+        ? `(${deptScopeSql}) AND ${assigneeScopeSql}`
+        : deptScopeSql;
 
       // Needed even when needsSlaPrefilter is set: the SLA-filtered case can no
       // longer skip this "wasted" count query (as it used to, since deptTotal
@@ -6627,8 +6751,22 @@ async function _handleJiraPgApi(
       mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
     );
     _mark('sla-enrichment');
+    // Origin department -- the department this ticket actually started in,
+    // for the "only the raising department can resolve it" rule enforced on
+    // the PATCH handler above. Computed from dbHistory (already fetched for
+    // the Activity tab, ordered newest-first) instead of a fresh query:
+    // the OLDEST department-change event's oldValue, or current_department
+    // if it's never moved. Lets the status dropdown hide "Resolved" for a
+    // department this ticket was merely routed to, instead of only ever
+    // rejecting the click after the fact.
+    const deptHistoryEvents = dbHistory.filter((h: any) => h.field === 'department');
+    const earliestDeptEvent = deptHistoryEvents.length
+      ? deptHistoryEvents.reduce((a: any, b: any) => (new Date(a.createdAt) < new Date(b.createdAt) ? a : b))
+      : null;
+    const originDepartment: string | null = earliestDeptEvent?.oldValue || mergedIssue.current_department || null;
     const responsePayload: any = {
       ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {},
+      originDepartment,
     };
     _mark('format-response');
 
@@ -6832,6 +6970,51 @@ async function _handleJiraPgApi(
       } catch { /* fail open on lookup errors, same as the department-change endpoint */ }
     }
 
+    // Only the department that actually RAISED this ticket may mark it done
+    // (e.g. "Resolved") -- a department it was merely routed to for support
+    // work (e.g. Migration raises a ticket, routes it to Dev for a technical
+    // fix) can work it and route it onward or back, but resolving it belongs
+    // to whoever owns the customer relationship on it, not whoever happened
+    // to touch it last. Origin is the earliest department-change event's
+    // oldValue (what the ticket started as before its first transfer), or
+    // current_department if it's never moved -- same computation already
+    // used for the Filters page's origin-based Created matching. Admins
+    // bypass this, same as every other queue-authorization check in this
+    // file.
+    if (!isAdmin) {
+      try {
+        // Two independent ways a department can mark a ticket done: a real
+        // statusId (category looked up from the statuses table) or a custom
+        // queue-defined queueStatusId (category comes straight off the body,
+        // since it's never a real row in the statuses table -- see the
+        // queueStatusId handling further below).
+        const isResolvingViaStatusId = body.statusId !== undefined && body.statusId !== null;
+        const isResolvingViaQueueStatus = !!body.queueStatusId && String(body.queueStatusCategory || '') === 'done';
+        let targetIsDone = false;
+        if (isResolvingViaStatusId) {
+          const targetStatusRow = await pool.query(`SELECT category FROM statuses WHERE id=$1 LIMIT 1`, [String(body.statusId)]);
+          targetIsDone = targetStatusRow.rows[0]?.category === 'done';
+        } else if (isResolvingViaQueueStatus) {
+          targetIsDone = true;
+        }
+        if (targetIsDone) {
+          const originRow = await pool.query(
+            `SELECT COALESCE(
+               (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+               i.current_department
+             ) AS origin_dept, i.current_department
+             FROM issues i WHERE i.id = $1`,
+            [issue.id]
+          );
+          const originDept: string | null = originRow.rows[0]?.origin_dept || null;
+          const currentDeptForResolve: string | null = originRow.rows[0]?.current_department || null;
+          if (originDept && currentDeptForResolve && originDept.trim().toLowerCase() !== currentDeptForResolve.trim().toLowerCase()) {
+            return json({ error: `This ticket was raised by ${originDept} — only ${originDept} can mark it resolved. Route it back there instead.` }, 403);
+          }
+        }
+      } catch { /* fail open on lookup errors, same as the queue-authorization check above */ }
+    }
+
     const data: Record<string, unknown> = {};
     if (body.summary !== undefined) data.summary = String(body.summary);
     if (body.description !== undefined) data.description = body.description === null ? null : String(body.description);
@@ -6902,12 +7085,22 @@ async function _handleJiraPgApi(
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
           const oldQueueStatusName = deptMapGet(deptStatuses, dept)?.name || 'Unknown';
           const oldQueueStatusCategory = deptMapGet(deptStatuses, dept)?.category || 'todo';
-          deptMapSet(deptStatuses, dept, {
+          const queueStatusEntry = {
             id: String(body.queueStatusId),
             name: String(body.queueStatusName || ''),
             color: String(body.queueStatusColor || '#64748B'),
             category: String(body.queueStatusCategory || 'todo'),
-          });
+          };
+          deptMapSet(deptStatuses, dept, queueStatusEntry);
+          // Same cross-department propagation as the plain statusId path below --
+          // resolving here (this dept's own custom "Resolved" queue status) should
+          // reflect into every other department this ticket passed through too.
+          if (queueStatusEntry.category === 'done') {
+            for (const deptKey of Object.keys(deptStatuses)) {
+              if (deptKey.toLowerCase() === dept.toLowerCase()) continue;
+              deptMapSet(deptStatuses, deptKey, queueStatusEntry);
+            }
+          }
           await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(deptStatuses), key]);
 
           // Reopening -- the dept's OLD status was done (Resolved/Closed/etc.)
@@ -7035,7 +7228,7 @@ async function _handleJiraPgApi(
             let queueHandoffOldDept = '';
             let queueHandoffTargetDept = '';
             let queueHandoffDone = false;
-            const waitMatchQueue = String(body.queueStatusName || '').match(/^waiting\s+for\s+(.+)$/i);
+            const waitMatchQueue = String(body.queueStatusName || '').match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
             if (waitMatchQueue) {
               queueHandoffTargetDept = waitMatchQueue[1].trim();
               try {
@@ -7234,7 +7427,7 @@ async function _handleJiraPgApi(
         ? await db.status.findUnique({ where: { id: String(data.statusId) } })
         : null;
       const newStatusNameForHandoff = (newStForHandoff?.name || '').trim();
-      const waitMatchHandoff = newStatusNameForHandoff.match(/^waiting\s+for\s+(.+)$/i);
+      const waitMatchHandoff = newStatusNameForHandoff.match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
       if (waitMatchHandoff) {
         handoffTargetDept = waitMatchHandoff[1].trim();
         try {
@@ -7284,6 +7477,21 @@ async function _handleJiraPgApi(
           if (syncDept) {
             const syncDeptStatuses: Record<string, any> = syncRow.rows[0]?.dept_statuses || {};
             deptMapSet(syncDeptStatuses, syncDept, { id: newStForSync.id, name: newStForSync.name, color: newStForSync.color, category: newStForSync.category });
+            // Resolving is only ever allowed from the ticket's ORIGIN
+            // department (enforced above, admin bypass aside) -- but every
+            // OTHER department this ticket passed through on the way there
+            // (e.g. Dev, routed to for support work before coming back to
+            // Migration to close) should show it as resolved too, not stuck
+            // on whatever status it was in when the ticket left. Without
+            // this, Dev's own "Worked on" list and the Filters page kept
+            // showing that ticket as still open/in-progress forever, even
+            // after the department that actually owns it had closed it out.
+            if (newStForSync.category === 'done') {
+              for (const deptKey of Object.keys(syncDeptStatuses)) {
+                if (deptKey.toLowerCase() === syncDept.toLowerCase()) continue;
+                deptMapSet(syncDeptStatuses, deptKey, { id: newStForSync.id, name: newStForSync.name, color: newStForSync.color, category: newStForSync.category });
+              }
+            }
             await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb WHERE id=$2`, [JSON.stringify(syncDeptStatuses), issue.id]);
           }
         }
@@ -8041,6 +8249,29 @@ async function _handleJiraPgApi(
       await (db as any).issueHistory.create({ data: { issueId: issue.id, field: 'comment', oldValue: null, newValue: comment.body.slice(0, 500), authorName: aName, authorEmail: authorUser?.email ?? null, createdAt: new Date() } });
     } catch (_e) {}
 
+    // Record that this user did real work on the ticket -- same 'worked'
+    // catch-all the general status/assignee-change PATCH handler already
+    // writes, extended to commenting. Someone can genuinely work a ticket
+    // (triage, ask for info, hand off in writing) through comments alone,
+    // with no status or assignee change at all -- that was previously
+    // invisible to "Worked on" / the Filters page's Worked chip / Team
+    // Analytics, same gap the PATCH-handler fix closed for status/assignee.
+    try {
+      // current_department isn't a Prisma-schema column (added via raw ALTER
+      // TABLE, like dept_sla_log/dept_statuses) -- db.issue.findUnique above
+      // never actually returns it, so it has to be read via a raw query, the
+      // same way the queue-suspension check earlier in this handler does.
+      const commentDeptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
+      const commentDept = commentDeptRow.rows[0]?.current_department || null;
+      if (userId && commentDept) {
+        await pool.query(
+          `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
+           ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET worked_at=NOW()`,
+          [userId, issue.id, commentDept]
+        );
+      }
+    } catch { /* non-critical */ }
+
 
     const issueDisplayKey = (issue as any).cf_key || issue.key;
     // Email: notify assignee + reporter (not the commenter)
@@ -8085,62 +8316,7 @@ async function _handleJiraPgApi(
     );
     await notifyWatchers(issue.key, userId, { title: `New comment on ${issueDisplayKey}`, message: commentPreview });
 
-    // Detect @mentions Ã¢â‚¬â€ extract data-userid from mention spans (most reliable)
-    // Falls back to regex on plain text for non-rich-text comments
-    const mentionedUserIds = new Set<string>();
-    // 1. Extract from <span data-userid="..."> HTML mentions
-    const dataUserMatches = comment.body.matchAll(/data-userid="([^"]+)"/g);
-    for (const m of dataUserMatches) { if (m[1]) mentionedUserIds.add(m[1]); }
-    // 2. Fallback: regex on text for plain @name mentions (single word)
-    if (mentionedUserIds.size === 0) {
-      const textMatches = comment.body.replace(/<[^>]+>/g, '').match(/@([^\s@,]+)/g) || [];
-      for (const mention of textMatches) {
-        const username = mention.slice(1);
-        const found = await db.user.findFirst({
-          where: { OR: [{ email: { contains: username, mode: 'insensitive' } }, { firstName: { equals: username, mode: 'insensitive' } }] }
-        });
-        if (found) mentionedUserIds.add(found.id);
-      }
-    }
-    // Send in-app + email notification to each mentioned user
-    // Stripping tags alone leaves entities like the literal "&nbsp;" the rich
-    // text editor inserts right after a mention span (to guarantee a following
-    // space) sitting in the plain-text preview as visible "&nbsp;" characters.
-    // Same decode used for comment previews elsewhere (spaces/[spaceKey]/page.tsx).
-    const mentionPreview = comment.body
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 200);
-    for (const mentionedId of mentionedUserIds) {
-      if (mentionedId === userId) continue; // don't notify self
-      const mentionedUser = await db.user.findUnique({ where: { id: mentionedId } });
-      if (!mentionedUser) continue;
-      // In-app notification
-      await createNotification({
-        userId: mentionedId, type: 'MENTIONED',
-        title: `${commenterName} mentioned you in ${issueDisplayKey}`,
-        message: mentionPreview, issueKey: issueDisplayKey,
-      });
-      // Email notification
-      if (mentionedUser.email) {
-        notifyMentioned({
-          mentionedEmail: mentionedUser.email,
-          mentionedName: `${mentionedUser.firstName} ${mentionedUser.lastName}`.trim(),
-          mentionedBy: commenterName,
-          issueKey: issueDisplayKey,
-          issueSummary: issue.summary,
-          spaceKey: issue.space?.key ?? '',
-          spaceName: issue.space?.name ?? '',
-          commentPreview,
-        }).catch((err: any) => console.error('[Mention Email] Failed:', err?.message));
-      }
-    }
+    await notifyCommentMentions(comment.body, { actorUserId: userId, actorName: commenterName, issueDisplayKey, issue });
     } catch (err: any) { console.error('[Comment notifications] Failed:', err?.message || err); } })();
 
     return json({
@@ -8254,6 +8430,27 @@ async function _handleJiraPgApi(
             },
           });
         } catch { /* history tracking should never break the main response */ }
+      }
+      // A mention added while EDITING a comment (as opposed to typing it in
+      // fresh) previously never notified anyone -- only comment creation ran
+      // the mention scan. Re-scan on every edit too, but skip anything that
+      // was already mentioned in the comment's prior body so re-saving an
+      // edit that didn't touch the mention doesn't re-notify the same person.
+      if (before && before.body !== updated.body) {
+        (async () => { try {
+          const alreadyMentioned = await extractMentionedUserIds(before.body);
+          const issueForMention = await db.issue.findUnique({ where: { id: before.issueId }, include: { space: true } });
+          if (issueForMention) {
+            const actorName = currentUser
+              ? (`${currentUser.firstName ?? ''} ${currentUser.lastName ?? ''}`.trim() || currentUser.email)
+              : 'Unknown';
+            await notifyCommentMentions(updated.body, {
+              actorUserId: userId, actorName,
+              issueDisplayKey: (issueForMention as any).cf_key || issueForMention.key,
+              issue: issueForMention, alreadyNotifiedIds: alreadyMentioned,
+            });
+          }
+        } catch (err: any) { console.error('[Comment edit mentions] Failed:', err?.message || err); } })();
       }
       // reactions is a raw column db.comment.update() above doesn't touch or
       // return -- editing a comment's body doesn't change its reactions, but
@@ -8819,8 +9016,7 @@ async function _handleJiraPgApi(
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."assigneeId" IS NULL) AS unassigned,
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."createdAt" <= now() - interval '30 days') AS old30,
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
-        COUNT(*) FILTER (WHERE i.jira_sla_breached = true
-                            OR (s.category != 'done' AND i."dueDate" < now())) AS sla_breached
+        COUNT(*) FILTER (WHERE s.category != 'done' AND (i.jira_sla_breached = true OR i."dueDate" < now())) AS sla_breached
       FROM issues i LEFT JOIN statuses s ON i."statusId" = s.id
       WHERE i.current_department IS NOT NULL AND i.current_department != ''
         ${dateClause}${deptClause}
@@ -8859,7 +9055,29 @@ async function _handleJiraPgApi(
       slaBreached: Number(r.sla_breached) || 0,
     }));
 
-    const people = personRows.rows.map((r: any) => {
+    // Selecting a department's per-person list should only show people who
+    // actually have access to that department's queue, not everyone who ever
+    // got assigned a ticket carrying that department label -- same rule
+    // already applied to my-dashboard/reports (see the deptMemberSets comment
+    // on loadTeamAnalyticsScope above). Most department labels have no
+    // configured queue at all, so this only restricts the ones that do.
+    const cqRows = await pool.query(`SELECT queues FROM custom_queues`);
+    const deptMemberSets: Record<string, Set<string>> = {};
+    for (const row of cqRows.rows) {
+      const queues = Array.isArray(row.queues) ? row.queues : [];
+      for (const q of queues) {
+        const name = String(q?.name || '').trim().toLowerCase();
+        if (!name) continue;
+        const members: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+        const set = (deptMemberSets[name] ??= new Set<string>());
+        for (const m of members) set.add(m);
+      }
+    }
+
+    const people = personRows.rows.filter((r: any) => {
+      const memberSet = deptMemberSets[String(r.dept || '').trim().toLowerCase()];
+      return !memberSet || memberSet.size === 0 || memberSet.has(r.assignee_id);
+    }).map((r: any) => {
       const stale = Number(r.stale) || 0;
       const missing = Number(r.missing) || 0;
       const overdue = Number(r.overdue) || 0;
@@ -9004,6 +9222,66 @@ async function _handleJiraPgApi(
     return json({ people, monthly, summary, tickets, totalMatched: scoped.length });
   }
 
+  // GET /admin/file-health -- admin-only: scans every uploaded file this app
+  // knows about and reports which ones are actually missing from disk vs.
+  // just referenced. Two entirely different places a file reference can
+  // live: a real Attachment row (the dedicated Attachments section, plus
+  // Jira-imported attachments), or a bare link embedded directly in a
+  // ticket's description/comment HTML with no Attachment row at all (the
+  // rich text editor's inline paste/drop uploads) -- see the CF-29857
+  // investigation, where the file was only ever text inside the
+  // description, so a check that only looked at the attachments table would
+  // have reported it as fine. Storage root also differs by upload path:
+  // public/uploads for the former, uploads/tmp/<id>/<name> (NOT public/,
+  // served through its own API route) for the latter.
+  if (path === 'admin/file-health' && method === 'GET') {
+    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+    const { access } = await import('fs/promises');
+    const { join } = await import('path');
+
+    const diskPathFor = (relUrl: string): string | null => {
+      if (relUrl.startsWith('/api/uploads/')) return join(process.cwd(), relUrl.replace(/^\/api\/uploads\//, 'uploads/'));
+      if (relUrl.startsWith('/uploads/')) return join(process.cwd(), 'public', relUrl);
+      return null; // not a locally-stored file (e.g. an external URL) -- nothing to check
+    };
+
+    type Candidate = { ticketKey: string; filename: string; url: string; source: string };
+    const candidates: Candidate[] = [];
+
+    const attRows = await pool.query(`
+      SELECT a.filename, a.url, i.key, i.cf_key
+      FROM attachments a JOIN issues i ON i.id = a."issueId"
+    `);
+    for (const row of attRows.rows) {
+      candidates.push({ ticketKey: row.cf_key || row.key, filename: row.filename, url: row.url, source: 'attachment' });
+    }
+
+    // LIKE '%/uploads/%' is just a cheap prefilter to avoid regex-scanning
+    // every description/comment in the whole system -- both real storage
+    // roots contain "/uploads/" as a substring.
+    const urlRe = /\/(?:api\/uploads\/tmp|uploads)\/[^"'\s)<>]+/g;
+    const extractInline = (text: string, ticketKey: string, source: string) => {
+      const matches = Array.from(new Set(String(text || '').match(urlRe) || []));
+      for (const url of matches) candidates.push({ ticketKey, filename: url.split('/').pop() || url, url, source });
+    };
+    const descRows = await pool.query(`SELECT key, cf_key, description FROM issues WHERE description LIKE '%/uploads/%'`);
+    for (const row of descRows.rows) extractInline(row.description, row.cf_key || row.key, 'description');
+
+    const commentRows = await pool.query(`
+      SELECT c.body, i.key, i.cf_key FROM comments c JOIN issues i ON i.id = c."issueId" WHERE c.body LIKE '%/uploads/%'
+    `);
+    for (const row of commentRows.rows) extractInline(row.body, row.cf_key || row.key, 'comment');
+
+    const checked = await Promise.all(candidates.map(async (c) => {
+      const diskPath = diskPathFor(c.url);
+      if (!diskPath) return { ...c, exists: true };
+      try { await access(diskPath); return { ...c, exists: true }; }
+      catch { return { ...c, exists: false }; }
+    }));
+
+    const missing = checked.filter((c) => !c.exists).map(({ exists, ...rest }) => rest);
+    return json({ totalChecked: checked.length, missingCount: missing.length, missing });
+  }
   // Ã¢â€â‚¬Ã¢â€â‚¬ Workflow Routes (DB-backed) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   // GET /workflows?spaceKey=XXX  Ã¢â€ ' return "virtual" workflow for the space

@@ -374,6 +374,15 @@ function SpaceDetailContent() {
   const [addFilterDropPos, setAddFilterDropPos] = useState<{ top: number; left: number } | null>(null);
   const [visibleCols, setVisibleCols] = useState<string[]>(DEFAULT_COLS);
   const [serverFieldOptions, setServerFieldOptions] = useState<Record<string, string[]>>({});
+  // Tracks field-value fetches currently in flight, keyed the same way as
+  // serverFieldOptions -- separate from that state because the effect below
+  // only sees serverFieldOptions AFTER a fetch has actually resolved, so two
+  // renders close together (e.g. effectiveDept settling right after mount)
+  // both read it as empty and both fire the same 11 requests, doubling every
+  // queue-open's request burst for no reason. This ref is set synchronously
+  // the instant a fetch starts, so the second render's loop sees it and
+  // skips, not just the render after the response comes back.
+  const fieldValuesInFlight = useRef<Set<string>>(new Set());
   const [updating, setUpdating] = useState<string | null>(null);
   // Safety net: a row dims (opacity-50) while `updating` names its key, cleared
   // in the `finally` of whatever inline edit set it. If that edit's request
@@ -445,6 +454,8 @@ function SpaceDetailContent() {
       if (!textFields.has(fieldId)) return;
       const cacheKey = `${fieldId}::${effectiveDept}`;
       if (serverFieldOptions[cacheKey]) return; // already loaded
+      if (fieldValuesInFlight.current.has(cacheKey)) return; // already fetching
+      fieldValuesInFlight.current.add(cacheKey);
       const deptQuery = effectiveDept ? `&dept=${encodeURIComponent(effectiveDept)}` : '';
       fetch(`/api/spaces/${spaceKey}/field-values?field=${fieldId}${deptQuery}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}` },
@@ -453,7 +464,8 @@ function SpaceDetailContent() {
         .then((vals: string[]) => {
           setServerFieldOptions(prev => ({ ...prev, [cacheKey]: vals }));
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => { fieldValuesInFlight.current.delete(cacheKey); });
     });
   }, [spaceKey, effectiveDept]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2027,8 +2039,18 @@ function SpaceDetailContent() {
           const deptQueueForAssignee = deptParam
             ? allCustomQueues.find((q) => (q.name || '').toLowerCase() === deptParam.toLowerCase())
             : undefined;
+          // Admins aren't added to a queue's memberIds anywhere in this app --
+          // they get access through their role, not membership -- but every
+          // server-side check that gates on queue membership (status changes,
+          // department transfers, isUserAuthorizedForDeptQueue) already lets
+          // an admin through regardless. This filter list was scoping down to
+          // memberIds alone with no such bypass, so an admin who legitimately
+          // holds a ticket in this queue (assigned directly, or via
+          // round-robin) couldn't even be selected to filter by, even though
+          // every other queue-access rule in the app already treats admins as
+          // implicitly authorized everywhere.
           const assigneeFilterMembers = (deptQueueForAssignee?.memberIds?.length)
-            ? allMembers.filter((mb: any) => deptQueueForAssignee.memberIds.includes(mb.id))
+            ? allMembers.filter((mb: any) => deptQueueForAssignee.memberIds.includes(mb.id) || mb.role === 'admin')
             : allMembers;
 
           // Assignee, Status, and Request type (Type) each get their own standalone

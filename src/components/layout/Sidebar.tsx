@@ -48,6 +48,7 @@ import {
   Activity,
   Share2,
   BarChart2,
+  FileWarning,
   Route,
   ArrowUpRight,
   UserX,
@@ -631,6 +632,7 @@ export default function Sidebar() {
           { href: '/my-dashboard', icon: <LayoutDashboard size={16} />, match: pathname === '/my-dashboard' },
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
           ...(isPrivileged ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
+          ...(isPrivileged ? [{ href: '/file-health', icon: <FileWarning size={16} />, match: pathname === '/file-health' }] : []),
         ].map((item, i) => (
           <Link
             key={i}
@@ -686,6 +688,9 @@ export default function Sidebar() {
             <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
             {isPrivileged && (
               <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
+            )}
+            {isPrivileged && (
+              <GlobalNavItem href="/file-health" icon={<FileWarning size={15} />} label="File Health" active={pathname === '/file-health'} />
             )}
           </div>
 
