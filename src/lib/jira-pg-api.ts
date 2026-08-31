@@ -14,7 +14,6 @@ import { fireConnectorEvent, listConnectors, getConnector, createConnector, upda
 import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
-import mbrStaticTickets from '@/lib/mbr-static-tickets.json';
 
 // 60-second in-memory cache for user role lookups so every API request
 // doesn't pay an extra DB round-trip just to check isAdmin.
@@ -9109,117 +9108,143 @@ async function _handleJiraPgApi(
     return json({ departments, people });
   }
 
-  // GET /reports/mbr-static?team=eng|qa|infra&dateFrom=&dateTo=&person=<email> —
-  // Customer Engineering / QA / Infra tabs, backed by a static export
-  // (mbr-static-tickets.json — 2,257 rows from "All Tickets.xlsx", covering
-  // 2026-06-01 to 2026-07-30 only) rather than a live Jira fetch. This export
-  // carries only the fields Jira's own export had (no description/comment/
-  // attachment/RCA/Fix Description), so this endpoint only ever computes
-  // total/resolved/SLA-breach counts — never a hygiene score.
-  if (path === 'reports/mbr-static' && method === 'GET') {
+  // GET /reports/mbr-team?team=eng|qa|infra&dateFrom=&dateTo=&person=<email> —
+  // Customer Engineering / QA / Infra tabs, live from this app's own `issues`
+  // table (current_department = Dev/QA/Infra respectively), scoped to
+  // whatever date range is selected — NOT a frozen point-in-time export.
+  // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo],
+  // same convention as reports/mbr above. There's no first-response-SLA column
+  // on `issues` (only jira_sla_breached/_due_at/_start_at, which track
+  // resolution SLA), so frbBreached/frbTracked always come back 0/0 — kept in
+  // the response shape for the frontend, not because the data exists.
+  if (path === 'reports/mbr-team' && method === 'GET') {
     if (!isAdmin) return json({ error: 'Forbidden' }, 403);
 
+    const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra' };
     const team = url.searchParams.get('team') || '';
-    if (!['eng', 'qa', 'infra'].includes(team)) {
-      return json({ error: 'team must be one of eng, qa, infra' }, 400);
-    }
+    const dept = TEAM_DEPT[team];
+    if (!dept) return json({ error: 'team must be one of eng, qa, infra' }, 400);
+
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
     const person   = (url.searchParams.get('person') || '').toLowerCase();
 
-    const fromMs = dateFrom ? new Date(dateFrom).getTime() : null;
-    const toMs = dateTo ? (() => { const d = new Date(dateTo); d.setDate(d.getDate() + 1); return d.getTime(); })() : null;
-
-    const inRange = (t: any) => {
-      if (fromMs === null && toMs === null) return true;
-      const created = new Date(t.fields.created).getTime();
-      const updated = new Date(t.fields.updated).getTime();
-      const check = (ms: number) => (fromMs === null || ms >= fromMs) && (toMs === null || ms < toMs);
-      return check(created) || check(updated);
-    };
-
-    const isResolved = (t: any) => ['resolved', 'closed'].includes(String(t.fields.status?.name || '').toLowerCase());
-
-    const teamTickets = (mbrStaticTickets as any[]).filter((t) => t.teamKey === team && inRange(t));
-
-    // Per-person aggregation (every assignee actually present in this filtered slice —
-    // there's no external roster for this static export, unlike the live-DB department view).
-    const byPerson: Record<string, any> = {};
-    for (const t of teamTickets) {
-      const email = (t.fields.assignee?.emailAddress || '').toLowerCase();
-      if (!email) continue;
-      if (!byPerson[email]) {
-        byPerson[email] = {
-          email, name: t.fields.assignee?.displayName || email,
-          total: 0, resolved: 0, rbBreached: 0, rbTracked: 0, frbBreached: 0, frbTracked: 0,
-          resolutionHoursSum: 0, resolutionHoursCount: 0,
-        };
-      }
-      const p = byPerson[email];
-      p.total++;
-      const resolved = isResolved(t);
-      if (resolved) p.resolved++;
-      if (t.rb !== null) { p.rbTracked++; if (t.rb === true) p.rbBreached++; }
-      if (t.frb !== null) { p.frbTracked++; if (t.frb === true) p.frbBreached++; }
-      if (resolved && t.fields.resolutiondate) {
-        const hrs = (new Date(t.fields.resolutiondate).getTime() - new Date(t.fields.created).getTime()) / 3_600_000;
-        if (hrs >= 0) { p.resolutionHoursSum += hrs; p.resolutionHoursCount++; }
-      }
+    const baseParams: any[] = [dept];
+    let fromIdx: number | null = null;
+    let toIdx: number | null = null;
+    if (dateFrom) { baseParams.push(new Date(dateFrom).toISOString()); fromIdx = baseParams.length; }
+    if (dateTo) {
+      const toExclusive = new Date(dateTo);
+      toExclusive.setDate(toExclusive.getDate() + 1);
+      baseParams.push(toExclusive.toISOString());
+      toIdx = baseParams.length;
     }
-    const people = Object.values(byPerson)
-      .map((p: any) => ({
-        email: p.email, name: p.name, total: p.total, resolved: p.resolved,
-        rbBreached: p.rbBreached, rbTracked: p.rbTracked,
-        frbBreached: p.frbBreached, frbTracked: p.frbTracked,
-        avgResolutionHours: p.resolutionHoursCount > 0 ? Math.round(p.resolutionHoursSum / p.resolutionHoursCount) : null,
-      }))
-      .sort((a, b) => b.total - a.total);
-
-    // Monthly summary (by created month), capped at 12 months.
-    const monthlyMap = new Map<string, { total: number; resolved: number; rbBreached: number; rbTracked: number }>();
-    for (const t of teamTickets) {
-      const d = new Date(t.fields.created);
-      const label = `${d.toLocaleString('en-US', { month: 'short' })} ${d.getFullYear()}`;
-      if (!monthlyMap.has(label)) monthlyMap.set(label, { total: 0, resolved: 0, rbBreached: 0, rbTracked: 0 });
-      const m = monthlyMap.get(label)!;
-      m.total++;
-      if (isResolved(t)) m.resolved++;
-      if (t.rb !== null) { m.rbTracked++; if (t.rb === true) m.rbBreached++; }
+    let dateClause = '';
+    if (fromIdx || toIdx) {
+      const createdConds: string[] = [];
+      const updatedConds: string[] = [];
+      if (fromIdx) { createdConds.push(`i."createdAt" >= $${fromIdx}`); updatedConds.push(`i."updatedAt" >= $${fromIdx}`); }
+      if (toIdx)   { createdConds.push(`i."createdAt" < $${toIdx}`);    updatedConds.push(`i."updatedAt" < $${toIdx}`); }
+      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
-    const monthly = Array.from(monthlyMap.entries())
-      .map(([label, m]) => ({ label, ...m }))
-      .slice(0, 12);
 
-    // Summary cards + ticket table — scoped to the selected person if given, else the whole team.
-    const scoped = person ? teamTickets.filter((t) => (t.fields.assignee?.emailAddress || '').toLowerCase() === person) : teamTickets;
-    const summary = scoped.reduce(
-      (acc, t) => {
-        acc.total++;
-        if (isResolved(t)) acc.resolved++;
-        if (t.rb !== null) { acc.rbTracked++; if (t.rb === true) acc.rbBreached++; }
-        if (t.frb !== null) { acc.frbTracked++; if (t.frb === true) acc.frbBreached++; }
-        return acc;
-      },
-      { total: 0, resolved: 0, rbBreached: 0, rbTracked: 0, frbBreached: 0, frbTracked: 0 },
-    );
+    const scopedParams = person ? [...baseParams, person] : baseParams;
+    const personClause = person ? ` AND LOWER(au.email) = $${scopedParams.length}` : '';
 
-    const tickets = scoped
-      .slice()
-      .sort((a, b) => new Date(b.fields.created).getTime() - new Date(a.fields.created).getTime())
-      .slice(0, 300)
-      .map((t) => ({
-        key: t.key,
-        project: t.fields.project?.key || '',
-        assignee: t.fields.assignee?.displayName || '',
-        reporter: t.fields.reporter?.displayName || '',
-        status: t.fields.status?.name || '',
-        summary: t.fields.summary || '',
-        created: t.fields.created,
-        updated: t.fields.updated,
-        rb: t.rb,
-      }));
+    // jira_sla_breached is a plain non-nullable boolean here (no separate
+    // "was this ticket even tracked for SLA" column exists on `issues` —
+    // jira_sla_due_at/_start_at are effectively unpopulated), so every ticket
+    // counts as "tracked" and rb_breached is just how many of those are true.
+    const AGG = `
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE s.category = 'done') AS resolved,
+        COUNT(*) FILTER (WHERE i.jira_sla_breached = true) AS rb_breached,
+        ROUND(AVG(EXTRACT(EPOCH FROM (i."resolvedAt" - i."createdAt")) / 3600)
+          FILTER (WHERE i."resolvedAt" IS NOT NULL)) AS avg_resolution_hours`;
 
-    return json({ people, monthly, summary, tickets, totalMatched: scoped.length });
+    const [summaryRes, peopleRes, monthlyRes, ticketsRes] = await Promise.all([
+      pool.query(`
+        SELECT ${AGG}
+        FROM issues i
+        LEFT JOIN statuses s ON i."statusId" = s.id
+        LEFT JOIN users au ON au.id = i."assigneeId"
+        WHERE i.current_department = $1 ${dateClause}${personClause}
+      `, scopedParams),
+
+      pool.query(`
+        SELECT au.id AS assignee_id, au.email, au."firstName", au."lastName", ${AGG}
+        FROM issues i
+        LEFT JOIN statuses s ON i."statusId" = s.id
+        JOIN users au ON au.id = i."assigneeId"
+        WHERE i.current_department = $1 ${dateClause}
+        GROUP BY au.id, au.email, au."firstName", au."lastName"
+        ORDER BY total DESC
+      `, baseParams),
+
+      pool.query(`
+        SELECT to_char(i."createdAt", 'Mon YYYY') AS label, MIN(i."createdAt") AS sort_key, ${AGG}
+        FROM issues i
+        LEFT JOIN statuses s ON i."statusId" = s.id
+        WHERE i.current_department = $1 ${dateClause}
+        GROUP BY 1
+        ORDER BY sort_key DESC
+        LIMIT 12
+      `, baseParams),
+
+      pool.query(`
+        SELECT i.key, sp.key AS project_key,
+          COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
+          COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
+          s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
+          i.jira_sla_breached,
+          COUNT(*) OVER() AS total_matched
+        FROM issues i
+        LEFT JOIN statuses s ON i."statusId" = s.id
+        LEFT JOIN spaces sp ON sp.id = i."spaceId"
+        LEFT JOIN users au ON au.id = i."assigneeId"
+        LEFT JOIN users ru ON ru.id = i."reporterId"
+        WHERE i.current_department = $1 ${dateClause}${personClause}
+        ORDER BY i."createdAt" DESC
+        LIMIT 300
+      `, scopedParams),
+    ]);
+
+    const toSummary = (r: any) => ({
+      total: Number(r.total) || 0,
+      resolved: Number(r.resolved) || 0,
+      rbTracked: Number(r.total) || 0,
+      rbBreached: Number(r.rb_breached) || 0,
+      frbTracked: 0,
+      frbBreached: 0,
+    });
+
+    const summary = toSummary(summaryRes.rows[0] || {});
+
+    const people = peopleRes.rows.map((r: any) => ({
+      email: r.email,
+      name: `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email,
+      ...toSummary(r),
+      avgResolutionHours: r.avg_resolution_hours === null ? null : Number(r.avg_resolution_hours),
+    }));
+
+    const monthly = monthlyRes.rows
+      .map((r: any) => ({ label: r.label, ...toSummary(r) }))
+      .reverse();
+
+    const totalMatched = ticketsRes.rows.length > 0 ? Number(ticketsRes.rows[0].total_matched) || 0 : 0;
+    const tickets = ticketsRes.rows.map((r: any) => ({
+      key: r.key,
+      project: r.project_key || '',
+      assignee: r.assignee_name || '',
+      reporter: r.reporter_name || '',
+      status: r.status_name || '',
+      summary: r.summary || '',
+      created: r.createdAt,
+      updated: r.updatedAt,
+      rb: !!r.jira_sla_breached,
+    }));
+
+    return json({ people, monthly, summary, tickets, totalMatched });
   }
 
   // GET /admin/file-health -- admin-only: scans every uploaded file this app
