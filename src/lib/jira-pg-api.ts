@@ -8131,6 +8131,29 @@ async function _handleJiraPgApi(
       await (db as any).issueHistory.create({ data: { issueId: issue.id, field: 'comment', oldValue: null, newValue: comment.body.slice(0, 500), authorName: aName, authorEmail: authorUser?.email ?? null, createdAt: new Date() } });
     } catch (_e) {}
 
+    // Record that this user did real work on the ticket -- same 'worked'
+    // catch-all the general status/assignee-change PATCH handler already
+    // writes, extended to commenting. Someone can genuinely work a ticket
+    // (triage, ask for info, hand off in writing) through comments alone,
+    // with no status or assignee change at all -- that was previously
+    // invisible to "Worked on" / the Filters page's Worked chip / Team
+    // Analytics, same gap the PATCH-handler fix closed for status/assignee.
+    try {
+      // current_department isn't a Prisma-schema column (added via raw ALTER
+      // TABLE, like dept_sla_log/dept_statuses) -- db.issue.findUnique above
+      // never actually returns it, so it has to be read via a raw query, the
+      // same way the queue-suspension check earlier in this handler does.
+      const commentDeptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
+      const commentDept = commentDeptRow.rows[0]?.current_department || null;
+      if (userId && commentDept) {
+        await pool.query(
+          `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
+           ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET worked_at=NOW()`,
+          [userId, issue.id, commentDept]
+        );
+      }
+    } catch { /* non-critical */ }
+
 
     const issueDisplayKey = (issue as any).cf_key || issue.key;
     // Email: notify assignee + reporter (not the commenter)
