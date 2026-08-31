@@ -4985,6 +4985,20 @@ async function _handleJiraPgApi(
       // live status while still current here, or its frozen dept_statuses
       // snapshot (case-insensitive key match, same as every other per-dept
       // snapshot read in this file) once it's moved on to another dept.
+      // "Created" range + Queue (Filters page: Queue: Migration + Created:
+      // last 7 days) previously required the ticket to ALSO still be
+      // CURRENTLY in that dept -- so a ticket created in Migration and since
+      // moved to Dev (or anywhere else) silently dropped out, even though it
+      // genuinely was created there. Checked against real data: "created in
+      // Migration last week" came back 93 this way vs the true 99 counting
+      // each ticket's actual origin department. Match against origin instead
+      // (the earliest department-change event's oldValue, i.e. what it
+      // started as; current_department if it never moved) whenever Created
+      // is the active date filter alongside a Queue -- this mirrors
+      // workedRange's same "opt-in override for the Filters page's own
+      // semantics" pattern, and leaves the plain per-department queue board
+      // views (All Tickets, Assigned to me, etc., which never send
+      // createdRange) on the original current-department behavior.
       const deptDeptMatchSql = workedRange
         ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})
            AND (
@@ -4994,6 +5008,11 @@ async function _handleJiraPgApi(
                WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
              ))
            )`
+        : createdRange
+        ? `LOWER(COALESCE(
+             (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+             i.current_department
+           )) = LOWER($2) ${deptDoneClause}`
         : historyAssigneeIdx
         ? `(
             (LOWER(i.current_department) = LOWER($2) AND i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) ${deptDoneClause})
