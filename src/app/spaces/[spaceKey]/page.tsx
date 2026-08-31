@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { typeIcons, getInitials, getIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor, getDeptColor, buildMentionHtml } from '@/lib/utils';
+import { typeIcons, getInitials, getIssueStatus, getEffectiveIssueStatus, timeAgo, formatJiraDateTime, resolveStatusColor, getDeptColor, buildMentionHtml } from '@/lib/utils';
 import CommentReactions from '@/components/ui/CommentReactions';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { trackRecentItem } from '@/lib/recent-items';
@@ -2936,7 +2936,13 @@ function SpaceDetailContent() {
                 // snapshot used to be shown for every non-"done" status too, so once
                 // the receiving dept moved the ticket along (e.g. To Do -> In Progress)
                 // this view kept showing the old pre-transfer status forever.
-                const st = getIssueStatus(issue);
+                //
+                // getIssueStatus alone reads only the global statusId, which can lag
+                // behind the receiving dept's own per-dept status (dept_statuses) --
+                // the same stale-status class of bug getEffectiveIssueStatus already
+                // exists to fix everywhere else in the app (see its own comment in
+                // lib/utils.ts), just never applied to this specific card before.
+                const st = getEffectiveIssueStatus(issue as any);
                 const stColor = st ? resolveStatusColor(st) : '#6B7280';
                 // Last comment from issue (if comments loaded)
                 const comments: any[] = (issue as any).comments || [];
@@ -3010,7 +3016,13 @@ function SpaceDetailContent() {
                             <span className="text-[12px] text-gray-600">{assigneeName}</span>
                           </div>
                         ) : (
-                          <span className="text-[12px] text-gray-400 italic">Unassigned — waiting for {currentDept}</span>
+                          // Just "Unassigned" -- the actual current status (shown as its
+                          // own badge above, now reading the correct per-dept snapshot)
+                          // already answers "what's happening with it"; a second, separate
+                          // hardcoded "waiting for X" phrase here could say something that
+                          // doesn't match that badge (e.g. it's already been picked up and
+                          // moved past Open, but this still said "waiting").
+                          <span className="text-[12px] text-gray-400 italic">Unassigned</span>
                         )}
                       </div>
                     </div>
