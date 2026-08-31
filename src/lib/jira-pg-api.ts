@@ -14,6 +14,7 @@ import { fireConnectorEvent, listConnectors, getConnector, createConnector, upda
 import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
+import mbrStaticTickets from '@/lib/mbr-static-tickets.json';
 
 // 60-second in-memory cache for user role lookups so every API request
 // doesn't pay an extra DB round-trip just to check isAdmin.
@@ -9106,6 +9107,119 @@ async function _handleJiraPgApi(
     });
 
     return json({ departments, people });
+  }
+
+  // GET /reports/mbr-static?team=eng|qa|infra&dateFrom=&dateTo=&person=<email> —
+  // Customer Engineering / QA / Infra tabs, backed by a static export
+  // (mbr-static-tickets.json — 2,257 rows from "All Tickets.xlsx", covering
+  // 2026-06-01 to 2026-07-30 only) rather than a live Jira fetch. This export
+  // carries only the fields Jira's own export had (no description/comment/
+  // attachment/RCA/Fix Description), so this endpoint only ever computes
+  // total/resolved/SLA-breach counts — never a hygiene score.
+  if (path === 'reports/mbr-static' && method === 'GET') {
+    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+
+    const team = url.searchParams.get('team') || '';
+    if (!['eng', 'qa', 'infra'].includes(team)) {
+      return json({ error: 'team must be one of eng, qa, infra' }, 400);
+    }
+    const dateFrom = url.searchParams.get('dateFrom') || '';
+    const dateTo   = url.searchParams.get('dateTo') || '';
+    const person   = (url.searchParams.get('person') || '').toLowerCase();
+
+    const fromMs = dateFrom ? new Date(dateFrom).getTime() : null;
+    const toMs = dateTo ? (() => { const d = new Date(dateTo); d.setDate(d.getDate() + 1); return d.getTime(); })() : null;
+
+    const inRange = (t: any) => {
+      if (fromMs === null && toMs === null) return true;
+      const created = new Date(t.fields.created).getTime();
+      const updated = new Date(t.fields.updated).getTime();
+      const check = (ms: number) => (fromMs === null || ms >= fromMs) && (toMs === null || ms < toMs);
+      return check(created) || check(updated);
+    };
+
+    const isResolved = (t: any) => ['resolved', 'closed'].includes(String(t.fields.status?.name || '').toLowerCase());
+
+    const teamTickets = (mbrStaticTickets as any[]).filter((t) => t.teamKey === team && inRange(t));
+
+    // Per-person aggregation (every assignee actually present in this filtered slice —
+    // there's no external roster for this static export, unlike the live-DB department view).
+    const byPerson: Record<string, any> = {};
+    for (const t of teamTickets) {
+      const email = (t.fields.assignee?.emailAddress || '').toLowerCase();
+      if (!email) continue;
+      if (!byPerson[email]) {
+        byPerson[email] = {
+          email, name: t.fields.assignee?.displayName || email,
+          total: 0, resolved: 0, rbBreached: 0, rbTracked: 0, frbBreached: 0, frbTracked: 0,
+          resolutionHoursSum: 0, resolutionHoursCount: 0,
+        };
+      }
+      const p = byPerson[email];
+      p.total++;
+      const resolved = isResolved(t);
+      if (resolved) p.resolved++;
+      if (t.rb !== null) { p.rbTracked++; if (t.rb === true) p.rbBreached++; }
+      if (t.frb !== null) { p.frbTracked++; if (t.frb === true) p.frbBreached++; }
+      if (resolved && t.fields.resolutiondate) {
+        const hrs = (new Date(t.fields.resolutiondate).getTime() - new Date(t.fields.created).getTime()) / 3_600_000;
+        if (hrs >= 0) { p.resolutionHoursSum += hrs; p.resolutionHoursCount++; }
+      }
+    }
+    const people = Object.values(byPerson)
+      .map((p: any) => ({
+        email: p.email, name: p.name, total: p.total, resolved: p.resolved,
+        rbBreached: p.rbBreached, rbTracked: p.rbTracked,
+        frbBreached: p.frbBreached, frbTracked: p.frbTracked,
+        avgResolutionHours: p.resolutionHoursCount > 0 ? Math.round(p.resolutionHoursSum / p.resolutionHoursCount) : null,
+      }))
+      .sort((a, b) => b.total - a.total);
+
+    // Monthly summary (by created month), capped at 12 months.
+    const monthlyMap = new Map<string, { total: number; resolved: number; rbBreached: number; rbTracked: number }>();
+    for (const t of teamTickets) {
+      const d = new Date(t.fields.created);
+      const label = `${d.toLocaleString('en-US', { month: 'short' })} ${d.getFullYear()}`;
+      if (!monthlyMap.has(label)) monthlyMap.set(label, { total: 0, resolved: 0, rbBreached: 0, rbTracked: 0 });
+      const m = monthlyMap.get(label)!;
+      m.total++;
+      if (isResolved(t)) m.resolved++;
+      if (t.rb !== null) { m.rbTracked++; if (t.rb === true) m.rbBreached++; }
+    }
+    const monthly = Array.from(monthlyMap.entries())
+      .map(([label, m]) => ({ label, ...m }))
+      .slice(0, 12);
+
+    // Summary cards + ticket table — scoped to the selected person if given, else the whole team.
+    const scoped = person ? teamTickets.filter((t) => (t.fields.assignee?.emailAddress || '').toLowerCase() === person) : teamTickets;
+    const summary = scoped.reduce(
+      (acc, t) => {
+        acc.total++;
+        if (isResolved(t)) acc.resolved++;
+        if (t.rb !== null) { acc.rbTracked++; if (t.rb === true) acc.rbBreached++; }
+        if (t.frb !== null) { acc.frbTracked++; if (t.frb === true) acc.frbBreached++; }
+        return acc;
+      },
+      { total: 0, resolved: 0, rbBreached: 0, rbTracked: 0, frbBreached: 0, frbTracked: 0 },
+    );
+
+    const tickets = scoped
+      .slice()
+      .sort((a, b) => new Date(b.fields.created).getTime() - new Date(a.fields.created).getTime())
+      .slice(0, 300)
+      .map((t) => ({
+        key: t.key,
+        project: t.fields.project?.key || '',
+        assignee: t.fields.assignee?.displayName || '',
+        reporter: t.fields.reporter?.displayName || '',
+        status: t.fields.status?.name || '',
+        summary: t.fields.summary || '',
+        created: t.fields.created,
+        updated: t.fields.updated,
+        rb: t.rb,
+      }));
+
+    return json({ people, monthly, summary, tickets, totalMatched: scoped.length });
   }
 
   // GET /admin/file-health -- admin-only: scans every uploaded file this app

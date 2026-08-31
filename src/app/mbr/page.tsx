@@ -23,15 +23,215 @@ const GRADE_STYLE: Record<string, string> = {
 };
 const GRADE_LABEL: Record<string, string> = { great: 'Great', ok: 'Needs attention', poor: 'Poor' };
 
-function Card({ label, value, tone, icon }: { label: string; value: number; tone?: 'warn' | 'bad'; icon: React.ReactNode }) {
+function Card({ label, value, tone, icon, sub }: { label: string; value: React.ReactNode; tone?: 'warn' | 'bad'; icon: React.ReactNode; sub?: string }) {
   const valueColor = tone === 'bad' ? 'text-red-600' : tone === 'warn' ? 'text-amber-600' : 'text-gray-800';
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-5 flex items-start justify-between">
       <div>
         <p className={`text-[24px] font-bold ${valueColor}`}>{value}</p>
         <p className="text-[12px] text-gray-500 mt-0.5">{label}</p>
+        {sub && <p className="text-[11px] text-gray-400 mt-0.5">{sub}</p>}
       </div>
       <div className="text-gray-300">{icon}</div>
+    </div>
+  );
+}
+
+const TOP_TABS = [
+  { id: 'department', label: 'By Department' },
+  { id: 'eng', label: 'Customer Engineering' },
+  { id: 'qa', label: 'QA' },
+  { id: 'infra', label: 'Infra' },
+] as const;
+type TopTab = (typeof TOP_TABS)[number]['id'];
+
+function pct(numerator: number, denominator: number): string {
+  return denominator > 0 ? `${Math.round((numerator / denominator) * 100)}%` : '—';
+}
+
+// Customer Engineering / QA / Infra — backed by a static export (mbr-static-tickets.json,
+// 2,257 rows from "All Tickets.xlsx", 2026-06-01 to 2026-07-30 only), not a live fetch.
+// No hygiene score / RCA / screenshot checks here — that data isn't in this export.
+function StaticTeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dateFrom: string; dateTo: string }) {
+  const [person, setPerson] = useState('');
+  const [people, setPeople] = useState<any[]>([]);
+  const [monthly, setMonthly] = useState<any[]>([]);
+  const [summary, setSummary] = useState<any>({ total: 0, resolved: 0, rbBreached: 0, rbTracked: 0, frbBreached: 0, frbTracked: 0 });
+  const [tickets, setTickets] = useState<any[]>([]);
+  const [totalMatched, setTotalMatched] = useState(0);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    api.getMbrStaticData(team, dateFrom || undefined, dateTo || undefined, person || undefined)
+      .then((d) => { setPeople(d.people); setMonthly(d.monthly); setSummary(d.summary); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
+      .catch(() => { setPeople([]); setMonthly([]); setTickets([]); })
+      .finally(() => setLoading(false));
+  }, [team, dateFrom, dateTo, person]);
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
+        <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <p className="text-[12px] text-gray-400 -mt-2">
+        From All Tickets.xlsx (covers 2026-06-01 to 2026-07-30 only) — no hygiene score, RCA, closing-comment, or screenshot checks (this export doesn't carry that data).
+      </p>
+
+      <div className="flex items-center gap-3">
+        <label className="text-[12px] text-gray-500 font-medium">Person</label>
+        <select value={person} onChange={(e) => setPerson(e.target.value)}
+          className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[220px]">
+          <option value="">All ({people.reduce((s, p) => s + p.total, 0)} tickets)</option>
+          {people.map((p) => <option key={p.email} value={p.email}>{p.name} ({p.total})</option>)}
+        </select>
+      </div>
+
+      {/* Summary — Section 4.12 "Summary" (4 cards, for selected person or whole team) */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Card label="Total tickets" value={summary.total} icon={<Users size={22} />} />
+        <Card label="Resolved tickets" value={summary.resolved} sub={pct(summary.resolved, summary.total)} icon={<Users size={22} />}
+          tone={summary.total > 0 && summary.resolved / summary.total < 0.7 ? 'warn' : undefined} />
+        <Card label="Resolution SLA breached" value={`${summary.rbBreached} / ${summary.rbTracked}`} icon={<AlertTriangle size={22} />} tone={summary.rbBreached > 0 ? 'bad' : undefined} />
+        <Card label="First response SLA breached" value={`${summary.frbBreached} / ${summary.frbTracked}`} icon={<AlertTriangle size={22} />} tone={summary.frbBreached > 0 ? 'bad' : undefined} />
+      </div>
+
+      {/* Monthly summary — Section 4.12, team-wide regardless of person filter */}
+      {monthly.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-100">
+            <h3 className="text-[14px] font-semibold text-gray-700">Monthly summary</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-5 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Month</th>
+                  <th className="px-5 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Total tickets</th>
+                  <th className="px-5 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Resolved tickets</th>
+                  <th className="px-5 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Resolution SLA breached</th>
+                  <th className="px-5 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Breach rate</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {monthly.map((m) => (
+                  <tr key={m.label} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-5 py-3 text-[13px] font-medium text-gray-800">{m.label}</td>
+                    <td className="px-5 py-3 text-[13px] text-gray-700">{m.total}</td>
+                    <td className="px-5 py-3 text-[13px] text-gray-700">{m.resolved} <span className="text-gray-400">({pct(m.resolved, m.total)})</span></td>
+                    <td className={`px-5 py-3 text-[13px] ${m.rbBreached > 0 ? 'text-red-600' : 'text-gray-700'}`}>{m.rbBreached} / {m.rbTracked}</td>
+                    <td className="px-5 py-3 text-[13px] text-gray-700">{pct(m.rbBreached, m.rbTracked)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Per-person SLA summary — Section 4.12 */}
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100">
+          <h3 className="text-[14px] font-semibold text-gray-700">Per-person SLA summary</h3>
+        </div>
+        {people.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <Users size={36} className="text-gray-200 mb-3" />
+            <p className="text-[14px] font-medium text-gray-400">No tracked tickets for this selection</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Name</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Total tickets</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Resolved tickets</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Resolution SLA breached</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Avg. resolution (hrs)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {people.map((p) => (
+                  <tr key={p.email} className="hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => setPerson(p.email)}>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-7 h-7 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-[11px] font-bold flex-shrink-0">
+                          {(p.name || '?').charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                          <p className="text-[13px] font-medium text-gray-800">{p.name}</p>
+                          <p data-hj-suppress className="text-[11px] text-gray-400">{p.email}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.total}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.resolved} <span className="text-gray-400">({pct(p.resolved, p.total)})</span></td>
+                    <td className={`px-4 py-3 text-[13px] ${p.rbBreached > 0 ? 'text-red-600' : 'text-gray-700'}`}>{p.rbBreached} / {p.rbTracked}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.avgResolutionHours === null ? '—' : p.avgResolutionHours}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Ticket table — Section 4.12 */}
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <h3 className="text-[14px] font-semibold text-gray-700">Tickets</h3>
+          <span className="text-[12px] text-gray-400">Showing {tickets.length} of {totalMatched}{totalMatched > tickets.length ? ' (capped)' : ''}</span>
+        </div>
+        {tickets.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <Users size={36} className="text-gray-200 mb-3" />
+            <p className="text-[14px] font-medium text-gray-400">No tickets in this range</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+            <table className="w-full text-[13px] whitespace-nowrap">
+              <thead>
+                <tr>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Ticket</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Board</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Assignee</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Reporter</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Status</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Summary</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolution SLA breached</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tickets.map((t) => (
+                  <tr key={t.key} className="hover:bg-gray-50">
+                    <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">{t.key}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.assignee}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.reporter}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100">
+                      {t.rb === true && <span className="font-semibold text-red-600">Yes</span>}
+                      {t.rb === false && <span className="font-medium text-green-600">No</span>}
+                      {t.rb === null && <span className="text-gray-400">N/A</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -41,6 +241,7 @@ export default function MbrPage() {
   const router = useRouter();
   const isPrivileged = PRIVILEGED_ROLES.includes(user?.role || '');
 
+  const [topTab, setTopTab] = useState<TopTab>('department');
   const [allDepartments, setAllDepartments] = useState<string[]>([]);
   const [department, setDepartment] = useState('');
   const [dateFrom, setDateFrom] = useState('');
@@ -64,13 +265,13 @@ export default function MbrPage() {
   }, [isPrivileged]);
 
   useEffect(() => {
-    if (!isPrivileged) return;
+    if (!isPrivileged || topTab !== 'department') return;
     setLoading(true);
     api.getMbrData(department || undefined, dateFrom || undefined, dateTo || undefined, staleDays)
       .then((d) => { setDepartments(d.departments); setPeople(d.people); })
       .catch(() => { setDepartments([]); setPeople([]); })
       .finally(() => setLoading(false));
-  }, [isPrivileged, department, dateFrom, dateTo, staleDays]);
+  }, [isPrivileged, topTab, department, dateFrom, dateTo, staleDays]);
 
   const toggleSort = useCallback((key: keyof PersonRow) => {
     setSortKey((prevKey) => {
@@ -116,18 +317,32 @@ export default function MbrPage() {
       {/* Header */}
       <div className="bg-white border-b border-gray-200 px-8 py-4 flex items-center justify-between flex-shrink-0">
         <h1 className="text-xl font-bold flex items-center gap-2 text-gray-800"><BarChart2 size={20} /> MBR</h1>
-        <select
-          value={department}
-          onChange={(e) => setDepartment(e.target.value)}
-          className="border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-56"
-        >
-          <option value="">All Departments</option>
-          {allDepartments.map((d) => <option key={d} value={d}>{d}</option>)}
-        </select>
+        {topTab === 'department' && (
+          <select
+            value={department}
+            onChange={(e) => setDepartment(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-56"
+          >
+            <option value="">All Departments</option>
+            {allDepartments.map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        )}
+      </div>
+
+      {/* Top-level tabs */}
+      <div className="bg-white border-b border-gray-200 px-8 flex-shrink-0">
+        <div className="flex gap-1">
+          {TOP_TABS.map((t) => (
+            <button key={t.id} onClick={() => setTopTab(t.id)}
+              className={`px-4 py-3 text-[13px] border-b-2 transition-colors ${topTab === t.id ? 'border-blue-600 text-blue-600 font-semibold' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex-1 overflow-auto px-8 py-6">
-        {/* Shared date range + stale threshold bar */}
+        {/* Shared date range bar */}
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2 text-[13px] font-medium text-gray-600">
             <Calendar size={15} className="text-gray-400" />
@@ -143,15 +358,17 @@ export default function MbrPage() {
             <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
               className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
-          <div className="flex items-center gap-2">
-            <label className="text-[12px] text-gray-400 font-medium">Stale threshold</label>
-            <select value={staleDays} onChange={(e) => setStaleDays(Number(e.target.value))}
-              className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value={3}>3 days</option>
-              <option value={7}>7 days</option>
-              <option value={14}>14 days</option>
-            </select>
-          </div>
+          {topTab === 'department' && (
+            <div className="flex items-center gap-2">
+              <label className="text-[12px] text-gray-400 font-medium">Stale threshold</label>
+              <select value={staleDays} onChange={(e) => setStaleDays(Number(e.target.value))}
+                className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value={3}>3 days</option>
+                <option value={7}>7 days</option>
+                <option value={14}>14 days</option>
+              </select>
+            </div>
+          )}
           {(dateFrom || dateTo) && (
             <button onClick={() => { setDateFrom(''); setDateTo(''); }}
               className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
@@ -160,7 +377,9 @@ export default function MbrPage() {
           )}
         </div>
 
-        {loading ? (
+        {topTab !== 'department' ? (
+          <StaticTeamTab team={topTab} dateFrom={dateFrom} dateTo={dateTo} />
+        ) : loading ? (
           <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
             <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
           </div>
