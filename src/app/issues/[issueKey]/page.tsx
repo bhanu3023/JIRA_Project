@@ -2831,6 +2831,23 @@ export default function IssueDetailPage() {
 
                 // If the workflow has transitions from this status, show only those targets.
                 // Otherwise fall back to showing all other statuses (unconstrained workflow).
+                // The ticket's dept_statuses snapshot can carry an id from
+                // either source depending on how it was last set: a real
+                // statuses-table id (from a plain status change, synced by
+                // the backend's "keep dept_statuses in sync" block) or a
+                // queue-scoped qst_... id (from picking a custom queue
+                // status directly) -- these don't necessarily match this
+                // queue's OWN id for what's conceptually the same status
+                // (e.g. dept_statuses held "status_qa_inprogress" while this
+                // queue's own "In Progress" entry is "qst_migration_
+                // inprogress"), so an id-only comparison silently failed to
+                // recognize the ticket was already on that status and kept
+                // offering it as a "move to" option. Also compare by name
+                // (case-insensitive) as a fallback -- two statuses conceptually
+                // named "In Progress" are the same status regardless of which
+                // id happens to be attached to the snapshot right now.
+                const issueStatNameLower = (issueStat.name || '').trim().toLowerCase();
+                const isCurrentStatus = (s: any) => s.id === issueStat.id || (s.name || '').trim().toLowerCase() === issueStatNameLower;
                 const options: { status: any; transitionName: string }[] =
                   validToIds.length > 0
                     ? (validToIds
@@ -2840,9 +2857,9 @@ export default function IssueDetailPage() {
                           return status ? { status, transitionName: tr?.name || '' } : null;
                         })
                         .filter(Boolean) as { status: any; transitionName: string }[])
-                        .filter(o => o.status.id !== issueStat.id)
+                        .filter(o => !isCurrentStatus(o.status))
                     : spaceStatuses
-                        .filter((s: any) => s.id !== issueStat.id)
+                        .filter((s: any) => !isCurrentStatus(s))
                         .map((s: any) => ({ status: s, transitionName: '' }));
 
                 return (
@@ -3834,17 +3851,7 @@ export default function IssueDetailPage() {
             <div className="px-6 py-5">
               <h3 className="text-[15px] font-semibold text-gray-900 mb-1">Change Department?</h3>
               <p className="text-[13px] text-gray-600 mt-2 leading-relaxed">
-                {(() => {
-                  const waitingName = `Waiting for ${pendingDeptChange.dept.name}`;
-                  const alreadyWaiting = issueStat?.name?.toLowerCase() === waitingName.toLowerCase();
-                  return alreadyWaiting ? (
-                    <>The ticket will move to <span className="font-semibold text-blue-700">{pendingDeptChange.dept.name}</span>.</>
-                  ) : (
-                    <>The current status in <span className="font-semibold text-gray-800">{(issue as any).current_department || 'current'}</span> will
-                    first be set to <span className="font-semibold text-amber-600">{waitingName}</span>,
-                    then the ticket will move to <span className="font-semibold text-blue-700">{pendingDeptChange.dept.name}</span>.</>
-                  );
-                })()}
+                Are you sure you want to change the department to <span className="font-semibold text-blue-700">{pendingDeptChange.dept.name}</span>?
               </p>
               <div className="flex items-center justify-end gap-2 mt-5">
                 <button
@@ -4537,9 +4544,7 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
               <div className="px-6 py-5">
                 <h3 className="text-[15px] font-semibold text-gray-900 mb-1">Change Department?</h3>
                 <p className="text-[13px] text-gray-600 mt-2 leading-relaxed">
-                  The current status in <span className="font-semibold text-gray-800">{currentDepartment || 'Dev'}</span> will
-                  first be set to <span className="font-semibold text-amber-600">Waiting for {pendingDept.name}</span>,
-                  then the ticket will move to <span className="font-semibold text-blue-700">{pendingDept.name}</span>.
+                  Are you sure you want to change the department to <span className="font-semibold text-blue-700">{pendingDept.name}</span>?
                 </p>
                 <div className="flex items-center justify-end gap-2 mt-5">
                   <button
