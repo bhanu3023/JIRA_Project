@@ -4999,7 +4999,7 @@ async function _handleJiraPgApi(
       // semantics" pattern, and leaves the plain per-department queue board
       // views (All Tickets, Assigned to me, etc., which never send
       // createdRange) on the original current-department behavior.
-      const deptDeptMatchSql = workedRange
+      const workedDeptMatchSql = workedRange
         ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})
            AND (
              (LOWER(i.current_department) = LOWER($2) AND s.category = 'done')
@@ -5008,11 +5008,28 @@ async function _handleJiraPgApi(
                WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
              ))
            )`
-        : createdRange
+        : null;
+      const originDeptMatchSql = createdRange
         ? `LOWER(COALESCE(
              (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
              i.current_department
-           )) = LOWER($2) ${deptDoneClause}`
+           )) = LOWER($2)`
+        : null;
+      // Both Created and Worked can be active together (e.g. "created in
+      // Migration in the last 7 days AND worked in Migration in the last 7
+      // days") -- these used to be mutually exclusive (workedRange silently
+      // took over the ENTIRE dept-match whenever set, discarding the
+      // origin-based Created match even when both filters were visibly
+      // active), so combining them dropped the Created filter's department
+      // scoping without any indication anything had changed. AND them
+      // together instead so each active filter's own department semantics
+      // actually applies, matching what the visible filter chips say.
+      const deptDeptMatchSql = workedDeptMatchSql && originDeptMatchSql
+        ? `${workedDeptMatchSql} AND ${originDeptMatchSql}`
+        : workedDeptMatchSql
+        ? workedDeptMatchSql
+        : originDeptMatchSql
+        ? `${originDeptMatchSql} ${deptDoneClause}`
         : historyAssigneeIdx
         ? `(
             (LOWER(i.current_department) = LOWER($2) AND i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) ${deptDoneClause})
