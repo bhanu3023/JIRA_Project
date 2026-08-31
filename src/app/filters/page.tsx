@@ -1433,18 +1433,14 @@ export default function FiltersPage() {
   // EXPORT_EXTRA_COLUMNS but never actually rendered in the on-screen table
   // itself -- filtering by one of these told you which tickets matched, but
   // not what value each ticket actually had, without exporting just to look.
-  // Same "chip active OR a value is currently selected" visibility rule the
-  // export already uses, kept to just these three (the ones actually asked
-  // for) rather than every EXPORT_EXTRA_COLUMNS field, so the table doesn't
-  // grow columns for extras nobody's using here.
+  // Tried gating these on "the matching filter chip is active" first, same
+  // as the export does -- but that meant filtering by Queue+Worked (not
+  // Product Type) hid them again, which is exactly the "why isn't it
+  // showing" complaint this was meant to fix. Always show them instead,
+  // like Assignee/Reported By/Status already are, regardless of which
+  // filters happen to be selected.
   const TABLE_EXTRA_COLUMN_IDS = ['productType', 'combination', 'projectManager'] as const;
-  const tableExtraCols = TABLE_EXTRA_COLUMN_IDS.filter((id) => {
-    if (activeExtras.includes(id)) return true;
-    if (id === 'productType') return selProductType.length > 0;
-    if (id === 'combination') return !!selCombination;
-    if (id === 'projectManager') return selProjectManager.length > 0;
-    return false;
-  });
+  const tableExtraCols = TABLE_EXTRA_COLUMN_IDS;
 
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
@@ -1977,7 +1973,7 @@ export default function FiltersPage() {
                 <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24 hidden md:table-cell">Time Spent</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
                 {tableExtraCols.map((id) => (
-                  <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32 hidden xl:table-cell">
+                  <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
                     {EXPORT_EXTRA_COLUMNS[id].label}
                   </th>
                 ))}
@@ -2107,7 +2103,7 @@ export default function FiltersPage() {
                     </span>
                   </td>
                   {tableExtraCols.map((id) => (
-                    <td key={id} className="px-2 py-2.5 hidden xl:table-cell">
+                    <td key={id} className="px-2 py-2.5">
                       <span className="text-[11.5px] text-gray-600 truncate">
                         {EXPORT_EXTRA_COLUMNS[id].getValue(issue) || '—'}
                       </span>
