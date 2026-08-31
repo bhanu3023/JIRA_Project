@@ -1968,6 +1968,11 @@ export default function FiltersPage() {
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[32%]">Work</th>
+                {tableExtraCols.map((id) => (
+                  <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
+                    {EXPORT_EXTRA_COLUMNS[id].label}
+                  </th>
+                ))}
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Assignee</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Reported By</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
@@ -1976,11 +1981,6 @@ export default function FiltersPage() {
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
                 <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24 hidden md:table-cell">Time Spent</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
-                {tableExtraCols.map((id) => (
-                  <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
-                    {EXPORT_EXTRA_COLUMNS[id].label}
-                  </th>
-                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -2005,6 +2005,13 @@ export default function FiltersPage() {
                       {issue.summary}
                     </Link>
                   </td>
+                  {tableExtraCols.map((id) => (
+                    <td key={id} className="px-2 py-2.5">
+                      <span className="text-[11.5px] text-gray-600 truncate">
+                        {EXPORT_EXTRA_COLUMNS[id].getValue(issue) || '—'}
+                      </span>
+                    </td>
+                  ))}
                   <td className="px-2 py-2.5">
                     {issue.assignee ? (
                       <div className="flex items-center gap-1.5">
@@ -2106,13 +2113,6 @@ export default function FiltersPage() {
                       })()}
                     </span>
                   </td>
-                  {tableExtraCols.map((id) => (
-                    <td key={id} className="px-2 py-2.5">
-                      <span className="text-[11.5px] text-gray-600 truncate">
-                        {EXPORT_EXTRA_COLUMNS[id].getValue(issue) || '—'}
-                      </span>
-                    </td>
-                  ))}
                 </tr>
               ))}
             </tbody>
