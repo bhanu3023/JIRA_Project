@@ -1429,6 +1429,23 @@ export default function FiltersPage() {
     setExporting(false);
   };
 
+  // Product Type / Combination / Project Manager were exportable via
+  // EXPORT_EXTRA_COLUMNS but never actually rendered in the on-screen table
+  // itself -- filtering by one of these told you which tickets matched, but
+  // not what value each ticket actually had, without exporting just to look.
+  // Same "chip active OR a value is currently selected" visibility rule the
+  // export already uses, kept to just these three (the ones actually asked
+  // for) rather than every EXPORT_EXTRA_COLUMNS field, so the table doesn't
+  // grow columns for extras nobody's using here.
+  const TABLE_EXTRA_COLUMN_IDS = ['productType', 'combination', 'projectManager'] as const;
+  const tableExtraCols = TABLE_EXTRA_COLUMN_IDS.filter((id) => {
+    if (activeExtras.includes(id)) return true;
+    if (id === 'productType') return selProductType.length > 0;
+    if (id === 'combination') return !!selCombination;
+    if (id === 'projectManager') return selProjectManager.length > 0;
+    return false;
+  });
+
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
     if (selStatuses.length === 0) return;
@@ -1959,6 +1976,11 @@ export default function FiltersPage() {
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
                 <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24 hidden md:table-cell">Time Spent</th>
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
+                {tableExtraCols.map((id) => (
+                  <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32 hidden xl:table-cell">
+                    {EXPORT_EXTRA_COLUMNS[id].label}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -2084,6 +2106,13 @@ export default function FiltersPage() {
                       })()}
                     </span>
                   </td>
+                  {tableExtraCols.map((id) => (
+                    <td key={id} className="px-2 py-2.5 hidden xl:table-cell">
+                      <span className="text-[11.5px] text-gray-600 truncate">
+                        {EXPORT_EXTRA_COLUMNS[id].getValue(issue) || '—'}
+                      </span>
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>
