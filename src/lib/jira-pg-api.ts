@@ -5015,30 +5015,36 @@ async function _handleJiraPgApi(
              i.current_department
            )) = LOWER($2)`
         : null;
-      // Both Created and Worked can be active together (e.g. "created in
-      // Migration in the last 7 days AND worked in Migration in the last 7
-      // days") -- these used to be mutually exclusive (workedRange silently
-      // took over the ENTIRE dept-match whenever set, discarding the
-      // origin-based Created match even when both filters were visibly
-      // active), so combining them dropped the Created filter's department
-      // scoping without any indication anything had changed. AND them
-      // together instead so each active filter's own department semantics
-      // actually applies, matching what the visible filter chips say.
-      const deptDeptMatchSql = workedDeptMatchSql && originDeptMatchSql
-        ? `${workedDeptMatchSql} AND ${originDeptMatchSql}`
-        : workedDeptMatchSql
+      // Department-scope (which of the three modes above decides "does this
+      // ticket belong to dept $2") and assignee-scope (does the selected
+      // person match, optionally including their historical work here) are
+      // two independent concerns -- ANDed together below, rather than the
+      // single nested ternary this used to be, which silently dropped
+      // includeHistory's historical-assignee matching whenever Created was
+      // ALSO active (createdRange's branch won the ternary and never
+      // consulted historyAssigneeIdx at all) even though Created is this
+      // page's own default always-on filter, making that the common case,
+      // not an edge case -- confirmed for real: Queue: Dev + Assignee: Ravi
+      // + Created (the default) returned 0 issues for a ticket he'd
+      // genuinely worked in Dev before it moved on, exactly the CF-29889
+      // scenario this session already fixed once for the Worked filter.
+      const deptScopeSql = workedDeptMatchSql
         ? workedDeptMatchSql
         : originDeptMatchSql
         ? `${originDeptMatchSql} ${deptDoneClause}`
-        : historyAssigneeIdx
+        : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
+      const assigneeScopeSql = historyAssigneeIdx
         ? `(
-            (LOWER(i.current_department) = LOWER($2) AND i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) ${deptDoneClause})
+            i."assigneeId" = ANY($${historyAssigneeIdx}::text[])
             OR EXISTS (
               SELECT 1 FROM user_worked_on_tickets w
               WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2)
             )
           )`
-        : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
+        : null;
+      const deptDeptMatchSql = assigneeScopeSql
+        ? `(${deptScopeSql}) AND ${assigneeScopeSql}`
+        : deptScopeSql;
 
       // Needed even when needsSlaPrefilter is set: the SLA-filtered case can no
       // longer skip this "wasted" count query (as it used to, since deptTotal

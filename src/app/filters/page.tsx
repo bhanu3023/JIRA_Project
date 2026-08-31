@@ -1268,6 +1268,16 @@ export default function FiltersPage() {
 
         if (selAssignees.length) {
           params.assignees = Array.from(new Set(selAssignees.flatMap(expandMember))).join(',');
+          // Queue + Assignee together should mean "did this person work this
+          // dept's tickets", not "is this person the ticket's CURRENT owner
+          // right now" -- without this, a ticket this person genuinely
+          // worked here (e.g. resolved it) but which has since moved to
+          // another department and been reassigned there silently drops out,
+          // even though it's exactly the kind of ticket this combination is
+          // meant to surface. Backend already supports this (includeHistory
+          // folds in user_worked_on_tickets alongside the plain current-
+          // assignee match) -- just never wired up from this page before.
+          if (selQueue) params.includeHistory = 'true';
         }
 
         if (selReporters.length) {
