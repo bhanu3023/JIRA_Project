@@ -1809,29 +1809,18 @@ async function loadTeamAnalyticsScope(url: URL) {
     if (depts && depts.length) {
       workedClause += ` AND LOWER(w.dept) = ANY($${idx++}::text[])`;
       params.push(depts.map((d) => d.toLowerCase()));
-      // Only count work by someone who currently has access to that specific
-      // queue -- e.g. selecting "Dev" shouldn't credit a ticket to Dev's
-      // worked-count just because SOME person touched it while it briefly
-      // carried that department label; it must have been a real Dev-access
-      // person who did the work. Built as a dept(lowercased) -> memberIds
-      // jsonb map so each selected department is checked against its own
-      // configured list -- a department with no queue config at all (most
-      // of them; see the comment on deptMemberSets above) imposes no
-      // restriction, same "no config = no restriction" rule used elsewhere.
-      const cqW = await pool.query(`SELECT queues FROM custom_queues`);
-      const memberMap: Record<string, string[]> = {};
-      for (const row of cqW.rows) {
-        const queuesW = Array.isArray(row.queues) ? row.queues : [];
-        for (const q of queuesW) {
-          const name = String(q?.name || '').trim().toLowerCase();
-          if (!name) continue;
-          const members: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
-          (memberMap[name] ??= []).push(...members);
-        }
-      }
-      workedClause += ` AND (NOT ($${idx}::jsonb ? LOWER(w.dept)) OR ($${idx}::jsonb -> LOWER(w.dept)) @> to_jsonb(w.user_id))`;
-      params.push(JSON.stringify(memberMap));
-      idx++;
+      // Previously also required the worker to be on that queue's CURRENT
+      // configured memberIds list, on the theory that someone off the list
+      // could only have "briefly touched" the ticket. Checked against real
+      // production data and that's wrong: user_worked_on_tickets is already
+      // the authoritative record of a real pass/return/close event -- it
+      // doesn't fire on a brief touch. The membership list just drifts out
+      // of sync with who's actually done the work (people added to a queue
+      // after they did the work, name variants, etc.), so this was silently
+      // dropping real workers from the "Worked" filter and its export --
+      // confirmed 10 real Dev workers and 3 real Migration workers hidden
+      // this way in a single week of production data. Removed; the dept
+      // match above is enough scoping.
     }
     workedClause += `)`;
     whereClauses.push(workedClause);
