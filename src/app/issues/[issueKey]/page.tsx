@@ -431,12 +431,20 @@ export default function IssueDetailPage() {
     return () => { setIssueLoadDone(false); };
   }, [issueKey, loadIssue]);
 
-  // Redirect to CF key URL if issue loaded with original Jira key
+  // Redirect to CF key URL if issue loaded with original Jira key. Must
+  // confirm currentIssue.key actually matches the URL's issueKey before
+  // redirecting -- without that check, this fires on the STALE previous
+  // ticket's data too: clicking from Ticket A to Ticket B updates issueKey
+  // immediately, but currentIssue is still Ticket A's (loadIssue's fetch for
+  // B hasn't resolved yet) for at least one render. That render sees
+  // issueKey (B's key) !== currentIssue.cfKey (A's cfKey) and was
+  // redirecting straight back to Ticket A's URL -- exactly what read as
+  // "opening a ticket briefly shows a different ticket's details."
   useEffect(() => {
-    if (currentIssue?.cfKey && issueKey !== currentIssue.cfKey) {
+    if (currentIssue?.cfKey && currentIssue.key === issueKey && issueKey !== currentIssue.cfKey) {
       router.replace(`/issues/${currentIssue.cfKey}`);
     }
-  }, [currentIssue?.cfKey, issueKey]);
+  }, [currentIssue?.cfKey, currentIssue?.key, issueKey]);
 
   // Track recently viewed issue — per user so different users don't share history
   useEffect(() => {
