@@ -1967,7 +1967,7 @@ export default function FiltersPage() {
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[32%]">Work</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Work</th>
                 {tableExtraCols.map((id) => (
                   <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
                     {EXPORT_EXTRA_COLUMNS[id].label}
@@ -1997,7 +1997,7 @@ export default function FiltersPage() {
                       </Link>
                     </div>
                   </td>
-                  <td className="px-2 py-2.5 w-[32%]">
+                  <td className="px-2 py-2.5">
                     <Link
                       href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
                       className="block truncate text-[13px] text-gray-900 hover:text-blue-600 transition-colors"
