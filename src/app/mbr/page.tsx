@@ -49,10 +49,11 @@ function pct(numerator: number, denominator: number): string {
   return denominator > 0 ? `${Math.round((numerator / denominator) * 100)}%` : '—';
 }
 
-// Customer Engineering / QA / Infra — backed by a static export (mbr-static-tickets.json,
-// 2,257 rows from "All Tickets.xlsx", 2026-06-01 to 2026-07-30 only), not a live fetch.
-// No hygiene score / RCA / screenshot checks here — that data isn't in this export.
-function StaticTeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dateFrom: string; dateTo: string }) {
+// Customer Engineering / QA / Infra — live from this app's own issues table
+// (current_department = Dev/QA/Infra respectively), scoped to whatever date
+// range is selected above. No hygiene score / RCA / screenshot checks here —
+// this app doesn't track first-response SLA, so that count always reads 0/0.
+function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dateFrom: string; dateTo: string }) {
   const [person, setPerson] = useState('');
   const [people, setPeople] = useState<any[]>([]);
   const [monthly, setMonthly] = useState<any[]>([]);
@@ -63,7 +64,7 @@ function StaticTeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra
 
   useEffect(() => {
     setLoading(true);
-    api.getMbrStaticData(team, dateFrom || undefined, dateTo || undefined, person || undefined)
+    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined)
       .then((d) => { setPeople(d.people); setMonthly(d.monthly); setSummary(d.summary); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
       .catch(() => { setPeople([]); setMonthly([]); setTickets([]); })
       .finally(() => setLoading(false));
@@ -80,7 +81,7 @@ function StaticTeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra
   return (
     <div className="space-y-6">
       <p className="text-[12px] text-gray-400 -mt-2">
-        From All Tickets.xlsx (covers 2026-06-01 to 2026-07-30 only) — no hygiene score, RCA, closing-comment, or screenshot checks (this export doesn't carry that data).
+        Live data, scoped to the date range above — no hygiene score, RCA, closing-comment, or screenshot checks (this app doesn't track first-response SLA, so that count always reads 0/0).
       </p>
 
       <div className="flex items-center gap-3">
@@ -378,7 +379,7 @@ export default function MbrPage() {
         </div>
 
         {topTab !== 'department' ? (
-          <StaticTeamTab team={topTab} dateFrom={dateFrom} dateTo={dateTo} />
+          <TeamTab team={topTab} dateFrom={dateFrom} dateTo={dateTo} />
         ) : loading ? (
           <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
             <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
