@@ -1010,25 +1010,46 @@ export default function FiltersPage() {
   // single time wasn't discoverable; it can still be removed via its own X.
   const [activeExtras, setActiveExtras]         = useState<string[]>(['created']);
 
+  // Created/Updated/Due Date/Worked all filter by a different date column,
+  // and Created+Worked active together turned out to mean something quite
+  // different from either one alone -- department matching had to combine
+  // both filters' semantics (origin dept AND worked dept) rather than one
+  // silently overriding the other, and even fixed, the combined result
+  // isn't what picking a single date filter would lead you to expect ("92
+  // in Migration" reads very differently once you realize it's actually
+  // "created in Migration AND ALSO worked in Migration", not just one or
+  // the other). Simplest to keep these mutually exclusive instead of
+  // requiring every combination to be individually reasoned about --
+  // selecting one clears any other Date-group filter that was active.
+  const DATE_GROUP_KEYS = ['created', 'updated', 'dueDate', 'worked'];
+  const clearExtraValue = (key: string) => {
+    if (key === 'created')        setSelCreated('');
+    if (key === 'updated')        setSelUpdated('');
+    if (key === 'dueDate')        setSelDueDate('');
+    if (key === 'worked')         setSelWorked('');
+    if (key === 'reporter')       setSelReporters([]);
+    if (key === 'priority')       setSelPriorities([]);
+    if (key === 'department')     setSelDepartment('');
+    if (key === 'productType')    setSelProductType([]);
+    if (key === 'combination')    setSelCombination('');
+    if (key === 'customerName')   setSelCustomerName('');
+    if (key === 'clientName')     setSelClientName('');
+    if (key === 'projectManager') setSelProjectManager([]);
+    if (key === 'projectPool')    setSelProjectPool('');
+  };
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
       if (prev.includes(key)) {
-        if (key === 'created')        setSelCreated('');
-        if (key === 'updated')        setSelUpdated('');
-        if (key === 'dueDate')        setSelDueDate('');
-        if (key === 'worked')         setSelWorked('');
-        if (key === 'reporter')       setSelReporters([]);
-        if (key === 'priority')       setSelPriorities([]);
-        if (key === 'department')     setSelDepartment('');
-        if (key === 'productType')    setSelProductType([]);
-        if (key === 'combination')    setSelCombination('');
-        if (key === 'customerName')   setSelCustomerName('');
-        if (key === 'clientName')     setSelClientName('');
-        if (key === 'projectManager') setSelProjectManager([]);
-        if (key === 'projectPool')    setSelProjectPool('');
+        clearExtraValue(key);
         return prev.filter((k) => k !== key);
       }
-      return [...prev, key];
+      let next = [...prev, key];
+      if (DATE_GROUP_KEYS.includes(key)) {
+        const others = DATE_GROUP_KEYS.filter((k) => k !== key && prev.includes(k));
+        others.forEach(clearExtraValue);
+        next = next.filter((k) => !others.includes(k));
+      }
+      return next;
     });
   };
 
