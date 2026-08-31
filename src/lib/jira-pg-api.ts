@@ -1255,22 +1255,60 @@ async function performDeptHandoff(
   // uses) is also what makes a LATER done+return visit's restoringOwnSnapshot
   // below correctly restore "In Progress" instead of resurrecting that stale
   // "Open" from before this dept ever started on it.
+  // A "Routed to X"/"Waiting for X" queue status is a record of an OUTGOING
+  // action ("this dept sent the ticket to X") -- valid to display for the
+  // department that just sent it, but never a valid ACTIVE status for that
+  // same department to resurrect later if the ticket comes back around to
+  // it (a dept can't be actively "Routed to Dev" about a ticket that's back
+  // in its own hands). Shared by both checks below: preserving the old
+  // dept's own just-picked label immediately after routing, and refusing to
+  // treat a stored routing label as a legitimate "own snapshot" to restore
+  // on a later return visit.
+  const isRoutingLabel = (obj: any) => typeof obj?.id === 'string'
+    && obj.id.startsWith('qst_')
+    && /^(?:waiting\s+for|routed\s+to)\s+/i.test(String(obj.name || ''));
+
   let oldDeptStatusObj: any;
   if (isDoneNow) {
     oldDeptStatusObj = priorStatus
       ? { id: priorStatus.id, name: priorStatus.name, category: priorStatus.category, color: priorStatus.color }
       : { id: '', name: 'Unknown', category: 'todo', color: '#6B7280' };
   } else {
-    const oldQueueStatuses = oldDept ? queueStatusesFor(oldDept) : [];
-    const inProgressSt = oldQueueStatuses.find((s: any) => s.category === 'in_progress')
-      || oldQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'));
-    oldDeptStatusObj = inProgressSt
-      ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
-      : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+    // When this handoff was triggered by picking a "Routed to X"/"Waiting
+    // for X" queue status (the common case -- see the queueStatusId path's
+    // own dept_statuses write right before calling this function), that
+    // label is already sitting in deptStatuses[oldDept] at this point and
+    // IS the record of what actually happened: this dept routed the ticket
+    // to X. Forcing a generic "In Progress" here unconditionally used to
+    // discard it immediately -- confirmed for real: Migration picked
+    // "Routed to Dev" for CF-29970, and dept_statuses['Migration'] still
+    // read "In Progress" moments later. Preserve it when it's a genuine
+    // routing label; only fall back to the generic "In Progress" default
+    // for the plain "Change Department" dropdown case, which never picks a
+    // queue status at all and has nothing meaningful to preserve here.
+    const existingOldDeptStatus = deptMapGet(deptStatuses, oldDept);
+    if (isRoutingLabel(existingOldDeptStatus)) {
+      oldDeptStatusObj = existingOldDeptStatus;
+    } else {
+      const oldQueueStatuses = oldDept ? queueStatusesFor(oldDept) : [];
+      const inProgressSt = oldQueueStatuses.find((s: any) => s.category === 'in_progress')
+        || oldQueueStatuses.find((s: any) => (s.name || '').toLowerCase().includes('progress'));
+      oldDeptStatusObj = inProgressSt
+        ? { id: inProgressSt.id, name: inProgressSt.name, category: inProgressSt.category, color: inProgressSt.color }
+        : { id: '', name: 'In Progress', category: 'in_progress', color: '#3B82F6' };
+    }
   }
   deptMapSet(deptStatuses, oldDept, oldDeptStatusObj);
 
-  const restoringOwnSnapshot = isDoneNow && deptMapGet(deptStatuses, targetDept) != null;
+  // Excludes a stored routing label from counting as a restorable "own
+  // snapshot" -- without this, a ticket that left Migration as "Routed to
+  // Dev" (now preserved there by the block above) and later comes back to
+  // Migration done elsewhere would restore Migration's own status as
+  // "Routed to Dev" instead of correctly falling through to "In Progress"
+  // below, since that's not an active status Migration should show about
+  // a ticket it's actively holding again.
+  const targetOwnSnapshot = deptMapGet(deptStatuses, targetDept);
+  const restoringOwnSnapshot = isDoneNow && targetOwnSnapshot != null && !isRoutingLabel(targetOwnSnapshot);
   let newDeptStatusObj: any;
   let targetStatusId: string | null;
   if (restoringOwnSnapshot) {
