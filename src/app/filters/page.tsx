@@ -699,7 +699,6 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
-  { id: 'worked',         label: 'Worked (real activity, needs a Queue selected)', group: 'Date' },
 ];
 
 /* ─── Simple text filter button ─── */
@@ -976,10 +975,6 @@ export default function FiltersPage() {
   const [selCreated, setSelCreated]       = useState('');
   const [selUpdated, setSelUpdated]       = useState('');
   const [selDueDate, setSelDueDate]       = useState('');
-  // Only meaningful together with a single selected Queue -- backed by
-  // user_worked_on_tickets, so it counts a ticket once someone with access
-  // actually picked it up and worked it, not just whenever it was created.
-  const [selWorked, setSelWorked]         = useState('');
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
   const [selCombination, setSelCombination] = useState('');
@@ -1010,23 +1005,16 @@ export default function FiltersPage() {
   // single time wasn't discoverable; it can still be removed via its own X.
   const [activeExtras, setActiveExtras]         = useState<string[]>(['created']);
 
-  // Created/Updated/Due Date/Worked all filter by a different date column,
-  // and Created+Worked active together turned out to mean something quite
-  // different from either one alone -- department matching had to combine
-  // both filters' semantics (origin dept AND worked dept) rather than one
-  // silently overriding the other, and even fixed, the combined result
-  // isn't what picking a single date filter would lead you to expect ("92
-  // in Migration" reads very differently once you realize it's actually
-  // "created in Migration AND ALSO worked in Migration", not just one or
-  // the other). Simplest to keep these mutually exclusive instead of
-  // requiring every combination to be individually reasoned about --
-  // selecting one clears any other Date-group filter that was active.
-  const DATE_GROUP_KEYS = ['created', 'updated', 'dueDate', 'worked'];
+  // Created/Updated/Due Date all filter by a different date column --
+  // keeping these mutually exclusive avoids the same "two date filters
+  // silently combine into a number that doesn't mean what either one
+  // alone would suggest" problem that came up with Created+Worked
+  // (Worked has since been removed from this page entirely).
+  const DATE_GROUP_KEYS = ['created', 'updated', 'dueDate'];
   const clearExtraValue = (key: string) => {
     if (key === 'created')        setSelCreated('');
     if (key === 'updated')        setSelUpdated('');
     if (key === 'dueDate')        setSelDueDate('');
-    if (key === 'worked')         setSelWorked('');
     if (key === 'reporter')       setSelReporters([]);
     if (key === 'priority')       setSelPriorities([]);
     if (key === 'department')     setSelDepartment('');
@@ -1109,7 +1097,6 @@ export default function FiltersPage() {
     const rCreated         = urlParams?.get('rCreated');
     const rUpdated         = urlParams?.get('rUpdated');
     const rDueDate         = urlParams?.get('rDueDate');
-    const rWorked          = urlParams?.get('rWorked');
     const rDepartment      = urlParams?.get('rDepartment');
     const rProductType     = urlParams?.get('rProductType');
     const rCombination     = urlParams?.get('rCombination');
@@ -1132,7 +1119,6 @@ export default function FiltersPage() {
     if (rCreated) setSelCreated(rCreated);
     if (rUpdated) setSelUpdated(rUpdated);
     if (rDueDate) setSelDueDate(rDueDate);
-    if (rWorked) setSelWorked(rWorked);
     if (rDepartment) setSelDepartment(rDepartment);
     if (rProductType) setSelProductType(rProductType.split(','));
     if (rCombination) setSelCombination(rCombination);
@@ -1184,7 +1170,6 @@ export default function FiltersPage() {
     if (selCreated) p.rCreated = selCreated;
     if (selUpdated) p.rUpdated = selUpdated;
     if (selDueDate) p.rDueDate = selDueDate;
-    if (selWorked) p.rWorked = selWorked;
     if (selDepartment) p.rDepartment = selDepartment;
     if (selProductType.length) p.rProductType = selProductType.join(',');
     if (selCombination) p.rCombination = selCombination;
@@ -1197,7 +1182,7 @@ export default function FiltersPage() {
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1238,7 +1223,7 @@ export default function FiltersPage() {
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
-    selCreated || selUpdated || selDueDate || selWorked || selDepartment ||
+    selCreated || selUpdated || selDueDate || selDepartment ||
     selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selProjectPool || selBreached || selOverdue,
   );
 
@@ -1302,10 +1287,6 @@ export default function FiltersPage() {
         if (selCreated) params.createdRange = selCreated;
         if (selUpdated) params.updatedRange = selUpdated;
         if (selDueDate) params.dueDateRange = selDueDate;
-        // Only meaningful together with a single selected Queue -- the backend
-        // only reads workedRange inside the dept-scoped branch (i.e. when
-        // params.dept is set), so this is a no-op without a Queue selected.
-        if (selWorked && params.dept) params.workedRange = selWorked;
 
         // Hours actually spent in an "In Progress"-type status per ticket --
         // needs an extra issue_history query on the backend, so opt-in rather
@@ -1329,7 +1310,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selWorked, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy */
   const fetchIssues = useCallback(() => {
@@ -1949,15 +1930,6 @@ export default function FiltersPage() {
               <div className="flex items-center gap-1">
                 <DateDropBtn label="Due Date" selected={selDueDate} onChange={setSelDueDate} />
                 <button onClick={() => toggleExtra('dueDate')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
-              </div>
-            )}
-            {activeExtras.includes('worked') && (
-              <div className="flex items-center gap-1">
-                <DateDropBtn label="Worked" selected={selWorked} onChange={setSelWorked} />
-                <button onClick={() => toggleExtra('worked')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
-                {!selQueue && (
-                  <span className="text-[11px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Select a Queue for this to apply</span>
-                )}
               </div>
             )}
           </div>
