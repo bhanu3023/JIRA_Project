@@ -9108,28 +9108,56 @@ async function _handleJiraPgApi(
     return json({ departments, people });
   }
 
-  // GET /reports/mbr-team?team=eng|qa|infra&dateFrom=&dateTo=&person=<email> —
+  // GET /reports/mbr-team?team=eng|qa|infra&dateFrom=&dateTo=&person=<email>&ticketFilter=resolved|rb —
   // Customer Engineering / QA / Infra tabs, live from this app's own `issues`
-  // table (current_department = Dev/QA/Infra respectively), scoped to
-  // whatever date range is selected — NOT a frozen point-in-time export.
-  // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo],
-  // same convention as reports/mbr above. There's no first-response-SLA column
-  // on `issues` (only jira_sla_breached/_due_at/_start_at, which track
-  // resolution SLA), so frbBreached/frbTracked always come back 0/0 — kept in
-  // the response shape for the frontend, not because the data exists.
+  // table, scoped to whatever date range is selected — NOT a frozen
+  // point-in-time export. Scoping is current_department = Dev/QA/Infra
+  // *and* assignee in that team's hardcoded roster (real team membership,
+  // not just whoever happened to touch a Dev/QA/Infra-tagged ticket) — the
+  // roster is the source of truth given to us for these three tabs.
+  // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo]
+  // for the overall total/summary/tickets (same convention as reports/mbr
+  // above); the monthly trend instead buckets strictly by createdAt within
+  // that same window, so a ticket only merely *updated* in range doesn't
+  // make some earlier month bleed into the trend. There's no
+  // first-response-SLA column on `issues` (only jira_sla_breached/_due_at/
+  // _start_at, which track resolution SLA), so frbBreached/frbTracked always
+  // come back 0/0 — kept in the response shape for the frontend, not because
+  // the data exists. `resolvedAt` is never populated in this DB, so
+  // avgResolutionHours always comes back null.
   if (path === 'reports/mbr-team' && method === 'GET') {
     if (!isAdmin) return json({ error: 'Forbidden' }, 403);
 
     const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra' };
+    const TEAM_ROSTER: Record<string, string[]> = {
+      eng: [
+        'abhinandan.kumar@cloudfuze.com', 'akhila.aenkoju@cloudfuze.com', 'akib.mohd@cloudfuze.com', 'ankit@cloudfuze.com',
+        'bhagyashri.deokar@cloudfuze.com', 'hemadasu.kantam@cloudfuze.com', 'jaswanth.adari@cloudfuze.com', 'lakshmi.adabala@cloudfuze.com',
+        'mayank@cloudfuze.com', 'naved.osama@cloudfuze.com', 'pragati.pandey@cloudfuze.com', 'ravi.srivastava@cloudfuze.com',
+        'rehan.khan@cloudfuze.com', 'sairaj.kanigicharla@cloudfuze.com', 'shiva.amuda@cloudfuze.com', 'shivam.singh@cloudfuze.com',
+        'srinu.gudimitla@cloudfuze.com', 'vamsi.malla@cloudfuze.com', 'vishal.kumar@cloudfuze.com',
+      ],
+      qa: [
+        'asma.karim@cloudfuze.com', 'bhuvana.mosra@cloudfuze.com', 'ganesh.guda@cloudfuze.com', 'kamal.basha@cloudfuze.com',
+        'kiran.ummenthala@cloudfuze.com', 'nagalakshmi.mangina@cloudfuze.com', 'sadia.shaik@cloudfuze.com',
+        'soniya.paladugula@cloudfuze.com', 'soumya.gande@cloudfuze.com',
+      ],
+      infra: [
+        'gururaj.bhimrao@cloudfuze.com', 'hymavathi@cloudfuze.com', 'pavan@cloudfuze.com', 'bala.raviteja@cloudfuze.com',
+      ],
+    };
+
     const team = url.searchParams.get('team') || '';
     const dept = TEAM_DEPT[team];
+    const roster = TEAM_ROSTER[team];
     if (!dept) return json({ error: 'team must be one of eng, qa, infra' }, 400);
 
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
     const person   = (url.searchParams.get('person') || '').toLowerCase();
+    const ticketFilter = url.searchParams.get('ticketFilter') || '';
 
-    const baseParams: any[] = [dept];
+    const baseParams: any[] = [dept, roster];
     let fromIdx: number | null = null;
     let toIdx: number | null = null;
     if (dateFrom) { baseParams.push(new Date(dateFrom).toISOString()); fromIdx = baseParams.length; }
@@ -9140,6 +9168,9 @@ async function _handleJiraPgApi(
       toIdx = baseParams.length;
     }
     let dateClause = '';
+    let createdClause = '';
+    if (fromIdx) { createdClause += ` AND i."createdAt" >= $${fromIdx}`; }
+    if (toIdx)   { createdClause += ` AND i."createdAt" < $${toIdx}`; }
     if (fromIdx || toIdx) {
       const createdConds: string[] = [];
       const updatedConds: string[] = [];
@@ -9148,17 +9179,23 @@ async function _handleJiraPgApi(
       dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
 
-    const scopedParams = person ? [...baseParams, person] : baseParams;
+    const rosterClause = ` AND LOWER(au.email) = ANY($2::text[])`;
+
+    let scopedParams = person ? [...baseParams, person] : baseParams;
     const personClause = person ? ` AND LOWER(au.email) = $${scopedParams.length}` : '';
+
+    let ticketFilterClause = '';
+    if (ticketFilter === 'resolved') ticketFilterClause = ` AND s.category = 'done'`;
+    else if (ticketFilter === 'rb') ticketFilterClause = ` AND i.jira_sla_breached = true`;
 
     // jira_sla_breached is a plain non-nullable boolean here (no separate
     // "was this ticket even tracked for SLA" column exists on `issues` —
     // jira_sla_due_at/_start_at are effectively unpopulated), so every ticket
     // counts as "tracked" and rb_breached is just how many of those are true.
     const AGG = `
-        COUNT(*) AS total,
-        COUNT(*) FILTER (WHERE s.category = 'done') AS resolved,
-        COUNT(*) FILTER (WHERE i.jira_sla_breached = true) AS rb_breached,
+        COUNT(i.id) AS total,
+        COUNT(i.id) FILTER (WHERE s.category = 'done') AS resolved,
+        COUNT(i.id) FILTER (WHERE i.jira_sla_breached = true) AS rb_breached,
         ROUND(AVG(EXTRACT(EPOCH FROM (i."resolvedAt" - i."createdAt")) / 3600)
           FILTER (WHERE i."resolvedAt" IS NOT NULL)) AS avg_resolution_hours`;
 
@@ -9168,16 +9205,21 @@ async function _handleJiraPgApi(
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
         LEFT JOIN users au ON au.id = i."assigneeId"
-        WHERE i.current_department = $1 ${dateClause}${personClause}
+        WHERE i.current_department = $1 ${rosterClause}${dateClause}${personClause}
       `, scopedParams),
 
+      // LEFT JOIN from the roster itself (not FROM issues) so every roster
+      // member appears even with zero tickets in the selected range —
+      // "make sure those are displayed under those tabs" applies to the
+      // person list itself, not just to whoever happens to have activity.
       pool.query(`
-        SELECT au.id AS assignee_id, au.email, au."firstName", au."lastName", ${AGG}
-        FROM issues i
+        WITH roster(email) AS (SELECT unnest($2::text[]))
+        SELECT COALESCE(u.email, r.email) AS email, u."firstName", u."lastName", ${AGG}
+        FROM roster r
+        LEFT JOIN users u ON LOWER(u.email) = r.email
+        LEFT JOIN issues i ON i."assigneeId" = u.id AND i.current_department = $1 ${dateClause}
         LEFT JOIN statuses s ON i."statusId" = s.id
-        JOIN users au ON au.id = i."assigneeId"
-        WHERE i.current_department = $1 ${dateClause}
-        GROUP BY au.id, au.email, au."firstName", au."lastName"
+        GROUP BY r.email, u.email, u."firstName", u."lastName"
         ORDER BY total DESC
       `, baseParams),
 
@@ -9185,7 +9227,8 @@ async function _handleJiraPgApi(
         SELECT to_char(i."createdAt", 'Mon YYYY') AS label, MIN(i."createdAt") AS sort_key, ${AGG}
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
-        WHERE i.current_department = $1 ${dateClause}
+        LEFT JOIN users au ON au.id = i."assigneeId"
+        WHERE i.current_department = $1 ${rosterClause}${createdClause}
         GROUP BY 1
         ORDER BY sort_key DESC
         LIMIT 12
@@ -9203,7 +9246,7 @@ async function _handleJiraPgApi(
         LEFT JOIN spaces sp ON sp.id = i."spaceId"
         LEFT JOIN users au ON au.id = i."assigneeId"
         LEFT JOIN users ru ON ru.id = i."reporterId"
-        WHERE i.current_department = $1 ${dateClause}${personClause}
+        WHERE i.current_department = $1 ${rosterClause}${dateClause}${personClause}${ticketFilterClause}
         ORDER BY i."createdAt" DESC
         LIMIT 300
       `, scopedParams),

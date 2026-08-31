@@ -62,6 +62,12 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
   const [totalMatched, setTotalMatched] = useState(0);
   const [loading, setLoading] = useState(false);
 
+  const [drillDown, setDrillDown] = useState<{ person?: string; filter: 'resolved' | 'rb'; label: string } | null>(null);
+  const [drillTickets, setDrillTickets] = useState<any[]>([]);
+  const [drillTotal, setDrillTotal] = useState(0);
+  const [drillLoading, setDrillLoading] = useState(false);
+  const openDrill = (filter: 'resolved' | 'rb', personEmail: string | undefined, label: string) => setDrillDown({ person: personEmail, filter, label });
+
   useEffect(() => {
     setLoading(true);
     api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined)
@@ -69,6 +75,15 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
       .catch(() => { setPeople([]); setMonthly([]); setTickets([]); })
       .finally(() => setLoading(false));
   }, [team, dateFrom, dateTo, person]);
+
+  useEffect(() => {
+    if (!drillDown) return;
+    setDrillLoading(true);
+    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, drillDown.person, drillDown.filter)
+      .then((d) => { setDrillTickets(d.tickets); setDrillTotal(d.totalMatched); })
+      .catch(() => { setDrillTickets([]); setDrillTotal(0); })
+      .finally(() => setDrillLoading(false));
+  }, [drillDown, team, dateFrom, dateTo]);
 
   if (loading) {
     return (
@@ -96,9 +111,11 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
       {/* Summary — Section 4.12 "Summary" (4 cards, for selected person or whole team) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card label="Total tickets" value={summary.total} icon={<Users size={22} />} />
-        <Card label="Resolved tickets" value={summary.resolved} sub={pct(summary.resolved, summary.total)} icon={<Users size={22} />}
-          tone={summary.total > 0 && summary.resolved / summary.total < 0.7 ? 'warn' : undefined} />
-        <Card label="Resolution SLA breached" value={`${summary.rbBreached} / ${summary.rbTracked}`} icon={<AlertTriangle size={22} />} tone={summary.rbBreached > 0 ? 'bad' : undefined} />
+        <Card label="Resolved tickets" sub={pct(summary.resolved, summary.total)} icon={<Users size={22} />}
+          tone={summary.total > 0 && summary.resolved / summary.total < 0.7 ? 'warn' : undefined}
+          value={<button onClick={() => openDrill('resolved', person || undefined, `Resolved tickets — ${person ? (people.find((p) => p.email === person)?.name || person) : 'All'}`)} className="hover:underline">{summary.resolved}</button>} />
+        <Card label="Resolution SLA breached" icon={<AlertTriangle size={22} />} tone={summary.rbBreached > 0 ? 'bad' : undefined}
+          value={<button onClick={() => openDrill('rb', person || undefined, `Resolution SLA breached — ${person ? (people.find((p) => p.email === person)?.name || person) : 'All'}`)} className="hover:underline">{summary.rbBreached} / {summary.rbTracked}</button>} />
         <Card label="First response SLA breached" value={`${summary.frbBreached} / ${summary.frbTracked}`} icon={<AlertTriangle size={22} />} tone={summary.frbBreached > 0 ? 'bad' : undefined} />
       </div>
 
@@ -172,8 +189,13 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
                       </div>
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">{p.total}</td>
-                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.resolved} <span className="text-gray-400">({pct(p.resolved, p.total)})</span></td>
-                    <td className={`px-4 py-3 text-[13px] ${p.rbBreached > 0 ? 'text-red-600' : 'text-gray-700'}`}>{p.rbBreached} / {p.rbTracked}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      <button onClick={(e) => { e.stopPropagation(); openDrill('resolved', p.email, `Resolved tickets — ${p.name}`); }} className="hover:underline text-blue-600">{p.resolved}</button>{' '}
+                      <span className="text-gray-400">({pct(p.resolved, p.total)})</span>
+                    </td>
+                    <td className={`px-4 py-3 text-[13px] ${p.rbBreached > 0 ? 'text-red-600' : 'text-gray-700'}`}>
+                      <button onClick={(e) => { e.stopPropagation(); openDrill('rb', p.email, `Resolution SLA breached — ${p.name}`); }} className="hover:underline">{p.rbBreached} / {p.rbTracked}</button>
+                    </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">{p.avgResolutionHours === null ? '—' : p.avgResolutionHours}</td>
                   </tr>
                 ))}
@@ -233,6 +255,63 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
           </div>
         )}
       </div>
+
+      {drillDown && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDrillDown(null)}>
+          <div className="bg-white rounded-xl w-full max-w-5xl max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
+              <div>
+                <h3 className="text-[14px] font-semibold text-gray-700">{drillDown.label}</h3>
+                <p className="text-[12px] text-gray-400 mt-0.5">
+                  Showing {drillTickets.length} of {drillTotal}{drillTotal > drillTickets.length ? ' (capped)' : ''}
+                </p>
+              </div>
+              <button onClick={() => setDrillDown(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="overflow-auto flex-1">
+              {drillLoading ? (
+                <div className="flex items-center justify-center py-20">
+                  <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+                </div>
+              ) : drillTickets.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <Users size={36} className="text-gray-200 mb-3" />
+                  <p className="text-[14px] font-medium text-gray-400">No tickets match</p>
+                </div>
+              ) : (
+                <table className="w-full text-[13px] whitespace-nowrap">
+                  <thead>
+                    <tr>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Ticket</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Board</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Assignee</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Status</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Summary</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {drillTickets.map((t) => (
+                      <tr key={t.key} className="hover:bg-gray-50">
+                        <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">{t.key}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.assignee}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
