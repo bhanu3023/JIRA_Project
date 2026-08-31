@@ -6750,8 +6750,22 @@ async function _handleJiraPgApi(
       mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
     );
     _mark('sla-enrichment');
+    // Origin department -- the department this ticket actually started in,
+    // for the "only the raising department can resolve it" rule enforced on
+    // the PATCH handler above. Computed from dbHistory (already fetched for
+    // the Activity tab, ordered newest-first) instead of a fresh query:
+    // the OLDEST department-change event's oldValue, or current_department
+    // if it's never moved. Lets the status dropdown hide "Resolved" for a
+    // department this ticket was merely routed to, instead of only ever
+    // rejecting the click after the fact.
+    const deptHistoryEvents = dbHistory.filter((h: any) => h.field === 'department');
+    const earliestDeptEvent = deptHistoryEvents.length
+      ? deptHistoryEvents.reduce((a: any, b: any) => (new Date(a.createdAt) < new Date(b.createdAt) ? a : b))
+      : null;
+    const originDepartment: string | null = earliestDeptEvent?.oldValue || mergedIssue.current_department || null;
     const responsePayload: any = {
       ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {},
+      originDepartment,
     };
     _mark('format-response');
 
@@ -6955,6 +6969,51 @@ async function _handleJiraPgApi(
       } catch { /* fail open on lookup errors, same as the department-change endpoint */ }
     }
 
+    // Only the department that actually RAISED this ticket may mark it done
+    // (e.g. "Resolved") -- a department it was merely routed to for support
+    // work (e.g. Migration raises a ticket, routes it to Dev for a technical
+    // fix) can work it and route it onward or back, but resolving it belongs
+    // to whoever owns the customer relationship on it, not whoever happened
+    // to touch it last. Origin is the earliest department-change event's
+    // oldValue (what the ticket started as before its first transfer), or
+    // current_department if it's never moved -- same computation already
+    // used for the Filters page's origin-based Created matching. Admins
+    // bypass this, same as every other queue-authorization check in this
+    // file.
+    if (!isAdmin) {
+      try {
+        // Two independent ways a department can mark a ticket done: a real
+        // statusId (category looked up from the statuses table) or a custom
+        // queue-defined queueStatusId (category comes straight off the body,
+        // since it's never a real row in the statuses table -- see the
+        // queueStatusId handling further below).
+        const isResolvingViaStatusId = body.statusId !== undefined && body.statusId !== null;
+        const isResolvingViaQueueStatus = !!body.queueStatusId && String(body.queueStatusCategory || '') === 'done';
+        let targetIsDone = false;
+        if (isResolvingViaStatusId) {
+          const targetStatusRow = await pool.query(`SELECT category FROM statuses WHERE id=$1 LIMIT 1`, [String(body.statusId)]);
+          targetIsDone = targetStatusRow.rows[0]?.category === 'done';
+        } else if (isResolvingViaQueueStatus) {
+          targetIsDone = true;
+        }
+        if (targetIsDone) {
+          const originRow = await pool.query(
+            `SELECT COALESCE(
+               (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+               i.current_department
+             ) AS origin_dept, i.current_department
+             FROM issues i WHERE i.id = $1`,
+            [issue.id]
+          );
+          const originDept: string | null = originRow.rows[0]?.origin_dept || null;
+          const currentDeptForResolve: string | null = originRow.rows[0]?.current_department || null;
+          if (originDept && currentDeptForResolve && originDept.trim().toLowerCase() !== currentDeptForResolve.trim().toLowerCase()) {
+            return json({ error: `This ticket was raised by ${originDept} — only ${originDept} can mark it resolved. Route it back there instead.` }, 403);
+          }
+        }
+      } catch { /* fail open on lookup errors, same as the queue-authorization check above */ }
+    }
+
     const data: Record<string, unknown> = {};
     if (body.summary !== undefined) data.summary = String(body.summary);
     if (body.description !== undefined) data.description = body.description === null ? null : String(body.description);
@@ -7025,12 +7084,22 @@ async function _handleJiraPgApi(
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
           const oldQueueStatusName = deptMapGet(deptStatuses, dept)?.name || 'Unknown';
           const oldQueueStatusCategory = deptMapGet(deptStatuses, dept)?.category || 'todo';
-          deptMapSet(deptStatuses, dept, {
+          const queueStatusEntry = {
             id: String(body.queueStatusId),
             name: String(body.queueStatusName || ''),
             color: String(body.queueStatusColor || '#64748B'),
             category: String(body.queueStatusCategory || 'todo'),
-          });
+          };
+          deptMapSet(deptStatuses, dept, queueStatusEntry);
+          // Same cross-department propagation as the plain statusId path below --
+          // resolving here (this dept's own custom "Resolved" queue status) should
+          // reflect into every other department this ticket passed through too.
+          if (queueStatusEntry.category === 'done') {
+            for (const deptKey of Object.keys(deptStatuses)) {
+              if (deptKey.toLowerCase() === dept.toLowerCase()) continue;
+              deptMapSet(deptStatuses, deptKey, queueStatusEntry);
+            }
+          }
           await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(deptStatuses), key]);
 
           // Reopening -- the dept's OLD status was done (Resolved/Closed/etc.)
@@ -7407,6 +7476,21 @@ async function _handleJiraPgApi(
           if (syncDept) {
             const syncDeptStatuses: Record<string, any> = syncRow.rows[0]?.dept_statuses || {};
             deptMapSet(syncDeptStatuses, syncDept, { id: newStForSync.id, name: newStForSync.name, color: newStForSync.color, category: newStForSync.category });
+            // Resolving is only ever allowed from the ticket's ORIGIN
+            // department (enforced above, admin bypass aside) -- but every
+            // OTHER department this ticket passed through on the way there
+            // (e.g. Dev, routed to for support work before coming back to
+            // Migration to close) should show it as resolved too, not stuck
+            // on whatever status it was in when the ticket left. Without
+            // this, Dev's own "Worked on" list and the Filters page kept
+            // showing that ticket as still open/in-progress forever, even
+            // after the department that actually owns it had closed it out.
+            if (newStForSync.category === 'done') {
+              for (const deptKey of Object.keys(syncDeptStatuses)) {
+                if (deptKey.toLowerCase() === syncDept.toLowerCase()) continue;
+                deptMapSet(syncDeptStatuses, deptKey, { id: newStForSync.id, name: newStForSync.name, color: newStForSync.color, category: newStForSync.category });
+              }
+            }
             await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb WHERE id=$2`, [JSON.stringify(syncDeptStatuses), issue.id]);
           }
         }

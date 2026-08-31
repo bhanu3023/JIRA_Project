@@ -463,6 +463,15 @@ export default function IssueDetailPage() {
   useEffect(() => {
     if (currentIssue?.spaceKey) {
       const dept = (currentIssue as any).current_department as string | undefined;
+      // Only the department that actually raised this ticket may resolve it
+      // (enforced server-side on the PATCH handler) -- hide any done-category
+      // status from the dropdown here for every OTHER department it's
+      // currently sitting in, instead of only rejecting the click after the
+      // fact. originDepartment comes straight off the issue response (see
+      // GET /issues/:key), computed from its own department-change history.
+      const originDept = (currentIssue as any).originDepartment as string | undefined;
+      const isOriginDept = !dept || !originDept || dept.trim().toLowerCase() === originDept.trim().toLowerCase();
+      const applyStatuses = (list: any[]) => setSpaceStatuses(isOriginDept ? list : (list || []).filter((s: any) => s.category !== 'done'));
 
       // When a ticket is routed to a department, find the dept_queue space that owns
       // the custom queue with that name, and load statuses/workflow from THAT space.
@@ -473,7 +482,7 @@ export default function IssueDetailPage() {
           const filtered = statusIds?.length
             ? allStatuses.filter((s: any) => statusIds.includes(s.id))
             : allStatuses;
-          setSpaceStatuses(filtered);
+          applyStatuses(filtered);
           setSpaceMembers(space.members || []);
           api.request<any>(`workflows/wf_${spaceKey}/statuses`).then(wf => {
             setWorkflowTransitions(wf.transitions || space.transitions || []);
@@ -513,7 +522,7 @@ export default function IssueDetailPage() {
                 const qSt = matchedQueue.queueStatuses;
                 const qTr = matchedQueue.queueTransitions;
                 if (qSt?.length) {
-                  setSpaceStatuses(qSt);
+                  applyStatuses(qSt);
                   setWorkflowTransitions((qTr || []).map((t: any) => ({
                     fromStatusId: t.fromStatusId ?? t.from,
                     toStatusId: t.toStatusId ?? t.to,
@@ -522,7 +531,7 @@ export default function IssueDetailPage() {
                   const effectiveKey = matchedQueue.workflowSpaceKey || spKey;
                   loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
                 } else {
-                  setSpaceStatuses(DEFAULT_QUEUE_STATUSES);
+                  applyStatuses(DEFAULT_QUEUE_STATUSES);
                   setWorkflowTransitions([]);
                 }
                 resolvedFromCache = true;
@@ -548,7 +557,7 @@ export default function IssueDetailPage() {
               const qSt = matchedQueue.queueStatuses;
               const qTr = matchedQueue.queueTransitions;
               if (qSt?.length) {
-                setSpaceStatuses(qSt);
+                applyStatuses(qSt);
                 setWorkflowTransitions((qTr || []).map((t: any) => ({
                   fromStatusId: t.fromStatusId ?? t.from,
                   toStatusId: t.toStatusId ?? t.to,
@@ -560,7 +569,7 @@ export default function IssueDetailPage() {
                 loadStatusesForSpace(effectiveKey, matchedQueue.statusIds);
                 return;
               }
-              setSpaceStatuses(DEFAULT_QUEUE_STATUSES);
+              applyStatuses(DEFAULT_QUEUE_STATUSES);
               setWorkflowTransitions([]);
               return;
             }
