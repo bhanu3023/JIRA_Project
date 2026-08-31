@@ -49,10 +49,18 @@ async function main() {
     id: `qst_${queueArg.toLowerCase()}_${slug}`,
     name: nameArg,
     color: '#F59E0B',
-    order: statuses.length,
     category: 'in_progress',
   };
-  console.log(`Would add to ${spaceArg} / ${queue.name}:`, JSON.stringify(newStatus, null, 2));
+  // Insert right before the first done-category status (e.g. "Resolved"),
+  // not at the very end -- a routing option belongs grouped with the other
+  // in-progress statuses, not trailing after the terminal one. Falls back
+  // to appending at the end if there's no done-category status at all.
+  const doneIdx = statuses.findIndex((s) => s.category === 'done');
+  const insertAt = doneIdx === -1 ? statuses.length : doneIdx;
+  const newStatuses = [...statuses.slice(0, insertAt), newStatus, ...statuses.slice(insertAt)]
+    .map((s, i) => ({ ...s, order: i }));
+  console.log(`Would add to ${spaceArg} / ${queue.name} at position ${insertAt}:`, JSON.stringify(newStatus, null, 2));
+  console.log('Resulting order:', newStatuses.map((s) => s.name).join(' -> '));
 
   if (DRY_RUN) {
     console.log('\nDry run only -- nothing written. Re-run without --dry-run to apply.');
@@ -60,7 +68,7 @@ async function main() {
     return;
   }
 
-  queues[idx] = { ...queue, queueStatuses: [...statuses, newStatus] };
+  queues[idx] = { ...queue, queueStatuses: newStatuses };
   await client.query(`UPDATE custom_queues SET queues = $1::jsonb WHERE space_key = $2`, [
     JSON.stringify(queues),
     row.space_key,
