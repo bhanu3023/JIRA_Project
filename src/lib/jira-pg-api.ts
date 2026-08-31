@@ -4827,8 +4827,24 @@ async function _handleJiraPgApi(
       // the Unassigned-in-dept queue silently showed EVERY ticket in the
       // department (assigned or not), not just the unassigned ones.
       let historyAssigneeIdx: number | null = null;
+      // Assignee, under a "Worked" date filter, means "who did the work" --
+      // folded into workedRangeSql below as a w.user_id check -- not "who
+      // currently owns the ticket". A ticket worked in this dept and then
+      // handed to another department (and reassigned there) still has this
+      // dept's own worker's name on it as far as "worked" is concerned, even
+      // though i."assigneeId" now points at whoever holds it now. Requiring
+      // i."assigneeId" to match here (the plain non-worked case, below) was
+      // silently filtering out every ticket the selected person had actually
+      // worked but since moved on from -- confirmed for real: CF-29889 was
+      // worked in Dev by Ravi Srivastava, then resolved and handed to
+      // Migration under a different assignee, so "Queue: Dev + Assignee:
+      // Ravi" could never find it.
+      let workedAssigneeIds: string[] | null = null;
       if (unassignedOnly) {
         deptExtraClauses.push(`i."assigneeId" IS NULL`);
+      } else if (workedRange && assignees) {
+        const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
+        workedAssigneeIds = await resolveUserIds(ids);
       } else if (includeHistoryParam && assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         const resolvedIds = await resolveUserIds(ids);
@@ -4930,24 +4946,24 @@ async function _handleJiraPgApi(
         const workedToIdx = deptParamIdx++;
         deptExtraParams.push(workedFrom, workedTo);
         workedRangeSql = ` AND w.worked_at >= $${workedFromIdx} AND w.worked_at <= $${workedToIdx}`;
-        // Only count work by someone who currently has access to this queue --
-        // e.g. selecting "Dev" shouldn't credit a ticket to Dev's worked-count
-        // just because SOME person touched it while it briefly carried that
-        // department label; it must have been a real Dev-access person who
-        // did the work. Same "no config = no restriction" rule as
-        // queueMembersOnly above -- a department with no queue config at all
-        // imposes no restriction here either.
-        try {
-          const cqW = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
-          const queuesW: any[] = cqW.rows[0]?.queues || [];
-          const qW = queuesW.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
-          const memberIdsW: string[] = Array.isArray(qW?.memberIds) ? qW.memberIds : [];
-          if (memberIdsW.length) {
-            const memberIdx = deptParamIdx++;
-            deptExtraParams.push(memberIdsW);
-            workedRangeSql += ` AND w.user_id = ANY($${memberIdx}::text[])`;
-          }
-        } catch { /* ignore -- no restriction if lookup fails */ }
+        // Previously also required the worker to be on that queue's CURRENT
+        // configured memberIds list. Checked against real production data
+        // (same investigation as loadTeamAnalyticsScope's identical rule) and
+        // that's wrong: user_worked_on_tickets only gets a row on a real
+        // pass/return/close event, never a brief touch, so it's already the
+        // authoritative signal -- the membership list just drifts out of sync
+        // with who's actually done the work. Confirmed real workers were
+        // being silently dropped from this exact query. Removed.
+        //
+        // When a specific assignee was selected alongside "Worked", scope to
+        // that person's own work instead (see workedAssigneeIds above) --
+        // this is what actually answers "did THIS person work this ticket in
+        // this dept", not "does this ticket's current owner match".
+        if (workedAssigneeIds) {
+          const assigneeIdx = deptParamIdx++;
+          deptExtraParams.push(workedAssigneeIds.length ? workedAssigneeIds : ['__none__']);
+          workedRangeSql += ` AND w.user_id = ANY($${assigneeIdx}::text[])`;
+        }
       }
 
       const deptDoneClause = deptExcludeDone ? `AND (s.category IS NULL OR s.category != 'done')` : '';
