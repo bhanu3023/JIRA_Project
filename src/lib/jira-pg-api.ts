@@ -9410,16 +9410,27 @@ async function _handleJiraPgApi(
       toIdx = baseParams.length;
     }
     let dateClause = '';
-    let createdClause = '';
-    if (fromIdx) { createdClause += ` AND i."createdAt" >= $${fromIdx}`; }
-    if (toIdx)   { createdClause += ` AND i."createdAt" < $${toIdx}`; }
+    let createdInRangeSql = 'TRUE';
     if (fromIdx || toIdx) {
       const createdConds: string[] = [];
       const updatedConds: string[] = [];
       if (fromIdx) { createdConds.push(`i."createdAt" >= $${fromIdx}`); updatedConds.push(`i."updatedAt" >= $${fromIdx}`); }
       if (toIdx)   { createdConds.push(`i."createdAt" < $${toIdx}`);    updatedConds.push(`i."updatedAt" < $${toIdx}`); }
       dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
+      createdInRangeSql = createdConds.join(' AND ');
     }
+    // Monthly buckets have to sum back to the exact same total the summary
+    // cards show for the same selection -- a ticket that only matched via
+    // dateClause's updatedAt side (its createdAt falls outside the window)
+    // must NOT be bucketed by that out-of-range createdAt month, or it both
+    // vanishes from the visible monthly rows (undercounting them) and, if a
+    // range spans multiple months, can misattribute it to the wrong one.
+    // Bucket by whichever of the two dates is the one actually inside the
+    // selected range; with no range selected there's no "in range" date to
+    // prefer, so it falls back to plain createdAt (original behavior).
+    const monthlyBucketExpr = (fromIdx || toIdx)
+      ? `CASE WHEN (${createdInRangeSql}) THEN i."createdAt" ELSE i."updatedAt" END`
+      : `i."createdAt"`;
 
     // Was a plain `i.current_department = $1` everywhere in this handler --
     // same gap the Filters page had (see originDeptMatchSql/updatedDeptMatchSql
@@ -9512,10 +9523,10 @@ async function _handleJiraPgApi(
       `, baseParams),
 
       pool.query(`
-        SELECT to_char(i."createdAt", 'Mon YYYY') AS label, MIN(i."createdAt") AS sort_key, ${AGG}
+        SELECT to_char(${monthlyBucketExpr}, 'Mon YYYY') AS label, MIN(${monthlyBucketExpr}) AS sort_key, ${AGG}
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
-        WHERE ${deptMatchSql} AND ${rosterMatchSql}${createdClause}
+        WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}
         GROUP BY 1
         ORDER BY sort_key DESC
         LIMIT 12
@@ -9557,7 +9568,7 @@ async function _handleJiraPgApi(
     // this dept on this ticket -- so a ticket can legitimately count as
     // breached under more than one person, same as total/resolved already do.
     const slaCandidatesRes = await pool.query(`
-      SELECT i.id, i.priority, i.current_department, i."spaceId", i."createdAt", i."resolvedAt",
+      SELECT i.id, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
         i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
         i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category
       FROM issues i
@@ -9588,6 +9599,19 @@ async function _handleJiraPgApi(
     }
 
     const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    // Mirrors monthlyBucketExpr's SQL rule exactly, so a breached ticket lands
+    // in the same monthly row its total/resolved counts already landed in.
+    const rangeFromMs = fromIdx ? new Date(dateFrom).getTime() : null;
+    const rangeToMs = toIdx ? (() => { const d = new Date(dateTo); d.setDate(d.getDate() + 1); return d.getTime(); })() : null;
+    const monthLabelFor = (row: any): string => {
+      let d = new Date(row.createdAt);
+      if (rangeFromMs !== null || rangeToMs !== null) {
+        const createdMs = d.getTime();
+        const createdInRange = (rangeFromMs === null || createdMs >= rangeFromMs) && (rangeToMs === null || createdMs < rangeToMs);
+        if (!createdInRange) d = new Date(row.updatedAt);
+      }
+      return `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+    };
     const slaById = new Map<string, boolean>();
     const peopleRbBreached: Record<string, number> = {};
     const monthlyRbBreached: Record<string, number> = {};
@@ -9602,8 +9626,7 @@ async function _handleJiraPgApi(
       slaById.set(row.id, breached);
       if (!breached) continue;
 
-      const createdDate = new Date(row.createdAt);
-      const monthLabel = `${MONTH_ABBR[createdDate.getUTCMonth()]} ${createdDate.getUTCFullYear()}`;
+      const monthLabel = monthLabelFor(row);
       monthlyRbBreached[monthLabel] = (monthlyRbBreached[monthLabel] || 0) + 1;
 
       const emails = new Set<string>(workedRosterByIssue[row.id] || []);
