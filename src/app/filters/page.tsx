@@ -1343,6 +1343,19 @@ export default function FiltersPage() {
 
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
 
+  // Filters results never refreshed on their own -- someone leaving this
+  // page open with a filter applied (e.g. a live Queue view during the
+  // day) just kept looking at whatever it showed when they last touched a
+  // filter, going stale as tickets got created/updated elsewhere. Every
+  // other live list in this app already auto-refreshes on some interval
+  // (department queue views every 30s, Sent/Watching every 15s) -- this
+  // page never got one. Silent background refresh, same as those: never
+  // clears what's currently shown while the new fetch is in flight.
+  useEffect(() => {
+    const id = setInterval(() => { fetchIssues(); }, 60_000);
+    return () => clearInterval(id);
+  }, [fetchIssues]);
+
   /* export current filter results to CSV — same params as the live table,
      but the server's own max page size (2000) instead of the 100-row
      browsing cap, so the export covers everything a saved/shared filter
