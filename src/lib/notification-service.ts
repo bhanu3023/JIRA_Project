@@ -238,6 +238,17 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
 // it. Returns a ranked list instead of one email so the caller can try the
 // next candidate when one account's token turns out to be dead, rather than
 // giving up the instant the single best-guess sender fails.
+//
+// Deliberately does NOT fall through to every connected account (used to,
+// briefly) -- confirmed for real: with the intended shared sender
+// (leo@fuzebot.io) never actually connected, that full fallback reached a
+// real employee's own personal mailbox (joy.prakash@cloudfuze.com), and
+// Microsoft Graph/Exchange shows a mailbox's own real display name to
+// recipients regardless of the FROM_NAME this app requests -- so the
+// notification arrived reading as that person personally emailing the
+// customer, not "CloudFuze Support". Explicitly decided: better to skip a
+// notification (logged, not silently lost) than have it appear to come
+// from a random employee's real identity.
 async function getSenderEmailCandidates(): Promise<string[]> {
   try {
     const { getAllOAuthEmails } = await import('@/lib/oauth-service');
@@ -247,7 +258,6 @@ async function getSenderEmailCandidates(): Promise<string[]> {
     const ordered = [
       ...(override && emails.includes(override) ? [override] : []),
       ...sharedLooking,
-      ...emails,
     ];
     return Array.from(new Set(ordered));
   } catch { return []; }
