@@ -4350,12 +4350,29 @@ async function _handleJiraPgApi(
       ];
     }
 
-    // Date range filters
-    if (createdRange) {
+    // Date range filters -- Created+Updated together is a union (everything
+    // created in that window, plus everything updated in that window), not
+    // an intersection requiring both on the same ticket; see the matching
+    // fix in the dept-scoped branch below for why. searchQ above may have
+    // already claimed where.OR, so combine the two OR-groups via where.AND
+    // instead of one silently overwriting the other.
+    if (createdRange && updatedRange) {
+      const created = parseDateRange(createdRange);
+      const updated = parseDateRange(updatedRange);
+      const dateOr = [
+        { createdAt: { gte: created.from, lte: created.to } },
+        { updatedAt: { gte: updated.from, lte: updated.to } },
+      ];
+      if (where.OR) {
+        where.AND = [{ OR: where.OR }, { OR: dateOr }];
+        delete where.OR;
+      } else {
+        where.OR = dateOr;
+      }
+    } else if (createdRange) {
       const { from, to } = parseDateRange(createdRange);
       where.createdAt = { gte: from, lte: to };
-    }
-    if (updatedRange) {
+    } else if (updatedRange) {
       const { from, to } = parseDateRange(updatedRange);
       where.updatedAt = { gte: from, lte: to };
     }
@@ -4983,13 +5000,29 @@ async function _handleJiraPgApi(
       // were likewise only ever wired into the general Prisma branch — picking any
       // of these while viewing a department queue showed "0 issues" even for tickets
       // created that same day.
-      if (createdRange) {
+      // Created + Updated active together used to push two SEPARATE AND
+      // clauses here, requiring a ticket's createdAt AND its updatedAt to
+      // each fall in their own window -- an intersection that silently
+      // dropped every ticket that only satisfied one of the two (e.g. one
+      // created back in July but resolved in August, which "Updated: Aug"
+      // alone would correctly surface). Confirmed with the user this is
+      // meant to be a union instead: everything created in that window,
+      // plus everything updated in that window, not just tickets that
+      // happen to hit both windows on the same ticket.
+      if (createdRange && updatedRange) {
+        const created = parseDateRange(createdRange);
+        const updated = parseDateRange(updatedRange);
+        deptExtraClauses.push(
+          `((i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}) OR (i."updatedAt" >= $${deptParamIdx + 2} AND i."updatedAt" <= $${deptParamIdx + 3}))`
+        );
+        deptExtraParams.push(created.from, created.to, updated.from, updated.to);
+        deptParamIdx += 4;
+      } else if (createdRange) {
         const { from, to } = parseDateRange(createdRange);
         deptExtraClauses.push(`i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}`);
         deptExtraParams.push(from, to);
         deptParamIdx += 2;
-      }
-      if (updatedRange) {
+      } else if (updatedRange) {
         const { from, to } = parseDateRange(updatedRange);
         deptExtraClauses.push(`i."updatedAt" >= $${deptParamIdx} AND i."updatedAt" <= $${deptParamIdx + 1}`);
         deptExtraParams.push(from, to);
@@ -5155,8 +5188,17 @@ async function _handleJiraPgApi(
       // + Created (the default) returned 0 issues for a ticket he'd
       // genuinely worked in Dev before it moved on, exactly the CF-29889
       // scenario this session already fixed once for the Worked filter.
+      // Created+Updated both active used to let Created's originDeptMatchSql
+      // win outright, discarding updatedDeptMatchSql's own broadening (the
+      // frozen dept_statuses-done check for a ticket that moved on with no
+      // formal worked-on row) even though the OR'd date window above can now
+      // admit tickets that only satisfy the Updated side. Union both dept-
+      // match rules here too so the department scope is never narrower than
+      // whichever one of Created/Updated actually let a given ticket in.
       const deptScopeSql = workedDeptMatchSql
         ? workedDeptMatchSql
+        : (originDeptMatchSql && updatedDeptMatchSql)
+        ? `((${originDeptMatchSql} ${deptDoneClause}) OR (${updatedDeptMatchSql}))`
         : originDeptMatchSql
         ? `${originDeptMatchSql} ${deptDoneClause}`
         : updatedDeptMatchSql
