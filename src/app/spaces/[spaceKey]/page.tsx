@@ -142,6 +142,13 @@ function SpaceDetailContent() {
   // its own initializer, and the deferred effect callback from that render
   // would hit the TDZ ("Cannot access 'isAdmin' before initialization").
   const isAdmin = user?.role === 'admin';
+  // "Worked on" opened directly from the sidebar (no explicit ?viewUser=)
+  // was showing every Dev queue member's worked tickets mixed together --
+  // Assignee column jumping between different people on a screen someone
+  // expects to be "my own worked tickets". Default it to the viewer's own
+  // id; only the admin-only per-user drill-down (see viewUserParam's own
+  // comment above) should ever show someone else's.
+  const effectiveViewUserParam = viewUserParam || user?.id || '';
   // Static column definitions (always available)
   const STATIC_COLUMNS = [
     { id: 'reporter',       label: 'Reporter',            width: '150px' },
@@ -647,7 +654,7 @@ function SpaceDetailContent() {
           }
           // Dept sub-queue: closed tickets — fetched separately, auto-refreshed every 30s
           if (queueFilter === 'dept_closed') {
-            if (!cancelled) await fetchClosedIssues(spaceKey, deptParam, viewUserParam);
+            if (!cancelled) await fetchClosedIssues(spaceKey, deptParam, effectiveViewUserParam);
             return; // skip normal loadIssues for closed view
           }
           // Summary opened from inside a specific queue (sidebar's per-queue
@@ -706,7 +713,7 @@ function SpaceDetailContent() {
       }
     })();
     return () => { cancelled = true; setIsFetching(false); };
-  }, [spaceKey, currentPage, queueFilter, deptParam, viewUserParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id, issuesVersion]);
+  }, [spaceKey, currentPage, queueFilter, deptParam, effectiveViewUserParam, activeCustomQueue, customQueuesLoadedFor, filters, debouncedSearch, loadSpace, loadIssues, clearIssuesCache, fetchClosedIssues, user?.id, issuesVersion]);
 
   // Auto-refresh Sent/Watching every 15s — silent background refresh, never clears display
   useEffect(() => {
@@ -764,10 +771,10 @@ function SpaceDetailContent() {
   useEffect(() => {
     if (queueFilter !== 'dept_closed' || !spaceKey || !deptParam) return;
     const id = setInterval(() => {
-      fetchClosedIssues(spaceKey, deptParam, viewUserParam);
+      fetchClosedIssues(spaceKey, deptParam, effectiveViewUserParam);
     }, 30_000);
     return () => clearInterval(id);
-  }, [queueFilter, spaceKey, deptParam, viewUserParam, fetchClosedIssues]);
+  }, [queueFilter, spaceKey, deptParam, effectiveViewUserParam, fetchClosedIssues]);
 
   // Auto-refresh every 30s for regular (non-dept-queue) spaces — silent background refresh, never clears display
   useEffect(() => {
