@@ -4337,9 +4337,19 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
           }
           return true;
         });
-        // If a dept-routing field exists but this space is not assigned, mark as not assigned
+        // If a dept-routing field exists but this space is not assigned, mark as not assigned.
+        // BUT never flip an already-confirmed true back to false -- a ticket that
+        // already carries a real current_department (see the initial useState
+        // above) is itself proof this board uses department routing, even when
+        // this particular space isn't in some *other* department-routing custom
+        // field's configured spaceIds list. Confirmed for real: this exact
+        // override was hiding the Department row on CF-29926 (IT Administration
+        // space) a few seconds after it correctly rendered on mount -- the field
+        // flashed in from the initial state, then this effect resolved and
+        // hid it again, even though the ticket's own current_department was
+        // genuinely 'Dev'.
         if (allDeptFields.length > 0) {
-          setSpaceAssigned(deptFields.length > 0);
+          setSpaceAssigned(prev => prev === true ? true : deptFields.length > 0);
         }
         for (const field of deptFields) {
           for (const opt of (field.options || [])) {
