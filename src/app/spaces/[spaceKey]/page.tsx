@@ -15,7 +15,7 @@ import SpaceIcon from '@/components/ui/SpaceIcon';
 import DotLoader from '@/components/ui/DotLoader';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import {
-  LayoutGrid, Settings, ChevronDown, Check, User,
+  LayoutGrid, Settings, ChevronDown, Check, User, Users,
   Search, CheckCircle2, ClipboardList, X, Tag, Calendar, UserCheck,
   Briefcase, Package, Layers, Monitor, Clock, AlertCircle, Building2, SlidersHorizontal, RefreshCw, BarChart2,
   ChevronRight, Inbox as InboxIcon, AlertTriangle, Trophy, PieChart
@@ -1537,30 +1537,49 @@ function SpaceDetailContent() {
           : [];
         return (
           <div className="flex-1 overflow-y-auto px-6 py-6">
-            <h2 className="text-[15px] font-semibold text-gray-800 mb-1">Queues</h2>
-            <p className="text-[12px] text-gray-400 mb-5">Select a queue to view its tickets</p>
-            <div className="grid grid-cols-1 gap-2 max-w-2xl">
-              {customQueues.length === 0 && (
-                <p className="text-[13px] text-gray-400 py-4">No queues available.</p>
-              )}
-              {customQueues.map(q => (
-                // Same fix as the sidebar's queue-name link (commit e78b353): route to
-                // dept_all (open tickets, paginated) instead of the cq_<id> custom-queue
-                // view, which loads every ticket ever routed there including closed ones
-                // — for a queue with years of history that's thousands of rows, and this
-                // page appeared to hang because that load was so much heavier than expected.
-                <Link key={q.id} href={`/spaces/${spaceKey}?queue=dept_all&dept=${encodeURIComponent(q.name)}`}
-                  className="flex items-center gap-4 px-4 py-3 rounded-lg border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 transition-all group">
-                  <div className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0" style={{ backgroundColor: getDeptColor(q.name) + '20' }}>
-                    <Layers size={15} style={{ color: getDeptColor(q.name) }} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[13px] font-medium text-gray-800 group-hover:text-blue-700">{q.name}</p>
-                    <p className="text-[11px] text-gray-400 mt-0.5">Custom department queue</p>
-                  </div>
-                  <ChevronRight size={14} className="text-gray-300 group-hover:text-blue-400" />
-                </Link>
-              ))}
+            <div className="flex items-center gap-2.5 mb-1">
+              <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
+                <LayoutGrid size={16} className="text-blue-600" />
+              </div>
+              <h2 className="text-[17px] font-semibold text-gray-800">Queues</h2>
+            </div>
+            <p className="text-[12.5px] text-gray-400 mb-6 ml-[42px]">Select a queue to view its tickets</p>
+            {customQueues.length === 0 && (
+              <p className="text-[13px] text-gray-400 py-4">No queues available.</p>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 max-w-5xl">
+              {customQueues.map(q => {
+                const color = getDeptColor(q.name);
+                return (
+                  // Same fix as the sidebar's queue-name link (commit e78b353): route to
+                  // dept_all (open tickets, paginated) instead of the cq_<id> custom-queue
+                  // view, which loads every ticket ever routed there including closed ones
+                  // — for a queue with years of history that's thousands of rows, and this
+                  // page appeared to hang because that load was so much heavier than expected.
+                  <Link key={q.id} href={`/spaces/${spaceKey}?queue=dept_all&dept=${encodeURIComponent(q.name)}`}
+                    className="relative flex flex-col gap-3 px-5 pt-5 pb-4 rounded-xl border border-gray-200 bg-white overflow-hidden
+                      hover:border-transparent hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 group">
+                    {/* Color accent bar -- same per-queue color already used across the app
+                        (dashboard badges, sidebar dots) so this list visually matches them. */}
+                    <div className="absolute top-0 left-0 right-0 h-1" style={{ backgroundColor: color }} />
+                    <div className="flex items-start justify-between">
+                      <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-105"
+                        style={{ backgroundColor: color + '18' }}>
+                        <Layers size={20} style={{ color }} />
+                      </div>
+                      <ChevronRight size={16} className="text-gray-300 group-hover:text-blue-500 group-hover:translate-x-0.5 transition-all mt-1.5" />
+                    </div>
+                    <div>
+                      <p className="text-[14.5px] font-semibold text-gray-800 group-hover:text-blue-700 transition-colors">{q.name}</p>
+                      <p className="text-[11.5px] text-gray-400 mt-0.5">Custom department queue</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 pt-2 mt-auto border-t border-gray-100 text-[11.5px] text-gray-500">
+                      <Users size={12} className="text-gray-400" />
+                      <span>{q.memberIds.length} {q.memberIds.length === 1 ? 'member' : 'members'}</span>
+                    </div>
+                  </Link>
+                );
+              })}
             </div>
           </div>
         );
