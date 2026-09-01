@@ -147,11 +147,23 @@ export default function DashboardPage() {
   }, []);
   const [recentIssues, setRecentIssues] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  /** Click a box to show a black border on that box only; click again to clear. */
+  /** Click a box to show a black border on that box only; click again to clear.
+      For the Open Issues / Resolved stat cards specifically, this now ALSO
+      actually filters "My Assigned Tickets" to match -- clicking used to
+      only draw a highlight border with no effect on what's shown, which
+      looked like the click did nothing (worse, "Resolved" had literally no
+      way to see those tickets at all: the assigned-tab fetch always sent
+      excludeDone=true, matching only the Open Issues count). Switches to
+      that tab too, so the filtered result is immediately visible instead of
+      silently updating a tab you might not currently be looking at. */
   const [highlightedBox, setHighlightedBox] = useState<DashboardHighlight | null>(null);
 
   const toggleHighlight = (id: DashboardHighlight) => {
-    setHighlightedBox((prev) => (prev === id ? null : id));
+    setHighlightedBox((prev) => {
+      const next = prev === id ? null : id;
+      if (id === 'stat-1' || id === 'stat-2') setActiveTab('assigned');
+      return next;
+    });
   };
 
   const panelShellClick = (e: React.MouseEvent, id: 'spaces' | 'issues') => {
@@ -164,17 +176,46 @@ export default function DashboardPage() {
 
   useEffect(() => { loadSpaces(); }, [loadSpaces]);
 
-  // Only re-fetch when tab or user changes — NOT when spaces changes
+  // Only re-fetch when tab or user changes — NOT when spaces changes.
+  // Also re-fetch on highlightedBox so toggling the Open Issues/Resolved
+  // stat card while already on (or switching to) "My Assigned Tickets"
+  // actually re-queries with the matching filter instead of leaving
+  // whatever was already loaded on screen.
   useEffect(() => {
     if (user?.id) loadTabData(activeTab);
-  }, [activeTab, user?.id]);
+  }, [activeTab, user?.id, highlightedBox]);
 
   // Distinct reporters with at least one ticket currently in the Migration
   // department — Migration Manager / admin only, see the tab below.
   const [migrationReporters, setMigrationReporters] = useState<any[]>([]);
   const canSeeMigrationReporters = user?.role === 'admin' || user?.role === 'migration_manager';
 
+  // Separate cache for the "Resolved" stat-card view of My Assigned Tickets --
+  // a genuinely different query (statusCategory=done instead of excludeDone),
+  // not just a client-side filter of the same result set, so it needs its own
+  // cache slot rather than sharing tabCache['assigned'] with the open-tickets
+  // view and clobbering whichever one was fetched more recently.
+  const assignedResolvedCache = useRef<any[] | null>(null);
+
   const loadTabData = async (tab: TabType, forceRefresh = false) => {
+    if (tab === 'assigned' && highlightedBox === 'stat-2') {
+      if (!forceRefresh && assignedResolvedCache.current) {
+        setAssignedIssues(assignedResolvedCache.current);
+        return;
+      }
+      setLoading(true);
+      try {
+        if (user) {
+          const data = await api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '50' });
+          const issues = data.issues || [];
+          setAssignedIssues(issues);
+          assignedResolvedCache.current = issues;
+        }
+      } catch { /* ignore */ }
+      setLoading(false);
+      return;
+    }
+
     // Return cached data instantly if available and not forcing refresh
     if (!forceRefresh && tabCache.current[tab]) {
       if (tab === 'assigned') setAssignedIssues(tabCache.current[tab]!);
@@ -235,7 +276,7 @@ export default function DashboardPage() {
     : currentIssues;
 
   const tabs: { key: TabType; label: string; count?: number }[] = [
-    { key: 'assigned', label: 'My Assigned Tickets', count: assignedIssues.length },
+    { key: 'assigned', label: highlightedBox === 'stat-2' ? 'My Assigned Tickets — Resolved' : 'My Assigned Tickets', count: assignedIssues.length },
     { key: 'worked_on', label: 'Worked On' },
     { key: 'viewed', label: 'Viewed' },
     ...(canSeeMigrationReporters ? [{ key: 'migration_reporters' as const, label: 'Migration Reporters' }] : []),
@@ -461,9 +502,11 @@ export default function DashboardPage() {
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <CheckCircle2 size={32} className="mb-3 text-gray-300" />
                 <p className="text-[13px] font-medium text-gray-500">
-                  {activeTab === 'assigned' ? 'No open issues assigned to you' : 'Nothing here yet'}
+                  {activeTab === 'assigned'
+                    ? (highlightedBox === 'stat-2' ? 'No resolved tickets assigned to you yet' : 'No open issues assigned to you')
+                    : 'Nothing here yet'}
                 </p>
-                {activeTab === 'assigned' && <p className="mt-1 text-[12px] text-gray-400">{"You're all caught up!"}</p>}
+                {activeTab === 'assigned' && highlightedBox !== 'stat-2' && <p className="mt-1 text-[12px] text-gray-400">{"You're all caught up!"}</p>}
               </div>
             )}
           </div>
