@@ -4848,7 +4848,25 @@ async function _handleJiraPgApi(
           const queues: any[] = cq.rows[0]?.queues || [];
           const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
           const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
-          deptExtraClauses.push(memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0');
+          const memberClause = memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0';
+          // Same gap as origin/updated matching had, one layer up: this
+          // membership check runs unconditionally whenever queueMembersOnly is
+          // set, even when Created/Updated has already broadened department
+          // scope to include tickets someone genuinely worked here before
+          // moving on -- a ticket's CURRENT assignee is no longer a configured
+          // member of this queue the instant it's handed to another
+          // department, so this alone silently re-excluded every one of them
+          // regardless of what the broadened matching above decided. Confirmed
+          // for real: Queue: Dev + Created: Aug (no assignee filter) returned
+          // 178 instead of the true 439. OR in the same worked-on-record check
+          // when Created/Updated is active, so a ticket that's moved on still
+          // counts here as long as someone actually worked it in this dept.
+          const broadenIt = (createdRange || updatedRange) && queueMembersOnlyParam;
+          deptExtraClauses.push(
+            broadenIt
+              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)))`
+              : memberClause
+          );
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
         } catch { /* ignore -- no restriction if lookup fails */ }
       }
