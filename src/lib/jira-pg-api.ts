@@ -5076,12 +5076,29 @@ async function _handleJiraPgApi(
       // but this dept's own frozen snapshot shows it done" -- still-open
       // tickets currently in this dept keep matching exactly as before
       // (deptDoneClause only restricts when the exclude-done toggle is set).
+      //
+      // The done-category check alone was still too narrow -- confirmed for
+      // real: Queue: Dev + Updated + Assignee: Rehan Khan missed ~25 tickets
+      // he genuinely worked in Dev (real user_worked_on_tickets rows, dept
+      // 'Dev', timestamps inside the window) because he handed most of them
+      // on mid-flight rather than resolving them there -- dept_statuses['Dev']
+      // sat at 'In Progress', not 'done'. Unlike "Worked" (deliberately scoped
+      // to only count finished work, per the comment on workedDeptMatchSql
+      // above), "Updated" means activity, not completion -- a genuine
+      // worked-on row for this dept is on its own enough evidence the ticket
+      // belongs here, done or not.
       const updatedDeptMatchSql = updatedRange && queueMembersOnlyParam && !workedDeptMatchSql
         ? `(
              (LOWER(i.current_department) = LOWER($2) ${deptDoneClause})
-             OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
-               SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
-               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
+             OR (LOWER(i.current_department) != LOWER($2) AND (
+               EXISTS (
+                 SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+                 WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
+               )
+               OR EXISTS (
+                 SELECT 1 FROM user_worked_on_tickets w
+                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)
+               )
              ))
            )`
         : null;
