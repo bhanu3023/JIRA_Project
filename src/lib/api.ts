@@ -331,11 +331,12 @@ class ApiClient {
     const qs = params.toString();
     return this.request<{ departments: any[]; people: any[] }>(`/reports/mbr${qs ? `?${qs}` : ''}`);
   }
-  getMbrTeamData(team: 'eng' | 'qa' | 'infra', dateFrom?: string, dateTo?: string, person?: string) {
+  getMbrTeamData(team: 'eng' | 'qa' | 'infra', dateFrom?: string, dateTo?: string, person?: string, ticketFilter?: 'resolved' | 'rb') {
     const params = new URLSearchParams({ team });
-    if (dateFrom) params.set('dateFrom', dateFrom);
-    if (dateTo)   params.set('dateTo',   dateTo);
-    if (person)   params.set('person',   person);
+    if (dateFrom)     params.set('dateFrom',     dateFrom);
+    if (dateTo)       params.set('dateTo',       dateTo);
+    if (person)       params.set('person',       person);
+    if (ticketFilter) params.set('ticketFilter', ticketFilter);
     return this.request<{ people: any[]; monthly: any[]; summary: any; tickets: any[]; totalMatched: number }>(`/reports/mbr-team?${params}`);
   }
   getFileHealth() {
