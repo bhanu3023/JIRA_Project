@@ -9376,10 +9376,29 @@ async function _handleJiraPgApi(
       dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
 
-    const rosterClause = ` AND LOWER(au.email) = ANY($2::text[])`;
+    // Was a plain `i.current_department = $1` everywhere in this handler --
+    // same gap the Filters page had (see originDeptMatchSql/updatedDeptMatchSql
+    // above) and independently re-introduced here since this report never
+    // shared that code path. Confirmed for real: MBR's Customer Engineering
+    // tab undercounted every ticket a Dev-roster member resolved and which
+    // was then routed back to wherever it originated, exactly like the
+    // Filters page did before its own fix. A ticket belongs to this team's
+    // dept if it's currently there OR someone genuinely worked it here.
+    const deptMatchSql = `(LOWER(i.current_department) = LOWER($1) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wdx WHERE wdx.issue_id = i.id AND LOWER(wdx.dept) = LOWER($1)))`;
+    // Same for the roster/assignee side: the current assigneeId join (`au`)
+    // only ever reflects whoever holds the ticket NOW, which is no longer a
+    // roster member the instant it's handed to another department -- this
+    // silently re-excluded every one of those tickets even after the dept
+    // broadening above decided they belong here. A roster member counts if
+    // they're the current assignee OR they have a worked-on record for this
+    // dept on this ticket.
+    const rosterMatchSql = `(EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[])) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wr JOIN users wru ON wru.id = wr.user_id WHERE wr.issue_id = i.id AND LOWER(wr.dept) = LOWER($1) AND LOWER(wru.email) = ANY($2::text[])))`;
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
-    const personClause = person ? ` AND LOWER(au.email) = $${scopedParams.length}` : '';
+    const personIdx = scopedParams.length;
+    const personMatchSql = person
+      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}))`
+      : '';
 
     let ticketFilterClause = '';
     if (ticketFilter === 'resolved') ticketFilterClause = ` AND s.category = 'done'`;
@@ -9401,20 +9420,27 @@ async function _handleJiraPgApi(
         SELECT ${AGG}
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
-        LEFT JOIN users au ON au.id = i."assigneeId"
-        WHERE i.current_department = $1 ${rosterClause}${dateClause}${personClause}
+        WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}
       `, scopedParams),
 
       // LEFT JOIN from the roster itself (not FROM issues) so every roster
       // member appears even with zero tickets in the selected range —
       // "make sure those are displayed under those tabs" applies to the
       // person list itself, not just to whoever happens to have activity.
+      // Keyed to u.id directly (not the generic dept-wide match above), so
+      // each roster member is credited for exactly their own current-owner
+      // or worked-on tickets -- the same ticket can legitimately show up
+      // under more than one person if, say, one resolved it here and it's
+      // since been handed to another of this dept's own members.
       pool.query(`
         WITH roster(email) AS (SELECT unnest($2::text[]))
         SELECT COALESCE(u.email, r.email) AS email, u."firstName", u."lastName", ${AGG}
         FROM roster r
         LEFT JOIN users u ON LOWER(u.email) = r.email
-        LEFT JOIN issues i ON i."assigneeId" = u.id AND i.current_department = $1 ${dateClause}
+        LEFT JOIN issues i ON (
+          (i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1))
+          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1))
+        ) ${dateClause}
         LEFT JOIN statuses s ON i."statusId" = s.id
         GROUP BY r.email, u.email, u."firstName", u."lastName"
         ORDER BY total DESC
@@ -9424,8 +9450,7 @@ async function _handleJiraPgApi(
         SELECT to_char(i."createdAt", 'Mon YYYY') AS label, MIN(i."createdAt") AS sort_key, ${AGG}
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
-        LEFT JOIN users au ON au.id = i."assigneeId"
-        WHERE i.current_department = $1 ${rosterClause}${createdClause}
+        WHERE ${deptMatchSql} AND ${rosterMatchSql}${createdClause}
         GROUP BY 1
         ORDER BY sort_key DESC
         LIMIT 12
@@ -9433,7 +9458,16 @@ async function _handleJiraPgApi(
 
       pool.query(`
         SELECT i.key, sp.key AS project_key,
-          COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
+          COALESCE(
+            CASE WHEN LOWER(i.current_department) = LOWER($1) AND au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])
+              THEN COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
+            END,
+            (SELECT COALESCE(NULLIF(TRIM(wtu."firstName" || ' ' || wtu."lastName"), ''), wtu.email)
+             FROM user_worked_on_tickets wt JOIN users wtu ON wtu.id = wt.user_id
+             WHERE wt.issue_id = i.id AND LOWER(wt.dept) = LOWER($1) AND LOWER(wtu.email) = ANY($2::text[])
+             ORDER BY wt.worked_at DESC LIMIT 1),
+            COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
+          ) AS assignee_name,
           COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
           s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
           i.jira_sla_breached,
@@ -9443,7 +9477,7 @@ async function _handleJiraPgApi(
         LEFT JOIN spaces sp ON sp.id = i."spaceId"
         LEFT JOIN users au ON au.id = i."assigneeId"
         LEFT JOIN users ru ON ru.id = i."reporterId"
-        WHERE i.current_department = $1 ${rosterClause}${dateClause}${personClause}${ticketFilterClause}
+        WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}${ticketFilterClause}
         ORDER BY i."createdAt" DESC
         LIMIT 300
       `, scopedParams),
