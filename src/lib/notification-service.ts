@@ -230,15 +230,27 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
 // explicit override (DEFAULT_NOTIFICATION_SENDER) if set, then any connected
 // account that looks like a shared/support mailbox by its address, before
 // falling back to the old first-connected behavior as a last resort.
-async function getBestSenderEmail(): Promise<string | null> {
+// Was a single pick with no fallback -- once the "best" account's refresh
+// token expires (which it will, Microsoft expires them after 90 days of
+// inactivity: confirmed for real on l1board@cloudfuze.com), every
+// notification failed outright even though 100+ OTHER OAuth accounts were
+// sitting connected in this same table, any one of which could have sent
+// it. Returns a ranked list instead of one email so the caller can try the
+// next candidate when one account's token turns out to be dead, rather than
+// giving up the instant the single best-guess sender fails.
+async function getSenderEmailCandidates(): Promise<string[]> {
   try {
     const { getAllOAuthEmails } = await import('@/lib/oauth-service');
     const emails = getAllOAuthEmails();
     const override = (process.env.DEFAULT_NOTIFICATION_SENDER || '').toLowerCase().trim();
-    if (override && emails.includes(override)) return override;
-    const sharedLooking = emails.find((e) => /^(support|helpdesk|help-desk|l1board|noreply|no-reply|ticket)/i.test(e.split('@')[0]));
-    return sharedLooking || emails[0] || null;
-  } catch { return null; }
+    const sharedLooking = emails.filter((e) => /^(support|helpdesk|help-desk|l1board|noreply|no-reply|ticket)/i.test(e.split('@')[0]));
+    const ordered = [
+      ...(override && emails.includes(override) ? [override] : []),
+      ...sharedLooking,
+      ...emails,
+    ];
+    return Array.from(new Set(ordered));
+  } catch { return []; }
 }
 
 // ── Look up the inbox email address for a space (e.g. L1board@cloudfuze.com for CUSTM) ──
@@ -326,13 +338,21 @@ async function sendNotification(to: string[], subject: string, html: string, tex
     }
   }
 
-  const senderEmail = await getBestSenderEmail();
-  if (senderEmail) {
-    const sent = await sendViaGraph({ from: senderEmail, to: uniqueTo, subject, html, text, inReplyTo });
-    if (!sent) console.error(`[Notification] All send methods failed for "${subject}" to ${uniqueTo.join(', ')}`);
-  } else {
+  const candidates = await getSenderEmailCandidates();
+  if (!candidates.length) {
     console.warn(`[Notification] Skipping "${subject}" — no working SMTP and no OAuth account connected`);
+    return;
   }
+  // Try the shared-mailbox-looking account(s) first, then fall through to
+  // any other connected account -- capped rather than trying all 100+, since
+  // a token refresh attempt against a genuinely dead token still costs a
+  // real network round trip; 10 candidates is enough to survive any one
+  // (or several) accounts' tokens having quietly expired without turning a
+  // single notification send into a long serial sweep of the whole table.
+  for (const candidate of candidates.slice(0, 10)) {
+    if (await sendViaGraph({ from: candidate, to: uniqueTo, subject, html, text, inReplyTo })) return;
+  }
+  console.error(`[Notification] All send methods failed for "${subject}" to ${uniqueTo.join(', ')}`);
 }
 
 function issueUrl(issueKey: string) {
