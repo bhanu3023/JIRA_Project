@@ -329,7 +329,7 @@ class ApiClient {
     if (dateTo)      params.set('dateTo',     dateTo);
     if (staleDays)   params.set('staleDays',  String(staleDays));
     const qs = params.toString();
-    return this.request<{ departments: any[]; people: any[] }>(`/reports/mbr${qs ? `?${qs}` : ''}`);
+    return this.request<{ departments: any[]; people: any[]; tickets: any[]; totalMatched: number }>(`/reports/mbr${qs ? `?${qs}` : ''}`);
   }
   getMbrTeamData(team: 'eng' | 'qa' | 'infra', dateFrom?: string, dateTo?: string, person?: string, ticketFilter?: 'resolved' | 'rb') {
     const params = new URLSearchParams({ team });

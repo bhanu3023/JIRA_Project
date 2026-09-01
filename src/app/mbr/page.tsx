@@ -329,6 +329,8 @@ export default function MbrPage() {
   const [staleDays, setStaleDays] = useState(7);
   const [departments, setDepartments] = useState<DeptRow[]>([]);
   const [people, setPeople] = useState<PersonRow[]>([]);
+  const [tickets, setTickets] = useState<any[]>([]);
+  const [totalMatched, setTotalMatched] = useState(0);
   const [loading, setLoading] = useState(false);
   const [sortKey, setSortKey] = useState<keyof PersonRow>('hygieneScore');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -348,8 +350,8 @@ export default function MbrPage() {
     if (!isPrivileged || topTab !== 'department') return;
     setLoading(true);
     api.getMbrData(department || undefined, dateFrom || undefined, dateTo || undefined, staleDays)
-      .then((d) => { setDepartments(d.departments); setPeople(d.people); })
-      .catch(() => { setDepartments([]); setPeople([]); })
+      .then((d) => { setDepartments(d.departments); setPeople(d.people); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
+      .catch(() => { setDepartments([]); setPeople([]); setTickets([]); setTotalMatched(0); })
       .finally(() => setLoading(false));
   }, [isPrivileged, topTab, department, dateFrom, dateTo, staleDays]);
 
@@ -566,6 +568,57 @@ export default function MbrPage() {
                             <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold ${GRADE_STYLE[p.grade]}`}>
                               {p.hygieneScore} · {GRADE_LABEL[p.grade]}
                             </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Tickets — the actual ticket-level detail behind the KPI/hygiene aggregates above */}
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                <h3 className="text-[14px] font-semibold text-gray-700">Tickets</h3>
+                <span className="text-[12px] text-gray-400">Showing {tickets.length} of {totalMatched}{totalMatched > tickets.length ? ' (capped)' : ''}</span>
+              </div>
+              {tickets.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <Users size={36} className="text-gray-200 mb-3" />
+                  <p className="text-[14px] font-medium text-gray-400">No tickets in this range</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                  <table className="w-full text-[13px] whitespace-nowrap">
+                    <thead>
+                      <tr>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Ticket</th>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Board</th>
+                        {!department && <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Department</th>}
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Assignee</th>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Reporter</th>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Status</th>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Summary</th>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">SLA breached</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tickets.map((t) => (
+                        <tr key={t.key} className="hover:bg-gray-50">
+                          <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">{t.key}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
+                          {!department && <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.dept}</td>}
+                          <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.assignee}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.reporter}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100">
+                            {t.slaBreached ? <span className="font-semibold text-red-600">Yes</span> : <span className="font-medium text-green-600">No</span>}
                           </td>
                         </tr>
                       ))}
