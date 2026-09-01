@@ -1549,12 +1549,12 @@ function SpaceDetailContent() {
             )}
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 max-w-5xl">
               {customQueues.map(q => {
-                // Was each queue's own hash-derived color (a different hue per
-                // card) -- switched to one consistent light/dark blue pair
-                // matching the rest of this UI (Status pills, header, active
-                // nav highlights) instead of a rainbow of unrelated colors.
-                const accentDark = '#2563EB';
-                const accentLight = '#DBEAFE';
+                // Exact dark blue already used for the app's own top header
+                // bar (Header.tsx, bg-[#0129AC]) paired with a lighter steel-
+                // blue -- the specific pair asked for, sampled from a swatch,
+                // not just "some blue" like the earlier #2563EB/#DBEAFE pass.
+                const accentDark = '#0129AC';
+                const accentLight = '#5B9BD5';
                 return (
                   // Same fix as the sidebar's queue-name link (commit e78b353): route to
                   // dept_all (open tickets, paginated) instead of the cq_<id> custom-queue
@@ -1568,7 +1568,7 @@ function SpaceDetailContent() {
                     <div className="flex items-start justify-between">
                       <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-105"
                         style={{ backgroundColor: accentLight }}>
-                        <Layers size={20} style={{ color: accentDark }} />
+                        <Layers size={20} className="text-white" />
                       </div>
                       <ChevronRight size={16} className="text-gray-300 group-hover:text-blue-500 group-hover:translate-x-0.5 transition-all mt-1.5" />
                     </div>
