@@ -1295,7 +1295,8 @@ function SpaceDetailContent() {
     if (filters.type && !matchesMulti(filters.type, issue.type || '')) return false;
     // Status filter
     if (filters.status && !matchesMulti(filters.status, issue.status?.name || '')) return false;
-    // Assignee filter — match by email (member id ≠ user id in seeded data)
+    // Assignee filter — match by email (member id ≠ user id in seeded data).
+    // Now multi-select (comma-separated ids), same pattern as matchesMulti above.
     if (filters.assignee) {
       if (filters.assignee === '__unassigned') { if (issue.assignee) return false; }
       else if (filters.assignee === '__current') {
@@ -1303,7 +1304,8 @@ function SpaceDetailContent() {
                         issue.assignee?.id    === user?.id;
         if (!matches) return false;
       } else {
-        if (issue.assignee?.id !== filters.assignee) return false;
+        const selectedAssigneeIds = filters.assignee.split(',').map((v: string) => v.trim()).filter(Boolean);
+        if (!issue.assignee?.id || !selectedAssigneeIds.includes(issue.assignee.id)) return false;
       }
     }
     // Priority filter
@@ -2227,10 +2229,27 @@ function SpaceDetailContent() {
               const filtered = aq
                 ? assigneeFilterMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
                 : assigneeFilterMembers;
+              // Was single-select (picking a person replaced whoever was already
+              // selected, closing the dropdown immediately) -- every other
+              // multi-value filter in this same panel (Type, Status, Priority)
+              // already uses a comma-joined toggle instead, and the backend
+              // already accepts a comma-separated assignee list (resolveUserIds
+              // splits on it) -- this was the one holdout still limited to one
+              // person at a time. __current/__unassigned are special, mutually
+              // exclusive with picking specific people (selecting one clears
+              // the other kind), same as Jira's own "Unassigned" acting as its
+              // own distinct choice rather than combining with named people.
+              const selectedIds = filters.assignee && filters.assignee !== '__current' && filters.assignee !== '__unassigned'
+                ? filters.assignee.split(',').map((v: string) => v.trim()).filter(Boolean)
+                : [];
+              const toggleAssignee = (id: string) => {
+                const next = selectedIds.includes(id) ? selectedIds.filter((v: string) => v !== id) : [...selectedIds, id];
+                if (next.length === 0) clearFilter('assignee'); else setFilter('assignee', next.join(','));
+              };
               return (
                 <div className="flex flex-col max-h-[380px]">
                   <div className="px-3 py-2 border-b border-gray-100 flex-shrink-0 text-[12px] text-gray-500">
-                    Assignee <span className="font-semibold text-gray-700">= (equals)</span>
+                    Assignee <span className="font-semibold text-gray-700">in</span>
                   </div>
                   <div className="px-2 pt-2 pb-1 flex-shrink-0">
                     <div className="relative">
@@ -2242,7 +2261,7 @@ function SpaceDetailContent() {
                   </div>
                   <div className="overflow-y-auto flex-1">
                     {!aq && <>
-                      <button onClick={() => { setFilter('assignee', '__current'); setAssigneeSearch(''); setOpenFilter(null); }}
+                      <button onClick={() => { setFilter('assignee', filters.assignee === '__current' ? '' : '__current'); setAssigneeSearch(''); }}
                         className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.assignee === '__current' ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
                         <div className="w-5 h-5 rounded-full bg-teal-500 flex items-center justify-center flex-shrink-0">
                           <span className="text-[8px] font-bold text-white">{getInitials(user?.firstName, user?.lastName)}</span>
@@ -2250,7 +2269,7 @@ function SpaceDetailContent() {
                         <span>Current User</span>
                         {filters.assignee === '__current' && <Check size={11} className="ml-auto text-blue-600" />}
                       </button>
-                      <button onClick={() => { setFilter('assignee', '__unassigned'); setAssigneeSearch(''); setOpenFilter(null); }}
+                      <button onClick={() => { setFilter('assignee', filters.assignee === '__unassigned' ? '' : '__unassigned'); setAssigneeSearch(''); }}
                         className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${filters.assignee === '__unassigned' ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
                         <div className="w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center flex-shrink-0">
                           <User size={10} className="text-gray-400" />
@@ -2261,17 +2280,19 @@ function SpaceDetailContent() {
                       <div className="border-t border-gray-100 mx-2 my-1" />
                     </>}
                     {filtered.map((mb: any) => {
-                      const isSelected = filters.assignee === mb.id;
+                      const isSelected = selectedIds.includes(mb.id);
                       const colors = ['bg-blue-500','bg-purple-500','bg-green-500','bg-orange-500','bg-rose-500','bg-teal-500','bg-indigo-500'];
                       const color = colors[(mb.firstName?.charCodeAt(0) || 0) % colors.length];
                       return (
-                        <button key={mb.id} onClick={() => { setFilter('assignee', mb.id); setAssigneeSearch(''); setOpenFilter(null); }}
+                        <button key={mb.id} onClick={() => toggleAssignee(mb.id)}
                           className={`w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-blue-50 transition-colors ${isSelected ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
+                          <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${isSelected ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300'}`}>
+                            {isSelected && <Check size={10} className="text-white" strokeWidth={3} />}
+                          </span>
                           <div className={`w-5 h-5 rounded-full ${color} flex items-center justify-center text-[8px] font-bold text-white flex-shrink-0`}>
                             {getInitials(mb.firstName, mb.lastName)}
                           </div>
                           <span className="truncate">{mb.firstName} {mb.lastName}</span>
-                          {isSelected && <Check size={11} className="ml-auto flex-shrink-0 text-blue-600" />}
                         </button>
                       );
                     })}
@@ -2507,8 +2528,12 @@ function SpaceDetailContent() {
             if (key === 'assignee') {
               if (val === '__unassigned') return 'Unassigned';
               if (val === '__current') return 'Current User';
-              const mb = allMembers.find((m: any) => m.id === val);
-              return mb ? `${mb.firstName} ${mb.lastName}` : val;
+              // Multi-select (comma-separated ids) -- same joinMulti collapse-to-
+              // count pattern already used above for the other multi-value filters.
+              return joinMulti(val.split(','), (id) => {
+                const mb = allMembers.find((m: any) => m.id === id);
+                return mb ? `${mb.firstName} ${mb.lastName}` : id;
+              });
             }
             if (key === 'reporter') {
               if (val === '__current') return 'Current User';
