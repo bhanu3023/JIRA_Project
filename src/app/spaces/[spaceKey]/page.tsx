@@ -2930,6 +2930,19 @@ function SpaceDetailContent() {
                 const assigneeName = currentAssignee
                   ? `${currentAssignee.firstName || ''} ${currentAssignee.lastName || ''}`.trim()
                   : null;
+                // "Assigned to" above is whoever holds it in its CURRENT department --
+                // useful, but doesn't answer this page's own question: who from OUR
+                // side (deptParam, the queue this Sent/Watching list belongs to) is
+                // the one actually watching it. That's this dept's own saved snapshot
+                // from right before it left, same dept_assignees map keyed the other
+                // way around.
+                const watchingDeptKey = Object.keys(deptAssignees).find(
+                  (k) => k.toLowerCase() === deptParam.toLowerCase()
+                );
+                const watchingAssignee = watchingDeptKey ? deptAssignees[watchingDeptKey] : null;
+                const watchingName = watchingAssignee
+                  ? `${watchingAssignee.firstName || ''} ${watchingAssignee.lastName || ''}`.trim()
+                  : null;
                 // Sent/Watching exists so the sending dept can watch what happens to a
                 // ticket after it leaves — always show the real current status, not a
                 // frozen snapshot of whatever it was right before the transfer. That
@@ -3023,6 +3036,25 @@ function SpaceDetailContent() {
                           // doesn't match that badge (e.g. it's already been picked up and
                           // moved past Open, but this still said "waiting").
                           <span className="text-[12px] text-gray-400 italic">Unassigned</span>
+                        )}
+                      </div>
+                      {/* Divider */}
+                      <div className="h-3 w-px bg-gray-200" />
+                      {/* Who from OUR queue (deptParam) is watching this -- our own
+                          saved assignee snapshot from right before it left, distinct
+                          from "Assigned to" above (whoever holds it in ITS CURRENT
+                          department right now). */}
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10.5px] text-gray-400 font-medium uppercase tracking-wide">Watching</span>
+                        {watchingName ? (
+                          <div className="flex items-center gap-1">
+                            <div className="w-5 h-5 rounded-full bg-amber-500 flex items-center justify-center text-[8px] font-bold text-white">
+                              {watchingName.split(' ').map((n: string) => n[0]).join('').toUpperCase().slice(0,2)}
+                            </div>
+                            <span className="text-[12px] text-gray-600">{watchingName}</span>
+                          </div>
+                        ) : (
+                          <span className="text-[12px] text-gray-400 italic">—</span>
                         )}
                       </div>
                     </div>
