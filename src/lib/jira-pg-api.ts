@@ -9188,17 +9188,26 @@ async function _handleJiraPgApi(
     const dateTo     = url.searchParams.get('dateTo') || '';
     const staleDays  = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
+    // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo] —
+    // same convention as reports/mbr-team's team tabs, so the date-range filter
+    // means the same thing everywhere in the MBR page.
     const filterParams: any[] = [];
-    let dateClause = '';
-    if (dateFrom) {
-      filterParams.push(new Date(dateFrom).toISOString());
-      dateClause += ` AND i."updatedAt" >= $${filterParams.length}`;
-    }
+    let fromIdx: number | null = null;
+    let toIdx: number | null = null;
+    if (dateFrom) { filterParams.push(new Date(dateFrom).toISOString()); fromIdx = filterParams.length; }
     if (dateTo) {
       const toExclusive = new Date(dateTo);
       toExclusive.setDate(toExclusive.getDate() + 1);
       filterParams.push(toExclusive.toISOString());
-      dateClause += ` AND i."updatedAt" < $${filterParams.length}`;
+      toIdx = filterParams.length;
+    }
+    let dateClause = '';
+    if (fromIdx || toIdx) {
+      const createdConds: string[] = [];
+      const updatedConds: string[] = [];
+      if (fromIdx) { createdConds.push(`i."createdAt" >= $${fromIdx}`); updatedConds.push(`i."updatedAt" >= $${fromIdx}`); }
+      if (toIdx)   { createdConds.push(`i."createdAt" < $${toIdx}`);    updatedConds.push(`i."updatedAt" < $${toIdx}`); }
+      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
     let deptClause = '';
     if (department) {
@@ -9241,6 +9250,42 @@ async function _handleJiraPgApi(
         ${dateClause}${deptClause}
       GROUP BY i.current_department, i."assigneeId", u."firstName", u."lastName", u.email
     `, staleParams);
+
+    // Ticket-level detail for whatever department + date range is selected —
+    // the KPI/hygiene tables above are aggregates only; this is the actual
+    // ticket list behind them, same shape/cap (300, newest first) as the
+    // Customer Engineering/QA/Infra tabs' ticket table.
+    const ticketRows = await pool.query(`
+      SELECT i.key, sp.key AS project_key, i.current_department AS dept,
+        COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
+        COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
+        s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
+        (i.jira_sla_breached = true OR (s.category != 'done' AND i."dueDate" < now())) AS sla_breached,
+        COUNT(*) OVER() AS total_matched
+      FROM issues i
+      LEFT JOIN statuses s ON i."statusId" = s.id
+      LEFT JOIN spaces sp ON sp.id = i."spaceId"
+      LEFT JOIN users au ON au.id = i."assigneeId"
+      LEFT JOIN users ru ON ru.id = i."reporterId"
+      WHERE i.current_department IS NOT NULL AND i.current_department != ''
+        ${dateClause}${deptClause}
+      ORDER BY i."createdAt" DESC
+      LIMIT 300
+    `, filterParams);
+
+    const totalMatched = ticketRows.rows.length > 0 ? Number(ticketRows.rows[0].total_matched) || 0 : 0;
+    const tickets = ticketRows.rows.map((r: any) => ({
+      key: r.key,
+      project: r.project_key || '',
+      dept: r.dept,
+      assignee: r.assignee_name || '',
+      reporter: r.reporter_name || '',
+      status: r.status_name || '',
+      summary: r.summary || '',
+      created: r.createdAt,
+      updated: r.updatedAt,
+      slaBreached: !!r.sla_breached,
+    }));
 
     const departments = deptRows.rows.map((r: any) => ({
       dept: r.dept,
@@ -9302,7 +9347,7 @@ async function _handleJiraPgApi(
       };
     });
 
-    return json({ departments, people });
+    return json({ departments, people, tickets, totalMatched });
   }
 
   // GET /reports/mbr-team?team=eng|qa|infra&dateFrom=&dateTo=&person=<email>&ticketFilter=resolved|rb —
