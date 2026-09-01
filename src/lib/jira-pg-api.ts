@@ -5271,6 +5271,19 @@ async function _handleJiraPgApi(
             const snap = snapKey ? deptAssignees[snapKey] : null;
             if (snap?.id) {
               assigneeOverride = { id: snap.id, firstName: snap.firstName || '', lastName: snap.lastName || '', email: snap.email || null, avatarUrl: snap.avatarUrl || avatarRef(snap.id, null) };
+            } else if (movedAwayFromQueue && row.reporter_id) {
+              // No per-dept assignee snapshot exists at all -- confirmed for
+              // real on CF-29845: reported by a Dev-queue member, transferred
+              // to Infra about a minute later, and never formally assigned to
+              // anyone while it sat in Dev, so there's genuinely no assignee
+              // to snapshot. Falling through to the raw current assignee here
+              // showed the ticket's now-unrelated Infra owner as if they'd
+              // done Dev's work. The reporter is who actually handled it
+              // during its time in this dept (set root cause/fix description
+              // etc. before handing off), so credit them instead of a
+              // stranger to this dept, or leave the field blank if even the
+              // reporter is missing.
+              assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
             }
           }
           return formatIssue({
