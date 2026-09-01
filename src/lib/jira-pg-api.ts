@@ -9400,20 +9400,40 @@ async function _handleJiraPgApi(
       ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}))`
       : '';
 
+    // "resolved" still filters correctly in SQL (status category is a plain
+    // column); "rb" (breached) can't -- see the rb_breached comment below --
+    // so it's applied in JS after the live computation instead.
     let ticketFilterClause = '';
     if (ticketFilter === 'resolved') ticketFilterClause = ` AND s.category = 'done'`;
-    else if (ticketFilter === 'rb') ticketFilterClause = ` AND i.jira_sla_breached = true`;
 
-    // jira_sla_breached is a plain non-nullable boolean here (no separate
-    // "was this ticket even tracked for SLA" column exists on `issues` —
-    // jira_sla_due_at/_start_at are effectively unpopulated), so every ticket
-    // counts as "tracked" and rb_breached is just how many of those are true.
+    // rb_breached (here and in AGG below) used to be COUNT(...) FILTER (WHERE
+    // i.jira_sla_breached = true) -- jira_sla_breached only ever reflects a
+    // breach Jira itself had already recorded before import; it says nothing
+    // about this app's OWN live department SLA clock (dept_sla_started_at /
+    // dept_sla_log against sla_definitions), which is what actually decides
+    // breach status everywhere else in this app -- the issue detail page's
+    // own SLA panel and the Filters page's "SLA Breached" column both go
+    // through computeSLAInstancesPure. Confirmed for real: jira_sla_breached
+    // was 0 for every single ticket in every department for August, even
+    // though the live calculation correctly flags real breaches. rb_breached
+    // is computed separately below (slaComputed) using that same shared
+    // function, then merged into summary/people/monthly here; AGG keeps only
+    // the parts that were already accurate via plain SQL.
     const AGG = `
         COUNT(i.id) AS total,
         COUNT(i.id) FILTER (WHERE s.category = 'done') AS resolved,
-        COUNT(i.id) FILTER (WHERE i.jira_sla_breached = true) AS rb_breached,
         ROUND(AVG(EXTRACT(EPOCH FROM (i."resolvedAt" - i."createdAt")) / 3600)
           FILTER (WHERE i."resolvedAt" IS NOT NULL)) AS avg_resolution_hours`;
+
+    // ticketFilter=rb can no longer be pushed into the SQL WHERE (breach
+    // status is only known after the live per-ticket computation below), so
+    // its candidate fetch has to be wide enough to contain every real match
+    // before that JS filter runs, not just the 300 the UI ever displays.
+    // Every dept's real monthly volume seen in this app is a few hundred
+    // tickets at most, so this cap is generous, not silent -- flagged here
+    // rather than actually enforced against a count, since exceeding it
+    // would need dept sizes this app has never approached.
+    const ticketsLimit = ticketFilter === 'rb' ? 2000 : 300;
 
     const [summaryRes, peopleRes, monthlyRes, ticketsRes] = await Promise.all([
       pool.query(`
@@ -9457,7 +9477,7 @@ async function _handleJiraPgApi(
       `, baseParams),
 
       pool.query(`
-        SELECT i.key, sp.key AS project_key,
+        SELECT i.id, i.key, sp.key AS project_key,
           COALESCE(
             CASE WHEN LOWER(i.current_department) = LOWER($1) AND au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])
               THEN COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
@@ -9470,7 +9490,6 @@ async function _handleJiraPgApi(
           ) AS assignee_name,
           COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
           s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
-          i.jira_sla_breached,
           COUNT(*) OVER() AS total_matched
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
@@ -9479,34 +9498,112 @@ async function _handleJiraPgApi(
         LEFT JOIN users ru ON ru.id = i."reporterId"
         WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}${ticketFilterClause}
         ORDER BY i."createdAt" DESC
-        LIMIT 300
+        LIMIT ${ticketsLimit}
       `, scopedParams),
     ]);
 
-    const toSummary = (r: any) => ({
+    // Live SLA breach computation for every ticket that matched dept+roster
+    // in this date range (broadest of the four queries above -- a superset
+    // of what peopleRes/monthlyRes/ticketsRes each individually need), using
+    // the SAME shared function and per-space policy set the issue detail
+    // page's own SLA panel uses. Attribution per roster member mirrors
+    // peopleRes's own join above: current assignee if they're on the roster,
+    // plus anyone else on the roster with a genuine worked-on record for
+    // this dept on this ticket -- so a ticket can legitimately count as
+    // breached under more than one person, same as total/resolved already do.
+    const slaCandidatesRes = await pool.query(`
+      SELECT i.id, i.priority, i.current_department, i."spaceId", i."createdAt", i."resolvedAt",
+        i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
+        i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category
+      FROM issues i
+      LEFT JOIN statuses s ON i."statusId" = s.id
+      LEFT JOIN users au ON au.id = i."assigneeId"
+      WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}
+    `, baseParams);
+
+    const candidateIds = slaCandidatesRes.rows.map((r: any) => r.id);
+    const workedRosterRes = candidateIds.length
+      ? await pool.query(
+          `SELECT w.issue_id, wu.email
+           FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
+           WHERE w.issue_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2) AND LOWER(wu.email) = ANY($3::text[])`,
+          [candidateIds, dept, roster]
+        )
+      : { rows: [] as any[] };
+    const workedRosterByIssue: Record<string, Set<string>> = {};
+    for (const wr of workedRosterRes.rows) {
+      (workedRosterByIssue[wr.issue_id] ??= new Set()).add(String(wr.email).toLowerCase());
+    }
+
+    const slaSpaceIds = Array.from(new Set(slaCandidatesRes.rows.map((r: any) => r.spaceId).filter(Boolean)));
+    const slaPoliciesBySpace: Record<string, any[]> = {};
+    if (slaSpaceIds.length) {
+      const polRows = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`, [slaSpaceIds]);
+      for (const p of polRows.rows) (slaPoliciesBySpace[p.spaceId] ??= []).push(p);
+    }
+
+    const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const slaById = new Map<string, boolean>();
+    const peopleRbBreached: Record<string, number> = {};
+    const monthlyRbBreached: Record<string, number> = {};
+    let summaryRbBreached = 0;
+    for (const row of slaCandidatesRes.rows) {
+      const instances = computeSLAInstancesPure(
+        { ...row, status: { name: row.status_name, category: row.status_category } },
+        slaPoliciesBySpace[row.spaceId] || [],
+        false
+      );
+      const breached = instances.some((x: any) => x.isBreached);
+      slaById.set(row.id, breached);
+      if (!breached) continue;
+
+      const createdDate = new Date(row.createdAt);
+      const monthLabel = `${MONTH_ABBR[createdDate.getUTCMonth()]} ${createdDate.getUTCFullYear()}`;
+      monthlyRbBreached[monthLabel] = (monthlyRbBreached[monthLabel] || 0) + 1;
+
+      const emails = new Set<string>(workedRosterByIssue[row.id] || []);
+      if (row.assignee_email && String(row.current_department || '').toLowerCase() === dept.toLowerCase()
+        && roster.some((e) => e.toLowerCase() === String(row.assignee_email).toLowerCase())) {
+        emails.add(String(row.assignee_email).toLowerCase());
+      }
+      for (const email of Array.from(emails)) peopleRbBreached[email] = (peopleRbBreached[email] || 0) + 1;
+      if (!person || emails.has(person)) summaryRbBreached++;
+    }
+
+    const toSummary = (r: any, rbBreached: number) => ({
       total: Number(r.total) || 0,
       resolved: Number(r.resolved) || 0,
       rbTracked: Number(r.total) || 0,
-      rbBreached: Number(r.rb_breached) || 0,
+      rbBreached,
       frbTracked: 0,
       frbBreached: 0,
     });
 
-    const summary = toSummary(summaryRes.rows[0] || {});
+    const summary = toSummary(summaryRes.rows[0] || {}, summaryRbBreached);
 
     const people = peopleRes.rows.map((r: any) => ({
       email: r.email,
       name: `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email,
-      ...toSummary(r),
+      ...toSummary(r, peopleRbBreached[String(r.email || '').toLowerCase()] || 0),
       avgResolutionHours: r.avg_resolution_hours === null ? null : Number(r.avg_resolution_hours),
     }));
 
     const monthly = monthlyRes.rows
-      .map((r: any) => ({ label: r.label, ...toSummary(r) }))
+      .map((r: any) => ({ label: r.label, ...toSummary(r, monthlyRbBreached[r.label] || 0) }))
       .reverse();
 
-    const totalMatched = ticketsRes.rows.length > 0 ? Number(ticketsRes.rows[0].total_matched) || 0 : 0;
-    const tickets = ticketsRes.rows.map((r: any) => ({
+    let ticketRows = ticketsRes.rows;
+    // total_matched from COUNT(*) OVER() reflects the SQL-provable WHERE
+    // clause (correct as-is when ticketFilter is '' or 'resolved'); for 'rb'
+    // it would only be "candidates before the live breach filter", so the
+    // JS-filtered length is used instead -- accurate as long as the true
+    // breached count is under the ticketsLimit candidate cap above.
+    let totalMatched = ticketsRes.rows.length > 0 ? Number(ticketsRes.rows[0].total_matched) || 0 : 0;
+    if (ticketFilter === 'rb') {
+      ticketRows = ticketRows.filter((r: any) => slaById.get(r.id));
+      totalMatched = ticketRows.length;
+    }
+    const tickets = ticketRows.slice(0, 300).map((r: any) => ({
       key: r.key,
       project: r.project_key || '',
       assignee: r.assignee_name || '',
@@ -9515,7 +9612,7 @@ async function _handleJiraPgApi(
       summary: r.summary || '',
       created: r.createdAt,
       updated: r.updatedAt,
-      rb: !!r.jira_sla_breached,
+      rb: !!slaById.get(r.id),
     }));
 
     return json({ people, monthly, summary, tickets, totalMatched });
