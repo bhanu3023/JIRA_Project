@@ -9329,7 +9329,7 @@ async function _handleJiraPgApi(
     // ticket list behind them, same shape/cap (300, newest first) as the
     // Customer Engineering/QA/Infra tabs' ticket table.
     const ticketRows = await pool.query(`
-      SELECT i.key, sp.key AS project_key, i.current_department AS dept,
+      SELECT COALESCE(i.cf_key, i.key) AS key, sp.key AS project_key, i.current_department AS dept,
         COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
         COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
         s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
@@ -9444,28 +9444,35 @@ async function _handleJiraPgApi(
     if (!isAdmin) return json({ error: 'Forbidden' }, 403);
 
     const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra' };
-    const TEAM_ROSTER: Record<string, string[]> = {
-      eng: [
-        'abhinandan.kumar@cloudfuze.com', 'akhila.aenkoju@cloudfuze.com', 'akib.mohd@cloudfuze.com', 'ankit@cloudfuze.com',
-        'bhagyashri.deokar@cloudfuze.com', 'hemadasu.kantam@cloudfuze.com', 'jaswanth.adari@cloudfuze.com', 'lakshmi.adabala@cloudfuze.com',
-        'mayank@cloudfuze.com', 'naved.osama@cloudfuze.com', 'pragati.pandey@cloudfuze.com', 'ravi.srivastava@cloudfuze.com',
-        'rehan.khan@cloudfuze.com', 'sairaj.kanigicharla@cloudfuze.com', 'shiva.amuda@cloudfuze.com', 'shivam.singh@cloudfuze.com',
-        'srinu.gudimitla@cloudfuze.com', 'vamsi.malla@cloudfuze.com', 'vishal.kumar@cloudfuze.com',
-      ],
-      qa: [
-        'asma.karim@cloudfuze.com', 'bhuvana.mosra@cloudfuze.com', 'ganesh.guda@cloudfuze.com', 'kamal.basha@cloudfuze.com',
-        'kiran.ummenthala@cloudfuze.com', 'nagalakshmi.mangina@cloudfuze.com', 'sadia.shaik@cloudfuze.com',
-        'soniya.paladugula@cloudfuze.com', 'soumya.gande@cloudfuze.com',
-      ],
-      infra: [
-        'gururaj.bhimrao@cloudfuze.com', 'hymavathi@cloudfuze.com', 'pavan@cloudfuze.com', 'bala.raviteja@cloudfuze.com',
-      ],
-    };
 
     const team = url.searchParams.get('team') || '';
     const dept = TEAM_DEPT[team];
-    const roster = TEAM_ROSTER[team];
     if (!dept) return json({ error: 'team must be one of eng, qa, infra' }, 400);
+
+    // Roster used to be a hardcoded email list per team, maintained
+    // completely separately from this queue's REAL configured membership
+    // (custom_queues.queues[].memberIds -- the same config Filters'
+    // queueMembersOnly and the department queue board itself already read
+    // from). The two had drifted apart for real: 9 actual Dev-queue
+    // members -- including bharath.tummaganti@cloudfuze.com and
+    // abhinav.surattu@cloudfuze.com -- were completely absent from the
+    // hardcoded eng list, so every one of their tickets was silently
+    // excluded from every Customer Engineering number this report shows,
+    // with no way to notice short of diffing the two lists by hand. Read
+    // the roster live from the queue's own config instead, so it can never
+    // silently drift out of sync with team membership again.
+    let roster: string[] = [];
+    try {
+      const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = 'TESTIN'`);
+      const queues: any[] = cq.rows[0]?.queues || [];
+      const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === dept.toLowerCase());
+      const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+      if (memberIds.length) {
+        const usersRes = await pool.query(`SELECT email FROM users WHERE id = ANY($1::text[])`, [memberIds]);
+        roster = usersRes.rows.map((r: any) => String(r.email || '').toLowerCase()).filter(Boolean);
+      }
+    } catch { /* leave roster empty -- surfaced as the error below */ }
+    if (!roster.length) return json({ error: `No queue members configured for ${dept} on CloudFuze Board` }, 400);
 
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
@@ -9595,7 +9602,7 @@ async function _handleJiraPgApi(
       `, baseParams),
 
       pool.query(`
-        SELECT i.id, i.key, sp.key AS project_key,
+        SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.key AS project_key,
           COALESCE(
             CASE WHEN LOWER(i.current_department) = LOWER($1) AND au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])
               THEN COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
