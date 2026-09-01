@@ -4883,6 +4883,10 @@ async function _handleJiraPgApi(
       // the Unassigned-in-dept queue silently showed EVERY ticket in the
       // department (assigned or not), not just the unassigned ones.
       let historyAssigneeIdx: number | null = null;
+      // Lifted out of the includeHistoryParam branch below so the row-display
+      // logic further down can know exactly which people the Assignee filter
+      // selected -- see its use there for why.
+      let historyAssigneeFilterIds: string[] | null = null;
       // Assignee, under a "Worked" date filter, means "who did the work" --
       // folded into workedRangeSql below as a w.user_id check -- not "who
       // currently owns the ticket". A ticket worked in this dept and then
@@ -4906,6 +4910,7 @@ async function _handleJiraPgApi(
         const resolvedIds = await resolveUserIds(ids);
         if (resolvedIds.length) {
           historyAssigneeIdx = deptParamIdx;
+          historyAssigneeFilterIds = resolvedIds;
           deptExtraParams.push(resolvedIds);
           deptParamIdx++;
         }
@@ -5236,6 +5241,43 @@ async function _handleJiraPgApi(
            LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
           rowParams
         );
+        // When a specific person is selected in the Assignee filter (the
+        // includeHistory/historyAssigneeFilterIds case), a row can match
+        // because THAT person worked this ticket in this dept, while the
+        // per-dept snapshot below (dept_assignees) belongs to a different
+        // co-worker who also touched it. Confirmed for real: Queue: Dev +
+        // Assignee: Rehan Khan returned rows showing "Lakshmi Adabala" /
+        // "vamsi malla" in the Assignee column -- correct that Rehan worked
+        // those tickets, wrong that his own name never showed. Look up,
+        // per row, which of the filtered people actually has a worked-on
+        // record here for this dept, so the row can be attributed to the
+        // person the filter was actually asking about, not just whichever
+        // snapshot happened to survive.
+        let filteredWorkerByIssue: Record<string, string> = {};
+        let filteredUserInfo: Record<string, { id: string; firstName: string; lastName: string; email: string | null; avatarUrl: string | null }> = {};
+        if (historyAssigneeFilterIds && historyAssigneeFilterIds.length && rows.rows.length) {
+          try {
+            const issueIds = rows.rows.map((r: any) => r.id);
+            const workedRows = await pool.query(
+              `SELECT DISTINCT ON (w.issue_id) w.issue_id, w.user_id
+               FROM user_worked_on_tickets w
+               WHERE w.issue_id = ANY($1::text[]) AND w.user_id = ANY($2::text[]) AND LOWER(w.dept) = LOWER($3)
+               ORDER BY w.issue_id, w.worked_at DESC`,
+              [issueIds, historyAssigneeFilterIds, deptParam]
+            );
+            for (const wr of workedRows.rows) filteredWorkerByIssue[wr.issue_id] = wr.user_id;
+            const neededUserIds = Array.from(new Set(Object.values(filteredWorkerByIssue)));
+            if (neededUserIds.length) {
+              const userRows = await pool.query(
+                `SELECT id, "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = ANY($1::text[])`,
+                [neededUserIds]
+              );
+              for (const u of userRows.rows) {
+                filteredUserInfo[u.id] = { id: u.id, firstName: u.firstName || '', lastName: u.lastName || '', email: u.email || null, avatarUrl: u.avatarUrl || null };
+              }
+            }
+          } catch { /* fall through to the existing snapshot/reporter logic below */ }
+        }
         enrichedIssues = rows.rows.map((row: any) => {
           // "Queue: Infra" + a "Worked" date filter is asking "who from Infra
           // worked this while it sat here" -- but the row's assignee_id/name
@@ -5265,7 +5307,22 @@ async function _handleJiraPgApi(
           // those still mean "whoever holds it right now".
           let assigneeOverride: { id: string; firstName: string; lastName: string; email: string | null; avatarUrl: string | null } | null = null;
           const movedAwayFromQueue = queueMembersOnlyParam && String(row.current_department || '').toLowerCase() !== deptParam.toLowerCase();
-          if (workedRange || movedAwayFromQueue) {
+          // A specific Assignee filter takes priority over the generic
+          // per-dept snapshot below -- the snapshot only ever holds ONE
+          // person, whoever's handoff last touched it, which isn't
+          // necessarily the specific person this row matched the filter
+          // through. If the ticket's current assignee already IS one of the
+          // filtered people, that's already correct and needs no override;
+          // otherwise, if the filter matched via one of them having worked
+          // this dept on this ticket, show that specific person.
+          if (historyAssigneeFilterIds && historyAssigneeFilterIds.length && !historyAssigneeFilterIds.includes(row.assignee_id)) {
+            const matchedUserId = filteredWorkerByIssue[row.id];
+            const info = matchedUserId ? filteredUserInfo[matchedUserId] : null;
+            if (info) {
+              assigneeOverride = { id: info.id, firstName: info.firstName, lastName: info.lastName, email: info.email, avatarUrl: info.avatarUrl || avatarRef(info.id, null) };
+            }
+          }
+          if (!assigneeOverride && (workedRange || movedAwayFromQueue)) {
             const deptAssignees: Record<string, any> = row.dept_assignees || {};
             const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
             const snap = snapKey ? deptAssignees[snapKey] : null;
