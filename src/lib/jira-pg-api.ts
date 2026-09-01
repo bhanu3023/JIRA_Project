@@ -5063,6 +5063,28 @@ async function _handleJiraPgApi(
              i.current_department
            )) = LOWER($2)`
         : null;
+      // Filters page "Updated" range + Queue: same gap as Created had -- a ticket
+      // resolved by this dept and then routed on to wherever it originated
+      // (e.g. Dev resolves it, it auto-routes back to Migration) dropped out the
+      // instant current_department changed, even though i.updatedAt (the exact
+      // thing this filter is matching) is the resolution the dept actually did.
+      // Confirmed for real: Queue: Dev + Updated: Aug -- 34 tickets Naved
+      // resolved in Dev that month, only 6 came back; the other 28 all show
+      // current_department = Migration with dept_statuses['Dev'] still frozen
+      // as Resolved. Unlike Created, "Updated" has no single origin dept to
+      // fall back to, so this ORs the plain current-dept match with "moved on,
+      // but this dept's own frozen snapshot shows it done" -- still-open
+      // tickets currently in this dept keep matching exactly as before
+      // (deptDoneClause only restricts when the exclude-done toggle is set).
+      const updatedDeptMatchSql = updatedRange && queueMembersOnlyParam && !workedDeptMatchSql
+        ? `(
+             (LOWER(i.current_department) = LOWER($2) ${deptDoneClause})
+             OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
+               SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
+             ))
+           )`
+        : null;
       // Department-scope (which of the three modes above decides "does this
       // ticket belong to dept $2") and assignee-scope (does the selected
       // person match, optionally including their historical work here) are
@@ -5080,6 +5102,8 @@ async function _handleJiraPgApi(
         ? workedDeptMatchSql
         : originDeptMatchSql
         ? `${originDeptMatchSql} ${deptDoneClause}`
+        : updatedDeptMatchSql
+        ? updatedDeptMatchSql
         : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
       const assigneeScopeSql = historyAssigneeIdx
         ? `(
