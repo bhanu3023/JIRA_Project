@@ -1549,7 +1549,12 @@ function SpaceDetailContent() {
             )}
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 max-w-5xl">
               {customQueues.map(q => {
-                const color = getDeptColor(q.name);
+                // Was each queue's own hash-derived color (a different hue per
+                // card) -- switched to one consistent light/dark blue pair
+                // matching the rest of this UI (Status pills, header, active
+                // nav highlights) instead of a rainbow of unrelated colors.
+                const accentDark = '#2563EB';
+                const accentLight = '#DBEAFE';
                 return (
                   // Same fix as the sidebar's queue-name link (commit e78b353): route to
                   // dept_all (open tickets, paginated) instead of the cq_<id> custom-queue
@@ -1559,13 +1564,11 @@ function SpaceDetailContent() {
                   <Link key={q.id} href={`/spaces/${spaceKey}?queue=dept_all&dept=${encodeURIComponent(q.name)}`}
                     className="relative flex flex-col gap-3 px-5 pt-5 pb-4 rounded-xl border border-gray-200 bg-white overflow-hidden
                       hover:border-transparent hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 group">
-                    {/* Color accent bar -- same per-queue color already used across the app
-                        (dashboard badges, sidebar dots) so this list visually matches them. */}
-                    <div className="absolute top-0 left-0 right-0 h-1" style={{ backgroundColor: color }} />
+                    <div className="absolute top-0 left-0 right-0 h-1" style={{ backgroundColor: accentDark }} />
                     <div className="flex items-start justify-between">
                       <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-105"
-                        style={{ backgroundColor: color + '18' }}>
-                        <Layers size={20} style={{ color }} />
+                        style={{ backgroundColor: accentLight }}>
+                        <Layers size={20} style={{ color: accentDark }} />
                       </div>
                       <ChevronRight size={16} className="text-gray-300 group-hover:text-blue-500 group-hover:translate-x-0.5 transition-all mt-1.5" />
                     </div>
