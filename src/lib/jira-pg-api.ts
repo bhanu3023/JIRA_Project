@@ -5364,7 +5364,7 @@ async function _handleJiraPgApi(
             const debugUserRow = await pool.query(`SELECT email FROM users WHERE id = $1`, [historyAssigneeFilterIds[0]]);
             if (debugUserRow.rows[0]?.email === 'rehan.khan@cloudfuze.com') {
               const debugRows = await pool.query(
-                `SELECT COALESCE(i.cf_key, i.key) AS ticket
+                `SELECT COALESCE(i.cf_key, i.key) AS ticket, i."createdAt", i."updatedAt"
                  FROM issues i
                  LEFT JOIN statuses s ON i."statusId" = s.id
                  WHERE i."spaceId" = ANY($1::text[])
@@ -5375,6 +5375,11 @@ async function _handleJiraPgApi(
                 countParams
               );
               console.log(`[DEBUG rehan-dev-count] count=${deptCandidateCount} tickets=${JSON.stringify(debugRows.rows.map((r: any) => r.ticket))}`);
+              console.log(`[DEBUG rehan-dev-count] deptExtraSql=${JSON.stringify(deptExtraSql)}`);
+              console.log(`[DEBUG rehan-dev-count] deptExtraClauses=${JSON.stringify(deptExtraClauses)}`);
+              console.log(`[DEBUG rehan-dev-count] countParams=${JSON.stringify(countParams)}`);
+              console.log(`[DEBUG rehan-dev-count] deptDeptMatchSql=${JSON.stringify(deptDeptMatchSql)}`);
+              console.log(`[DEBUG rehan-dev-count] allSpaceIds=${JSON.stringify(allSpaceIds)} deptParam=${JSON.stringify(deptParam)} deptSearchParam=${JSON.stringify(deptSearchParam)}`);
             }
           } catch (dbgErr) { console.error('[DEBUG rehan-dev-count failed]', dbgErr); }
         }
