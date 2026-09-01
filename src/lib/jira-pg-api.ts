@@ -3852,6 +3852,25 @@ async function _handleJiraPgApi(
     if (!spaceRes.rows[0]) return json({ error: 'Space not found' }, 404);
     const spaceId = spaceRes.rows[0].id;
 
+    // Every row this endpoint returns is already scoped to targetUserId --
+    // either a real user_worked_on_tickets row for them, or a ticket they
+    // currently own outright (see mergedSourceSql below) -- so this list is
+    // inherently "MY worked-on tickets", not a general roster view. Neither
+    // the dept_assignees snapshot nor the live current assignee reliably
+    // agrees with that though: a ticket can get reassigned to a teammate
+    // within the same dept stint before the snapshot is frozen (or after,
+    // once it's moved on), so "Worked on" for Ravi could show Adari's name
+    // if Adari happened to be holding it at snapshot time -- confirmed for
+    // real on CF-29963 (Ravi's own worked-on row, snapshot says Adari
+    // Venkata Jaswanth, live assignee is a third person again). Since every
+    // row here is already confirmed to be this viewer's own work, show
+    // their own identity directly instead of trusting either source.
+    const targetUserRes = await pool.query(
+      `SELECT id, "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = $1`,
+      [targetUserId]
+    );
+    const targetUser = targetUserRes.rows[0] || null;
+
     try {
       // "Worked on" is meant to be personal (tickets THIS viewer worked on in this
       // dept), but this previously showed every ticket ever closed in the dept for
@@ -3917,27 +3936,25 @@ async function _handleJiraPgApi(
         [spaceId]
       );
       const slaPolicies = slaPoliciesRes.rows;
-      // "Worked on — Dev" showed the ticket's CURRENT global assignee, which is
-      // whoever holds it now (possibly in a different dept after further
-      // transfers) — not who was actually assigned while it sat in THIS dept.
-      // A ticket someone worked in Dev before it moved on and got reassigned
-      // elsewhere showed the new owner's name here instead of theirs. Prefer
-      // the per-dept snapshot taken when the ticket left this dept.
+      // Assignee display for this list is handled after the map below (see
+      // targetUser) -- every row here already belongs to targetUserId, so it
+      // shows their own identity rather than a per-dept snapshot or the
+      // live current assignee, either of which can legitimately be a
+      // different teammate.
       //
-      // The exact same problem applied to status_name/color/category, just
-      // never fixed alongside it: they came straight from the LIVE statuses
-      // join on the ticket's current global statusId. Resolving a ticket in
-      // Dev, then handing it back to Migration (which restores Migration's
-      // own prior status, e.g. "In Progress" per computeSLAInstancesPure's
-      // dept-handoff rules) changed what this supposedly-historical "Worked
-      // on — Dev" row showed, even though Dev's own record of it never
-      // stopped being "Resolved". Prefer the per-dept status snapshot the
-      // same way, so this list reflects what Dev actually did, not whatever
-      // the ticket's global status happens to read right now.
+      // status_name/color/category has the analogous problem, still fixed
+      // the original way (per-dept snapshot): they come straight from the
+      // LIVE statuses join on the ticket's current global statusId, so
+      // resolving a ticket in Dev then handing it back to Migration (which
+      // restores Migration's own prior status, e.g. "In Progress" per
+      // computeSLAInstancesPure's dept-handoff rules) changed what this
+      // supposedly-historical "Worked on — Dev" row showed, even though
+      // Dev's own record of it never stopped being "Resolved". Unlike
+      // assignee, a ticket's STATUS while it sat in this dept is a real
+      // historical fact independent of who held it, so there's no single
+      // "this list's own person" answer to substitute -- the per-dept
+      // snapshot is still the right source here.
       const issues = rows.rows.map((r: any) => {
-        const deptAssignees: Record<string, any> = r.dept_assignees || {};
-        const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
-        const snap = snapKey ? deptAssignees[snapKey] : null;
         const deptStatuses: Record<string, any> = r.dept_statuses || {};
         const statusSnapKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
         const statusSnap = statusSnapKey ? deptStatuses[statusSnapKey] : null;
@@ -3958,8 +3975,14 @@ async function _handleJiraPgApi(
           slaBreached = r.jira_sla_breached;
         }
 
-        if (snap && snap.id) {
-          return { ...withStatus, sla_breached: slaBreached, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
+        if (targetUser) {
+          return {
+            ...withStatus,
+            sla_breached: slaBreached,
+            assignee_id: targetUser.id,
+            assignee_name: `${targetUser.firstName || ''} ${targetUser.lastName || ''}`.trim() || targetUser.email,
+            assignee_avatar: targetUser.avatarUrl || null,
+          };
         }
         return { ...withStatus, sla_breached: slaBreached };
       });
@@ -4068,6 +4091,16 @@ async function _handleJiraPgApi(
         );
         const byUser: Record<string, any> = {};
         for (const r of workedRes.rows) {
+          // ticketsWorked used to count every user_worked_on_tickets row
+          // regardless of the ticket's current status -- but clicking this
+          // number opens the "Worked on" tab (dept-queue/closed above),
+          // which only ever shows done-category tickets. That mismatch was
+          // real, if modest: confirmed for real for Ravi Srivastava/Dev
+          // (1080 raw worked-on rows vs 1078 actually done). Only count a
+          // ticket here once it's actually done, so the summary number
+          // always matches what clicking through to it shows.
+          const isDone = r.status_category === 'done';
+          if (!isDone) continue;
           if (!byUser[r.user_id]) {
             byUser[r.user_id] = {
               userId: r.user_id, firstName: r.firstName, lastName: r.lastName, email: r.email,
@@ -4075,9 +4108,7 @@ async function _handleJiraPgApi(
             };
           }
           byUser[r.user_id].ticketIds.add(r.issue_id);
-          const isDone = r.status_category === 'done';
-          const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
-          if (r.jira_sla_breached || dueBreach) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
+          if (r.jira_sla_breached) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
         }
         // Include every queue member even with zero worked tickets in this
         // range, not just the ones with activity -- otherwise a member who
@@ -4350,12 +4381,29 @@ async function _handleJiraPgApi(
       ];
     }
 
-    // Date range filters
-    if (createdRange) {
+    // Date range filters -- Created+Updated together is a union (everything
+    // created in that window, plus everything updated in that window), not
+    // an intersection requiring both on the same ticket; see the matching
+    // fix in the dept-scoped branch below for why. searchQ above may have
+    // already claimed where.OR, so combine the two OR-groups via where.AND
+    // instead of one silently overwriting the other.
+    if (createdRange && updatedRange) {
+      const created = parseDateRange(createdRange);
+      const updated = parseDateRange(updatedRange);
+      const dateOr = [
+        { createdAt: { gte: created.from, lte: created.to } },
+        { updatedAt: { gte: updated.from, lte: updated.to } },
+      ];
+      if (where.OR) {
+        where.AND = [{ OR: where.OR }, { OR: dateOr }];
+        delete where.OR;
+      } else {
+        where.OR = dateOr;
+      }
+    } else if (createdRange) {
       const { from, to } = parseDateRange(createdRange);
       where.createdAt = { gte: from, lte: to };
-    }
-    if (updatedRange) {
+    } else if (updatedRange) {
       const { from, to } = parseDateRange(updatedRange);
       where.updatedAt = { gte: from, lte: to };
     }
@@ -4983,13 +5031,29 @@ async function _handleJiraPgApi(
       // were likewise only ever wired into the general Prisma branch — picking any
       // of these while viewing a department queue showed "0 issues" even for tickets
       // created that same day.
-      if (createdRange) {
+      // Created + Updated active together used to push two SEPARATE AND
+      // clauses here, requiring a ticket's createdAt AND its updatedAt to
+      // each fall in their own window -- an intersection that silently
+      // dropped every ticket that only satisfied one of the two (e.g. one
+      // created back in July but resolved in August, which "Updated: Aug"
+      // alone would correctly surface). Confirmed with the user this is
+      // meant to be a union instead: everything created in that window,
+      // plus everything updated in that window, not just tickets that
+      // happen to hit both windows on the same ticket.
+      if (createdRange && updatedRange) {
+        const created = parseDateRange(createdRange);
+        const updated = parseDateRange(updatedRange);
+        deptExtraClauses.push(
+          `((i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}) OR (i."updatedAt" >= $${deptParamIdx + 2} AND i."updatedAt" <= $${deptParamIdx + 3}))`
+        );
+        deptExtraParams.push(created.from, created.to, updated.from, updated.to);
+        deptParamIdx += 4;
+      } else if (createdRange) {
         const { from, to } = parseDateRange(createdRange);
         deptExtraClauses.push(`i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}`);
         deptExtraParams.push(from, to);
         deptParamIdx += 2;
-      }
-      if (updatedRange) {
+      } else if (updatedRange) {
         const { from, to } = parseDateRange(updatedRange);
         deptExtraClauses.push(`i."updatedAt" >= $${deptParamIdx} AND i."updatedAt" <= $${deptParamIdx + 1}`);
         deptExtraParams.push(from, to);
@@ -5155,8 +5219,17 @@ async function _handleJiraPgApi(
       // + Created (the default) returned 0 issues for a ticket he'd
       // genuinely worked in Dev before it moved on, exactly the CF-29889
       // scenario this session already fixed once for the Worked filter.
+      // Created+Updated both active used to let Created's originDeptMatchSql
+      // win outright, discarding updatedDeptMatchSql's own broadening (the
+      // frozen dept_statuses-done check for a ticket that moved on with no
+      // formal worked-on row) even though the OR'd date window above can now
+      // admit tickets that only satisfy the Updated side. Union both dept-
+      // match rules here too so the department scope is never narrower than
+      // whichever one of Created/Updated actually let a given ticket in.
       const deptScopeSql = workedDeptMatchSql
         ? workedDeptMatchSql
+        : (originDeptMatchSql && updatedDeptMatchSql)
+        ? `((${originDeptMatchSql} ${deptDoneClause}) OR (${updatedDeptMatchSql}))`
         : originDeptMatchSql
         ? `${originDeptMatchSql} ${deptDoneClause}`
         : updatedDeptMatchSql
@@ -9256,7 +9329,7 @@ async function _handleJiraPgApi(
     // ticket list behind them, same shape/cap (300, newest first) as the
     // Customer Engineering/QA/Infra tabs' ticket table.
     const ticketRows = await pool.query(`
-      SELECT i.key, sp.key AS project_key, i.current_department AS dept,
+      SELECT COALESCE(i.cf_key, i.key) AS key, sp.key AS project_key, i.current_department AS dept,
         COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
         COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
         s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
@@ -9371,28 +9444,35 @@ async function _handleJiraPgApi(
     if (!isAdmin) return json({ error: 'Forbidden' }, 403);
 
     const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra' };
-    const TEAM_ROSTER: Record<string, string[]> = {
-      eng: [
-        'abhinandan.kumar@cloudfuze.com', 'akhila.aenkoju@cloudfuze.com', 'akib.mohd@cloudfuze.com', 'ankit@cloudfuze.com',
-        'bhagyashri.deokar@cloudfuze.com', 'hemadasu.kantam@cloudfuze.com', 'jaswanth.adari@cloudfuze.com', 'lakshmi.adabala@cloudfuze.com',
-        'mayank@cloudfuze.com', 'naved.osama@cloudfuze.com', 'pragati.pandey@cloudfuze.com', 'ravi.srivastava@cloudfuze.com',
-        'rehan.khan@cloudfuze.com', 'sairaj.kanigicharla@cloudfuze.com', 'shiva.amuda@cloudfuze.com', 'shivam.singh@cloudfuze.com',
-        'srinu.gudimitla@cloudfuze.com', 'vamsi.malla@cloudfuze.com', 'vishal.kumar@cloudfuze.com',
-      ],
-      qa: [
-        'asma.karim@cloudfuze.com', 'bhuvana.mosra@cloudfuze.com', 'ganesh.guda@cloudfuze.com', 'kamal.basha@cloudfuze.com',
-        'kiran.ummenthala@cloudfuze.com', 'nagalakshmi.mangina@cloudfuze.com', 'sadia.shaik@cloudfuze.com',
-        'soniya.paladugula@cloudfuze.com', 'soumya.gande@cloudfuze.com',
-      ],
-      infra: [
-        'gururaj.bhimrao@cloudfuze.com', 'hymavathi@cloudfuze.com', 'pavan@cloudfuze.com', 'bala.raviteja@cloudfuze.com',
-      ],
-    };
 
     const team = url.searchParams.get('team') || '';
     const dept = TEAM_DEPT[team];
-    const roster = TEAM_ROSTER[team];
     if (!dept) return json({ error: 'team must be one of eng, qa, infra' }, 400);
+
+    // Roster used to be a hardcoded email list per team, maintained
+    // completely separately from this queue's REAL configured membership
+    // (custom_queues.queues[].memberIds -- the same config Filters'
+    // queueMembersOnly and the department queue board itself already read
+    // from). The two had drifted apart for real: 9 actual Dev-queue
+    // members -- including bharath.tummaganti@cloudfuze.com and
+    // abhinav.surattu@cloudfuze.com -- were completely absent from the
+    // hardcoded eng list, so every one of their tickets was silently
+    // excluded from every Customer Engineering number this report shows,
+    // with no way to notice short of diffing the two lists by hand. Read
+    // the roster live from the queue's own config instead, so it can never
+    // silently drift out of sync with team membership again.
+    let roster: string[] = [];
+    try {
+      const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = 'TESTIN'`);
+      const queues: any[] = cq.rows[0]?.queues || [];
+      const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === dept.toLowerCase());
+      const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+      if (memberIds.length) {
+        const usersRes = await pool.query(`SELECT email FROM users WHERE id = ANY($1::text[])`, [memberIds]);
+        roster = usersRes.rows.map((r: any) => String(r.email || '').toLowerCase()).filter(Boolean);
+      }
+    } catch { /* leave roster empty -- surfaced as the error below */ }
+    if (!roster.length) return json({ error: `No queue members configured for ${dept} on CloudFuze Board` }, 400);
 
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
@@ -9533,7 +9613,7 @@ async function _handleJiraPgApi(
       `, baseParams),
 
       pool.query(`
-        SELECT i.id, i.key, sp.key AS project_key,
+        SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.key AS project_key,
           COALESCE(
             CASE WHEN LOWER(i.current_department) = LOWER($1) AND au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])
               THEN COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
