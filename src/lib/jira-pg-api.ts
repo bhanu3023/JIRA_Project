@@ -4299,6 +4299,16 @@ async function _handleJiraPgApi(
 
     // Build Prisma WHERE
     const where: Record<string, unknown> = {};
+    // Assignee "worked-on" broadening, text search, and the Created+Updated
+    // date union below each need their OWN OR clause ANDed against
+    // everything else -- but Prisma's `where` only has one top-level `OR`
+    // key, so whichever of these naively assigns `where.OR = [...]` last
+    // silently clobbers whatever an earlier one set. Route every one of
+    // them through this instead of touching where.OR directly.
+    const addOrGroup = (orArray: any[]) => {
+      if (!orArray.length) return;
+      where.AND = [...(Array.isArray(where.AND) ? (where.AND as any[]) : []), { OR: orArray }];
+    };
 
     // Space filter
     if (spaceKey) {
@@ -4317,7 +4327,25 @@ async function _handleJiraPgApi(
     } else if (assignees) {
       const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
       const userIds = await resolveUserIds(ids);
-      where.assigneeId = userIds.length === 1 ? userIds[0] : { in: userIds };
+      // Plain current-assignee match alone missed a ticket the moment it got
+      // reassigned to someone else after this person's own work was done --
+      // confirmed for real on CF-30614: Jaswanth Adari and Praveen Kothagolla
+      // both genuinely worked it (real user_worked_on_tickets rows, Dev and
+      // Pre-sales respectively), but the ticket ended up reassigned to
+      // Vimalesh T at close, so filtering by either of their names here
+      // found nothing even though this app already knows they worked it.
+      // This broadening previously only fired when a Queue was ALSO
+      // selected (includeHistory, gated on selQueue in the frontend); the
+      // request here is for it to just always apply whenever an Assignee
+      // filter is active, Queue selected or not.
+      const workedRows = userIds.length
+        ? await pool.query(`SELECT DISTINCT issue_id FROM user_worked_on_tickets WHERE user_id = ANY($1::text[])`, [userIds])
+        : { rows: [] as any[] };
+      const workedIds = workedRows.rows.map((r: any) => r.issue_id);
+      addOrGroup([
+        { assigneeId: userIds.length === 1 ? userIds[0] : { in: userIds } },
+        ...(workedIds.length ? [{ id: { in: workedIds } }] : []),
+      ]);
     }
 
     // Reporter filter
@@ -4373,33 +4401,27 @@ async function _handleJiraPgApi(
     // Text search
     if (searchQ) {
       const q = searchQ.trim();
-      where.OR = [
+      addOrGroup([
         { summary: { contains: q, mode: 'insensitive' } },
         { key: { contains: q, mode: 'insensitive' } },
         { cf_key: { contains: q, mode: 'insensitive' } },
         { description: { contains: q, mode: 'insensitive' } },
-      ];
+      ]);
     }
 
     // Date range filters -- Created+Updated together is a union (everything
     // created in that window, plus everything updated in that window), not
     // an intersection requiring both on the same ticket; see the matching
-    // fix in the dept-scoped branch below for why. searchQ above may have
-    // already claimed where.OR, so combine the two OR-groups via where.AND
-    // instead of one silently overwriting the other.
+    // fix in the dept-scoped branch below for why. Routed through addOrGroup
+    // (see its own comment above) since assignee/search may have already
+    // added their own OR groups.
     if (createdRange && updatedRange) {
       const created = parseDateRange(createdRange);
       const updated = parseDateRange(updatedRange);
-      const dateOr = [
+      addOrGroup([
         { createdAt: { gte: created.from, lte: created.to } },
         { updatedAt: { gte: updated.from, lte: updated.to } },
-      ];
-      if (where.OR) {
-        where.AND = [{ OR: where.OR }, { OR: dateOr }];
-        delete where.OR;
-      } else {
-        where.OR = dateOr;
-      }
+      ]);
     } else if (createdRange) {
       const { from, to } = parseDateRange(createdRange);
       where.createdAt = { gte: from, lte: to };
