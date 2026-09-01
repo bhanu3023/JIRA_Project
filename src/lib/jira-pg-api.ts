@@ -5247,12 +5247,25 @@ async function _handleJiraPgApi(
           // Queue+Worked is to see Infra's own history. Same "prefer the
           // per-dept assignee snapshot" fix already applied to the Worked-On
           // sidebar list further up in this file (see the comment there) --
-          // just never extended to this, the main Filters-page list. Only
-          // applies in the workedRange case; every other caller of this
-          // branch (All Tickets, Unassigned, Assigned to me, ...) still means
-          // "whoever holds it right now" and is deliberately left alone.
+          // just never extended to this, the main Filters-page list.
+          //
+          // Was gated to workedRange only -- but the same confusion applies
+          // just as much once Created/Updated started matching a ticket via
+          // its worked-on history instead of current department (see the
+          // originDeptMatchSql/updatedDeptMatchSql broadening above): Queue:
+          // Dev + Created: Aug with no assignee filter showed a Migration
+          // person's name on a ticket Dev genuinely resolved, just because
+          // it was later handed back to Migration. Broadened to any
+          // queueMembersOnly view where the ticket has since moved away from
+          // the queue being viewed -- whenever current_department no longer
+          // matches deptParam, prefer the frozen per-dept snapshot over
+          // whoever holds it now, regardless of which date filter is active.
+          // Plain department-board views (All Tickets, Unassigned, Assigned
+          // to me, ...) never set queueMembersOnly and are unaffected --
+          // those still mean "whoever holds it right now".
           let assigneeOverride: { id: string; firstName: string; lastName: string; email: string | null; avatarUrl: string | null } | null = null;
-          if (workedRange) {
+          const movedAwayFromQueue = queueMembersOnlyParam && String(row.current_department || '').toLowerCase() !== deptParam.toLowerCase();
+          if (workedRange || movedAwayFromQueue) {
             const deptAssignees: Record<string, any> = row.dept_assignees || {};
             const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
             const snap = snapKey ? deptAssignees[snapKey] : null;
