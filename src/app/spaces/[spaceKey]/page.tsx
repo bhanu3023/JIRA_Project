@@ -254,27 +254,35 @@ function SpaceDetailContent() {
     }).catch(() => { setCustomQueuesLoadedFor(spaceKey); });
   }, [spaceKey]);
 
-  // A plain (non-dept_queue) board has no custom queues to pick from, so landing
-  // on the bare board URL (no ?queue=) showed a dead-end "Select a queue... No
-  // queues available" page instead of any tickets — while the sidebar still
-  // highlighted "All Tickets" as active, since it defaults the missing param to
-  // 'all-open', not 'queues'. Once we actually know (custom queues fetched +
-  // space loaded) that this board has none, redirect straight to the tickets
-  // list instead of the queue-picker landing page.
+  // A plain board with no custom queues to pick from has no use for the
+  // "Queues" landing page, so landing on the bare board URL (no ?queue=)
+  // showed a dead-end "Select a queue... No queues available" page instead
+  // of any tickets — while the sidebar still highlighted "All Tickets" as
+  // active, since it defaults the missing param to 'all-open', not 'queues'.
+  // Once we actually know (custom queues fetched + space loaded) that this
+  // board has none, redirect straight to the tickets list instead of the
+  // queue-picker landing page.
+  //
+  // Used to gate the wait-for-queues check on currentSpace?.type ===
+  // 'dept_queue' (skip waiting and redirect immediately for anything else,
+  // on the theory that only a dept_queue-typed space can have custom queues
+  // configured) -- confirmed false for real: TESTIN ("CloudFuze Board") is
+  // stored as type 'service_desk' but has 4 genuinely configured department
+  // queues (Migration/Dev/QA/Infra), so every visit to its bare board URL
+  // skipped the wait and redirected straight past this landing page to the
+  // generic "All Tickets" list, which is exactly the messy board-wide status
+  // list (every legacy status ever imported, mixed departments) this
+  // landing page exists to avoid. allCustomQueues.length > 0 is the actual
+  // signal that matters -- already used that way by the "queues" page's own
+  // render check just below (isDeptQueue) -- so wait for the fetch and use
+  // the same check here regardless of the space's stored type.
   useEffect(() => {
     if (!spaceKey || queueFilter !== 'queues') return;
     if (currentSpace?.key !== spaceKey) return;
-    // Only dept_queue boards can have custom queues, so a non-dept_queue board
-    // can redirect the moment currentSpace resolves — no need to also wait on
-    // customQueuesLoadedFor first. That extra wait was showing its own "Queues"
-    // spinner in between the initial page spinner and the tickets-list spinner,
-    // i.e. 3 loading states in a row for what's really just one board load.
-    if (currentSpace?.type === 'dept_queue') {
-      if (customQueuesLoadedFor !== spaceKey) return;
-      if (allCustomQueues.length > 0) return;
-    }
+    if (customQueuesLoadedFor !== spaceKey) return;
+    if (allCustomQueues.length > 0) return;
     router.replace(`/spaces/${spaceKey}?queue=all-open`);
-  }, [spaceKey, queueFilter, customQueuesLoadedFor, currentSpace?.key, currentSpace?.type, allCustomQueues.length, router]);
+  }, [spaceKey, queueFilter, customQueuesLoadedFor, currentSpace?.key, allCustomQueues.length, router]);
 
   // Extract stable primitives from the matched queue so activeCustomQueue only gets a new
   // reference when the queue's id or name actually changes — not every time allCustomQueues
@@ -1504,12 +1512,19 @@ function SpaceDetailContent() {
         // premature (and usually wrong) conclusion that flashed for however
         // long the fetch took, right before the redirect effect above sent
         // plain boards on to the tickets list. Show a spinner instead of a
-        // false negative while that's still in flight. Once currentSpace is
-        // known to be a non-dept_queue board, the redirect effect above is
-        // about to fire on the next tick regardless of customQueuesLoadedFor
-        // — keep showing the spinner rather than painting this landing page
-        // for the one render it'd otherwise flash on screen.
-        if (customQueuesLoadedFor !== spaceKey || currentSpace?.type !== 'dept_queue') {
+        // false negative while that's still in flight.
+        //
+        // Used to also gate on currentSpace?.type !== 'dept_queue' (spinner
+        // forever for anything else, on the assumption the redirect effect
+        // above was always about to fire for a non-dept_queue space) --
+        // removed alongside that same fixed assumption in the redirect
+        // effect: TESTIN is stored as type 'service_desk' but has 4 real
+        // configured queues, so this kept the spinner spinning forever
+        // instead of ever reaching the actual queue list below. The redirect
+        // effect and this render check now share the exact same condition
+        // (wait for customQueuesLoadedFor, then allCustomQueues.length),
+        // so whichever one is correct for this space, both agree on it.
+        if (customQueuesLoadedFor !== spaceKey) {
           return (
             <div className="flex-1 flex items-center justify-center">
               <DotLoader className="h-64" />
