@@ -3852,6 +3852,25 @@ async function _handleJiraPgApi(
     if (!spaceRes.rows[0]) return json({ error: 'Space not found' }, 404);
     const spaceId = spaceRes.rows[0].id;
 
+    // Every row this endpoint returns is already scoped to targetUserId --
+    // either a real user_worked_on_tickets row for them, or a ticket they
+    // currently own outright (see mergedSourceSql below) -- so this list is
+    // inherently "MY worked-on tickets", not a general roster view. Neither
+    // the dept_assignees snapshot nor the live current assignee reliably
+    // agrees with that though: a ticket can get reassigned to a teammate
+    // within the same dept stint before the snapshot is frozen (or after,
+    // once it's moved on), so "Worked on" for Ravi could show Adari's name
+    // if Adari happened to be holding it at snapshot time -- confirmed for
+    // real on CF-29963 (Ravi's own worked-on row, snapshot says Adari
+    // Venkata Jaswanth, live assignee is a third person again). Since every
+    // row here is already confirmed to be this viewer's own work, show
+    // their own identity directly instead of trusting either source.
+    const targetUserRes = await pool.query(
+      `SELECT id, "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = $1`,
+      [targetUserId]
+    );
+    const targetUser = targetUserRes.rows[0] || null;
+
     try {
       // "Worked on" is meant to be personal (tickets THIS viewer worked on in this
       // dept), but this previously showed every ticket ever closed in the dept for
@@ -3917,27 +3936,25 @@ async function _handleJiraPgApi(
         [spaceId]
       );
       const slaPolicies = slaPoliciesRes.rows;
-      // "Worked on — Dev" showed the ticket's CURRENT global assignee, which is
-      // whoever holds it now (possibly in a different dept after further
-      // transfers) — not who was actually assigned while it sat in THIS dept.
-      // A ticket someone worked in Dev before it moved on and got reassigned
-      // elsewhere showed the new owner's name here instead of theirs. Prefer
-      // the per-dept snapshot taken when the ticket left this dept.
+      // Assignee display for this list is handled after the map below (see
+      // targetUser) -- every row here already belongs to targetUserId, so it
+      // shows their own identity rather than a per-dept snapshot or the
+      // live current assignee, either of which can legitimately be a
+      // different teammate.
       //
-      // The exact same problem applied to status_name/color/category, just
-      // never fixed alongside it: they came straight from the LIVE statuses
-      // join on the ticket's current global statusId. Resolving a ticket in
-      // Dev, then handing it back to Migration (which restores Migration's
-      // own prior status, e.g. "In Progress" per computeSLAInstancesPure's
-      // dept-handoff rules) changed what this supposedly-historical "Worked
-      // on — Dev" row showed, even though Dev's own record of it never
-      // stopped being "Resolved". Prefer the per-dept status snapshot the
-      // same way, so this list reflects what Dev actually did, not whatever
-      // the ticket's global status happens to read right now.
+      // status_name/color/category has the analogous problem, still fixed
+      // the original way (per-dept snapshot): they come straight from the
+      // LIVE statuses join on the ticket's current global statusId, so
+      // resolving a ticket in Dev then handing it back to Migration (which
+      // restores Migration's own prior status, e.g. "In Progress" per
+      // computeSLAInstancesPure's dept-handoff rules) changed what this
+      // supposedly-historical "Worked on — Dev" row showed, even though
+      // Dev's own record of it never stopped being "Resolved". Unlike
+      // assignee, a ticket's STATUS while it sat in this dept is a real
+      // historical fact independent of who held it, so there's no single
+      // "this list's own person" answer to substitute -- the per-dept
+      // snapshot is still the right source here.
       const issues = rows.rows.map((r: any) => {
-        const deptAssignees: Record<string, any> = r.dept_assignees || {};
-        const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
-        const snap = snapKey ? deptAssignees[snapKey] : null;
         const deptStatuses: Record<string, any> = r.dept_statuses || {};
         const statusSnapKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
         const statusSnap = statusSnapKey ? deptStatuses[statusSnapKey] : null;
@@ -3958,8 +3975,14 @@ async function _handleJiraPgApi(
           slaBreached = r.jira_sla_breached;
         }
 
-        if (snap && snap.id) {
-          return { ...withStatus, sla_breached: slaBreached, assignee_id: snap.id, assignee_name: `${snap.firstName || ''} ${snap.lastName || ''}`.trim(), assignee_avatar: snap.avatarUrl || null };
+        if (targetUser) {
+          return {
+            ...withStatus,
+            sla_breached: slaBreached,
+            assignee_id: targetUser.id,
+            assignee_name: `${targetUser.firstName || ''} ${targetUser.lastName || ''}`.trim() || targetUser.email,
+            assignee_avatar: targetUser.avatarUrl || null,
+          };
         }
         return { ...withStatus, sla_breached: slaBreached };
       });
@@ -4068,6 +4091,16 @@ async function _handleJiraPgApi(
         );
         const byUser: Record<string, any> = {};
         for (const r of workedRes.rows) {
+          // ticketsWorked used to count every user_worked_on_tickets row
+          // regardless of the ticket's current status -- but clicking this
+          // number opens the "Worked on" tab (dept-queue/closed above),
+          // which only ever shows done-category tickets. That mismatch was
+          // real, if modest: confirmed for real for Ravi Srivastava/Dev
+          // (1080 raw worked-on rows vs 1078 actually done). Only count a
+          // ticket here once it's actually done, so the summary number
+          // always matches what clicking through to it shows.
+          const isDone = r.status_category === 'done';
+          if (!isDone) continue;
           if (!byUser[r.user_id]) {
             byUser[r.user_id] = {
               userId: r.user_id, firstName: r.firstName, lastName: r.lastName, email: r.email,
@@ -4075,9 +4108,7 @@ async function _handleJiraPgApi(
             };
           }
           byUser[r.user_id].ticketIds.add(r.issue_id);
-          const isDone = r.status_category === 'done';
-          const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
-          if (r.jira_sla_breached || dueBreach) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
+          if (r.jira_sla_breached) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
         }
         // Include every queue member even with zero worked tickets in this
         // range, not just the ones with activity -- otherwise a member who
