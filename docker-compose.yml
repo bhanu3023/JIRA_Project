@@ -1,4 +1,18 @@
 services:
+  app:
+    build: .
+    container_name: jira_app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5882:8080"
+    env_file:
+      - .env.local
+    depends_on:
+      - postgres
+    volumes:
+      - jira_app_uploads:/app/public/uploads
+      - jira_app_uploads_tmp:/app/uploads
+
   postgres:
     image: postgres:16-alpine
     container_name: jira_postgres
@@ -8,9 +22,11 @@ services:
       POSTGRES_PASSWORD: "Neutara@2024"
       POSTGRES_DB: jiradb
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - jira_postgres_data:/var/lib/postgresql/data
 
 volumes:
   jira_postgres_data:
+  jira_app_uploads:
+  jira_app_uploads_tmp:
