@@ -2608,6 +2608,48 @@ function SpaceDetailContent() {
               <QuickFilterButton catId="status" label="Status" buttonRef={statusFilterRef} dropPos={statusDropPos} setDropPos={setStatusDropPos} />
               <QuickFilterButton catId="type" label="Request type" buttonRef={typeFilterRef} dropPos={typeDropPos} setDropPos={setTypeDropPos} />
 
+              {/* Active filter chips -- moved here (right after the fixed quick-filter
+                  buttons, before "More filters") instead of trailing after every other
+                  toolbar control, so a field added from More filters shows up grouped
+                  with the rest of the active filtering, not hidden past it. */}
+              {chips.map(chip => (
+                <span key={chip.key} className="flex items-center gap-1 pl-0.5 pr-1 py-1 text-[11.5px] bg-blue-50 text-blue-700 border border-blue-200 rounded-full whitespace-nowrap flex-shrink-0 font-medium">
+                  <button
+                    title="Click to change this filter's values"
+                    onClick={(e) => {
+                      // Single-panel editor (same bare renderRightPanel() the
+                      // Assignee/Status/Request type buttons already use) instead
+                      // of reopening the full "browse all fields" two-panel menu
+                      // -- once a filter is already active, editing its value
+                      // shouldn't require seeing the whole field list beside it
+                      // again, same as clicking any of those three buttons never
+                      // shows one either.
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                      setAddFilterDropPos({ top: rect.bottom + 4, left: rect.left });
+                      setFilterCategory(chip.key === 'department' ? 'department' : chip.key);
+                      setOpenFilter('__chipEdit');
+                      setAssigneeSearch(''); setReporterSearch(''); setDropdownSearch('');
+                    }}
+                    className="max-w-[120px] truncate px-1.5 py-0.5 rounded-full hover:bg-blue-100 transition-colors">
+                    {getChipLabel(chip.key, chip.val)}
+                  </button>
+                  <button onClick={() => {
+                    if (chip.key === 'department') setDeptFilter('');
+                    else clearFilter(chip.key);
+                  }} className="hover:text-blue-900 flex-shrink-0"><X size={10} /></button>
+                </span>
+              ))}
+              {openFilter === '__chipEdit' && addFilterDropPos && (
+                <>
+                  <div className="fixed inset-0 z-[9998]" onClick={() => setOpenFilter(null)} />
+                  <div className="fixed z-[9999] bg-white rounded-lg shadow-xl border border-gray-200"
+                    style={{ top: addFilterDropPos.top, left: addFilterDropPos.left, minWidth: 260 }}
+                    onMouseDown={e => e.stopPropagation()}>
+                    {renderRightPanel()}
+                  </div>
+                </>
+              )}
+
               {/* More filters button — everything else, still a two-panel category menu */}
               <div className="relative flex-shrink-0">
                 <button ref={addFilterRef}
@@ -2702,31 +2744,6 @@ function SpaceDetailContent() {
                   </>
                 )}
               </div>
-
-              {/* Active filter chips */}
-              {chips.map(chip => (
-                <span key={chip.key} className="flex items-center gap-1 pl-0.5 pr-1 py-1 text-[11.5px] bg-blue-50 text-blue-700 border border-blue-200 rounded-full whitespace-nowrap flex-shrink-0 font-medium">
-                  <button
-                    title="Click to change this filter's values"
-                    onClick={() => {
-                      // Reopen the same picker this chip belongs to, so clicking an
-                      // active filter re-edits its values instead of only offering
-                      // to remove it — matches clicking a filter pill in Jira.
-                      const rect = addFilterRef.current?.getBoundingClientRect();
-                      if (rect) setAddFilterDropPos({ top: rect.bottom + 4, left: rect.left });
-                      setFilterCategory(chip.key === 'department' ? 'department' : chip.key);
-                      setOpenFilter('__filterPanel');
-                      setAssigneeSearch(''); setReporterSearch(''); setDropdownSearch('');
-                    }}
-                    className="max-w-[120px] truncate px-1.5 py-0.5 rounded-full hover:bg-blue-100 transition-colors">
-                    {getChipLabel(chip.key, chip.val)}
-                  </button>
-                  <button onClick={() => {
-                    if (chip.key === 'department') setDeptFilter('');
-                    else clearFilter(chip.key);
-                  }} className="hover:text-blue-900 flex-shrink-0"><X size={10} /></button>
-                </span>
-              ))}
             </>
           );
         })()}
