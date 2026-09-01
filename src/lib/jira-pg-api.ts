@@ -5353,36 +5353,6 @@ async function _handleJiraPgApi(
           countParams
         );
         deptCandidateCount = countRow.rows[0]?.cnt ?? 0;
-        // TEMP DEBUG -- tracing a Filters-vs-manual-reconstruction count
-        // mismatch (Queue: Dev, Assignee: Rehan Khan, Created: Aug 2026:
-        // UI shows 45, manual SQL reconstruction of this same query gives
-        // 50). Logs the exact matched ticket keys for this one specific
-        // combination so they can be diffed directly instead of guessing
-        // further. Remove once resolved.
-        if (deptParam?.toLowerCase() === 'dev' && historyAssigneeFilterIds?.length === 1) {
-          try {
-            const debugUserRow = await pool.query(`SELECT email FROM users WHERE id = $1`, [historyAssigneeFilterIds[0]]);
-            if (debugUserRow.rows[0]?.email === 'rehan.khan@cloudfuze.com') {
-              const debugRows = await pool.query(
-                `SELECT COALESCE(i.cf_key, i.key) AS ticket, i."createdAt", i."updatedAt"
-                 FROM issues i
-                 LEFT JOIN statuses s ON i."statusId" = s.id
-                 WHERE i."spaceId" = ANY($1::text[])
-                   AND ${deptDeptMatchSql}
-                 ${deptSearchClause}
-                 ${deptExtraSql}
-                 ORDER BY i."createdAt" ASC`,
-                countParams
-              );
-              console.log(`[DEBUG rehan-dev-count] count=${deptCandidateCount} tickets=${JSON.stringify(debugRows.rows.map((r: any) => r.ticket))}`);
-              console.log(`[DEBUG rehan-dev-count] deptExtraSql=${JSON.stringify(deptExtraSql)}`);
-              console.log(`[DEBUG rehan-dev-count] deptExtraClauses=${JSON.stringify(deptExtraClauses)}`);
-              console.log(`[DEBUG rehan-dev-count] countParams=${JSON.stringify(countParams)}`);
-              console.log(`[DEBUG rehan-dev-count] deptDeptMatchSql=${JSON.stringify(deptDeptMatchSql)}`);
-              console.log(`[DEBUG rehan-dev-count] allSpaceIds=${JSON.stringify(allSpaceIds)} deptParam=${JSON.stringify(deptParam)} deptSearchParam=${JSON.stringify(deptSearchParam)}`);
-            }
-          } catch (dbgErr) { console.error('[DEBUG rehan-dev-count failed]', dbgErr); }
-        }
       } catch (err) { console.error('[dept count query failed]', err); deptCandidateCount = 0; }
       // placeholder when SLA-prefiltering -- corrected after breach filtering below
       deptTotal = needsSlaPrefilter ? 0 : deptCandidateCount;
