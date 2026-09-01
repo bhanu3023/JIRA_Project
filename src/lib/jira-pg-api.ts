@@ -4309,6 +4309,13 @@ async function _handleJiraPgApi(
       if (!orArray.length) return;
       where.AND = [...(Array.isArray(where.AND) ? (where.AND as any[]) : []), { OR: orArray }];
     };
+    // Set by the Assignee filter below when it broadens via worked-on
+    // tickets -- consumed after enrichedIssues is built (see its own
+    // comment there) to show the filtered person's own name instead of
+    // whoever currently holds the ticket, same "filtered person wins over
+    // a stale snapshot" rule the dept-scoped branch already applies.
+    let generalAssigneeFilterIds: string[] | null = null;
+    let generalWorkedByIssue: Record<string, { id: string; firstName: string; lastName: string; email: string; avatarUrl: string | null }> = {};
 
     // Space filter
     if (spaceKey) {
@@ -4339,13 +4346,23 @@ async function _handleJiraPgApi(
       // request here is for it to just always apply whenever an Assignee
       // filter is active, Queue selected or not.
       const workedRows = userIds.length
-        ? await pool.query(`SELECT DISTINCT issue_id FROM user_worked_on_tickets WHERE user_id = ANY($1::text[])`, [userIds])
+        ? await pool.query(
+            `SELECT DISTINCT ON (w.issue_id) w.issue_id, u.id, u."firstName", u."lastName", u.email, u."avatarUrl"
+             FROM user_worked_on_tickets w JOIN users u ON u.id = w.user_id
+             WHERE w.user_id = ANY($1::text[])
+             ORDER BY w.issue_id, w.worked_at DESC`,
+            [userIds]
+          )
         : { rows: [] as any[] };
       const workedIds = workedRows.rows.map((r: any) => r.issue_id);
       addOrGroup([
         { assigneeId: userIds.length === 1 ? userIds[0] : { in: userIds } },
         ...(workedIds.length ? [{ id: { in: workedIds } }] : []),
       ]);
+      generalAssigneeFilterIds = userIds;
+      for (const r of workedRows.rows) {
+        generalWorkedByIssue[r.issue_id] = { id: r.id, firstName: r.firstName, lastName: r.lastName, email: r.email, avatarUrl: r.avatarUrl };
+      }
     }
 
     // Reporter filter
@@ -4858,6 +4875,32 @@ async function _handleJiraPgApi(
     // base64-embedded image in its description (from before uploads moved to
     // URL-based storage) could balloon this list response by tens of MB on its own.
     let enrichedIssues = issues.map((i: any) => formatIssue({ ...i, ...(deptMap[i.key] || {}), description: (i.description || '').slice(0, 500) }));
+    // Assignee filter matched some of these via a worked-on record, not the
+    // ticket's current live assignee (see generalAssigneeFilterIds above) --
+    // show the filtered person's own name on those rows instead of whoever
+    // holds the ticket now, same rule the dept-scoped branch already applies
+    // when its own Assignee filter is active. Confirmed for real on
+    // CF-30614: filtering by Praveen Kothagolla found the ticket (he
+    // genuinely worked it), but the row showed Vimalesh T -- the person it
+    // got reassigned to at close, not who this filter is actually about.
+    if (generalAssigneeFilterIds && generalAssigneeFilterIds.length) {
+      enrichedIssues = enrichedIssues.map((iss: any) => {
+        if (iss.assignee?.id && generalAssigneeFilterIds!.includes(iss.assignee.id)) return iss;
+        const worked = generalWorkedByIssue[iss.id];
+        if (!worked) return iss;
+        return {
+          ...iss,
+          assignee: {
+            id: worked.id,
+            email: worked.email,
+            firstName: worked.firstName,
+            lastName: worked.lastName,
+            displayName: `${worked.firstName || ''} ${worked.lastName || ''}`.trim() || worked.email,
+            avatarUrl: avatarRef(worked.id, worked.avatarUrl),
+          },
+        };
+      });
+    }
     let deptTotal = total;
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
