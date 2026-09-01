@@ -5057,11 +5057,28 @@ async function _handleJiraPgApi(
       // moment someone added a Created filter. queueMembersOnly is only ever
       // sent by the Filters page, which is the one place origin-matching was
       // actually intended to apply.
+      // Origin-only was still too narrow -- confirmed for real: Queue: Dev +
+      // Created: Aug + Assignee: Rehan Khan came back with only the 4 tickets
+      // still currently assigned to him, missing ~20+ he genuinely worked in
+      // Dev that month (real user_worked_on_tickets rows) but which originated
+      // in Migration and were later routed there for the fix. "Created" is a
+      // pure date-window check on i.createdAt regardless of this clause --
+      // this only decides whether the ticket counts as belonging to dept $2 at
+      // all, so ORing in a worked-on-in-this-dept check (same signal already
+      // used for Updated, see updatedDeptMatchSql below) surfaces every ticket
+      // someone actually worked in this dept and created in the window, not
+      // just the ones this dept happened to raise itself.
       const originDeptMatchSql = createdRange && queueMembersOnlyParam
-        ? `LOWER(COALESCE(
-             (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
-             i.current_department
-           )) = LOWER($2)`
+        ? `(
+             LOWER(COALESCE(
+               (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+               i.current_department
+             )) = LOWER($2)
+             OR EXISTS (
+               SELECT 1 FROM user_worked_on_tickets w
+               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)
+             )
+           )`
         : null;
       // Filters page "Updated" range + Queue: same gap as Created had -- a ticket
       // resolved by this dept and then routed on to wherever it originated
