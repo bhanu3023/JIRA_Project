@@ -4985,7 +4985,24 @@ async function _handleJiraPgApi(
         deptParamIdx++;
       }
       if (statusParam) {
-        deptExtraClauses.push(`LOWER(s.name) = ANY($${deptParamIdx}::text[])`);
+        // "Routed to X" (and every other custom queueStatuses entry) only
+        // ever lives in dept_statuses -- picking one on the ticket detail
+        // page's "Move to status" dropdown never touches the real global
+        // statusId for a non-done category (see the queueStatusId PATCH
+        // handler), so LOWER(s.name) alone can never match it; confirmed
+        // for real, zero tickets in this space have a global status
+        // literally named "Routed to X". OR in the ticket's CURRENT
+        // department's own dept_statuses snapshot name, case-insensitive
+        // key match same as updatedDeptMatchSql's done-category check
+        // above, so a selected "Routed to X" filter actually finds tickets
+        // instead of silently matching nothing.
+        deptExtraClauses.push(
+          `(LOWER(s.name) = ANY($${deptParamIdx}::text[])
+             OR EXISTS (
+               SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+               WHERE LOWER(k) = LOWER(i.current_department) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
+             ))`
+        );
         deptExtraParams.push(statusParam.split(',').map((s2) => s2.trim().toLowerCase()));
         deptParamIdx++;
       }

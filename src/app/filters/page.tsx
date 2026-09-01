@@ -967,6 +967,25 @@ export default function FiltersPage() {
   const [text, setText]                   = useState('');
   const [selSpaces, setSelSpaces]         = useState<string[]>([]);
   const [selQueue, setSelQueue]           = useState('');  // custom queue name within a single selected space
+  // "Routed to X" (and any other custom queue status) only lives inside that
+  // queue's own queueStatuses config, never in the space's real statuses
+  // table -- confirmed for real, no ticket in this app ever carries "Routed
+  // to X" as its actual global status, since picking one only updates
+  // dept_statuses for non-done categories (see the backend's queueStatusId
+  // handler). The Status filter dropdown's ALLOWED_STATUSES list below could
+  // never offer these as options without fetching them from here.
+  const [queueStatusOptions, setQueueStatusOptions] = useState<{ value: string; label: string }[]>([]);
+  useEffect(() => {
+    if (!selQueue || selSpaces.length !== 1) { setQueueStatusOptions([]); return; }
+    let cancelled = false;
+    api.request<any[]>(`custom-queues/${selSpaces[0]}`).then((queues) => {
+      if (cancelled) return;
+      const q = (queues || []).find((qq: any) => (qq.name || '').toLowerCase() === selQueue.toLowerCase());
+      const names: { value: string; label: string }[] = (q?.queueStatuses || []).map((s: any) => ({ value: s.name, label: s.name }));
+      setQueueStatusOptions(names);
+    }).catch(() => { if (!cancelled) setQueueStatusOptions([]); });
+    return () => { cancelled = true; };
+  }, [selQueue, selSpaces]);
   const [selAssignees, setSelAssignees]   = useState<string[]>([]);  // stores member IDs
   const [selReporters, setSelReporters]   = useState<string[]>([]);  // stores member IDs
   const [selTypes, setSelTypes]           = useState<string[]>([]);
@@ -1200,15 +1219,18 @@ export default function FiltersPage() {
     : spaces;
   const ALLOWED_STATUSES = new Set(['open', 'in progress', 'waiting for dev', 'waiting for migration', 'waiting for qa', 'waiting for infra', 'resolved']);
   const availableStatuses: { value: string; label: string }[] = Array.from(
-    new Map(
-      filteredSpacesForStatus
+    new Map([
+      ...filteredSpacesForStatus
         .flatMap((sp: any) => (sp.statuses || []))
         .filter((s: any) => ALLOWED_STATUSES.has((s.name || '').toLowerCase()))
-        .map((s: any) => [s.name, s])
-    ).values()
+        .map((s: any) => [s.name, { value: s.name, label: s.name, order: s.order ?? 0 }] as const),
+      // Merged in on top -- the selected queue's own "Routed to X" set, only
+      // ever meaningful once a specific queue is chosen (see queueStatusOptions above).
+      ...queueStatusOptions.map((s) => [s.value, { ...s, order: 99 }] as const),
+    ]).values()
   )
     .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
-    .map((s: any) => ({ value: s.name, label: s.name }));
+    .map((s: any) => ({ value: s.value, label: s.label }));
 
   // Memoized: this feeds buildFilterParams' dependency array below. Without
   // useMemo, this array got a brand-new reference every render, which broke
