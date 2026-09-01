@@ -5353,6 +5353,22 @@ async function _handleJiraPgApi(
           countParams
         );
         deptCandidateCount = countRow.rows[0]?.cnt ?? 0;
+        // TEMP DEBUG -- verifying the Updated-range count (Queue: Dev,
+        // Assignee: Rehan Khan, Updated: Aug 2026) matches a manual SQL
+        // reconstruction (55) the same way the Created-range case did once
+        // a genuinely fresh container was confirmed. UI shows 48. Remove
+        // once resolved.
+        if (deptParam?.toLowerCase() === 'dev' && historyAssigneeFilterIds?.length === 1 && updatedRange) {
+          try {
+            const debugUserRow = await pool.query(`SELECT email FROM users WHERE id = $1`, [historyAssigneeFilterIds[0]]);
+            if (debugUserRow.rows[0]?.email === 'rehan.khan@cloudfuze.com') {
+              console.log(`[DEBUG rehan-dev-updated-count] count=${deptCandidateCount}`);
+              console.log(`[DEBUG rehan-dev-updated-count] deptExtraSql=${JSON.stringify(deptExtraSql)}`);
+              console.log(`[DEBUG rehan-dev-updated-count] countParams=${JSON.stringify(countParams)}`);
+              console.log(`[DEBUG rehan-dev-updated-count] deptDeptMatchSql=${JSON.stringify(deptDeptMatchSql)}`);
+            }
+          } catch (dbgErr) { console.error('[DEBUG rehan-dev-updated-count failed]', dbgErr); }
+        }
       } catch (err) { console.error('[dept count query failed]', err); deptCandidateCount = 0; }
       // placeholder when SLA-prefiltering -- corrected after breach filtering below
       deptTotal = needsSlaPrefilter ? 0 : deptCandidateCount;
