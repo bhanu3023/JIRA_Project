@@ -561,6 +561,12 @@ export default function Sidebar() {
     })),
   );
   const isPrivileged = PRIVILEGED_ROLES.includes(user?.role || '');
+  // MBR can also be granted to one specific non-admin user via
+  // canViewMbr, a narrow additive permission separate from role (see
+  // reports/mbr's own backend guard) -- kept distinct from isPrivileged
+  // above so that grant only ever unlocks the MBR link itself, never
+  // "Create space" or any other admin-only affordance in this sidebar.
+  const canSeeMbr = isPrivileged || !!(user as any)?.canViewMbr;
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -631,7 +637,7 @@ export default function Sidebar() {
           { href: '/search', icon: <Search size={16} />, match: pathname === '/search' },
           { href: '/my-dashboard', icon: <LayoutDashboard size={16} />, match: pathname === '/my-dashboard' },
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
-          ...(isPrivileged ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
+          ...(canSeeMbr ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
           ...(isPrivileged ? [{ href: '/file-health', icon: <FileWarning size={16} />, match: pathname === '/file-health' }] : []),
         ].map((item, i) => (
           <Link
@@ -686,7 +692,7 @@ export default function Sidebar() {
             <GlobalNavItem href="/filters" icon={<List size={15} />} label="Filters" active={pathname === '/filters'} />
             <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
             <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
-            {isPrivileged && (
+            {canSeeMbr && (
               <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
             )}
             {isPrivileged && (

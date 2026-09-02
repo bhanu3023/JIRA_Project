@@ -27,6 +27,18 @@ async function getCachedUser(userId: string) {
   return user;
 }
 
+// can_view_mbr is a raw ALTER TABLE column (not in the Prisma schema, same
+// gap as current_department/dept_assignees/etc. on issues), so it never
+// comes back from getCachedUser's Prisma lookup above -- checked separately
+// wherever MBR access is gated.
+async function userCanViewMbr(userId: string | null): Promise<boolean> {
+  if (!userId) return false;
+  try {
+    const row = await pool.query(`SELECT can_view_mbr FROM users WHERE id = $1`, [userId]);
+    return !!row.rows[0]?.can_view_mbr;
+  } catch { return false; }
+}
+
 // Ensure original_dept column exists
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).catch(() => {});
 // deploy.sh never runs `prisma migrate deploy` (only `prisma generate` in the
@@ -42,6 +54,13 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "projectPool" TEXT`).cat
 // belt-and-suspenders idempotent ALTER TABLE as projectPool above.
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "infraIssueType" TEXT`).catch(() => {});
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMP(3)`).catch(() => {});
+// MBR was previously restricted to role='admin' only, with no way to give
+// one specific person MBR visibility without also making them a full admin
+// (user management, space/queue settings, deleting tickets, every other
+// admin-only page). This is a narrow, additive grant -- true only unlocks
+// the MBR tab itself, nothing else -- deliberately separate from `role` so
+// it never disturbs whatever role a user already has.
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_mbr BOOLEAN DEFAULT FALSE`).catch(() => {});
 
 // Deleted-ticket trash: DELETE /issues/:key used to be a genuine hard
 // delete with no way to get a ticket back -- a production ticket got
@@ -983,6 +1002,10 @@ function formatUser(u: {
     status,
     createdAt: u.createdAt?.toISOString() ?? nowIso(),
     lastSeenAt: (u as any).lastSeenAt ? (u as any).lastSeenAt.toISOString() : null,
+    // can_view_mbr is a raw column not in the Prisma schema -- only present
+    // when the caller merged it in themselves (see auth/me below); absent
+    // callers correctly default to false rather than throwing.
+    canViewMbr: !!(u as any).can_view_mbr,
   };
 }
 
@@ -3337,7 +3360,7 @@ async function _handleJiraPgApi(
     // missing.
     try {
       const dbUser = await db.user.findUnique({ where: { id: userId } });
-      if (dbUser) return json(formatUser(dbUser));
+      if (dbUser) return json(formatUser({ ...dbUser, can_view_mbr: await userCanViewMbr(userId) } as any));
     } catch { /* DB unreachable -- fall through to dev fallback below */ }
     if (process.env.NODE_ENV === 'development') {
       try {
@@ -9366,7 +9389,7 @@ async function _handleJiraPgApi(
   // a per-person loop — this app has 29k+ issues / 370+ users, so an N+1 pattern
   // (like reports/user-performance above) wouldn't scale to full-department volume.
   if (path === 'reports/mbr' && method === 'GET') {
-    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+    if (!isAdmin && !(await userCanViewMbr(userId))) return json({ error: 'Forbidden' }, 403);
 
     const department = url.searchParams.get('department') || '';
     const dateFrom   = url.searchParams.get('dateFrom') || '';
@@ -9553,7 +9576,7 @@ async function _handleJiraPgApi(
   // the data exists. `resolvedAt` is never populated in this DB, so
   // avgResolutionHours always comes back null.
   if (path === 'reports/mbr-team' && method === 'GET') {
-    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+    if (!isAdmin && !(await userCanViewMbr(userId))) return json({ error: 'Forbidden' }, 403);
 
     const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra' };
 

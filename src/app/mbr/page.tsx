@@ -319,7 +319,7 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
 export default function MbrPage() {
   const user = useStore((s) => s.user);
   const router = useRouter();
-  const isPrivileged = PRIVILEGED_ROLES.includes(user?.role || '');
+  const isPrivileged = PRIVILEGED_ROLES.includes(user?.role || '') || !!(user as any)?.canViewMbr;
 
   const [topTab, setTopTab] = useState<TopTab>('department');
   const [allDepartments, setAllDepartments] = useState<string[]>([]);
