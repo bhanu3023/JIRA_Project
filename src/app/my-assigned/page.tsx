@@ -131,7 +131,12 @@ export default function MyAssignedPage() {
           const assigned = data.issues.filter((i) => i.assignee);
           if (!cancelled) setIssues(assigned);
         } else if (user?.id) {
-          const data = await api.getIssues({ assignee: user.id, limit: '100' });
+          // assigneeStrict: this page means strictly "currently assigned to
+          // me", not "ever worked on by me" -- same fix as the dashboard's
+          // "My Assigned Tickets" widget, same underlying bug (the backend's
+          // worked-on-history broadening, correct for Filters, was leaking
+          // into every plain Assignee-filtered call including this one).
+          const data = await api.getIssues({ assignee: user.id, limit: '100', assigneeStrict: 'true' });
           if (!cancelled) setIssues(data.issues);
         } else if (!cancelled) {
           setIssues([]);

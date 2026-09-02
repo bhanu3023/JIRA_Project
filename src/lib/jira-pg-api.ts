@@ -4369,8 +4369,25 @@ async function _handleJiraPgApi(
     }
 
     // Assignee filter Ã¢â‚¬â€ look up by ID or email
+    // Opt-out for callers that need STRICT "currently assigned to me" only,
+    // with no worked-on broadening -- e.g. the dashboard's "My Assigned
+    // Tickets" widget, which sits right next to its own separate "Worked On"
+    // tab. Broadening by default (below) is correct for Filters' own plain
+    // Assignee search, but applying it unconditionally to every caller of
+    // this endpoint leaked into that dashboard widget too: it started
+    // showing tickets someone had merely worked on in the past (even after
+    // being reassigned to a completely different person) as if they were
+    // still "mine" -- confirmed for real on Ravi Srivastava's dashboard,
+    // where 5 of 7 "My Assigned Tickets" actually belonged to other people
+    // (Amulya, Nagalakshmi, Akhila, Sairaj) or nobody at all, purely because
+    // he had an old worked-on row for each.
+    const assigneeStrictParam = url.searchParams.get('assigneeStrict') === 'true';
     if (unassignedOnly) {
       where.assigneeId = null;
+    } else if (assignees && assigneeStrictParam) {
+      const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
+      const userIds = await resolveUserIds(ids);
+      where.assigneeId = userIds.length === 1 ? userIds[0] : { in: userIds };
     } else if (assignees) {
       const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
       const userIds = await resolveUserIds(ids);

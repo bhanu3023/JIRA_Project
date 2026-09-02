@@ -229,8 +229,12 @@ export default function DashboardPage() {
       if (tab === 'assigned' && user) {
         // Limit to 50 for speed — enough for dashboard. excludeDone so a
         // resolved ticket doesn't linger in "My Assigned Tickets" alongside
-        // the actually-open ones it's meant to surface.
-        const data = await api.getIssues({ assignee: user.id, excludeDone: 'true', limit: '50' });
+        // the actually-open ones it's meant to surface. assigneeStrict opts
+        // out of the backend's worked-on-history broadening (correct for
+        // Filters' own Assignee search, wrong here) -- this widget sits
+        // right next to its own separate "Worked On" tab, so it must mean
+        // strictly "currently assigned to me", not "ever touched by me".
+        const data = await api.getIssues({ assignee: user.id, excludeDone: 'true', limit: '50', assigneeStrict: 'true' });
         const issues = data.issues || [];
         setAssignedIssues(issues);
         tabCache.current[tab] = issues;
