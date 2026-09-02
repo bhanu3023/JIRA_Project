@@ -1525,6 +1525,29 @@ export default function IssueDetailPage() {
     ? { id: historicalStatusSnap.id, name: historicalStatusSnap.name, color: resolveStatusColor(historicalStatusSnap), category: historicalStatusSnap.category }
     : issueStat;
 
+  // Same frozen-snapshot treatment as displayStat above, but for the Assignee
+  // field -- the property panel always showed the ticket's LIVE current
+  // assignee here, even while viewing a "Worked on" row opened from another
+  // queue. A ticket person A worked and handed off in Dev, later reassigned
+  // to person B in Migration, opened from Dev's own "Worked on" list (which
+  // already correctly shows A) landed on this page showing B instead --
+  // directly contradicting the list it was just opened from, the same
+  // "another queue's own assignee" confusion already fixed for dept_closed
+  // and the Filters page. dept_assignees is this queue's own frozen record
+  // of who held it while it sat here; fall back to the live assignee when no
+  // snapshot exists for this dept (e.g. it was never formally assigned here).
+  const historicalDeptAssignees: Record<string, any> = (issue as any)?.dept_assignees || {};
+  const historicalAssigneeKey = Object.keys(historicalDeptAssignees).find(k => k.toLowerCase() === viewDeptParam.toLowerCase());
+  const historicalAssigneeSnap = isHistoricalDeptView && historicalAssigneeKey ? historicalDeptAssignees[historicalAssigneeKey] : null;
+  const displayAssignee = historicalAssigneeSnap?.id
+    ? {
+        id: historicalAssigneeSnap.id,
+        firstName: historicalAssigneeSnap.firstName || (historicalAssigneeSnap.displayName || '').split(' ')[0] || '',
+        lastName: historicalAssigneeSnap.lastName || (historicalAssigneeSnap.displayName || '').split(' ').slice(1).join(' ') || '',
+        avatarUrl: historicalAssigneeSnap.avatarUrl || null,
+      }
+    : issue.assignee;
+
   const t = typeIcons[issue.type] || typeIcons.task;
 
   /** Real-time SLA breach value for "Time to First Response" / "Time to Resolution" custom fields */
@@ -2939,14 +2962,21 @@ export default function IssueDetailPage() {
             {pinnedFields.includes('assignee') && (
               <PropRow label="Assignee" pinned onPin={() => togglePin('assignee')}>
                 <div className="relative">
-                  <button onClick={() => setShowAssigneeDropdown(!showAssigneeDropdown)}
-                    className="flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full">
-                    {issue.assignee ? (
+                  {isHistoricalDeptView && (
+                    <p className="text-[10.5px] text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mb-1.5">
+                      Showing {viewDeptParam}&rsquo;s own assignee — this ticket has since moved to {currentDeptForView || 'another queue'}.
+                    </p>
+                  )}
+                  <button onClick={() => !isHistoricalDeptView && setShowAssigneeDropdown(!showAssigneeDropdown)}
+                    disabled={isHistoricalDeptView}
+                    title={isHistoricalDeptView ? `Historical assignee as last seen in ${viewDeptParam}` : undefined}
+                    className={`flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full ${isHistoricalDeptView ? 'cursor-not-allowed opacity-70' : ''}`}>
+                    {displayAssignee ? (
                       <>
                         <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
-                          {getInitials(issue.assignee.firstName, issue.assignee.lastName)}
+                          {getInitials(displayAssignee.firstName, displayAssignee.lastName)}
                         </div>
-                        <span className="text-[13px] text-gray-800 font-medium truncate">{issue.assignee.firstName} {issue.assignee.lastName}</span>
+                        <span className="text-[13px] text-gray-800 font-medium truncate">{displayAssignee.firstName} {displayAssignee.lastName}</span>
                       </>
                     ) : (
                       <>
@@ -3203,14 +3233,21 @@ export default function IssueDetailPage() {
             {/* Assignee */}
             {!pinnedFields.includes('assignee') && <PropRow label="Assignee" onPin={() => togglePin('assignee')}>
               <div className="relative">
-                <button onClick={() => setShowAssigneeDropdown(!showAssigneeDropdown)}
-                  className="flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full">
-                  {issue.assignee ? (
+                {isHistoricalDeptView && (
+                  <p className="text-[10.5px] text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mb-1.5">
+                    Showing {viewDeptParam}&rsquo;s own assignee — this ticket has since moved to {currentDeptForView || 'another queue'}.
+                  </p>
+                )}
+                <button onClick={() => !isHistoricalDeptView && setShowAssigneeDropdown(!showAssigneeDropdown)}
+                  disabled={isHistoricalDeptView}
+                  title={isHistoricalDeptView ? `Historical assignee as last seen in ${viewDeptParam}` : undefined}
+                  className={`flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full ${isHistoricalDeptView ? 'cursor-not-allowed opacity-70' : ''}`}>
+                  {displayAssignee ? (
                     <>
                       <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
-                        {getInitials(issue.assignee.firstName, issue.assignee.lastName)}
+                        {getInitials(displayAssignee.firstName, displayAssignee.lastName)}
                       </div>
-                      <span className="text-[13px] text-gray-800 font-medium truncate">{issue.assignee.firstName} {issue.assignee.lastName}</span>
+                      <span className="text-[13px] text-gray-800 font-medium truncate">{displayAssignee.firstName} {displayAssignee.lastName}</span>
                     </>
                   ) : (
                     <>
