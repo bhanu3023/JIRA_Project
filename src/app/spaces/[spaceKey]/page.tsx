@@ -2270,9 +2270,6 @@ function SpaceDetailContent() {
 
             if (cat === 'assignee') {
               const aq = assigneeSearch.trim().toLowerCase();
-              const filtered = aq
-                ? assigneeFilterMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
-                : assigneeFilterMembers;
               // Was single-select (picking a person replaced whoever was already
               // selected, closing the dropdown immediately) -- every other
               // multi-value filter in this same panel (Type, Status, Priority)
@@ -2286,6 +2283,21 @@ function SpaceDetailContent() {
               const selectedIds = filters.assignee && filters.assignee !== '__current' && filters.assignee !== '__unassigned'
                 ? filters.assignee.split(',').map((v: string) => v.trim()).filter(Boolean)
                 : [];
+              // Already-selected people were left in whatever order
+              // assigneeFilterMembers happened to arrive in -- for a long
+              // roster, an active selection could sit well below the fold,
+              // invisible without scrolling every time this dropdown reopens.
+              // Same stable-sort fix already applied to the Filters page's
+              // own Assignee dropdown: selected people bubble to the top,
+              // stable within each group so the rest of the ordering doesn't
+              // jump around.
+              const filtered = (aq
+                ? assigneeFilterMembers.filter((mb: any) => `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(aq) || (mb.email || '').toLowerCase().includes(aq))
+                : assigneeFilterMembers
+              )
+                .map((mb: any, idx: number) => ({ mb, idx, sel: selectedIds.includes(mb.id) ? 0 : 1 }))
+                .sort((a: any, b: any) => a.sel - b.sel || a.idx - b.idx)
+                .map(({ mb }: any) => mb);
               const toggleAssignee = (id: string) => {
                 const next = selectedIds.includes(id) ? selectedIds.filter((v: string) => v !== id) : [...selectedIds, id];
                 if (next.length === 0) clearFilter('assignee'); else setFilter('assignee', next.join(','));
@@ -2299,7 +2311,7 @@ function SpaceDetailContent() {
                     <div className="relative">
                       <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                       <input autoFocus type="text" value={assigneeSearch} onChange={e => setAssigneeSearch(e.target.value)}
-                        placeholder="Search assignee…"
+                        placeholder="Search assignee…" autoComplete="off"
                         className="w-full pl-7 pr-3 py-1.5 text-[12.5px] border border-blue-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white" />
                     </div>
                   </div>
