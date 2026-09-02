@@ -1057,8 +1057,25 @@ async function pauseDeptSLA(issueKey: string | null, issueId: string | null, dep
     const startedAt: Date | null = row.rows[0].dept_sla_started_at;
     const log: Record<string, any> = row.rows[0].dept_sla_log || {};
     const nowTs = new Date();
-    const existingElapsed: number = log[dept]?.elapsed_ms ?? 0;
-    const newElapsed = startedAt
+    const existingEntry = log[dept];
+    const existingElapsed: number = existingEntry?.elapsed_ms ?? 0;
+    // dept_sla_started_at is the top-level "when did the CURRENT running
+    // period begin" column -- it's only ever reset by startDeptSLA, never by
+    // this function. If this dept's own log entry is already 'paused' (e.g.
+    // the ticket resolved here days ago and just sat untouched since), that
+    // column is stale: it still points at whenever the dept last actually
+    // started running, not "now". Pausing an already-paused dept a second
+    // time (a real path -- e.g. resolve now, get transferred away later)
+    // blindly measured now-minus-that-stale-timestamp and added the entire
+    // idle gap on top of the already-correct elapsed total, as if the ticket
+    // had been actively worked the whole time it sat resolved. Confirmed for
+    // real on CF-29930: resolved in 14 minutes on Aug 30, sat resolved for
+    // 2.5 days, then transferred away -- this added those 2.5 idle days as
+    // "elapsed", blowing past the 24h goal and creating a false breach (plus
+    // a due time computed as before the resolution itself). Only accumulate
+    // elapsed time while this dept's clock was actually running.
+    const wasRunning = !existingEntry || existingEntry.status !== 'paused';
+    const newElapsed = (wasRunning && startedAt)
       ? existingElapsed + (nowTs.getTime() - new Date(startedAt).getTime())
       : existingElapsed;
     log[dept] = {
