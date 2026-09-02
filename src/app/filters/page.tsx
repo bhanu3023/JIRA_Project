@@ -98,7 +98,16 @@ function DropBtn({
     };
   }, [open, align]);
 
-  const filtered = options.filter((o) => o.label.toLowerCase().includes(q.toLowerCase()));
+  // Already-selected options were left in whatever order `options` happened
+  // to arrive in -- for a long list (e.g. Assignee's full member roster),
+  // an active selection could sit well below the fold, invisible without
+  // scrolling every time this dropdown is reopened. Stable-sort selected
+  // options to the top so what's currently active is always visible first.
+  const filtered = options
+    .filter((o) => o.label.toLowerCase().includes(q.toLowerCase()))
+    .map((o, idx) => ({ o, idx, sel: selected.includes(o.value) ? 0 : 1 }))
+    .sort((a, b) => a.sel - b.sel || a.idx - b.idx)
+    .map(({ o }) => o);
   const toggle = (val: string) =>
     onChange(selected.includes(val) ? selected.filter((v) => v !== val) : [...selected, val]);
 
