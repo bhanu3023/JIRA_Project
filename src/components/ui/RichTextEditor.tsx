@@ -929,16 +929,59 @@ export default function RichTextEditor({
     // (a real screenshot/copied-image paste has no text/html or text/plain).
     const htmlContent = e.clipboardData?.getData('text/html');
     const plainText = e.clipboardData?.getData('text/plain');
-    // TEMP DEBUG — remove once the Excel-table-paste issue is confirmed fixed.
-    console.log('[PASTE DEBUG] clipboard types:', items.map(i => i.type),
-      'html length:', htmlContent?.length ?? 0, 'has <table>:', !!htmlContent?.includes('<table'),
-      'html sample:', htmlContent?.slice(0, 500),
-      'plainText sample:', plainText?.slice(0, 200));
     if (imgItem && !htmlContent && !plainText) {
       e.preventDefault();
       const file = imgItem.getAsFile();
       if (file) insertImage(file);
       return;
+    }
+    // A real spreadsheet copy (Excel, Google Sheets, or any grid that
+    // preserves cell structure in its clipboard text) always separates
+    // columns with a literal tab character in its plain-text representation
+    // -- a far more reliable signal than the HTML that comes alongside it.
+    // Office's accompanying text/html frequently carries its actual visible
+    // borders/shading through classes pointing at a <style> block that sits
+    // OUTSIDE the StartFragment/EndFragment markers wrapped tightly around
+    // just the <table> -- extractOfficeFragment (necessarily) keeps the
+    // structure but drops that styling, and depending on the exact source
+    // (a filtered view, an in-tenant web grid the IDs were copied from
+    // rather than raw Excel, etc.) the HTML can vary in ways forcing a grid
+    // onto every <table> we find doesn't reliably catch. Building our own
+    // table straight from the tab/newline structure sidesteps all of that:
+    // whatever HTML did or didn't survive, the plain text's tabs and line
+    // breaks are the one thing that reliably says "this was columns and
+    // rows" -- checked before the HTML branch so it takes priority over
+    // whatever (possibly broken) markup came with it.
+    const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const buildBorderedTable = (rows: string[][]) => `<table style="border-collapse:collapse">${rows.map(cells =>
+      `<tr>${cells.map(cell =>
+        `<td style="border:1px solid #d1d5db;padding:4px 8px">${escapeHtml(cell)}</td>`
+      ).join('')}</tr>`
+    ).join('')}</table>`;
+    if (plainText && plainText.includes('\t')) {
+      e.preventDefault();
+      editorRef.current?.focus();
+      const rows = plainText.replace(/\r/g, '').split('\n').filter(row => row.length > 0);
+      document.execCommand('insertHTML', false, buildBorderedTable(rows.map(row => row.split('\t'))));
+      emit();
+      return;
+    }
+    // No tabs, but still a list of single-token lines (IDs, keys, codes --
+    // exactly what a single-COLUMN spreadsheet selection copies as: one
+    // value per line, no tab between columns since there's only one). Real
+    // prose essentially never has every line be one whitespace-free token,
+    // so this is a narrow, safe signal rather than trying to auto-tableify
+    // any multi-line paste (which would wrongly box up an ordinary pasted
+    // paragraph split across lines).
+    if (plainText) {
+      const lines = plainText.replace(/\r/g, '').split('\n').filter(l => l.trim().length > 0);
+      if (lines.length >= 2 && lines.every(l => !/\s/.test(l.trim()))) {
+        e.preventDefault();
+        editorRef.current?.focus();
+        document.execCommand('insertHTML', false, buildBorderedTable(lines.map(l => [l.trim()])));
+        emit();
+        return;
+      }
     }
     // Insert HTML ourselves rather than letting the browser's own native
     // paste handler take over — for complex Office markup (merged cells,
