@@ -677,7 +677,17 @@ export default function IssueDetailPage() {
         } catch { /* ignore */ }
       })();
     }
-  }, [currentIssue?.spaceKey, currentIssue?.id, currentIssue?.spaceId, spaces, user?.id]);
+  // (currentIssue as any)?.current_department is included so this effect
+  // re-runs -- and recomputes isOriginDept/spaceStatuses above -- whenever
+  // the ticket's department changes within the SAME page session (e.g.
+  // create in Migration, then transfer to Dev without a reload in between).
+  // Without it, a department change left the dropdown showing whatever
+  // status list (including "Resolved") was computed for the OLD department,
+  // wrongly still offering it after the ticket moved to a dept that never
+  // raised it. Confirmed for real on CF-30639: created in Migration,
+  // transferred to Dev seconds later in the same session, and Dev's status
+  // dropdown kept showing "Resolved" as if Dev itself had raised it.
+  }, [currentIssue?.spaceKey, currentIssue?.id, currentIssue?.spaceId, spaces, user?.id, (currentIssue as any)?.current_department]);
 
   // Periodically re-check SLA breach status every 30s and sync custom fields
   useEffect(() => {
