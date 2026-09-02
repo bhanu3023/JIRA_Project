@@ -129,7 +129,7 @@ const COMBINATION_OPTIONS = [
   'SharePoint - Amazon S3', 'SharePoint - Azure', 'SharePoint - Egnyte',
   'NFS - OneDrive', 'NFS - SharePoint', 'NFS - MyDrive', 'NFS - SharedDrive',
   'OneDrive - Amazon S3', 'OneDrive - OneDrive', 'OneDrive - MyDrive',
-  'Sharefile - Amazon S3', 'Sharefile - Azure',
+  'Sharefile - Amazon S3', 'Sharefile - Azure', 'Sharefile - OneDrive', 'Sharefile - SharePoint',
   'Sharedrive - Azure',
   'Amazon S3 - SharePoint',
   'Amazon Workdocs - NFS',

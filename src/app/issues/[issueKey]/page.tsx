@@ -3588,7 +3588,7 @@ export default function IssueDetailPage() {
                   'Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','Egnyte - Azure',
                   'NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive',
                   'OneDrive - Amazon S3','Box - Amazon S3','Share Point - Amazon S3','Shared Drive - Amazon S3','Sharefile - Amazon S3',
-                  'SharePoint - Azure','Sharefile - Azure','Amazon S3 - SharePoint',
+                  'SharePoint - Azure','Sharefile - Azure','Sharefile - OneDrive','Sharefile - SharePoint','Amazon S3 - SharePoint',
                   'SharePoint - Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint','SharePoint - Egnyte',
                   'Onedrive - Onedrive','Onedrive - MyDrive',
                   'Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Teams to Slack','Chat To Slack',
