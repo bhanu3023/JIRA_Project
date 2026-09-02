@@ -5013,6 +5013,11 @@ async function _handleJiraPgApi(
       // Migration under a different assignee, so "Queue: Dev + Assignee:
       // Ravi" could never find it.
       let workedAssigneeIds: string[] | null = null;
+      if (deptParam) {
+        console.log('[DEBUG dept-request]', JSON.stringify({
+          url: url.toString(), deptParam, createdRange, updatedRange, assignees, queueMembersOnlyParam,
+        }));
+      }
       if (unassignedOnly) {
         deptExtraClauses.push(`i."assigneeId" IS NULL`);
       } else if (workedRange && assignees) {
