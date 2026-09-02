@@ -2465,6 +2465,7 @@ const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> 
   CB:      { jiraProject: 'CB',     spaceKey: 'TESTIN' },
   SOPS:    { jiraProject: 'SOPS',   spaceKey: 'TESTIN' },
   QABOAR:  { jiraProject: 'QABOAR', spaceKey: 'TESTIN' },
+  QA:      { jiraProject: 'QA',     spaceKey: 'TESTIN' },
 };
 
 const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665';
