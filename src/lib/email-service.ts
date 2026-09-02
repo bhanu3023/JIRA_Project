@@ -635,6 +635,30 @@ export function stripQuotedContent(text: string): string {
 let pollerRunning = false;
 let pollerInterval: ReturnType<typeof setInterval> | null = null;
 
+// ── Poll concurrency gate ─────────────────────────────────────────────────
+// Each connected mailbox runs its own independent 30s timer (see
+// startImapPoller below) with a random jitter to avoid firing in lockstep —
+// fine at the ~40-mailbox scale it was written for, but with 100+ accounts
+// now connected, jitter alone still leaves several polls overlapping at any
+// given moment, each doing an OAuth token refresh + Graph API round trip.
+// Confirmed for real: the Filters page's own issues query timed out
+// (net::ERR_CONNECTION_TIMED_OUT) while ~15 mailboxes were mid-poll in the
+// same few seconds and jira_app's CPU sat at 190%. Capping how many polls
+// actually run at once keeps the load flat no matter how many mailboxes get
+// connected, instead of growing linearly with account count — excess polls
+// simply queue and run once a slot frees up rather than all firing at once.
+const MAX_CONCURRENT_POLLS = 6;
+let activePollCount = 0;
+const pollWaitQueue: Array<() => void> = [];
+async function acquirePollSlot(): Promise<void> {
+  if (activePollCount < MAX_CONCURRENT_POLLS) { activePollCount++; return; }
+  await new Promise<void>(resolve => pollWaitQueue.push(resolve));
+}
+function releasePollSlot(): void {
+  const next = pollWaitQueue.shift();
+  if (next) { next(); } else { activePollCount = Math.max(0, activePollCount - 1); }
+}
+
 interface ParsedEmail {
   from: string;
   to: string;
@@ -1000,7 +1024,7 @@ export function startImapPoller(
     }
   }
 
-  async function pollOnce() {
+  async function pollOnceInner() {
     console.log(`[EmailPoller] Poll starting for ${config.imap.user}`);
     // Refresh OAuth token if needed
     let accessToken = config.imap.oauthAccessToken;
@@ -1135,6 +1159,15 @@ export function startImapPoller(
       await client.logout();
     } catch (err) {
       console.error('[EmailPoller] IMAP error:', err);
+    }
+  }
+
+  async function pollOnce() {
+    await acquirePollSlot();
+    try {
+      await pollOnceInner();
+    } finally {
+      releasePollSlot();
     }
   }
 
