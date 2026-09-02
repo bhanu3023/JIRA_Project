@@ -1024,11 +1024,16 @@ export default function FiltersPage() {
   // single time wasn't discoverable; it can still be removed via its own X.
   const [activeExtras, setActiveExtras]         = useState<string[]>(['created']);
 
-  // Created/Updated/Due Date all filter by a different date column --
-  // keeping these mutually exclusive avoids the same "two date filters
-  // silently combine into a number that doesn't mean what either one
-  // alone would suggest" problem that came up with Created+Worked
-  // (Worked has since been removed from this page entirely).
+  // Created and Updated were mutually exclusive here on the theory that
+  // "two date filters silently combine into a number that doesn't mean
+  // what either one alone would suggest" -- true in general (still applies
+  // to Due Date below), but Created+Updated together now has a real,
+  // well-defined meaning: the backend unions them (everything created in
+  // that window, plus everything updated in that window), verified against
+  // production data. Keeping them force-exclusive in the UI meant that
+  // backend support was simply unreachable -- there was no way to ever
+  // send both params at once. Due Date has no such union support on the
+  // backend, so it stays exclusive with both.
   const DATE_GROUP_KEYS = ['created', 'updated', 'dueDate'];
   const clearExtraValue = (key: string) => {
     if (key === 'created')        setSelCreated('');
@@ -1051,10 +1056,15 @@ export default function FiltersPage() {
         return prev.filter((k) => k !== key);
       }
       let next = [...prev, key];
-      if (DATE_GROUP_KEYS.includes(key)) {
-        const others = DATE_GROUP_KEYS.filter((k) => k !== key && prev.includes(k));
+      if (key === 'dueDate') {
+        // Due Date still exclusive with Created/Updated -- no backend
+        // union support for combining it with either.
+        const others = ['created', 'updated'].filter((k) => prev.includes(k));
         others.forEach(clearExtraValue);
         next = next.filter((k) => !others.includes(k));
+      } else if (DATE_GROUP_KEYS.includes(key) && prev.includes('dueDate')) {
+        clearExtraValue('dueDate');
+        next = next.filter((k) => k !== 'dueDate');
       }
       return next;
     });
