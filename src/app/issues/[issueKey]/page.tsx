@@ -2512,13 +2512,14 @@ export default function IssueDetailPage() {
                   </div>
                 </div>
 
-                {/* Existing comments — oldest first, same as Jira's own comment thread
-                    order. A "Reply" here only seeds an @mention on a new top-level
-                    comment (no real threading, see handleReplyToComment) rather than
-                    nesting under the original -- with a newest-first list that made a
-                    reply LOOK like it was replying "backward" to something below it, so
-                    it needs to land after (not above) the comment it references. */}
-                {[...(issue.comments || [])].filter(c => c.authorName !== 'System' && c.author?.email !== 'system').map(comment => (
+                {/* Existing comments — newest first, so the latest reply is visible
+                    without scrolling past the whole thread. A "Reply" here only seeds
+                    an @mention on a new top-level comment (no real threading, see
+                    handleReplyToComment) rather than nesting under the original, so a
+                    reply can appear above the comment it references in this order --
+                    a minor cosmetic tradeoff accepted in exchange for the latest
+                    activity always being at the top. */}
+                {[...(issue.comments || [])].filter(c => c.authorName !== 'System' && c.author?.email !== 'system').reverse().map(comment => (
                   <div key={comment.id} className="flex gap-2.5 group/comment">
                     <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-[11px] flex-shrink-0 font-semibold mt-0.5">
                       {getInitials(comment.author?.firstName ?? (comment.authorName ?? '').split(' ')[0], comment.author?.lastName ?? (comment.authorName ?? '').split(' ').slice(1).join(' '))}

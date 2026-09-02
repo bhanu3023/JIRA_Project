@@ -887,6 +887,28 @@ export default function RichTextEditor({
         el.style.float = '';
         if (el.style.position === 'absolute' || el.style.position === 'fixed') el.style.position = '';
       });
+
+      // Excel's copied HTML defines its actual grid lines/shading through
+      // classes (e.g. class="xl65") pointing at a <style> block that sits in
+      // the clipboard payload's <head> -- outside the StartFragment/
+      // EndFragment markers Excel itself wraps tightly around just the
+      // <table>. extractOfficeFragment (necessarily) only keeps what's
+      // between those markers, so the class names paste in but the CSS
+      // rules they pointed to never do: real rows/columns of data land in a
+      // structurally-correct <table>, just with no visible borders at all,
+      // reading as "the table didn't paste" even though every cell's text is
+      // right there. Force a plain visible grid on any table that didn't
+      // already get real borders some other way (an inline mso-border style
+      // that DID survive, or a table not from Office at all).
+      container.querySelectorAll<HTMLElement>('table').forEach(table => {
+        table.style.borderCollapse = 'collapse';
+        table.querySelectorAll<HTMLElement>('td, th').forEach(cell => {
+          if (!cell.style.border && !cell.getAttribute('style')?.includes('border')) {
+            cell.style.border = '1px solid #d1d5db';
+          }
+          if (!cell.style.padding) cell.style.padding = '4px 8px';
+        });
+      });
       cleaned = container.innerHTML;
     } catch { /* if DOM parsing itself fails, fall back to the regex-cleaned string as-is */ }
 
