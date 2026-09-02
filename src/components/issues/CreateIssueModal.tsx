@@ -745,6 +745,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     <option value="">Select Project Pool</option>
                     <option value="ENT">ENT</option>
                     <option value="SMB">SMB</option>
+                    <option value="Other">Other</option>
                   </select>
                   {projectPoolError && (
                     <div className="flex items-center gap-1.5 mt-1.5">
