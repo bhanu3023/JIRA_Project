@@ -3,8 +3,8 @@
  * Creates a user and sends them an invite email with a link to the login page.
  */
 import { NextRequest, NextResponse } from 'next/server';
-import nodemailer from 'nodemailer';
 import { pgPool as pool } from '@/lib/pg-pool';
+import { sendNotification } from '@/lib/notification-service';
 
 export const runtime = 'nodejs';
 
@@ -36,23 +36,7 @@ export async function POST(req: NextRequest) {
     if (!email) return NextResponse.json({ error: 'Email is required' }, { status: 400 });
 
     const APP_URL    = await getAppUrl();
-    const FROM_EMAIL = process.env.EMAIL_USER;
-    const FROM_PASS  = process.env.EMAIL_PASSWORD;
     const FROM_NAME  = process.env.EMAIL_FROM_NAME || 'Neutara Technologies Ticketing';
-
-    if (!FROM_EMAIL || !FROM_PASS) {
-      return NextResponse.json({ ok: true, emailSent: false, reason: 'SMTP not configured' });
-    }
-
-    const smtpHost = process.env.SMTP_HOST || 'smtp.office365.com';
-    const smtpPort = parseInt(process.env.SMTP_PORT || '587');
-    const transporter = nodemailer.createTransport({
-      host:   smtpHost,
-      port:   smtpPort,
-      secure: smtpPort === 465,
-      auth:   { user: FROM_EMAIL, pass: FROM_PASS },
-      tls:    { ciphers: 'SSLv3', rejectUnauthorized: false },
-    });
 
     const loginUrl   = `${APP_URL}/auth/login`;
     const displayName = `${firstName || ''} ${lastName || ''}`.trim() || email;
@@ -111,22 +95,26 @@ export async function POST(req: NextRequest) {
 </body>
 </html>`;
 
-    // Local/dev environments share the same production SMTP credentials with
-    // no separate test account — only the actual production deployment may
-    // send for real.
+    // Local/dev environments share the same production SMTP/OAuth mailbox
+    // credentials with no separate test account — only the actual production
+    // deployment may send for real. sendNotification() itself also no-ops
+    // outside production, so this is just to report an honest status back.
     if (process.env.NODE_ENV !== 'production') {
       console.log(`[Invite] DEV MODE — would send invite email to ${email} (not actually sent)`);
       return NextResponse.json({ ok: true, emailSent: false, reason: 'DEV MODE — email not sent' });
     }
 
-    // Fire-and-forget — return immediately, email sends in background
-    transporter.sendMail({
-      from:    `"${FROM_NAME}" <${FROM_EMAIL}>`,
-      to:      email,
-      subject: `You've been invited to ${FROM_NAME}`,
+    // Same SMTP-then-Graph-fallback path as ticket notifications, instead of
+    // this route's own SMTP-only sender -- that plain-SMTP send had no
+    // fallback at all, so every invite silently failed once SMTP auth started
+    // being rejected (535 5.7.139), even though `emailSent: true` was still
+    // returned to the caller because the send was fire-and-forget.
+    sendNotification(
+      [email],
+      `You've been invited to ${FROM_NAME}`,
       html,
-      text: `Hi ${displayName},\n\n${inviterName} has invited you to join ${FROM_NAME}.\n\nSign in here: ${loginUrl}\n\nUse your Microsoft account (${email}) to sign in.`,
-    }).catch((err: unknown) => console.error('[Invite] Email send failed:', err));
+      `Hi ${displayName},\n\n${inviterName} has invited you to join ${FROM_NAME}.\n\nSign in here: ${loginUrl}\n\nUse your Microsoft account (${email}) to sign in.`,
+    ).catch((err: unknown) => console.error('[Invite] Email send failed:', err));
 
     return NextResponse.json({ ok: true, emailSent: true });
   } catch {

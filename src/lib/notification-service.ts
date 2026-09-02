@@ -17,6 +17,8 @@ import nodemailer from 'nodemailer';
 
 // ── SMTP transporter (singleton) ──────────────────────────────────────────────
 let _transporter: nodemailer.Transporter | null = null;
+let smtpBrokenUntil = 0;
+const SMTP_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
 
 function getTransporter() {
   if (_transporter) return _transporter;
@@ -135,7 +137,17 @@ function buildEmailHtml(opts: {
 // getValidAccessToken() returns an IMAP-scoped token (aud: outlook.office365.com)
 // which cannot call graph.microsoft.com/sendMail (403). We must explicitly
 // exchange the refresh token for a Graph-scoped token.
+//
+// Cached in memory per sender: this used to hit login.microsoftonline.com on
+// EVERY single notification (even several in a row for the same sender within
+// the same second), adding a full extra network round-trip to every send on
+// top of the actual mail-send call. Access tokens are valid ~1hr; reuse until
+// shortly before expiry instead of refreshing every time.
+const graphTokenCache = new Map<string, { token: string; expiresAt: number }>();
+
 async function getGraphMailToken(email: string): Promise<string | null> {
+  const cached = graphTokenCache.get(email);
+  if (cached && cached.expiresAt > Date.now()) return cached.token;
   try {
     const { getOAuthTokens } = await import('@/lib/oauth-service');
     const tokens = getOAuthTokens(email);
@@ -160,7 +172,13 @@ async function getGraphMailToken(email: string): Promise<string | null> {
       return null;
     }
     const data = await res.json();
-    return data.access_token || null;
+    if (!data.access_token) return null;
+    // Refresh 2 minutes early rather than cutting it exactly at expiry.
+    graphTokenCache.set(email, {
+      token: data.access_token,
+      expiresAt: Date.now() + (Number(data.expires_in || 3600) - 120) * 1000,
+    });
+    return data.access_token;
   } catch (e: any) {
     console.error('[Notification] getGraphMailToken error:', e?.message);
     return null;
@@ -178,7 +196,12 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
     const accessToken = await getGraphMailToken(opts.from);
     if (!accessToken) return false;
 
-    for (const recipient of opts.to) {
+    // One recipient per Graph call (API has no multi-envelope send), but the
+    // calls themselves don't depend on each other — firing them in parallel
+    // instead of one-at-a-time is what actually lets a multi-recipient
+    // notification (e.g. status change with 3 watchers) land in ~1 round-trip
+    // instead of 3 serial ones.
+    await Promise.all(opts.to.map(async (recipient) => {
       const message: any = {
         subject: opts.subject,
         body: { contentType: 'HTML', content: opts.html },
@@ -208,7 +231,7 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
         const err = await res.text().catch(() => '');
         console.error(`[Notification] Graph send failed for ${recipient}: ${res.status} ${err.slice(0, 200)}`);
       }
-    }
+    }));
     return true;
   } catch (e: any) {
     console.error('[Notification] Graph send error:', e?.message);
@@ -304,7 +327,7 @@ async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: 
 // SMTP account (Microsoft 365 rejects legacy basic-auth SMTP for many
 // tenants) silently dropped the notification instead of falling back —
 // assignees and reporters got nothing, with no visible error.
-async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string) {
+export async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string) {
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
   if (!uniqueTo.length) return;
 
@@ -325,7 +348,15 @@ async function sendNotification(to: string[], subject: string, html: string, tex
     if (sentViaTicketInbox) return;
   }
 
-  const transporter = getTransporter();
+  // Circuit breaker: a rejected SMTP login (bad password, or — as confirmed
+  // in production — Microsoft 365 blocking legacy basic-auth SMTP tenant-wide)
+  // still costs a full TLS handshake + AUTH round-trip before failing, on
+  // EVERY single notification, before the working Graph fallback even starts.
+  // Skip that doomed attempt for a cooldown after a real failure so sends
+  // land fast; still retries periodically so it self-heals once SMTP is
+  // actually fixed instead of staying skipped forever.
+  const skipSmtp = smtpBrokenUntil > Date.now();
+  const transporter = skipSmtp ? null : getTransporter();
   if (transporter) {
     try {
       const mailOpts: any = {
@@ -341,9 +372,11 @@ async function sendNotification(to: string[], subject: string, html: string, tex
       }
       await transporter.sendMail(mailOpts);
       console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')} via SMTP (${FROM_EMAIL})`);
+      smtpBrokenUntil = 0;
       return;
     } catch (err: any) {
       console.error(`[Notification] SMTP send failed for "${subject}", trying OAuth fallback:`, err.message);
+      smtpBrokenUntil = Date.now() + SMTP_RETRY_COOLDOWN_MS;
       // fall through instead of giving up — the notification still matters
     }
   }
