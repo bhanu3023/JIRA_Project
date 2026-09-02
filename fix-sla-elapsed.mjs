@@ -61,12 +61,18 @@ function recomputeElapsed(events, now) {
     }
     // 'breached' is a marker only, not a state transition -- ignored here.
   }
-  // Any dept still "running" as of the last event: credit it up to now.
-  for (const dept of Object.keys(runningSince)) {
-    if (runningSince[dept]) {
-      elapsed[dept] += now.getTime() - runningSince[dept].getTime();
-    }
-  }
+  // A dept still "running" as of the last event (no closing pause/resolve
+  // yet) is NOT extended to "now" here. The live app never needed elapsed_ms
+  // to reflect a currently-active stint's real-time progress in the first
+  // place -- computeSLAInstancesPure already tracks that independently via
+  // dept_sla_started_at + the remaining-budget due-time math. elapsed_ms only
+  // ever needs to hold the total from CLOSED (already paused/resolved)
+  // stints. Extending it to "now" here would double-count the moment this
+  // dept next actually pauses -- the real pauseDeptSLA call would add that
+  // same still-running time on top of what we'd already baked in, recreating
+  // this exact bug through a different path. Confirmed for real on CF-29320:
+  // Migration has been running unclosed for 21 days; the correct elapsed_ms
+  // is still just its one earlier CLOSED 4.2h stint, not 510h.
   return { elapsed, stillRunning: Object.fromEntries(Object.entries(runningSince).map(([d, v]) => [d, !!v])) };
 }
 
