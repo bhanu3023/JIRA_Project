@@ -9436,6 +9436,10 @@ async function _handleJiraPgApi(
       GROUP BY i.current_department
       ORDER BY open DESC
     `, filterParams);
+    console.log('[DEBUG mbr-department-tab]', JSON.stringify({
+      dateFrom, dateTo, department,
+      rows: deptRows.rows.map((r: any) => ({ dept: r.dept, open: r.open, unassigned: r.unassigned, old30: r.old30, overdue: r.overdue, sla_breached: r.sla_breached })),
+    }));
 
     const staleParams = [...filterParams, staleDays];
     const staleParamIdx = staleParams.length;
@@ -9898,6 +9902,7 @@ async function _handleJiraPgApi(
       rb: !!slaById.get(r.id),
     }));
 
+    console.log('[DEBUG mbr-team-tab]', JSON.stringify({ team, dept, dateFrom, dateTo, person, ticketFilter, totalMatched, summary }));
     return json({ people, monthly, summary, tickets, totalMatched });
   }
 
