@@ -9667,7 +9667,19 @@ async function _handleJiraPgApi(
     // broadening above decided they belong here. A roster member counts if
     // they're the current assignee OR they have a worked-on record for this
     // dept on this ticket.
-    const rosterMatchSql = `(EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[])) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wr JOIN users wru ON wru.id = wr.user_id WHERE wr.issue_id = i.id AND LOWER(wr.dept) = LOWER($1) AND LOWER(wru.email) = ANY($2::text[])))`;
+    //
+    // The worked-on branch used to ALSO require that worker to currently be
+    // a Dev-roster member (LOWER(wru.email) = ANY($2)) -- but a worked-on
+    // record is real, immutable evidence this dept genuinely did the work,
+    // independent of whether that person is still on the roster today (left
+    // the team, or was never formally added despite pitching in on one
+    // ticket). That extra requirement silently re-excluded genuinely-worked
+    // tickets, causing MBR to undercount relative to Filters' own Queue view
+    // (which never had this restriction -- see queueMembersOnly's own
+    // memberClause). Confirmed for real: CF-29885, closed by
+    // gururaj.bhimrao@cloudfuze.com while it sat in Dev, counted in Filters
+    // but not MBR, purely because he isn't on Dev's current roster.
+    const rosterMatchSql = `(EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[])) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wr WHERE wr.issue_id = i.id AND LOWER(wr.dept) = LOWER($1)))`;
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
     const personIdx = scopedParams.length;
