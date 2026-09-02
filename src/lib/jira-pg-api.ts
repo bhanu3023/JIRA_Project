@@ -5317,9 +5317,22 @@ async function _handleJiraPgApi(
         : updatedDeptMatchSql
         ? updatedDeptMatchSql
         : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
+      // The plain "is currently assignee" branch used to have no department
+      // condition of its own -- fine on its own, since it was always ANDed
+      // with deptScopeSql anyway, but deptScopeSql's own broadening (origin
+      // OR *anyone's* worked-on record) meant a ticket could satisfy the
+      // AND purely because the selected person currently holds it in a
+      // DIFFERENT department while someone else entirely did the Dev work.
+      // Confirmed for real: ravi.hemanth@cloudfuze.com showed 7 Dev-queue
+      // tickets he was never personally connected to Dev on -- all
+      // Migration tickets he's the current assignee of, where a different
+      // teammate has the actual Dev worked-on record. Requiring current
+      // department to match here too (same rule MBR's per-person count
+      // already used) fixes it without touching the OTHER branch below,
+      // which already correctly requires the record be THIS person's own.
       const assigneeScopeSql = historyAssigneeIdx
         ? `(
-            i."assigneeId" = ANY($${historyAssigneeIdx}::text[])
+            (i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) AND LOWER(i.current_department) = LOWER($2))
             OR EXISTS (
               SELECT 1 FROM user_worked_on_tickets w
               WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2)
