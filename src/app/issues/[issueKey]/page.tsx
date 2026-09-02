@@ -460,6 +460,19 @@ export default function IssueDetailPage() {
     }
   }, [currentIssue?.key, user?.id]);
 
+  // Status/workflow loading lives in its OWN effect, split out from the
+  // members/custom-fields effect below -- it's the only one of the three
+  // that actually needs to react to a department change (to recompute
+  // isOriginDept and load the NEW department's own status list). Originally
+  // all three lived in one effect; adding current_department to that
+  // shared dependency array (to fix Resolved staying visible after an
+  // in-session department change, see CF-30639) made EVERY department
+  // change also re-run the members fetch and the custom-fields/SLA-sync
+  // block (which does real writes via setCustomFieldValue) for no reason --
+  // visible as a flicker/"shaking" on the ticket page during a status
+  // change that also moves the department (e.g. "Routed to Migration").
+  // Scoping this effect to just what status-loading actually depends on
+  // keeps that fix without the collateral re-fetching.
   useEffect(() => {
     if (currentIssue?.spaceKey) {
       const dept = (currentIssue as any).current_department as string | undefined;
@@ -580,6 +593,9 @@ export default function IssueDetailPage() {
         loadStatusesForSpace(currentIssue.spaceKey);
       }
     }
+  }, [currentIssue?.spaceKey, currentIssue?.id, spaces, (currentIssue as any)?.current_department, (currentIssue as any)?.originDepartment]);
+
+  useEffect(() => {
     // Always load members from the issue's own space (not the workflow space which may differ)
     if (currentIssue?.spaceKey) {
       api.getSpace(currentIssue.spaceKey).then((sp: any) => {
@@ -677,17 +693,7 @@ export default function IssueDetailPage() {
         } catch { /* ignore */ }
       })();
     }
-  // (currentIssue as any)?.current_department is included so this effect
-  // re-runs -- and recomputes isOriginDept/spaceStatuses above -- whenever
-  // the ticket's department changes within the SAME page session (e.g.
-  // create in Migration, then transfer to Dev without a reload in between).
-  // Without it, a department change left the dropdown showing whatever
-  // status list (including "Resolved") was computed for the OLD department,
-  // wrongly still offering it after the ticket moved to a dept that never
-  // raised it. Confirmed for real on CF-30639: created in Migration,
-  // transferred to Dev seconds later in the same session, and Dev's status
-  // dropdown kept showing "Resolved" as if Dev itself had raised it.
-  }, [currentIssue?.spaceKey, currentIssue?.id, currentIssue?.spaceId, spaces, user?.id, (currentIssue as any)?.current_department]);
+  }, [currentIssue?.spaceKey, currentIssue?.id, currentIssue?.spaceId, spaces, user?.id]);
 
   // Periodically re-check SLA breach status every 30s and sync custom fields
   useEffect(() => {
