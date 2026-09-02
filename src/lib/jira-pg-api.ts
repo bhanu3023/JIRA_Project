@@ -9827,6 +9827,16 @@ async function _handleJiraPgApi(
     `, baseParams);
 
     const candidateIds = slaCandidatesRes.rows.map((r: any) => r.id);
+    if (candidateIds.length) {
+      const keysRes = await pool.query(
+        `SELECT COALESCE(cf_key, key) AS key FROM issues WHERE id = ANY($1::text[]) ORDER BY key`,
+        [candidateIds]
+      );
+      console.log('[DEBUG mbr-team-full-keys]', JSON.stringify({
+        team, dept, dateFrom, dateTo, total: candidateIds.length,
+        keys: keysRes.rows.map((r: any) => r.key),
+      }));
+    }
     const workedRosterRes = candidateIds.length
       ? await pool.query(
           `SELECT w.issue_id, wu.email
