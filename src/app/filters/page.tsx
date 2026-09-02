@@ -2041,13 +2041,29 @@ export default function FiltersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {issues.slice(0, 100).map((issue: any) => (
+              {issues.slice(0, 100).map((issue: any) => {
+                // Carries which queue this row was shown under, same as the
+                // Queue Dashboard's own "Worked on" list -- without it, the
+                // issue detail page had no way to know it was opened from a
+                // Queue: X view and always showed the ticket's LIVE current
+                // assignee/status, even for a row Filters itself displayed
+                // using THIS queue's own frozen dept_assignees/dept_statuses
+                // snapshot (e.g. via the worked-on broadening above). A
+                // ticket showing "Guru M" as assignee in Queue: Dev's list
+                // (its real Dev worker) opened to show "Harshith Kaduluri"
+                // instead (Migration's current holder) -- directly
+                // contradicting the row it was just opened from. Confirmed
+                // for real on CF-29885.
+                const issueHref = selQueue
+                  ? `/issues/${issue.cfKey ?? issue.key}?ref=filters&viewDept=${encodeURIComponent(selQueue)}`
+                  : `/issues/${issue.cfKey ?? issue.key}?ref=filters`;
+                return (
                 <tr key={issue.id || issue.key} className="group hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-1.5">
                       <IssueTypeIcon type={issue.type || 'task'} size={15} />
                       <Link
-                        href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
+                        href={issueHref}
                         className="font-mono text-[11.5px] font-semibold text-blue-600 hover:text-blue-800 whitespace-nowrap"
                       >
                         {issue.cfKey ?? issue.key}
@@ -2056,7 +2072,7 @@ export default function FiltersPage() {
                   </td>
                   <td className="px-2 py-2.5">
                     <Link
-                      href={`/issues/${issue.cfKey ?? issue.key}?ref=filters`}
+                      href={issueHref}
                       className="block truncate text-[13px] text-gray-900 hover:text-blue-600 transition-colors"
                     >
                       {issue.summary}
@@ -2171,7 +2187,8 @@ export default function FiltersPage() {
                     </span>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}
