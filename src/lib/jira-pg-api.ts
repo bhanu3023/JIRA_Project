@@ -5406,6 +5406,24 @@ async function _handleJiraPgApi(
           countParams
         );
         deptCandidateCount = countRow.rows[0]?.cnt ?? 0;
+        if (createdRange && updatedRange && !historyAssigneeIdx) {
+          const keysRow = await pool.query(
+            `SELECT COALESCE(i.cf_key, i.key) AS key
+             FROM issues i
+             LEFT JOIN statuses s ON i."statusId" = s.id
+             WHERE i."spaceId" = ANY($1::text[])
+               AND ${deptDeptMatchSql}
+             ${deptSearchClause}
+             ${deptExtraSql}
+             ORDER BY key`,
+            countParams
+          );
+          console.log('[DEBUG dept-created-updated-count]', JSON.stringify({
+            deptParam, createdRange, updatedRange, deptSearchParam,
+            cnt: deptCandidateCount,
+            keys: keysRow.rows.map(r => r.key),
+          }));
+        }
       } catch (err) { console.error('[dept count query failed]', err); deptCandidateCount = 0; }
       // placeholder when SLA-prefiltering -- corrected after breach filtering below
       deptTotal = needsSlaPrefilter ? 0 : deptCandidateCount;
