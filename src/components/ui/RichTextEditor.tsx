@@ -929,6 +929,11 @@ export default function RichTextEditor({
     // (a real screenshot/copied-image paste has no text/html or text/plain).
     const htmlContent = e.clipboardData?.getData('text/html');
     const plainText = e.clipboardData?.getData('text/plain');
+    // TEMP DEBUG — remove once the Excel-table-paste issue is confirmed fixed.
+    console.log('[PASTE DEBUG] clipboard types:', items.map(i => i.type),
+      'html length:', htmlContent?.length ?? 0, 'has <table>:', !!htmlContent?.includes('<table'),
+      'html sample:', htmlContent?.slice(0, 500),
+      'plainText sample:', plainText?.slice(0, 200));
     if (imgItem && !htmlContent && !plainText) {
       e.preventDefault();
       const file = imgItem.getAsFile();
