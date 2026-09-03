@@ -3247,13 +3247,20 @@ function SpaceDetailContent() {
                             </span>
                           </div>
                         </div>
-                        {/* Progress bar */}
-                        <div className="mt-2 h-1.5 rounded-full bg-gray-200 overflow-hidden">
-                          <div
-                            className={`h-full rounded-full transition-all ${pausedSla.isBreached ? 'bg-red-500' : 'bg-amber-400'}`}
-                            style={{ width: `${Math.min(100, (pausedSla.elapsed_ms / pausedSla.goalDurationMs) * 100)}%` }}
-                          />
-                        </div>
+                        {/* Progress bar -- three-stage green/orange/red by how much of the
+                            SLA budget is actually used, not just a flat amber the whole way
+                            through. Green while there's real headroom, orange once it's
+                            genuinely close, red once breached -- same traffic-light read
+                            Jira's own SLA bar gives at a glance. */}
+                        {(() => {
+                          const pct = Math.min(100, (pausedSla.elapsed_ms / pausedSla.goalDurationMs) * 100);
+                          const barColor = pausedSla.isBreached ? 'bg-red-500' : pct >= 70 ? 'bg-orange-400' : 'bg-green-500';
+                          return (
+                            <div className="mt-2 h-1.5 rounded-full bg-gray-200 overflow-hidden">
+                              <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
 
