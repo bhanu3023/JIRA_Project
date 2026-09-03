@@ -1495,17 +1495,22 @@ export default function FiltersPage() {
     setExporting(false);
   };
 
-  // Product Type / Combination / Project Manager were exportable via
-  // EXPORT_EXTRA_COLUMNS but never actually rendered in the on-screen table
-  // itself -- filtering by one of these told you which tickets matched, but
-  // not what value each ticket actually had, without exporting just to look.
-  // Mirrors the export's own "chip active OR a value is currently selected"
-  // rule exactly, so a field shows as a column in the table the moment
-  // you've added it as a filter, and shows the same way in the CSV export --
-  // not tied to some other unrelated filter (e.g. Queue+Worked) being set.
-  // "Created" gets the same treatment but is table-only (kept out of
-  // EXPORT_EXTRA_COLUMNS since the CSV export already always includes its
-  // own fixed Created column -- adding it there too would double it up).
+  // Filtering by a field and seeing that field's column in the table used to
+  // be two disconnected things for most fields (only Product Type,
+  // Combination, and Project Manager had it) -- driven per-field by a
+  // hardcoded list here, which meant every new addable field needed its own
+  // line added by hand or it silently stayed export-only. Generalized to
+  // every field in EXTRA_FILTER_OPTIONS at once: a column shows in the table
+  // the moment that field is added via "More filters" (activeExtras) OR
+  // already has a value selected (the same "chip active OR a value is
+  // selected" rule the export uses, for the same reason -- activeExtras and
+  // a filter's own value state are two separately persisted pieces of state
+  // that can desync, e.g. an older deep link that set one without the
+  // other). Reporter, Priority, Department, and Updated are excluded here --
+  // they're already always-visible fixed columns, not extras.
+  // "Created" is table-only (kept out of EXPORT_EXTRA_COLUMNS since the CSV
+  // export already always includes its own fixed Created column -- adding
+  // it there too would double it up in the export).
   const TABLE_ONLY_COLUMNS: Record<string, { label: string; getValue: (issue: any) => string }> = {
     created: { label: 'Created', getValue: (i) => i.createdAt ? new Date(i.createdAt).toLocaleDateString() : '' },
   };
@@ -1513,19 +1518,19 @@ export default function FiltersPage() {
     ...TABLE_ONLY_COLUMNS,
     ...EXPORT_EXTRA_COLUMNS,
   };
-  const TABLE_EXTRA_COLUMN_IDS = ['created', 'productType', 'combination', 'projectManager', 'customerName', 'clientName', 'projectPool', 'dueDate'] as const;
-  const tableExtraCols = TABLE_EXTRA_COLUMN_IDS.filter((id) => {
-    if (activeExtras.includes(id)) return true;
-    if (id === 'created') return !!selCreated;
-    if (id === 'productType') return selProductType.length > 0;
-    if (id === 'combination') return !!selCombination;
-    if (id === 'projectManager') return selProjectManager.length > 0;
-    if (id === 'customerName') return !!selCustomerName;
-    if (id === 'clientName') return !!selClientName;
-    if (id === 'projectPool') return !!selProjectPool;
-    if (id === 'dueDate') return !!selDueDate;
-    return false;
-  });
+  const EXTRA_COLUMN_HAS_VALUE: Record<string, boolean> = {
+    created: !!selCreated,
+    productType: selProductType.length > 0,
+    combination: !!selCombination,
+    projectManager: selProjectManager.length > 0,
+    customerName: !!selCustomerName,
+    clientName: !!selClientName,
+    projectPool: !!selProjectPool,
+    dueDate: !!selDueDate,
+  };
+  const tableExtraCols = EXTRA_FILTER_OPTIONS
+    .map((f) => f.id)
+    .filter((id) => TABLE_COLUMN_DEFS[id] && (activeExtras.includes(id) || EXTRA_COLUMN_HAS_VALUE[id]));
 
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
@@ -1616,7 +1621,7 @@ export default function FiltersPage() {
   const starredFilters = savedFilters.filter((f) => f.starredBy?.includes(user?.id || ''));
 
   return (
-    <div className="max-w-[1200px] mx-auto space-y-4">
+    <div className="max-w-[1800px] mx-auto space-y-4">
 
       {/* ── Page header ── */}
       <div>
@@ -2052,7 +2057,6 @@ export default function FiltersPage() {
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20 hidden sm:table-cell">SLA Breached</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16 hidden sm:table-cell">Overdue</th>
                 <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24 hidden md:table-cell">Time Spent</th>
-                <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 hidden lg:table-cell">Updated</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -2187,18 +2191,6 @@ export default function FiltersPage() {
                       {issue.noHistory && (
                         <span className="ml-1 inline-flex items-center px-1 py-0.5 rounded-full text-[9px] font-medium bg-amber-50 text-amber-700 align-middle">No history</span>
                       )}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 hidden lg:table-cell">
-                    <span className="text-[11.5px] text-gray-400 whitespace-nowrap">
-                      {(() => {
-                        const d = new Date(issue.updatedAt || issue.createdAt);
-                        if (isNaN(d.getTime())) return '—';
-                        return d.toLocaleString('en-GB', {
-                          day: '2-digit', month: 'short', year: 'numeric',
-                          hour: '2-digit', minute: '2-digit', hour12: false,
-                        });
-                      })()}
                     </span>
                   </td>
                 </tr>
