@@ -9739,29 +9739,51 @@ async function _handleJiraPgApi(
       ? `CASE WHEN (${createdInRangeSql}) THEN i."createdAt" ELSE i."updatedAt" END`
       : `i."createdAt"`;
 
-    // Strict scoping, deliberately: a ticket counts for this team only while
-    // it is CURRENTLY tagged with this dept AND currently assigned to
-    // someone on this dept's roster -- "get the data from the dev queue
-    // based on the date range," full stop, not a history-aware broadened
-    // match. An earlier version of this handler also counted a ticket via
-    // any user_worked_on_tickets record for this dept (so a ticket a Dev
-    // person resolved would keep counting even after being handed to another
-    // department), which fixed a real undercounting case (CF-29885) but had
-    // its own real side effect: the ticket table's assignee display had no
-    // roster gate on its final fallback, so a ticket that only matched via
-    // that historical path could show a completely unrelated, non-roster
-    // person's name as the "assignee" -- confirmed as the cause of "names of
-    // other persons" showing up on the Customer Engineering tab. Reverted to
-    // strict current-dept + current-roster-assignee on request, accepting
-    // that a ticket handed off after a roster member resolved it will stop
-    // counting here the moment it's reassigned elsewhere.
-    const deptMatchSql = `LOWER(i.current_department) = LOWER($1)`;
-    const rosterMatchSql = `EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))`;
+    // Deliberately mirrors the Filters page's own "Queue: <dept> + date range"
+    // matching exactly (see queueMembersOnlyParam / originDeptMatchSql /
+    // updatedDeptMatchSql / deptExtraClauses above in this file) -- MBR and
+    // Filters are two independent reimplementations of "what counts as this
+    // dept's queue data," and every time they've drifted apart it's shown up
+    // as a real, confusing discrepancy (this handler previously undercounted
+    // Filters by more than half on a real date range: 161 vs Filters' true
+    // 423 for Queue: Dev + Updated: Aug 2026). A ticket belongs to dept $1 if
+    // ANY of: it's currently tagged $1; it originated in $1 (issue_history's
+    // earliest department change, or current_department if it never moved);
+    // its frozen per-dept snapshot (dept_statuses) shows it was completed
+    // while in $1; or there's a user_worked_on_tickets row for $1 at all --
+    // this last check has no roster restriction on the worker, matching
+    // Filters' own broadenIt clause exactly.
+    const deptMatchSql = `(
+      LOWER(i.current_department) = LOWER($1)
+      OR LOWER(COALESCE(
+           (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+           i.current_department
+         )) = LOWER($1)
+      OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($1) AND LOWER(v->>'category') = 'done')
+      OR EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1))
+    )`;
+    // Roster/member scope: current assignee is a configured queue member, OR
+    // anyone at all has a worked-on-in-$1 record -- again, no roster
+    // restriction on that worked-on branch (Filters' memberClause OR EXISTS
+    // pattern). A ticket can pass deptMatchSql+rosterMatchSql via a
+    // non-roster worker's history, which is why the ticket table's assignee
+    // display below can legitimately show a name outside the roster list --
+    // that's Filters' own real behavior too, not a bug to hide.
+    const rosterMatchSql = `(
+      EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
+      OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1))
+    )`;
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
     const personIdx = scopedParams.length;
+    // Selecting a specific person means "this person's own work" -- current
+    // assignee OR a worked-on-in-$1 record for exactly that person (mirrors
+    // Filters' historyAssigneeIdx/workedAssigneeIds handling of Assignee
+    // under a date-range filter: CF-29889 was worked in Dev by Ravi
+    // Srivastava, then handed to another dept and reassigned -- "Assignee:
+    // Ravi" still needs to find it).
     const personMatchSql = person
-      ? ` AND EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx})`
+      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}))`
       : '';
 
     // "resolved" still filters correctly in SQL (status category is a plain
@@ -9882,7 +9904,10 @@ async function _handleJiraPgApi(
         SELECT COALESCE(u.email, r.email) AS email, u."firstName", u."lastName", ${fullAgg(peopleStaleIdx)}
         FROM roster r
         LEFT JOIN users u ON LOWER(u.email) = r.email
-        LEFT JOIN issues i ON i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1) ${dateClause}
+        LEFT JOIN issues i ON (
+          (i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1))
+          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1))
+        ) ${dateClause}
         LEFT JOIN statuses s ON i."statusId" = s.id
         GROUP BY r.email, u.email, u."firstName", u."lastName"
         ORDER BY total DESC
@@ -9900,7 +9925,27 @@ async function _handleJiraPgApi(
 
       pool.query(`
         SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.key AS project_key,
-          COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
+          COALESCE(
+            CASE WHEN au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])
+              THEN COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
+            END,
+            (SELECT COALESCE(NULLIF(TRIM(wtu."firstName" || ' ' || wtu."lastName"), ''), wtu.email)
+             FROM user_worked_on_tickets wt JOIN users wtu ON wtu.id = wt.user_id
+             WHERE wt.issue_id = i.id AND LOWER(wt.dept) = LOWER($1) AND LOWER(wtu.email) = ANY($2::text[])
+             ORDER BY wt.worked_at DESC LIMIT 1),
+            COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
+          ) AS assignee_name,
+          -- Ticket matched via deptMatchSql/rosterMatchSql's worked-on branch with
+          -- no roster member (current or historical) to actually attribute it to --
+          -- the current assignee shown above is real, just outside this team's
+          -- roster (e.g. a different dept picked it up after a roster member's
+          -- work here was done). Surfaced explicitly rather than silently shown
+          -- as if they were a normal roster member.
+          NOT (
+            (au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[]))
+            OR EXISTS (SELECT 1 FROM user_worked_on_tickets wt2 JOIN users wtu2 ON wtu2.id = wt2.user_id
+                       WHERE wt2.issue_id = i.id AND LOWER(wt2.dept) = LOWER($1) AND LOWER(wtu2.email) = ANY($2::text[]))
+          ) AS assignee_outside_roster,
           COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
           s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
           COUNT(*) OVER() AS total_matched
@@ -9917,11 +9962,11 @@ async function _handleJiraPgApi(
 
     // Live SLA breach computation for every ticket that matched dept+roster
     // in this date range, using the SAME shared function and per-space
-    // policy set the issue detail page's own SLA panel uses. Since matching
-    // is strict (current dept = this team's dept AND current assignee is on
-    // this team's roster), every row here already has exactly one qualifying
-    // assignee to attribute the breach to -- no separate worked-on lookup
-    // needed.
+    // policy set the issue detail page's own SLA panel uses. Matching is
+    // broadened (see deptMatchSql/rosterMatchSql above), so a ticket can
+    // legitimately belong to more than one roster member -- current assignee
+    // if they're on the roster, plus anyone else on the roster with a
+    // genuine worked-on record for this dept on this ticket.
     const slaCandidatesRes = await pool.query(`
       SELECT i.id, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
         i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
@@ -9931,6 +9976,20 @@ async function _handleJiraPgApi(
       LEFT JOIN users au ON au.id = i."assigneeId"
       WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}
     `, baseParams);
+
+    const slaCandidateIds = slaCandidatesRes.rows.map((r: any) => r.id);
+    const workedRosterRes = slaCandidateIds.length
+      ? await pool.query(
+          `SELECT w.issue_id, wu.email
+           FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
+           WHERE w.issue_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2) AND LOWER(wu.email) = ANY($3::text[])`,
+          [slaCandidateIds, dept, roster]
+        )
+      : { rows: [] as any[] };
+    const workedRosterByIssue: Record<string, Set<string>> = {};
+    for (const wr of workedRosterRes.rows) {
+      (workedRosterByIssue[wr.issue_id] ??= new Set()).add(String(wr.email).toLowerCase());
+    }
 
     const slaSpaceIds = Array.from(new Set(slaCandidatesRes.rows.map((r: any) => r.spaceId).filter(Boolean)));
     const slaPoliciesBySpace: Record<string, any[]> = {};
@@ -9970,12 +10029,13 @@ async function _handleJiraPgApi(
       const monthLabel = monthLabelFor(row);
       monthlyRbBreached[monthLabel] = (monthlyRbBreached[monthLabel] || 0) + 1;
 
-      // Strict matching guarantees row.assignee_email is set and on roster --
-      // the WHERE clause above (deptMatchSql AND rosterMatchSql) wouldn't
-      // have returned this row otherwise.
-      const email = String(row.assignee_email || '').toLowerCase();
-      peopleRbBreached[email] = (peopleRbBreached[email] || 0) + 1;
-      if (!person || email === person) summaryRbBreached++;
+      const emails = new Set<string>(workedRosterByIssue[row.id] || []);
+      if (row.assignee_email && String(row.current_department || '').toLowerCase() === dept.toLowerCase()
+        && roster.some((e) => e.toLowerCase() === String(row.assignee_email).toLowerCase())) {
+        emails.add(String(row.assignee_email).toLowerCase());
+      }
+      for (const email of Array.from(emails)) peopleRbBreached[email] = (peopleRbBreached[email] || 0) + 1;
+      if (!person || emails.has(person)) summaryRbBreached++;
     }
 
     const toSummary = (r: any, rbBreached: number) => ({
@@ -10020,6 +10080,7 @@ async function _handleJiraPgApi(
       key: r.key,
       project: r.project_key || '',
       assignee: r.assignee_name || '',
+      assigneeOutsideRoster: !!r.assignee_outside_roster,
       reporter: r.reporter_name || '',
       status: r.status_name || '',
       summary: r.summary || '',

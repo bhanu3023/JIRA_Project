@@ -308,7 +308,12 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <tr key={t.key} className="hover:bg-gray-50">
                     <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">{t.key}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.assignee}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">
+                      {t.assignee}
+                      {t.assigneeOutsideRoster && (
+                        <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
+                      )}
+                    </td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.reporter}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
@@ -375,7 +380,12 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                       <tr key={t.key} className="hover:bg-gray-50">
                         <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">{t.key}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
-                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.assignee}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">
+                          {t.assignee}
+                          {t.assigneeOutsideRoster && (
+                            <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
+                          )}
+                        </td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
