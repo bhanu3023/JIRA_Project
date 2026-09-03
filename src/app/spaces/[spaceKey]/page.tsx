@@ -3202,7 +3202,14 @@ function SpaceDetailContent() {
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
                             <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Paused At</span>
-                            <span className="text-[13px] font-bold text-gray-600">{pausedSla.paused_at ? timeAgo(pausedSla.paused_at) : '—'}</span>
+                            <span className="text-[13px] font-bold text-gray-600" title={pausedSla.paused_at ? timeAgo(pausedSla.paused_at) : undefined}>
+                              {pausedSla.paused_at
+                                ? new Date(pausedSla.paused_at).toLocaleString('en-GB', {
+                                    day: '2-digit', month: 'short', year: 'numeric',
+                                    hour: '2-digit', minute: '2-digit', hour12: false,
+                                  })
+                                : '—'}
+                            </span>
                           </div>
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
