@@ -1077,32 +1077,59 @@ export default function IssueDetailPage() {
                 placeholder="Comma-separated values"
                 className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
             ) : (
-              /* multiselect — searchable checkbox list */
-              <div className="border border-blue-400 rounded bg-white overflow-hidden">
-                {allOptions.length > 8 && (
-                  <input value={customFieldSearch} onChange={e => setCustomFieldSearch(e.target.value)} autoFocus
-                    placeholder={`Search ${allOptions.length} options…`}
-                    className="w-full px-2 py-1 text-[12px] border-b border-gray-200 focus:outline-none" />
-                )}
-                <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto p-1.5">
-                  {filteredOptions.length === 0 && (
-                    <p className="text-[11px] text-gray-400 px-1 py-1">No matches</p>
-                  )}
-                  {filteredOptions.map(o => {
-                    const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                    const checked = selected.includes(o);
-                    return (
-                      <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                        <input type="checkbox" checked={checked} onChange={() => {
-                          const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                          setCustomFieldEditValue(updated.join(', '));
-                        }} />
-                        {o}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
+              /* multiselect — rich dropdown: selected chips (each removable on
+                 its own), search, checkboxes -- and every toggle saves
+                 immediately instead of waiting on a separate Save click, so
+                 picking or removing a value takes effect right away, the same
+                 as every other rich multiselect in this app (Filters,
+                 CreateIssueModal). Still dedupes on every commit for the same
+                 reason as the Save button below. */
+              (() => {
+                const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
+                const commit = (updated: string[]) => {
+                  const deduped = Array.from(new Set(updated.map(s => s.trim()).filter(Boolean)));
+                  setCustomFieldEditValue(deduped.join(', '));
+                  saveCustomField(key, deduped);
+                  setEditingCustomField(editKey);
+                };
+                return (
+                  <div className="border border-blue-400 rounded bg-white overflow-hidden">
+                    {selected.length > 0 && (
+                      <div className="flex flex-wrap gap-1 p-1.5 border-b border-gray-100">
+                        {selected.map(o => (
+                          <span key={o} className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 text-[11px] font-medium px-2 py-0.5 rounded-full border border-blue-200">
+                            {o}
+                            <button type="button" onClick={() => commit(selected.filter(s => s !== o))} className="hover:text-red-500">
+                              <X size={10} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {allOptions.length > 8 && (
+                      <input value={customFieldSearch} onChange={e => setCustomFieldSearch(e.target.value)} autoFocus
+                        placeholder={`Search ${allOptions.length} options…`}
+                        className="w-full px-2 py-1 text-[12px] border-b border-gray-200 focus:outline-none" />
+                    )}
+                    <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto p-1.5">
+                      {filteredOptions.length === 0 && (
+                        <p className="text-[11px] text-gray-400 px-1 py-1">No matches</p>
+                      )}
+                      {filteredOptions.map(o => {
+                        const checked = selected.includes(o);
+                        return (
+                          <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
+                            <input type="checkbox" checked={checked} onChange={() => {
+                              commit(checked ? selected.filter(s => s !== o) : [...selected, o]);
+                            }} />
+                            {o}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()
             )}
             <div className="flex gap-1 mt-0.5">
               <button onClick={() => {
