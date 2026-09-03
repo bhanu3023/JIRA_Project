@@ -3211,7 +3211,7 @@ function SpaceDetailContent() {
                             {(issue as any).createdAt && (
                               <span className="text-[10px] text-gray-400 font-medium mt-0.5">
                                 Due {new Date(new Date((issue as any).createdAt).getTime() + pausedSla.goalDurationMs).toLocaleString('en-GB', {
-                                  day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+                                  day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true,
                                 })}
                               </span>
                             )}
@@ -3223,7 +3223,7 @@ function SpaceDetailContent() {
                               {pausedSla.paused_at
                                 ? new Date(pausedSla.paused_at).toLocaleString('en-GB', {
                                     day: '2-digit', month: 'short', year: 'numeric',
-                                    hour: '2-digit', minute: '2-digit', hour12: false,
+                                    hour: '2-digit', minute: '2-digit', hour12: true,
                                   })
                                 : '—'}
                             </span>
@@ -3241,7 +3241,7 @@ function SpaceDetailContent() {
                             >
                               {pausedSla.paused_at
                                 ? new Date(new Date(pausedSla.paused_at).getTime() + pausedSla.remainingMs).toLocaleString('en-GB', {
-                                    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+                                    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
                                   })
                                 : '—'}
                             </span>
