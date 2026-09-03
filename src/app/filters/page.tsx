@@ -2040,11 +2040,23 @@ export default function FiltersPage() {
             </p>
           </div>
         ) : (
-          <table className="w-full table-fixed">
+          <table className="table-fixed">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
                 <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Work</th>
+                {/* Explicit width, not left to soak up whatever's left --
+                    table-fixed hands 100% of any unclaimed width to the one
+                    column with no width class, which at the page's widened
+                    max-width (1800px) stretched Work to roughly 600px wider
+                    than its own text needed, leaving a long dead gap before
+                    Created. Dropped the table's own w-full for the same
+                    reason: with every column now explicitly sized, forcing
+                    the table to fill 100% would just redistribute that same
+                    slack across all of them instead of Work alone -- letting
+                    it size to its natural (sum-of-columns) width and leaving
+                    any leftover space as plain page margin reads as a normal
+                    right-aligned table, not a stretched column. */}
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[380px]">Work</th>
                 {tableExtraCols.map((id) => (
                   <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
                     {TABLE_COLUMN_DEFS[id].label}
