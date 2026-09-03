@@ -9657,11 +9657,20 @@ async function _handleJiraPgApi(
   if (path === 'reports/mbr-team' && method === 'GET') {
     if (!isAdmin && !(await userCanViewMbr(userId))) return json({ error: 'Forbidden' }, 403);
 
-    const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra' };
+    // Migration ENT and SMB are both tagged current_department = 'Migration'
+    // on this board -- there's no separate department value for them -- so
+    // they're told apart purely by queue roster, same as everything else
+    // here. TEAM_QUEUE_NAME is the name of the custom_queues entry to read
+    // the roster from; TEAM_DEPT is the current_department value tickets are
+    // actually tagged with. These match for eng/qa/infra but diverge for
+    // ent/smb, which is exactly why they're two separate maps and not one.
+    const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra', ent: 'Migration', smb: 'Migration' };
+    const TEAM_QUEUE_NAME: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra', ent: 'ENT', smb: 'SMB' };
 
     const team = url.searchParams.get('team') || '';
     const dept = TEAM_DEPT[team];
-    if (!dept) return json({ error: 'team must be one of eng, qa, infra' }, 400);
+    const queueName = TEAM_QUEUE_NAME[team];
+    if (!dept) return json({ error: 'team must be one of eng, qa, infra, ent, smb' }, 400);
 
     // Roster used to be a hardcoded email list per team, maintained
     // completely separately from this queue's REAL configured membership
@@ -9679,19 +9688,20 @@ async function _handleJiraPgApi(
     try {
       const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = 'TESTIN'`);
       const queues: any[] = cq.rows[0]?.queues || [];
-      const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === dept.toLowerCase());
+      const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === queueName.toLowerCase());
       const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
       if (memberIds.length) {
         const usersRes = await pool.query(`SELECT email FROM users WHERE id = ANY($1::text[])`, [memberIds]);
         roster = usersRes.rows.map((r: any) => String(r.email || '').toLowerCase()).filter(Boolean);
       }
     } catch { /* leave roster empty -- surfaced as the error below */ }
-    if (!roster.length) return json({ error: `No queue members configured for ${dept} on CloudFuze Board` }, 400);
+    if (!roster.length) return json({ error: `No queue members configured for ${queueName} on CloudFuze Board` }, 400);
 
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
     const person   = (url.searchParams.get('person') || '').toLowerCase();
     const ticketFilter = url.searchParams.get('ticketFilter') || '';
+    const staleDays = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
     const baseParams: any[] = [dept, roster];
     let fromIdx: number | null = null;
@@ -9787,6 +9797,58 @@ async function _handleJiraPgApi(
         ROUND(AVG(EXTRACT(EPOCH FROM (i."resolvedAt" - i."createdAt")) / 3600)
           FILTER (WHERE i."resolvedAt" IS NOT NULL)) AS avg_resolution_hours`;
 
+    // Per-person hygiene, exactly the same formula/fields "By Department"
+    // already computes (stale/missing/overdue/no-closure/screenshots), plus
+    // two checks that tab never had: a closing-comment quality check (closed
+    // via a literal Closed/Resolved status AND has an actual, non-trivial
+    // comment on it -- a status-name match alone doesn't prove anyone
+    // explained the resolution) and an RCA/Fix Description check (rootCause/
+    // fixDescription columns exist on `issues` but are unpopulated for every
+    // ticket in this dataset today -- this will read 0% for everyone until
+    // those fields start actually getting filled in, which is expected, not
+    // a bug). Kept out of AGG itself (monthly/tickets don't need these) and
+    // parameterized on staleIdx since summary/people append staleDays at a
+    // different position in their own params array.
+    const fullAgg = (staleIdx: number) => `${AGG},
+        COUNT(i.id) FILTER (WHERE s.category != 'done' AND i."updatedAt" <= now() - make_interval(days => $${staleIdx}::int)) AS stale,
+        COUNT(i.id) FILTER (WHERE s.category != 'done' AND (i.priority IS NULL OR i."dueDate" IS NULL OR array_length(i.labels,1) IS NULL)) AS missing,
+        COUNT(i.id) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
+        COUNT(i.id) FILTER (WHERE s.category = 'done' AND LOWER(s.name) NOT IN ('closed','resolved','done','cancelled','declined')) AS no_closure,
+        COUNT(i.id) FILTER (WHERE s.category = 'done' AND EXISTS (
+          SELECT 1 FROM attachments a WHERE a."issueId" = i.id AND a."mimeType" LIKE 'image/%')) AS screenshots,
+        COUNT(i.id) FILTER (WHERE s.category = 'done' AND LOWER(s.name) IN ('closed','resolved') AND EXISTS (
+          SELECT 1 FROM comments c WHERE c."issueId" = i.id AND length(trim(c.body)) > 10)) AS closing_good,
+        COUNT(i.id) FILTER (WHERE s.category = 'done' AND (
+          length(trim(COALESCE(i."rootCause", ''))) > 0 OR length(trim(COALESCE(i."fixDescription", ''))) > 0)) AS rca_fix_good`;
+
+    // Mirrors computeHygiene() verbatim: starts at 100, independently-capped
+    // deductions, floored at 0. Shared by the summary card and every person row.
+    const hygieneFrom = (r: any) => {
+      const stale = Number(r.stale) || 0;
+      const missing = Number(r.missing) || 0;
+      const overdue = Number(r.overdue) || 0;
+      const noClosure = Number(r.no_closure) || 0;
+      const closed = Number(r.resolved) || 0;
+      const screenshots = Number(r.screenshots) || 0;
+      const closingGood = Number(r.closing_good) || 0;
+      const rcaFixGood = Number(r.rca_fix_good) || 0;
+      let score = 100;
+      score -= Math.min(30, stale * 5);
+      score -= Math.min(20, missing * 5);
+      score -= Math.min(24, overdue * 8);
+      score -= Math.min(18, noClosure * 6);
+      score -= Math.min(30, Math.max(0, closed - screenshots) * 10);
+      score = Math.max(0, Math.round(score));
+      const grade = score >= 80 ? 'great' : score >= 55 ? 'ok' : 'poor';
+      return {
+        stale, missing, overdue, closed, noClosure,
+        screenshots, screenshotPct: closed > 0 ? Math.round((screenshots / closed) * 100) : null,
+        closingCommentPct: closed > 0 ? Math.round((closingGood / closed) * 100) : null,
+        rcaFixPct: closed > 0 ? Math.round((rcaFixGood / closed) * 100) : null,
+        hygieneScore: score, grade,
+      };
+    };
+
     // ticketFilter=rb can no longer be pushed into the SQL WHERE (breach
     // status is only known after the live per-ticket computation below), so
     // its candidate fetch has to be wide enough to contain every real match
@@ -9797,13 +9859,18 @@ async function _handleJiraPgApi(
     // would need dept sizes this app has never approached.
     const ticketsLimit = ticketFilter === 'rb' ? 2000 : 300;
 
+    const summaryParams = [...scopedParams, staleDays];
+    const summaryStaleIdx = summaryParams.length;
+    const peopleParams = [...baseParams, staleDays];
+    const peopleStaleIdx = peopleParams.length;
+
     const [summaryRes, peopleRes, monthlyRes, ticketsRes] = await Promise.all([
       pool.query(`
-        SELECT ${AGG}
+        SELECT ${fullAgg(summaryStaleIdx)}
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
         WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}
-      `, scopedParams),
+      `, summaryParams),
 
       // LEFT JOIN from the roster itself (not FROM issues) so every roster
       // member appears even with zero tickets in the selected range —
@@ -9816,7 +9883,7 @@ async function _handleJiraPgApi(
       // since been handed to another of this dept's own members.
       pool.query(`
         WITH roster(email) AS (SELECT unnest($2::text[]))
-        SELECT COALESCE(u.email, r.email) AS email, u."firstName", u."lastName", ${AGG}
+        SELECT COALESCE(u.email, r.email) AS email, u."firstName", u."lastName", ${fullAgg(peopleStaleIdx)}
         FROM roster r
         LEFT JOIN users u ON LOWER(u.email) = r.email
         LEFT JOIN issues i ON (
@@ -9826,7 +9893,7 @@ async function _handleJiraPgApi(
         LEFT JOIN statuses s ON i."statusId" = s.id
         GROUP BY r.email, u.email, u."firstName", u."lastName"
         ORDER BY total DESC
-      `, baseParams),
+      `, peopleParams),
 
       pool.query(`
         SELECT to_char(${monthlyBucketExpr}, 'Mon YYYY') AS label, MIN(${monthlyBucketExpr}) AS sort_key, ${AGG}
@@ -9963,12 +10030,17 @@ async function _handleJiraPgApi(
       frbBreached: 0,
     });
 
-    const summary = toSummary(summaryRes.rows[0] || {}, summaryRbBreached);
+    // Only summary/people carry the hygiene fields -- monthly's own query
+    // never selected stale/missing/overdue/no_closure/screenshots/etc, so
+    // running hygieneFrom() on a monthly row would silently score every
+    // month a fake 100 (Number(undefined) || 0 for every deduction input).
+    const summary = { ...toSummary(summaryRes.rows[0] || {}, summaryRbBreached), ...hygieneFrom(summaryRes.rows[0] || {}) };
 
     const people = peopleRes.rows.map((r: any) => ({
       email: r.email,
       name: `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email,
       ...toSummary(r, peopleRbBreached[String(r.email || '').toLowerCase()] || 0),
+      ...hygieneFrom(r),
       avgResolutionHours: r.avg_resolution_hours === null ? null : Number(r.avg_resolution_hours),
     }));
 

@@ -42,6 +42,8 @@ const TOP_TABS = [
   { id: 'eng', label: 'Customer Engineering' },
   { id: 'qa', label: 'QA' },
   { id: 'infra', label: 'Infra' },
+  { id: 'ent', label: 'Migration - ENT' },
+  { id: 'smb', label: 'Migration - SMB' },
 ] as const;
 type TopTab = (typeof TOP_TABS)[number]['id'];
 
@@ -49,11 +51,13 @@ function pct(numerator: number, denominator: number): string {
   return denominator > 0 ? `${Math.round((numerator / denominator) * 100)}%` : '—';
 }
 
-// Customer Engineering / QA / Infra — live from this app's own issues table
-// (current_department = Dev/QA/Infra respectively), scoped to whatever date
-// range is selected above. No hygiene score / RCA / screenshot checks here —
-// this app doesn't track first-response SLA, so that count always reads 0/0.
-function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dateFrom: string; dateTo: string }) {
+// Customer Engineering / QA / Infra / Migration ENT / Migration SMB — live
+// from this app's own issues table, scoped to whatever date range is
+// selected above. This app doesn't track first-response SLA, so that count
+// always reads 0/0. RCA/Fix Description compliance will read 0% for
+// everyone until those fields actually start getting filled in on tickets —
+// the columns exist but are unpopulated in this data today.
+function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | 'infra' | 'ent' | 'smb'; dateFrom: string; dateTo: string; staleDays: number }) {
   const [person, setPerson] = useState('');
   const [people, setPeople] = useState<any[]>([]);
   const [monthly, setMonthly] = useState<any[]>([]);
@@ -70,11 +74,11 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
 
   useEffect(() => {
     setLoading(true);
-    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined)
+    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined, undefined, staleDays)
       .then((d) => { setPeople(d.people); setMonthly(d.monthly); setSummary(d.summary); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
       .catch(() => { setPeople([]); setMonthly([]); setTickets([]); })
       .finally(() => setLoading(false));
-  }, [team, dateFrom, dateTo, person]);
+  }, [team, dateFrom, dateTo, person, staleDays]);
 
   useEffect(() => {
     if (!drillDown) return;
@@ -96,7 +100,7 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
   return (
     <div className="space-y-6">
       <p className="text-[12px] text-gray-400 -mt-2">
-        Live data, scoped to the date range above — no hygiene score, RCA, closing-comment, or screenshot checks (this app doesn't track first-response SLA, so that count always reads 0/0).
+        Live data, scoped to the date range above. First response SLA breached always reads 0/0 (not tracked in this app). RCA/Fix Description compliance will read 0% until those fields start getting filled in on tickets — the columns exist but are unpopulated today.
       </p>
 
       <div className="flex items-center gap-3">
@@ -117,6 +121,24 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
         <Card label="Resolution SLA breached" icon={<AlertTriangle size={22} />} tone={summary.rbBreached > 0 ? 'bad' : undefined}
           value={<button onClick={() => openDrill('rb', person || undefined, `Resolution SLA breached — ${person ? (people.find((p) => p.email === person)?.name || person) : 'All'}`)} className="hover:underline">{summary.rbBreached} / {summary.rbTracked}</button>} />
         <Card label="First response SLA breached" value={`${summary.frbBreached} / ${summary.frbTracked}`} icon={<AlertTriangle size={22} />} tone={summary.frbBreached > 0 ? 'bad' : undefined} />
+      </div>
+
+      {/* Hygiene / closing-comment / RCA compliance — same formula as the By Department tab */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-white rounded-xl border border-gray-200 p-5 flex items-start justify-between">
+          <div>
+            <span className={`inline-flex items-center px-3 py-1.5 rounded-full text-[15px] font-bold ${GRADE_STYLE[summary.grade as string]}`}>
+              {summary.hygieneScore} · {GRADE_LABEL[summary.grade as string]}
+            </span>
+            <p className="text-[12px] text-gray-500 mt-2">Hygiene score</p>
+          </div>
+        </div>
+        <Card label="Closing comment quality" value={summary.closingCommentPct === null ? '—' : `${summary.closingCommentPct}%`}
+          sub="Closed tickets with a real closing comment" icon={<Users size={22} />}
+          tone={summary.closingCommentPct !== null && summary.closingCommentPct < 50 ? 'warn' : undefined} />
+        <Card label="RCA / Fix Description compliance" value={summary.rcaFixPct === null ? '—' : `${summary.rcaFixPct}%`}
+          sub="Closed tickets with a root cause or fix description" icon={<Users size={22} />}
+          tone={summary.rcaFixPct !== null && summary.rcaFixPct < 50 ? 'warn' : undefined} />
       </div>
 
       {/* Monthly summary — Section 4.12, team-wide regardless of person filter */}
@@ -172,6 +194,13 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Resolved tickets</th>
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Resolution SLA breached</th>
                   <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Avg. resolution (hrs)</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Stale</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Missing details</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Overdue</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Screenshot %</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Closing comment %</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">RCA/Fix %</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Hygiene score</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -197,6 +226,17 @@ function TeamTab({ team, dateFrom, dateTo }: { team: 'eng' | 'qa' | 'infra'; dat
                       <button onClick={(e) => { e.stopPropagation(); openDrill('rb', p.email, `Resolution SLA breached — ${p.name}`); }} className="hover:underline">{p.rbBreached} / {p.rbTracked}</button>
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">{p.avgResolutionHours === null ? '—' : p.avgResolutionHours}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.stale}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.missing}</td>
+                    <td className="px-4 py-3 text-[13px] text-red-600">{p.overdue}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.screenshotPct === null ? '—' : `${p.screenshotPct}%`}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.closingCommentPct === null ? '—' : `${p.closingCommentPct}%`}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.rcaFixPct === null ? '—' : `${p.rcaFixPct}%`}</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold ${GRADE_STYLE[p.grade]}`}>
+                        {p.hygieneScore} · {GRADE_LABEL[p.grade]}
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -440,17 +480,15 @@ export default function MbrPage() {
             <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
               className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
-          {topTab === 'department' && (
-            <div className="flex items-center gap-2">
-              <label className="text-[12px] text-gray-400 font-medium">Stale threshold</label>
-              <select value={staleDays} onChange={(e) => setStaleDays(Number(e.target.value))}
-                className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value={3}>3 days</option>
-                <option value={7}>7 days</option>
-                <option value={14}>14 days</option>
-              </select>
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <label className="text-[12px] text-gray-400 font-medium">Stale threshold</label>
+            <select value={staleDays} onChange={(e) => setStaleDays(Number(e.target.value))}
+              className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value={3}>3 days</option>
+              <option value={7}>7 days</option>
+              <option value={14}>14 days</option>
+            </select>
+          </div>
           {(dateFrom || dateTo) && (
             <button onClick={() => { setDateFrom(''); setDateTo(''); }}
               className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
@@ -460,7 +498,7 @@ export default function MbrPage() {
         </div>
 
         {topTab !== 'department' ? (
-          <TeamTab team={topTab} dateFrom={dateFrom} dateTo={dateTo} />
+          <TeamTab team={topTab} dateFrom={dateFrom} dateTo={dateTo} staleDays={staleDays} />
         ) : loading ? (
           <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
             <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
