@@ -3511,10 +3511,16 @@ export default function IssueDetailPage() {
               </div>
             </PropRow>}
 
-            {/* Department — only shown when the field is assigned to this space */}
+            {/* Department — only shown when the field is assigned to this space.
+                canEdit is deliberately NOT the general `canEdit` permission flag
+                above (that one governs whether this person can edit the ticket
+                AT ALL, and is true for anyone) -- Department specifically should
+                only ever change as a side effect of a "Routed to X" status
+                transition, never picked directly from a plain dropdown, so it's
+                hardcoded non-editable here regardless of who's viewing. */}
             <DepartmentField
               issueKey={issueKey}
-              canEdit={canEdit}
+              canEdit={false}
               currentDepartment={(issue as any).current_department || null}
               spaceKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
               spaceId={issue.spaceId}
