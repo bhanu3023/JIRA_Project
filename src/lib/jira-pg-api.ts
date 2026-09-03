@@ -7463,7 +7463,22 @@ async function _handleJiraPgApi(
     if (body.labels !== undefined) data.labels = Array.isArray(body.labels) ? body.labels.map(String) : [];
     if (body.parentKey !== undefined) data.parentKey = body.parentKey === null ? null : String(body.parentKey);
     if (body.productType !== undefined) data.productType = body.productType === null ? null : String(body.productType);
-    if (body.combination !== undefined) data.combination = body.combination === null ? null : String(body.combination);
+    // combination is stored as a comma-joined string (column is String?, not
+    // an array) but the multiselect editor sends an array -- was passed
+    // through plain String(arr), which is JS's default array-to-string (bare
+    // "," separator, no dedup). Several boards have their own overlapping
+    // Combination option lists (see the various KNOWN_CF_OPTIONS/*_COMBO_OPTIONS
+    // in the issue page), so the same value re-added through a different
+    // render path landed as a literal duplicate with no way to remove just
+    // one copy afterward -- unchecking only toggles presence, so a
+    // duplicated entry could only ever be removed all-or-nothing, and
+    // nothing here ever collapsed the duplicates in the first place.
+    if (body.combination !== undefined) {
+      data.combination = body.combination === null ? null
+        : Array.isArray(body.combination)
+          ? Array.from(new Set(body.combination.map(String).map(s => s.trim()).filter(Boolean))).join(', ')
+          : String(body.combination);
+    }
     if (body.rootCause !== undefined) data.rootCause = body.rootCause === null ? null : String(body.rootCause);
     if (body.fixDescription !== undefined) data.fixDescription = body.fixDescription === null ? null : String(body.fixDescription);
     if (body.manageClientName !== undefined) data.manageClientName = body.manageClientName === null ? null : String(body.manageClientName);

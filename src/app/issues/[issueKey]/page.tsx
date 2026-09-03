@@ -1079,8 +1079,15 @@ export default function IssueDetailPage() {
             )}
             <div className="flex gap-1 mt-0.5">
               <button onClick={() => {
+                // Dedupe on save -- a value already carrying a duplicate
+                // (several boards have overlapping option lists for the same
+                // field, e.g. Combination, so the same text can get re-added
+                // through a different render path) could never be cleaned
+                // up otherwise: unchecking only toggles whether a value is
+                // present at all, so a duplicated entry was all-or-nothing
+                // to remove, never reducible to just one copy.
                 const newVal = (type === 'multiselect' || type === 'tags')
-                  ? customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)
+                  ? Array.from(new Set(customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean)))
                   : customFieldEditValue;
                 saveCustomField(key, newVal);
               }} className="text-[11px] bg-blue-600 text-white px-2 py-0.5 rounded hover:bg-blue-700">Save</button>
