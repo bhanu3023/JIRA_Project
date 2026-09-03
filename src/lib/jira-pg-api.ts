@@ -9662,43 +9662,51 @@ async function _handleJiraPgApi(
 
     // Migration ENT and SMB are both tagged current_department = 'Migration'
     // on this board -- there's no separate department value for them -- so
-    // they're told apart purely by queue roster, same as everything else
-    // here. TEAM_QUEUE_NAME is the name of the custom_queues entry to read
-    // the roster from; TEAM_DEPT is the current_department value tickets are
-    // actually tagged with. These match for eng/qa/infra but diverge for
-    // ent/smb, which is exactly why they're two separate maps and not one.
+    // they're told apart purely by roster.
     const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra', ent: 'Migration', smb: 'Migration' };
-    const TEAM_QUEUE_NAME: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra', ent: 'ENT', smb: 'SMB' };
+
+    // Fixed roster, deliberately NOT read from custom_queues.queues[].memberIds
+    // (the "Dev" queue's live config on CloudFuze Board): that queue's real
+    // membership includes people who aren't this specific MBR team roster
+    // (e.g. bharath.tummaganti@cloudfuze.com, abhinav.surattu@cloudfuze.com) --
+    // a broader operational/support group, not the Customer Engineering/QA/
+    // Infra/Migration ENT/SMB teams this report is scoped to. Reverted to a
+    // fixed list per explicit request after the live-queue version surfaced
+    // exactly those extra names in the Team roster panel.
+    const TEAM_ROSTER: Record<string, string[]> = {
+      eng: [
+        'abhinandan.kumar@cloudfuze.com', 'akhila.aenkoju@cloudfuze.com', 'akib.mohd@cloudfuze.com', 'ankit@cloudfuze.com',
+        'bhagyashri.deokar@cloudfuze.com', 'hemadasu.kantam@cloudfuze.com', 'jaswanth.adari@cloudfuze.com', 'lakshmi.adabala@cloudfuze.com',
+        'mayank@cloudfuze.com', 'naved.osama@cloudfuze.com', 'pragati.pandey@cloudfuze.com', 'ravi.srivastava@cloudfuze.com',
+        'rehan.khan@cloudfuze.com', 'sairaj.kanigicharla@cloudfuze.com', 'shiva.amuda@cloudfuze.com', 'shivam.singh@cloudfuze.com',
+        'srinu.gudimitla@cloudfuze.com', 'vamsi.malla@cloudfuze.com', 'vishal.kumar@cloudfuze.com',
+      ],
+      qa: [
+        'asma.karim@cloudfuze.com', 'bhuvana.mosra@cloudfuze.com', 'ganesh.guda@cloudfuze.com', 'kamal.basha@cloudfuze.com',
+        'kiran.ummenthala@cloudfuze.com', 'nagalakshmi.mangina@cloudfuze.com', 'sadia.shaik@cloudfuze.com',
+        'soniya.paladugula@cloudfuze.com', 'soumya.gande@cloudfuze.com',
+      ],
+      infra: [
+        'gururaj.bhimrao@cloudfuze.com', 'hymavathi@cloudfuze.com', 'pavan@cloudfuze.com', 'bala.raviteja@cloudfuze.com',
+      ],
+      ent: [
+        'abhishek.sakala@cloudfuze.com', 'arun@cloudfuze.com', 'chaitanya.gupta@cloudfuze.com', 'chandra.mouli@cloudfuze.com',
+        'davidraj.dumpala@cloudfuze.com', 'ganesh.kondameedi@cloudfuze.com', 'harshith.kaduluri@cloudfuze.com', 'lakshmareddy@cloudfuze.com',
+        'lakshmi.prasanna@cloudfuze.com', 'manoj.bathula@cloudfuze.com', 'pallavi.kosuvaripalli@cloudfuze.com', 'pranavi@cloudfuze.com',
+      ],
+      smb: [
+        'abhishikth.yenugula@cloudfuze.com', 'ajay.singh@cloudfuze.com', 'ramana.reddy@cloudfuze.com', 'amulya.anapuram@cloudfuze.com',
+        'dathu.kaluvala@cloudfuze.com', 'habeebunnisa.begum@cloudfuze.com', 'harika.velidi@cloudfuze.com', 'meena.lakshmi@cloudfuze.com',
+        'neelima.krotta@cloudfuze.com', 'raghu.yellani@cloudfuze.com', 'ranadeep.muddam@cloudfuze.com', 'ravi.hemanth@cloudfuze.com',
+        'saikumar.kustapuram@cloudfuze.com', 'siva.kota@cloudfuze.com', 'sravan.kesaram@cloudfuze.com', 'sriram.ramakrishnan@cloudfuze.com',
+        'swaroop@cloudfuze.com', 'vijendar.burgula@cloudfuze.com', 'vineetha.yenti@cloudfuze.com',
+      ],
+    };
 
     const team = url.searchParams.get('team') || '';
     const dept = TEAM_DEPT[team];
-    const queueName = TEAM_QUEUE_NAME[team];
+    const roster = TEAM_ROSTER[team];
     if (!dept) return json({ error: 'team must be one of eng, qa, infra, ent, smb' }, 400);
-
-    // Roster used to be a hardcoded email list per team, maintained
-    // completely separately from this queue's REAL configured membership
-    // (custom_queues.queues[].memberIds -- the same config Filters'
-    // queueMembersOnly and the department queue board itself already read
-    // from). The two had drifted apart for real: 9 actual Dev-queue
-    // members -- including bharath.tummaganti@cloudfuze.com and
-    // abhinav.surattu@cloudfuze.com -- were completely absent from the
-    // hardcoded eng list, so every one of their tickets was silently
-    // excluded from every Customer Engineering number this report shows,
-    // with no way to notice short of diffing the two lists by hand. Read
-    // the roster live from the queue's own config instead, so it can never
-    // silently drift out of sync with team membership again.
-    let roster: string[] = [];
-    try {
-      const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = 'TESTIN'`);
-      const queues: any[] = cq.rows[0]?.queues || [];
-      const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === queueName.toLowerCase());
-      const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
-      if (memberIds.length) {
-        const usersRes = await pool.query(`SELECT email FROM users WHERE id = ANY($1::text[])`, [memberIds]);
-        roster = usersRes.rows.map((r: any) => String(r.email || '').toLowerCase()).filter(Boolean);
-      }
-    } catch { /* leave roster empty -- surfaced as the error below */ }
-    if (!roster.length) return json({ error: `No queue members configured for ${queueName} on CloudFuze Board` }, 400);
 
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
@@ -9786,11 +9794,29 @@ async function _handleJiraPgApi(
       ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}))`
       : '';
 
-    // "resolved" still filters correctly in SQL (status category is a plain
-    // column); "rb" (breached) can't -- see the rb_breached comment below --
-    // so it's applied in JS after the live computation instead.
+    // Drill-down filters for the per-person hygiene columns -- each shows the
+    // tickets actually FAILING that check (the "what's wrong" list), not the
+    // passing ones, since that's what the column is flagging in the first
+    // place. All of these are plain SQL conditions (unlike "rb" below, which
+    // needs the live per-ticket computation and can't be expressed in SQL).
     let ticketFilterClause = '';
-    if (ticketFilter === 'resolved') ticketFilterClause = ` AND s.category = 'done'`;
+    let ticketQueryParams = scopedParams;
+    if (ticketFilter === 'resolved') {
+      ticketFilterClause = ` AND s.category = 'done'`;
+    } else if (ticketFilter === 'stale') {
+      ticketQueryParams = [...scopedParams, staleDays];
+      ticketFilterClause = ` AND s.category != 'done' AND i."updatedAt" <= now() - make_interval(days => $${ticketQueryParams.length}::int)`;
+    } else if (ticketFilter === 'missing') {
+      ticketFilterClause = ` AND s.category != 'done' AND (i.priority IS NULL OR i."dueDate" IS NULL OR array_length(i.labels,1) IS NULL)`;
+    } else if (ticketFilter === 'overdue') {
+      ticketFilterClause = ` AND s.category != 'done' AND i."dueDate" < now()`;
+    } else if (ticketFilter === 'noComment') {
+      ticketFilterClause = ` AND s.category = 'done' AND NOT (LOWER(s.name) IN ('closed','resolved') AND EXISTS (SELECT 1 FROM comments c WHERE c."issueId" = i.id AND length(trim(c.body)) > 10))`;
+    } else if (ticketFilter === 'noScreenshot') {
+      ticketFilterClause = ` AND s.category = 'done' AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a."issueId" = i.id AND a."mimeType" LIKE 'image/%')`;
+    } else if (ticketFilter === 'noRcaFix') {
+      ticketFilterClause = ` AND s.category = 'done' AND NOT (length(trim(COALESCE(i."rootCause", ''))) > 0 OR length(trim(COALESCE(i."fixDescription", ''))) > 0)`;
+    }
 
     // rb_breached (here and in AGG below) used to be COUNT(...) FILTER (WHERE
     // i.jira_sla_breached = true) -- jira_sla_breached only ever reflects a
@@ -9957,7 +9983,7 @@ async function _handleJiraPgApi(
         WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}${ticketFilterClause}
         ORDER BY i."createdAt" DESC
         LIMIT ${ticketsLimit}
-      `, scopedParams),
+      `, ticketQueryParams),
     ]);
 
     // Live SLA breach computation for every ticket that matched dept+roster

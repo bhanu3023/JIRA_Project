@@ -67,12 +67,13 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [drillDown, setDrillDown] = useState<{ person?: string; filter: 'resolved' | 'rb'; label: string } | null>(null);
+  type DrillFilter = 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix';
+  const [drillDown, setDrillDown] = useState<{ person?: string; filter: DrillFilter; label: string } | null>(null);
   const [drillTickets, setDrillTickets] = useState<any[]>([]);
   const [drillTotal, setDrillTotal] = useState(0);
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillError, setDrillError] = useState<string | null>(null);
-  const openDrill = (filter: 'resolved' | 'rb', personEmail: string | undefined, label: string) => setDrillDown({ person: personEmail, filter, label });
+  const openDrill = (filter: DrillFilter, personEmail: string | undefined, label: string) => setDrillDown({ person: personEmail, filter, label });
 
   useEffect(() => {
     setLoading(true);
@@ -123,25 +124,10 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
         <label className="text-[12px] text-gray-500 font-medium">Person</label>
         <select value={person} onChange={(e) => setPerson(e.target.value)}
           className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[220px]">
-          <option value="">All ({people.reduce((s, p) => s + p.total, 0)} tickets)</option>
+          <option value="">All ({summary.total} tickets)</option>
           {people.map((p) => <option key={p.email} value={p.email}>{p.name} ({p.total})</option>)}
         </select>
       </div>
-
-      {/* Team roster — every configured queue member for this tab, name + email, regardless of ticket volume */}
-      <details className="bg-white rounded-xl border border-gray-200 open:pb-2">
-        <summary className="px-6 py-4 text-[14px] font-semibold text-gray-700 cursor-pointer select-none">
-          Team roster ({people.length} member{people.length === 1 ? '' : 's'})
-        </summary>
-        <div className="px-6 pb-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2">
-          {[...people].sort((a, b) => a.name.localeCompare(b.name)).map((p) => (
-            <div key={p.email} className="flex items-baseline gap-2 text-[13px] py-1 border-b border-gray-50">
-              <span className="font-medium text-gray-800 whitespace-nowrap">{p.name}</span>
-              <span data-hj-suppress className="text-gray-400 truncate">{p.email}</span>
-            </div>
-          ))}
-        </div>
-      </details>
 
       {/* Summary — Section 4.12 "Summary" (4 cards, for selected person or whole team) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -257,12 +243,30 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                       <button onClick={(e) => { e.stopPropagation(); openDrill('rb', p.email, `Resolution SLA breached — ${p.name}`); }} className="hover:underline">{p.rbBreached} / {p.rbTracked}</button>
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">{p.avgResolutionHours === null ? '—' : p.avgResolutionHours}</td>
-                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.stale}</td>
-                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.missing}</td>
-                    <td className="px-4 py-3 text-[13px] text-red-600">{p.overdue}</td>
-                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.screenshotPct === null ? '—' : `${p.screenshotPct}%`}</td>
-                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.closingCommentPct === null ? '—' : `${p.closingCommentPct}%`}</td>
-                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.rcaFixPct === null ? '—' : `${p.rcaFixPct}%`}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      <button onClick={(e) => { e.stopPropagation(); openDrill('stale', p.email, `Stale tickets — ${p.name}`); }} className="hover:underline">{p.stale}</button>
+                    </td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      <button onClick={(e) => { e.stopPropagation(); openDrill('missing', p.email, `Missing details — ${p.name}`); }} className="hover:underline">{p.missing}</button>
+                    </td>
+                    <td className="px-4 py-3 text-[13px] text-red-600">
+                      <button onClick={(e) => { e.stopPropagation(); openDrill('overdue', p.email, `Overdue tickets — ${p.name}`); }} className="hover:underline">{p.overdue}</button>
+                    </td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      {p.screenshotPct === null ? '—' : (
+                        <button onClick={(e) => { e.stopPropagation(); openDrill('noScreenshot', p.email, `Closed without a screenshot — ${p.name}`); }} className="hover:underline">{p.screenshotPct}%</button>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      {p.closingCommentPct === null ? '—' : (
+                        <button onClick={(e) => { e.stopPropagation(); openDrill('noComment', p.email, `Closed without a proper closing comment — ${p.name}`); }} className="hover:underline">{p.closingCommentPct}%</button>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      {p.rcaFixPct === null ? '—' : (
+                        <button onClick={(e) => { e.stopPropagation(); openDrill('noRcaFix', p.email, `Closed without RCA / Fix Description — ${p.name}`); }} className="hover:underline">{p.rcaFixPct}%</button>
+                      )}
+                    </td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold ${GRADE_STYLE[p.grade]}`}>
                         {p.hygieneScore} · {GRADE_LABEL[p.grade]}
