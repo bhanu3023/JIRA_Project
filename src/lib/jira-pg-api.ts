@@ -11337,6 +11337,25 @@ async function _handleJiraPgApi(
   if (path === 'department-queue' && method === 'GET') {
     const dept = (url.searchParams.get('dept') || '').trim();
     if (!dept) return json({ spaceKey: null, queue: null });
+    // Two different spaces can each have their own queue named the same
+    // thing (e.g. "Infra" exists both in TESTIN, actually configured with
+    // real workflow transitions, and as a leftover empty queue in IA from
+    // an earlier board cleanup) -- an unordered scan across every space's
+    // custom_queues row picked up whichever one Postgres happened to
+    // return first, with no regard for which space the calling ticket is
+    // actually in. Confirmed for real: a TESTIN ticket's "Move to status"
+    // dropdown was resolving to IA's same-named "Infra" queue, which has
+    // zero transitions configured, showing almost no status options even
+    // though TESTIN's own Infra queue was correctly set up. Prefer the
+    // caller's own space when it's provided and actually has a match,
+    // before falling back to searching every other space.
+    const preferredSpaceKey = (url.searchParams.get('spaceKey') || '').trim().toUpperCase();
+    if (preferredSpaceKey) {
+      const preferredRow = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [preferredSpaceKey]);
+      const preferredQueues: any[] = preferredRow.rows[0]?.queues || [];
+      const preferredMatch = preferredQueues.find((q: any) => (q.name || '').toLowerCase() === dept.toLowerCase());
+      if (preferredMatch) return json({ spaceKey: preferredSpaceKey, queue: preferredMatch });
+    }
     const rows = await pool.query(`SELECT space_key, queues FROM custom_queues`);
     for (const row of rows.rows) {
       const queues: any[] = row.queues || [];

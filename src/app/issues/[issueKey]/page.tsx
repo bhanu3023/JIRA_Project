@@ -563,7 +563,7 @@ export default function IssueDetailPage() {
           // snapshot was stale — also refreshes the cache for next time.
           try {
             const result = await api.request<{ spaceKey: string | null; queue: any }>(
-              `department-queue?dept=${encodeURIComponent(dept)}`
+              `department-queue?dept=${encodeURIComponent(dept)}&spaceKey=${encodeURIComponent(currentIssue.spaceKey)}`
             );
             const matchedQueue = result?.queue;
             const spKey = result?.spaceKey;
