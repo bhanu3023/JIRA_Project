@@ -33,7 +33,11 @@ export async function GET(req: NextRequest) {
   const mode        = searchParams.get('mode') || 'email';
   const loginHint   = searchParams.get('loginHint') || '';
   const department  = searchParams.get('department') || '';
-  const state       = Buffer.from(JSON.stringify({ spaceKey, returnUrl, mode, loginHint, department, ts: Date.now() })).toString('base64url');
+  // See the senderOnly comment in the callback route: refreshes this
+  // account's OAuth token for outbound Graph sending without also
+  // (re-)registering it as an inbound Connected email account.
+  const senderOnly  = searchParams.get('senderOnly') === 'true';
+  const state       = Buffer.from(JSON.stringify({ spaceKey, returnUrl, mode, loginHint, department, senderOnly, ts: Date.now() })).toString('base64url');
 
   return NextResponse.redirect(getMicrosoftAuthUrl(redirectUri, state, loginHint, mode === 'login' ? 'login' : 'email'));
 }

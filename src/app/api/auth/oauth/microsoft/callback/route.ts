@@ -47,12 +47,23 @@ export async function GET(req: NextRequest) {
   let returnUrl  = `/spaces/INFRA/settings?tab=email`;
   let mode       = 'email'; // 'login' | 'email'
   let department = '';
+  // senderOnly: refresh this account's OAuth token (for outbound Graph
+  // sending, see getSenderEmailCandidates in notification-service.ts)
+  // WITHOUT also registering/re-registering it as an inbound "Connected
+  // email account" for a space. Plain 'email' mode always does both --
+  // that's correct the first time an inbox is connected, but reconnecting
+  // an account solely because its token expired (e.g. after a password
+  // change revoked it) shouldn't re-add it to a space's customer-facing
+  // email list every time, especially for an account that was deliberately
+  // removed from that list after being connected as a sender only.
+  let senderOnly = false;
   try {
     const parsed = JSON.parse(Buffer.from(state, 'base64url').toString());
     spaceKey   = parsed.spaceKey   || spaceKey;
     returnUrl  = parsed.returnUrl  || returnUrl;
     mode       = parsed.mode       || mode;
     department = parsed.department || '';
+    senderOnly = !!parsed.senderOnly;
   } catch {}
 
   const failUrl = `${appUrl}${mode === 'login' ? '/auth/login' : returnUrl}?oauth_error=${encodeURIComponent(error || 'unknown_error')}`;
@@ -130,32 +141,36 @@ export async function GET(req: NextRequest) {
   // ── EMAIL MODE: register address + start IMAP poller ─────────────────────
   storeOAuthTokens(result.email, { ...result.tokens, spaceKey });
 
-  try {
-    await fetch(`${internalBase}/api/email-addresses/${spaceKey}`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ address: result.email, requestType: 'Emailed request', isReplyTo: false, autoReply: true }),
-    });
-  } catch {}
+  if (senderOnly) {
+    console.log(`[OAuthCallback] senderOnly reconnect for ${result.email} — token refreshed, not touching Connected email accounts`);
+  } else {
+    try {
+      await fetch(`${internalBase}/api/email-addresses/${spaceKey}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ address: result.email, requestType: 'Emailed request', isReplyTo: false, autoReply: true }),
+      });
+    } catch {}
 
-  try {
-    const connectRes = await fetch(`${internalBase}/api/email/connect`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        email: result.email, oauthAccessToken: result.tokens.accessToken,
-        oauthRefreshToken: result.tokens.refreshToken, oauthProvider: 'microsoft',
-        imapHost: 'outlook.office365.com', smtpHost: 'smtp.office365.com',
-        spaceKey, department: department || undefined, autoReply: true, appUrl: internalBase,
-      }),
-    });
-    const cd = await connectRes.json().catch(() => ({}));
-    console.log(`[OAuthCallback] Email connect ${result.email} → ${spaceKey}:`, (cd as any)?.ok, (cd as any)?.message || (cd as any)?.error);
-  } catch (e) {
-    console.error(`[OAuthCallback] Failed to start poller for ${result.email}:`, e);
+    try {
+      const connectRes = await fetch(`${internalBase}/api/email/connect`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          email: result.email, oauthAccessToken: result.tokens.accessToken,
+          oauthRefreshToken: result.tokens.refreshToken, oauthProvider: 'microsoft',
+          imapHost: 'outlook.office365.com', smtpHost: 'smtp.office365.com',
+          spaceKey, department: department || undefined, autoReply: true, appUrl: internalBase,
+        }),
+      });
+      const cd = await connectRes.json().catch(() => ({}));
+      console.log(`[OAuthCallback] Email connect ${result.email} → ${spaceKey}:`, (cd as any)?.ok, (cd as any)?.message || (cd as any)?.error);
+    } catch (e) {
+      console.error(`[OAuthCallback] Failed to start poller for ${result.email}:`, e);
+    }
+
+    fetch(`${internalBase}/api/email/reconnect`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
   }
-
-  fetch(`${internalBase}/api/email/reconnect`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
 
   const successUrl = `${appUrl}${returnUrl}${returnUrl.includes('?') ? '&' : '?'}oauth_success=1&oauth_email=${encodeURIComponent(result.email)}&oauth_name=${encodeURIComponent(result.name || '')}`;
   return NextResponse.redirect(successUrl);
