@@ -9540,8 +9540,11 @@ async function _handleJiraPgApi(
 
     // Ticket-level detail for whatever department + date range is selected —
     // the KPI/hygiene tables above are aggregates only; this is the actual
-    // ticket list behind them, same shape/cap (300, newest first) as the
-    // Customer Engineering/QA/Infra tabs' ticket table.
+    // ticket list behind them. Cap raised from 300 to 5000 (same reasoning as
+    // reports/mbr-team's DISPLAY_CAP): 300 was showing well under a tenth of
+    // a real department's tickets for a normal date range, not a genuine
+    // safety limit -- totalMatched + the "(capped)" UI note stay honest if
+    // this is ever actually hit.
     const ticketRows = await pool.query(`
       SELECT COALESCE(i.cf_key, i.key) AS key, sp.key AS project_key, i.current_department AS dept,
         COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
@@ -9557,7 +9560,7 @@ async function _handleJiraPgApi(
       WHERE i.current_department IS NOT NULL AND i.current_department != ''
         ${dateClause}${deptClause}
       ORDER BY i."createdAt" DESC
-      LIMIT 300
+      LIMIT 5000
     `, filterParams);
 
     const totalMatched = ticketRows.rows.length > 0 ? Number(ticketRows.rows[0].total_matched) || 0 : 0;
@@ -9838,15 +9841,19 @@ async function _handleJiraPgApi(
       };
     };
 
-    // ticketFilter=rb can no longer be pushed into the SQL WHERE (breach
-    // status is only known after the live per-ticket computation below), so
-    // its candidate fetch has to be wide enough to contain every real match
-    // before that JS filter runs, not just the 300 the UI ever displays.
-    // Every dept's real monthly volume seen in this app is a few hundred
-    // tickets at most, so this cap is generous, not silent -- flagged here
-    // rather than actually enforced against a count, since exceeding it
-    // would need dept sizes this app has never approached.
-    const ticketsLimit = ticketFilter === 'rb' ? 2000 : 300;
+    // The ticket table should show every matching ticket for the selected
+    // scope, not a small sample -- 300 was cutting a Dev-sized team's ticket
+    // list down to under 3% of what actually matched for a broad date range.
+    // DISPLAY_CAP is a generous ceiling against a truly pathological query
+    // (no date filter at all on a 10k+ ticket team), not a normal-use limit;
+    // totalMatched + the "(capped)" UI note stay honest if it's ever hit.
+    // ticketFilter=rb can't be pushed into the SQL WHERE (breach status is
+    // only known after the live per-ticket computation below), so its
+    // candidate fetch has to be wide enough to contain every real match
+    // before that JS filter runs -- several times DISPLAY_CAP, since most
+    // candidates in a large date range won't turn out to be breached.
+    const DISPLAY_CAP = 5000;
+    const ticketsLimit = ticketFilter === 'rb' ? 20000 : DISPLAY_CAP;
 
     const summaryParams = [...scopedParams, staleDays];
     const summaryStaleIdx = summaryParams.length;
@@ -10009,7 +10016,7 @@ async function _handleJiraPgApi(
       ticketRows = ticketRows.filter((r: any) => slaById.get(r.id));
       totalMatched = ticketRows.length;
     }
-    const tickets = ticketRows.slice(0, 300).map((r: any) => ({
+    const tickets = ticketRows.slice(0, DISPLAY_CAP).map((r: any) => ({
       key: r.key,
       project: r.project_key || '',
       assignee: r.assignee_name || '',
