@@ -328,6 +328,16 @@ pool.query(`CREATE TABLE IF NOT EXISTS user_worked_on_tickets (
   worked_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(user_id, issue_id, dept)
 )`).catch(() => {});
+// The UNIQUE(user_id, issue_id, dept) constraint above only gives this table
+// an implicit index leading with user_id -- useless for the by-far most
+// common query shape across this file, `WHERE w.issue_id = i.id AND
+// LOWER(w.dept) = LOWER($x)` (dozens of call sites: worked-on broadening in
+// Filters, MBR, Team Analytics, the "Worked on" queue page, etc.), which
+// filters by issue_id first and never had any index to use at all -- a full
+// scan of a table that's grown to 1,000+ rows per active user, on every one
+// of those queries. This table had genuinely no index anyone could actually
+// use.
+pool.query(`CREATE INDEX IF NOT EXISTS idx_worked_on_issue_id ON user_worked_on_tickets(issue_id)`).catch(() => {});
 
 // Custom queues table (needed by custom-queues endpoint)
 pool.query(`CREATE TABLE IF NOT EXISTS custom_queues (space_key TEXT PRIMARY KEY, queues JSONB NOT NULL DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT NOW())`).catch(() => {});
@@ -3889,10 +3899,12 @@ async function _handleJiraPgApi(
     const viewUserParam = url.searchParams.get('viewUser');
     const targetUserId = (viewUserParam && isAdmin) ? viewUserParam : userId;
 
-    const spaceRes = await pool.query(`SELECT id FROM spaces WHERE key = $1`, [spaceKeyParam]);
-    if (!spaceRes.rows[0]) return json({ error: 'Space not found' }, 404);
-    const spaceId = spaceRes.rows[0].id;
-
+    // spaceRes and targetUserRes don't depend on each other at all -- this
+    // was a needless sequential round-trip (space lookup, THEN wait for it
+    // to finish before even starting the completely independent user
+    // lookup), on a page whose whole point is loading fast for a single
+    // person clicking "Worked on". Fired together instead.
+    //
     // Every row this endpoint returns is already scoped to targetUserId --
     // either a real user_worked_on_tickets row for them, or a ticket they
     // currently own outright (see mergedSourceSql below) -- so this list is
@@ -3906,10 +3918,15 @@ async function _handleJiraPgApi(
     // Venkata Jaswanth, live assignee is a third person again). Since every
     // row here is already confirmed to be this viewer's own work, show
     // their own identity directly instead of trusting either source.
-    const targetUserRes = await pool.query(
-      `SELECT id, "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = $1`,
-      [targetUserId]
-    );
+    const [spaceRes, targetUserRes] = await Promise.all([
+      pool.query(`SELECT id FROM spaces WHERE key = $1`, [spaceKeyParam]),
+      pool.query(
+        `SELECT id, "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = $1`,
+        [targetUserId]
+      ),
+    ]);
+    if (!spaceRes.rows[0]) return json({ error: 'Space not found' }, 404);
+    const spaceId = spaceRes.rows[0].id;
     const targetUser = targetUserRes.rows[0] || null;
 
     try {
@@ -3941,27 +3958,6 @@ async function _handleJiraPgApi(
           AND s.category = 'done'
           AND COALESCE(i.department_assignee_id, i."assigneeId") = $3
       `;
-      const rows = await pool.query(
-        `WITH merged AS (${mergedSourceSql}),
-         dedup AS (SELECT issue_id, MAX(closed_at) AS closed_at, MAX(dept_name) AS dept_name FROM merged GROUP BY issue_id)
-         SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
-                i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at, i.jira_sla_breached,
-                d.closed_at, d.dept_name,
-                s.name AS status_name, s.color AS status_color, s.category AS status_category,
-                i.dept_sla_log, i.dept_assignees, i.dept_statuses,
-                CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
-                a.id AS assignee_id
-         FROM dedup d
-         JOIN issues i ON i.id = d.issue_id
-         LEFT JOIN statuses s ON i."statusId" = s.id
-         LEFT JOIN users a ON i."assigneeId" = a.id
-         ORDER BY COALESCE(i."updatedAt", d.closed_at) DESC LIMIT $4 OFFSET $5`,
-        [spaceId, dept, targetUserId, limit, (page - 1) * limit]
-      );
-      const countRes = await pool.query(
-        `WITH merged AS (${mergedSourceSql}) SELECT COUNT(DISTINCT issue_id) FROM merged`,
-        [spaceId, dept, targetUserId]
-      );
       // "Breached" on this list was always showing "No" for every ticket --
       // the response never included any breach field at all, so the
       // frontend's `issue.sla_breached ? 'Yes' : 'No'` check was reading
@@ -3972,10 +3968,38 @@ async function _handleJiraPgApi(
       // "Worked on — Dev" should judge breach from Dev's own perspective
       // even after the ticket has since moved elsewhere), falling back to
       // the historical jira_sla_breached flag otherwise.
-      const slaPoliciesRes = await pool.query(
-        `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
-        [spaceId]
-      );
+      //
+      // These three queries don't depend on each other's results (the page
+      // of rows, the total count for pagination, and the space's SLA
+      // policies) -- ran sequentially before, three round-trips end to end
+      // for a "click Worked on, see your list" page. Fired together instead.
+      const [rows, countRes, slaPoliciesRes] = await Promise.all([
+        pool.query(
+          `WITH merged AS (${mergedSourceSql}),
+           dedup AS (SELECT issue_id, MAX(closed_at) AS closed_at, MAX(dept_name) AS dept_name FROM merged GROUP BY issue_id)
+           SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
+                  i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at, i.jira_sla_breached,
+                  d.closed_at, d.dept_name,
+                  s.name AS status_name, s.color AS status_color, s.category AS status_category,
+                  i.dept_sla_log, i.dept_assignees, i.dept_statuses,
+                  CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a."avatarUrl" AS assignee_avatar,
+                  a.id AS assignee_id
+           FROM dedup d
+           JOIN issues i ON i.id = d.issue_id
+           LEFT JOIN statuses s ON i."statusId" = s.id
+           LEFT JOIN users a ON i."assigneeId" = a.id
+           ORDER BY COALESCE(i."updatedAt", d.closed_at) DESC LIMIT $4 OFFSET $5`,
+          [spaceId, dept, targetUserId, limit, (page - 1) * limit]
+        ),
+        pool.query(
+          `WITH merged AS (${mergedSourceSql}) SELECT COUNT(DISTINCT issue_id) FROM merged`,
+          [spaceId, dept, targetUserId]
+        ),
+        pool.query(
+          `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
+          [spaceId]
+        ),
+      ]);
       const slaPolicies = slaPoliciesRes.rows;
       // Assignee display for this list is handled after the map below (see
       // targetUser) -- every row here already belongs to targetUserId, so it
