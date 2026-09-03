@@ -1503,12 +1503,27 @@ export default function FiltersPage() {
   // rule exactly, so a field shows as a column in the table the moment
   // you've added it as a filter, and shows the same way in the CSV export --
   // not tied to some other unrelated filter (e.g. Queue+Worked) being set.
-  const TABLE_EXTRA_COLUMN_IDS = ['productType', 'combination', 'projectManager'] as const;
+  // "Created" gets the same treatment but is table-only (kept out of
+  // EXPORT_EXTRA_COLUMNS since the CSV export already always includes its
+  // own fixed Created column -- adding it there too would double it up).
+  const TABLE_ONLY_COLUMNS: Record<string, { label: string; getValue: (issue: any) => string }> = {
+    created: { label: 'Created', getValue: (i) => i.createdAt ? new Date(i.createdAt).toLocaleDateString() : '' },
+  };
+  const TABLE_COLUMN_DEFS: Record<string, { label: string; getValue: (issue: any) => string }> = {
+    ...TABLE_ONLY_COLUMNS,
+    ...EXPORT_EXTRA_COLUMNS,
+  };
+  const TABLE_EXTRA_COLUMN_IDS = ['created', 'productType', 'combination', 'projectManager', 'customerName', 'clientName', 'projectPool', 'dueDate'] as const;
   const tableExtraCols = TABLE_EXTRA_COLUMN_IDS.filter((id) => {
     if (activeExtras.includes(id)) return true;
+    if (id === 'created') return !!selCreated;
     if (id === 'productType') return selProductType.length > 0;
     if (id === 'combination') return !!selCombination;
     if (id === 'projectManager') return selProjectManager.length > 0;
+    if (id === 'customerName') return !!selCustomerName;
+    if (id === 'clientName') return !!selClientName;
+    if (id === 'projectPool') return !!selProjectPool;
+    if (id === 'dueDate') return !!selDueDate;
     return false;
   });
 
@@ -2027,7 +2042,7 @@ export default function FiltersPage() {
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide">Work</th>
                 {tableExtraCols.map((id) => (
                   <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
-                    {EXPORT_EXTRA_COLUMNS[id].label}
+                    {TABLE_COLUMN_DEFS[id].label}
                   </th>
                 ))}
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44 hidden sm:table-cell">Assignee</th>
@@ -2081,7 +2096,7 @@ export default function FiltersPage() {
                   {tableExtraCols.map((id) => (
                     <td key={id} className="px-2 py-2.5">
                       <span className="text-[11.5px] text-gray-600 truncate">
-                        {EXPORT_EXTRA_COLUMNS[id].getValue(issue) || '—'}
+                        {TABLE_COLUMN_DEFS[id].getValue(issue) || '—'}
                       </span>
                     </td>
                   ))}
