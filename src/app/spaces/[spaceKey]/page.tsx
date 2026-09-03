@@ -2998,26 +2998,31 @@ function SpaceDetailContent() {
       {/* ── Table ── */}
       <div className="flex-1 overflow-auto bg-[#F4F5F7]">
         <div style={{ minWidth: `${tableMinWidth}px` }}>
-          {/* Table header */}
-          <div className="grid items-center px-4 py-2 bg-[#FAFBFC] border-b border-[#DFE1E6] sticky top-0 z-10"
-            style={{ gridTemplateColumns: gridCols }}>
-            <div className="flex items-center justify-center" onClick={isAdmin ? toggleAll : undefined}>
-              {isAdmin && (() => {
-                const allChecked = selectedRows.size === issues.length && issues.length > 0;
-                return (
-                  <div className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors
-                    ${allChecked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-400 hover:border-blue-400'}`}>
-                    {allChecked && <svg width="9" height="9" viewBox="0 0 10 10" fill="none"><path d="M1.5 5l2.5 2.5 5-5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-                  </div>
-                );
-              })()}
+          {/* Table header -- Sent/Watching renders its own card list below,
+              not a table row per issue at all, so these column labels
+              (Type/Key/Summary/Assignee/Reporter/Priority/...) never
+              corresponded to anything actually shown underneath them. */}
+          {queueFilter !== 'sent-watching' && (
+            <div className="grid items-center px-4 py-2 bg-[#FAFBFC] border-b border-[#DFE1E6] sticky top-0 z-10"
+              style={{ gridTemplateColumns: gridCols }}>
+              <div className="flex items-center justify-center" onClick={isAdmin ? toggleAll : undefined}>
+                {isAdmin && (() => {
+                  const allChecked = selectedRows.size === issues.length && issues.length > 0;
+                  return (
+                    <div className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors
+                      ${allChecked ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-400 hover:border-blue-400'}`}>
+                      {allChecked && <svg width="9" height="9" viewBox="0 0 10 10" fill="none"><path d="M1.5 5l2.5 2.5 5-5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                    </div>
+                  );
+                })()}
+              </div>
+              {['Type', 'Key', 'Summary',
+                ...orderedVisibleCols.map(c => c.label)
+              ].map(h => (
+                <div key={h} className="text-[10.5px] font-semibold text-gray-500 uppercase tracking-wide px-2">{h}</div>
+              ))}
             </div>
-            {['Type', 'Key', 'Summary',
-              ...orderedVisibleCols.map(c => c.label)
-            ].map(h => (
-              <div key={h} className="text-[10.5px] font-semibold text-gray-500 uppercase tracking-wide px-2">{h}</div>
-            ))}
-          </div>
+          )}
 
           {/* Rows */}
           {queueFilter === 'sent-watching' ? (
