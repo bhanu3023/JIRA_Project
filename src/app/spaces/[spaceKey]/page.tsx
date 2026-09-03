@@ -3203,14 +3203,15 @@ function SpaceDetailContent() {
                           <div className="flex flex-col">
                             <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Actual SLA</span>
                             <span className="text-[13px] font-bold text-gray-600">{fmtDuration(pausedSla.goalDurationMs)}</span>
-                            {/* Absolute deadline this duration implies -- paused_at + whatever
-                                budget was left at the moment it paused, same reference point
-                                "Remaining"/"Overdue By" below now shows too, so a real point in
-                                time reads next to the raw duration instead of only a countdown. */}
-                            {pausedSla.paused_at && (
+                            {/* Actual SLA's own deadline: created + the full goal duration --
+                                the original, fixed target regardless of any pauses since, unlike
+                                "Remaining"/"Overdue By" below (paused_at + budget left), which
+                                tracks the live/paused projection instead. Two different reference
+                                points on purpose: this one never moves once the ticket exists. */}
+                            {(issue as any).createdAt && (
                               <span className="text-[10px] text-gray-400 font-medium mt-0.5">
-                                Due {new Date(new Date(pausedSla.paused_at).getTime() + pausedSla.remainingMs).toLocaleString('en-GB', {
-                                  day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+                                Due {new Date(new Date((issue as any).createdAt).getTime() + pausedSla.goalDurationMs).toLocaleString('en-GB', {
+                                  day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true,
                                 })}
                               </span>
                             )}
@@ -3222,7 +3223,7 @@ function SpaceDetailContent() {
                               {pausedSla.paused_at
                                 ? new Date(pausedSla.paused_at).toLocaleString('en-GB', {
                                     day: '2-digit', month: 'short', year: 'numeric',
-                                    hour: '2-digit', minute: '2-digit', hour12: false,
+                                    hour: '2-digit', minute: '2-digit', hour12: true,
                                   })
                                 : '—'}
                             </span>
@@ -3240,19 +3241,26 @@ function SpaceDetailContent() {
                             >
                               {pausedSla.paused_at
                                 ? new Date(new Date(pausedSla.paused_at).getTime() + pausedSla.remainingMs).toLocaleString('en-GB', {
-                                    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+                                    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
                                   })
                                 : '—'}
                             </span>
                           </div>
                         </div>
-                        {/* Progress bar */}
-                        <div className="mt-2 h-1.5 rounded-full bg-gray-200 overflow-hidden">
-                          <div
-                            className={`h-full rounded-full transition-all ${pausedSla.isBreached ? 'bg-red-500' : 'bg-amber-400'}`}
-                            style={{ width: `${Math.min(100, (pausedSla.elapsed_ms / pausedSla.goalDurationMs) * 100)}%` }}
-                          />
-                        </div>
+                        {/* Progress bar -- three-stage green/orange/red by how much of the
+                            SLA budget is actually used, not just a flat amber the whole way
+                            through. Green while there's real headroom, orange once it's
+                            genuinely close, red once breached -- same traffic-light read
+                            Jira's own SLA bar gives at a glance. */}
+                        {(() => {
+                          const pct = Math.min(100, (pausedSla.elapsed_ms / pausedSla.goalDurationMs) * 100);
+                          const barColor = pausedSla.isBreached ? 'bg-red-500' : pct >= 70 ? 'bg-orange-400' : 'bg-green-500';
+                          return (
+                            <div className="mt-2 h-1.5 rounded-full bg-gray-200 overflow-hidden">
+                              <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
 

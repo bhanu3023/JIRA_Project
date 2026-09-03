@@ -217,6 +217,13 @@ export default function IssueDetailPage() {
   // interval on every keystroke.
   const editingCustomFieldRef = useRef<string | null>(null);
   const commentTextRef = useRef('');
+  // Set while a status/assignee/etc change's optimistic-update-then-refetch
+  // cycle is in flight (see handleUpdate) -- the live-update poll firing
+  // during that window could fetch a version of the ticket from BETWEEN the
+  // optimistic local update and the real PATCH actually landing, briefly
+  // showing the old value again right after the new one appeared (the
+  // "shaking" report: change a status, watch it flicker back before settling).
+  const pendingUpdateRef = useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const [showSubtaskModal, setShowSubtaskModal] = useState(false);
   const [subtaskSummary, setSubtaskSummary] = useState('');
@@ -779,7 +786,7 @@ export default function IssueDetailPage() {
       // Don't silently overwrite the ticket out from under someone mid-edit
       // -- a field being edited or a comment draft in progress means don't
       // touch local state until they're done, even if the poll fires.
-      if (editingCustomFieldRef.current || commentTextRef.current.trim()) return;
+      if (editingCustomFieldRef.current || commentTextRef.current.trim() || pendingUpdateRef.current) return;
       try {
         const fresh = await api.getIssue(issueKey);
         const isCustm = currentIssue.spaceKey === 'CUSTM';
@@ -971,6 +978,7 @@ export default function IssueDetailPage() {
       currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: value, ...(displayPatch || {}) } as any : s.currentIssue,
     }));
     setEditing(null);
+    pendingUpdateRef.current = true;
     try {
       await api.updateIssue(issueKey, { [field]: value });
       loadIssue(issueKey);
@@ -980,6 +988,8 @@ export default function IssueDetailPage() {
         currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: prevValue, ...prevDisplay } as any : s.currentIssue,
       }));
       onError?.(err);
+    } finally {
+      pendingUpdateRef.current = false;
     }
   };
 
@@ -1067,32 +1077,59 @@ export default function IssueDetailPage() {
                 placeholder="Comma-separated values"
                 className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
             ) : (
-              /* multiselect — searchable checkbox list */
-              <div className="border border-blue-400 rounded bg-white overflow-hidden">
-                {allOptions.length > 8 && (
-                  <input value={customFieldSearch} onChange={e => setCustomFieldSearch(e.target.value)} autoFocus
-                    placeholder={`Search ${allOptions.length} options…`}
-                    className="w-full px-2 py-1 text-[12px] border-b border-gray-200 focus:outline-none" />
-                )}
-                <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto p-1.5">
-                  {filteredOptions.length === 0 && (
-                    <p className="text-[11px] text-gray-400 px-1 py-1">No matches</p>
-                  )}
-                  {filteredOptions.map(o => {
-                    const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
-                    const checked = selected.includes(o);
-                    return (
-                      <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
-                        <input type="checkbox" checked={checked} onChange={() => {
-                          const updated = checked ? selected.filter(s => s !== o) : [...selected, o];
-                          setCustomFieldEditValue(updated.join(', '));
-                        }} />
-                        {o}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
+              /* multiselect — rich dropdown: selected chips (each removable on
+                 its own), search, checkboxes -- and every toggle saves
+                 immediately instead of waiting on a separate Save click, so
+                 picking or removing a value takes effect right away, the same
+                 as every other rich multiselect in this app (Filters,
+                 CreateIssueModal). Still dedupes on every commit for the same
+                 reason as the Save button below. */
+              (() => {
+                const selected = customFieldEditValue.split(',').map(s => s.trim()).filter(Boolean);
+                const commit = (updated: string[]) => {
+                  const deduped = Array.from(new Set(updated.map(s => s.trim()).filter(Boolean)));
+                  setCustomFieldEditValue(deduped.join(', '));
+                  saveCustomField(key, deduped);
+                  setEditingCustomField(editKey);
+                };
+                return (
+                  <div className="border border-blue-400 rounded bg-white overflow-hidden">
+                    {selected.length > 0 && (
+                      <div className="flex flex-wrap gap-1 p-1.5 border-b border-gray-100">
+                        {selected.map(o => (
+                          <span key={o} className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 text-[11px] font-medium px-2 py-0.5 rounded-full border border-blue-200">
+                            {o}
+                            <button type="button" onClick={() => commit(selected.filter(s => s !== o))} className="hover:text-red-500">
+                              <X size={10} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {allOptions.length > 8 && (
+                      <input value={customFieldSearch} onChange={e => setCustomFieldSearch(e.target.value)} autoFocus
+                        placeholder={`Search ${allOptions.length} options…`}
+                        className="w-full px-2 py-1 text-[12px] border-b border-gray-200 focus:outline-none" />
+                    )}
+                    <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto p-1.5">
+                      {filteredOptions.length === 0 && (
+                        <p className="text-[11px] text-gray-400 px-1 py-1">No matches</p>
+                      )}
+                      {filteredOptions.map(o => {
+                        const checked = selected.includes(o);
+                        return (
+                          <label key={o} className="flex items-center gap-1.5 text-[12px] cursor-pointer hover:bg-gray-50 px-1 rounded">
+                            <input type="checkbox" checked={checked} onChange={() => {
+                              commit(checked ? selected.filter(s => s !== o) : [...selected, o]);
+                            }} />
+                            {o}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()
             )}
             <div className="flex gap-1 mt-0.5">
               <button onClick={() => {
@@ -1220,6 +1257,7 @@ export default function IssueDetailPage() {
           currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: { ...(s.currentIssue as any).dept_statuses, [dept]: queueSt } } as any : s.currentIssue,
         }));
         setShowStatusDropdown(false);
+        pendingUpdateRef.current = true;
         try {
           await api.updateIssue(issueKey, {
             queueStatusId: statusId,
@@ -1234,12 +1272,26 @@ export default function IssueDetailPage() {
             currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: prevDeptStatuses } as any : s.currentIssue,
           }));
           alert(err?.message || 'Failed to change status.');
+        } finally {
+          pendingUpdateRef.current = false;
         }
         return;
       }
     }
+    // A "Routed to X" status is a department handoff -- the backend updates
+    // current_department in the SAME request as the status change, but the
+    // optimistic patch below only ever touched `status`, so the status badge
+    // updated instantly while the Department field visibly lagged behind it
+    // until the follow-up loadIssue() refetch landed a moment later (the
+    // "changing twice" report: one field updates, then the other catches up
+    // separately instead of together). Parse the target department straight
+    // from the status name so both update in the same optimistic patch.
+    const routedMatch = targetStatus?.name?.match(/^Routed to (.+)$/i);
     await handleUpdate('statusId', statusId, targetStatus
-      ? { status: { id: targetStatus.id, name: targetStatus.name, category: (targetStatus as any).category, color: (targetStatus as any).color } }
+      ? {
+          status: { id: targetStatus.id, name: targetStatus.name, category: (targetStatus as any).category, color: (targetStatus as any).color },
+          ...(routedMatch ? { current_department: routedMatch[1].trim() } : {}),
+        }
       : undefined,
       (err: any) => { alert(err?.message || 'Failed to change status.'); }
     );
@@ -2698,13 +2750,41 @@ export default function IssueDetailPage() {
                 )}
                 {issue.activity && issue.activity.length > 0 ? (
                   <div className="space-y-0">
-                    {issue.activity.map(a => (
-                        <div key={a.id} className="flex items-start gap-3 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 px-1 rounded transition-colors">
-                          {/* User avatar */}
-                          <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center text-[10px] text-blue-700 flex-shrink-0 font-bold mt-0.5">
-                            {a.user ? (() => { const parts = (a.user.firstName||'').split(' '); return ((parts[0]?.[0]||'') + (parts[1]?.[0]||parts[0]?.[1]||'')).toUpperCase() || 'U'; })() : 'S'}
-                          </div>
-                          <div className="flex-1 min-w-0">
+                    {/* Real Jira groups everything one action produced under a single
+                        entry (one name/avatar/timestamp, several field lines below it)
+                        -- a single "Routed to Dev" click here produced FOUR separate
+                        entries (Status, Department, and two System SLA lines) all
+                        sharing the same author-and-instant, read as four disconnected
+                        events instead of the one action that actually happened.
+                        Grouping consecutive entries that share both the same author
+                        and the exact same timestamp (down to the millisecond, since
+                        that's genuinely how they were written -- one backend request,
+                        one NOW()) reconstructs that same single-action view without
+                        changing anything about how history is stored. Entries from a
+                        different author (e.g. an automated SYSTEM action interleaved
+                        with a human one) never merge, even at an identical instant --
+                        same rule Jira itself follows. */}
+                    {(() => {
+                      const groups: { key: string; user: any; createdAt: string; items: typeof issue.activity }[] = [];
+                      for (const a of issue.activity) {
+                        const last = groups[groups.length - 1];
+                        const authorKey = a.user ? `${a.user.firstName || ''}_${a.user.lastName || ''}` : 'system';
+                        if (last && last.key === authorKey && last.createdAt === a.createdAt) {
+                          last.items.push(a);
+                        } else {
+                          groups.push({ key: authorKey, user: a.user, createdAt: a.createdAt, items: [a] });
+                        }
+                      }
+                      return groups;
+                    })().map((group, gi) => (
+                      <div key={`${group.key}_${group.createdAt}_${gi}`} className="flex items-start gap-3 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 px-1 rounded transition-colors">
+                        {/* User avatar -- once per group, not once per field */}
+                        <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center text-[10px] text-blue-700 flex-shrink-0 font-bold mt-0.5">
+                          {group.user ? (() => { const parts = (group.user.firstName||'').split(' '); return ((parts[0]?.[0]||'') + (parts[1]?.[0]||parts[0]?.[1]||'')).toUpperCase() || 'U'; })() : 'S'}
+                        </div>
+                        <div className="flex-1 min-w-0 space-y-2">
+                          {group.items.map(a => (
+                          <div key={a.id}>
                             {/* Who did what */}
                             <div className="flex items-center flex-wrap gap-1 text-[13px] mb-1">
                               <span className="font-semibold text-gray-800">{a.user?.firstName || 'System'}</span>
@@ -2794,8 +2874,10 @@ export default function IssueDetailPage() {
                               </div>
                             )}
                           </div>
+                          ))}
                         </div>
-                      ))}
+                      </div>
+                    ))}
                   </div>
                 ) : (
                   <div className="py-12 text-center">
