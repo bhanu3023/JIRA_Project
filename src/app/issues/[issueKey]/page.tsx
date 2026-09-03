@@ -1251,8 +1251,20 @@ export default function IssueDetailPage() {
         return;
       }
     }
+    // A "Routed to X" status is a department handoff -- the backend updates
+    // current_department in the SAME request as the status change, but the
+    // optimistic patch below only ever touched `status`, so the status badge
+    // updated instantly while the Department field visibly lagged behind it
+    // until the follow-up loadIssue() refetch landed a moment later (the
+    // "changing twice" report: one field updates, then the other catches up
+    // separately instead of together). Parse the target department straight
+    // from the status name so both update in the same optimistic patch.
+    const routedMatch = targetStatus?.name?.match(/^Routed to (.+)$/i);
     await handleUpdate('statusId', statusId, targetStatus
-      ? { status: { id: targetStatus.id, name: targetStatus.name, category: (targetStatus as any).category, color: (targetStatus as any).color } }
+      ? {
+          status: { id: targetStatus.id, name: targetStatus.name, category: (targetStatus as any).category, color: (targetStatus as any).color },
+          ...(routedMatch ? { current_department: routedMatch[1].trim() } : {}),
+        }
       : undefined,
       (err: any) => { alert(err?.message || 'Failed to change status.'); }
     );
