@@ -39,6 +39,19 @@ const FROM_EMAIL = process.env.EMAIL_USER || 'leo@fuzebot.io';
 const FROM_NAME  = process.env.EMAIL_FROM_NAME || 'CloudFuze Support';
 const APP_URL    = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
 
+// A pasted/embedded image in a comment gets a root-relative URL
+// (/api/uploads/tmp/...) from the upload endpoint -- correct and working
+// while viewing the ticket in the app (the browser resolves it against the
+// current page), but broken the instant that same raw HTML is dropped into
+// an email: recipients' mail clients have no base URL to resolve a
+// relative path against, so the image just shows as a broken placeholder
+// (confirmed for real -- a comment's pasted screenshots arrived as blank
+// broken-image boxes in Outlook). The upload route itself needs no auth,
+// so making the URL absolute is the whole fix.
+function makeImageSrcsAbsolute(html: string): string {
+  return html.replace(/(<img\b[^>]*\bsrc=["'])\/(?!\/)/gi, `$1${APP_URL}/`);
+}
+
 // ── Priority colors (same as Jira) ────────────────────────────────────────────
 const PRIORITY_COLOR: Record<string, string> = {
   highest: '#FF0000',
@@ -583,7 +596,7 @@ export async function notifyCommentAdded(issue: {
 
   // Send a plain reply email — just the comment text, no ticket template
   // This looks like a normal email reply so the recipient can reply back
-  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">${issue.comment.body}</div>`;
+  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">${makeImageSrcsAbsolute(issue.comment.body)}</div>`;
   const commentText = issue.comment.body.replace(/<[^>]+>/g, '');
 
   await sendNotification(
@@ -743,7 +756,7 @@ export async function notifyMentioned(opts: {
       { label: 'Mentioned by', value: opts.mentionedBy },
       { label: 'Board',        value: opts.spaceName },
     ],
-    comment:   opts.commentPreview,
+    comment:   makeImageSrcsAbsolute(opts.commentPreview),
     actionUrl: issueUrl(opts.issueKey),
   });
   await sendNotification(
