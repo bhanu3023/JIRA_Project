@@ -65,27 +65,31 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   const [tickets, setTickets] = useState<any[]>([]);
   const [totalMatched, setTotalMatched] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [drillDown, setDrillDown] = useState<{ person?: string; filter: 'resolved' | 'rb'; label: string } | null>(null);
   const [drillTickets, setDrillTickets] = useState<any[]>([]);
   const [drillTotal, setDrillTotal] = useState(0);
   const [drillLoading, setDrillLoading] = useState(false);
+  const [drillError, setDrillError] = useState<string | null>(null);
   const openDrill = (filter: 'resolved' | 'rb', personEmail: string | undefined, label: string) => setDrillDown({ person: personEmail, filter, label });
 
   useEffect(() => {
     setLoading(true);
+    setError(null);
     api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined, undefined, staleDays)
       .then((d) => { setPeople(d.people); setMonthly(d.monthly); setSummary(d.summary); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
-      .catch(() => { setPeople([]); setMonthly([]); setTickets([]); })
+      .catch((err) => { setPeople([]); setMonthly([]); setTickets([]); setError(err?.message || 'Failed to load MBR data'); })
       .finally(() => setLoading(false));
   }, [team, dateFrom, dateTo, person, staleDays]);
 
   useEffect(() => {
     if (!drillDown) return;
     setDrillLoading(true);
+    setDrillError(null);
     api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, drillDown.person, drillDown.filter)
       .then((d) => { setDrillTickets(d.tickets); setDrillTotal(d.totalMatched); })
-      .catch(() => { setDrillTickets([]); setDrillTotal(0); })
+      .catch((err) => { setDrillTickets([]); setDrillTotal(0); setDrillError(err?.message || 'Failed to load tickets'); })
       .finally(() => setDrillLoading(false));
   }, [drillDown, team, dateFrom, dateTo]);
 
@@ -93,6 +97,18 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
     return (
       <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
         <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-xl p-5 flex items-start gap-3">
+        <AlertTriangle size={20} className="text-red-500 flex-shrink-0 mt-0.5" />
+        <div>
+          <p className="text-[13px] font-semibold text-red-700">Couldn't load this tab's data</p>
+          <p className="text-[12.5px] text-red-600 mt-0.5">{error}</p>
+        </div>
       </div>
     );
   }
@@ -330,6 +346,12 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                 <div className="flex items-center justify-center py-20">
                   <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
                 </div>
+              ) : drillError ? (
+                <div className="flex flex-col items-center justify-center py-16 text-center px-6">
+                  <AlertTriangle size={28} className="text-red-400 mb-3" />
+                  <p className="text-[13px] font-semibold text-red-600">Couldn't load these tickets</p>
+                  <p className="text-[12px] text-gray-400 mt-1">{drillError}</p>
+                </div>
               ) : drillTickets.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 text-center">
                   <Users size={36} className="text-gray-200 mb-3" />
@@ -387,6 +409,7 @@ export default function MbrPage() {
   const [tickets, setTickets] = useState<any[]>([]);
   const [totalMatched, setTotalMatched] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<keyof PersonRow>('hygieneScore');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
@@ -404,9 +427,10 @@ export default function MbrPage() {
   useEffect(() => {
     if (!isPrivileged || topTab !== 'department') return;
     setLoading(true);
+    setError(null);
     api.getMbrData(department || undefined, dateFrom || undefined, dateTo || undefined, staleDays)
       .then((d) => { setDepartments(d.departments); setPeople(d.people); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
-      .catch(() => { setDepartments([]); setPeople([]); setTickets([]); setTotalMatched(0); })
+      .catch((err) => { setDepartments([]); setPeople([]); setTickets([]); setTotalMatched(0); setError(err?.message || 'Failed to load MBR data'); })
       .finally(() => setLoading(false));
   }, [isPrivileged, topTab, department, dateFrom, dateTo, staleDays]);
 
@@ -517,6 +541,14 @@ export default function MbrPage() {
         ) : loading ? (
           <div className="bg-white rounded-xl border border-gray-200 flex items-center justify-center py-20">
             <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+          </div>
+        ) : error ? (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-5 flex items-start gap-3">
+            <AlertTriangle size={20} className="text-red-500 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-[13px] font-semibold text-red-700">Couldn't load this tab's data</p>
+              <p className="text-[12.5px] text-red-600 mt-0.5">{error}</p>
+            </div>
           </div>
         ) : (
           <div className="space-y-6">
