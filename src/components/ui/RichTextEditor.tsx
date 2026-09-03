@@ -982,6 +982,24 @@ export default function RichTextEditor({
         emit();
         return;
       }
+      // A list of IDs pasted as one run of space-separated tokens on the
+      // same line(s) -- e.g. copying a "Workspace IDs" column out of a tool
+      // that renders it as inline text rather than real cells, or a
+      // multi-select value list. Neither branch above catches this: no
+      // tabs, and it isn't one-per-line either (confirmed for real -- a
+      // pasted "_id 6a5a1b8f... 6a3d2906a9... 6a21bcb4c7..." list of Mongo-
+      // style object ids landed as one long wrapped run of plain text with
+      // no structure at all). Deliberately narrow: only fires when EVERY
+      // token is a long hex-looking id, so an ordinary sentence (words,
+      // not hex strings) never gets wrongly boxed into a table.
+      const tokens = plainText.trim().split(/\s+/);
+      if (tokens.length >= 3 && tokens.every(t => /^[0-9a-f]{16,}$/i.test(t))) {
+        e.preventDefault();
+        editorRef.current?.focus();
+        document.execCommand('insertHTML', false, buildBorderedTable(tokens.map(t => [t])));
+        emit();
+        return;
+      }
     }
     // Insert HTML ourselves rather than letting the browser's own native
     // paste handler take over — for complex Office markup (merged cells,
