@@ -112,6 +112,21 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
         </select>
       </div>
 
+      {/* Team roster — every configured queue member for this tab, name + email, regardless of ticket volume */}
+      <details className="bg-white rounded-xl border border-gray-200 open:pb-2">
+        <summary className="px-6 py-4 text-[14px] font-semibold text-gray-700 cursor-pointer select-none">
+          Team roster ({people.length} member{people.length === 1 ? '' : 's'})
+        </summary>
+        <div className="px-6 pb-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2">
+          {[...people].sort((a, b) => a.name.localeCompare(b.name)).map((p) => (
+            <div key={p.email} className="flex items-baseline gap-2 text-[13px] py-1 border-b border-gray-50">
+              <span className="font-medium text-gray-800 whitespace-nowrap">{p.name}</span>
+              <span data-hj-suppress className="text-gray-400 truncate">{p.email}</span>
+            </div>
+          ))}
+        </div>
+      </details>
+
       {/* Summary — Section 4.12 "Summary" (4 cards, for selected person or whole team) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card label="Total tickets" value={summary.total} icon={<Users size={22} />} />
