@@ -3203,13 +3203,14 @@ function SpaceDetailContent() {
                           <div className="flex flex-col">
                             <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Actual SLA</span>
                             <span className="text-[13px] font-bold text-gray-600">{fmtDuration(pausedSla.goalDurationMs)}</span>
-                            {/* Absolute deadline this duration implies -- paused_at + whatever
-                                budget was left at the moment it paused, same reference point
-                                "Remaining"/"Overdue By" below now shows too, so a real point in
-                                time reads next to the raw duration instead of only a countdown. */}
-                            {pausedSla.paused_at && (
+                            {/* Actual SLA's own deadline: created + the full goal duration --
+                                the original, fixed target regardless of any pauses since, unlike
+                                "Remaining"/"Overdue By" below (paused_at + budget left), which
+                                tracks the live/paused projection instead. Two different reference
+                                points on purpose: this one never moves once the ticket exists. */}
+                            {(issue as any).createdAt && (
                               <span className="text-[10px] text-gray-400 font-medium mt-0.5">
-                                Due {new Date(new Date(pausedSla.paused_at).getTime() + pausedSla.remainingMs).toLocaleString('en-GB', {
+                                Due {new Date(new Date((issue as any).createdAt).getTime() + pausedSla.goalDurationMs).toLocaleString('en-GB', {
                                   day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
                                 })}
                               </span>
