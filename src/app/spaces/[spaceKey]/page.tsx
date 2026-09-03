@@ -536,6 +536,24 @@ function SpaceDetailContent() {
   const toggleCol = (id: string) =>
     setVisibleCols(prev => prev.includes(id) ? prev.filter(c => c !== id) : [...prev, id]);
 
+  // Filtering by one of the "More filters" fields (Product Type, Combination,
+  // Root Cause, etc.) and seeing that field's column in the table were two
+  // completely disconnected actions -- picking a value there never made its
+  // column visible, so the table kept showing the same default columns
+  // regardless of what you'd just filtered by. Right after Status, not
+  // appended at the end, so a newly-filtered field reads next to the field
+  // most people scan first rather than getting lost off to the right.
+  const ensureColumnAfterStatus = (id: string) => {
+    setVisibleCols(prev => {
+      if (prev.includes(id)) return prev;
+      const statusIdx = prev.indexOf('status');
+      if (statusIdx === -1) return [...prev, id];
+      const next = [...prev];
+      next.splice(statusIdx + 1, 0, id);
+      return next;
+    });
+  };
+
   // Build dynamic grid template: checkbox + type + key + summary + visible optional cols
   // Preserve the order columns were added (visibleCols order), not STATIC_COLUMNS order
   const orderedVisibleCols = visibleCols
@@ -2511,7 +2529,7 @@ function SpaceDetailContent() {
                 const exists = selectedVals.includes(opt);
                 const next = exists ? selectedVals.filter((v: string) => v !== opt) : [...selectedVals, opt];
                 if (next.length === 0) clearFilter(cat);
-                else setFilter(cat, next.join(','));
+                else { setFilter(cat, next.join(',')); ensureColumnAfterStatus(def.id); }
               };
               const dateLabels: Record<string, string> = {
                 today: 'Today', '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days',
@@ -2525,7 +2543,7 @@ function SpaceDetailContent() {
                 return (
                   <div className="overflow-y-auto max-h-[340px]">
                     {dateOptions.map(([val, lbl]) => (
-                      <button key={val} onClick={() => { setFilter(cat, val); setOpenFilter(null); }}
+                      <button key={val} onClick={() => { setFilter(cat, val); ensureColumnAfterStatus(def.id); setOpenFilter(null); }}
                         className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-[12.5px] hover:bg-blue-50 transition-colors ${selectedVals.includes(val) ? 'text-blue-600 font-semibold bg-blue-50' : 'text-gray-700'}`}>
                         <AddableIcon icon={def.icon} size={13} />
                         <span>{lbl}</span>
