@@ -217,6 +217,13 @@ export default function IssueDetailPage() {
   // interval on every keystroke.
   const editingCustomFieldRef = useRef<string | null>(null);
   const commentTextRef = useRef('');
+  // Set while a status/assignee/etc change's optimistic-update-then-refetch
+  // cycle is in flight (see handleUpdate) -- the live-update poll firing
+  // during that window could fetch a version of the ticket from BETWEEN the
+  // optimistic local update and the real PATCH actually landing, briefly
+  // showing the old value again right after the new one appeared (the
+  // "shaking" report: change a status, watch it flicker back before settling).
+  const pendingUpdateRef = useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const [showSubtaskModal, setShowSubtaskModal] = useState(false);
   const [subtaskSummary, setSubtaskSummary] = useState('');
@@ -779,7 +786,7 @@ export default function IssueDetailPage() {
       // Don't silently overwrite the ticket out from under someone mid-edit
       // -- a field being edited or a comment draft in progress means don't
       // touch local state until they're done, even if the poll fires.
-      if (editingCustomFieldRef.current || commentTextRef.current.trim()) return;
+      if (editingCustomFieldRef.current || commentTextRef.current.trim() || pendingUpdateRef.current) return;
       try {
         const fresh = await api.getIssue(issueKey);
         const isCustm = currentIssue.spaceKey === 'CUSTM';
@@ -971,6 +978,7 @@ export default function IssueDetailPage() {
       currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: value, ...(displayPatch || {}) } as any : s.currentIssue,
     }));
     setEditing(null);
+    pendingUpdateRef.current = true;
     try {
       await api.updateIssue(issueKey, { [field]: value });
       loadIssue(issueKey);
@@ -980,6 +988,8 @@ export default function IssueDetailPage() {
         currentIssue: s.currentIssue ? { ...s.currentIssue, [field]: prevValue, ...prevDisplay } as any : s.currentIssue,
       }));
       onError?.(err);
+    } finally {
+      pendingUpdateRef.current = false;
     }
   };
 
@@ -1220,6 +1230,7 @@ export default function IssueDetailPage() {
           currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: { ...(s.currentIssue as any).dept_statuses, [dept]: queueSt } } as any : s.currentIssue,
         }));
         setShowStatusDropdown(false);
+        pendingUpdateRef.current = true;
         try {
           await api.updateIssue(issueKey, {
             queueStatusId: statusId,
@@ -1234,6 +1245,8 @@ export default function IssueDetailPage() {
             currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: prevDeptStatuses } as any : s.currentIssue,
           }));
           alert(err?.message || 'Failed to change status.');
+        } finally {
+          pendingUpdateRef.current = false;
         }
         return;
       }
