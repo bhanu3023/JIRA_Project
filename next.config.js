@@ -19,7 +19,15 @@ const nextConfig = {
   async headers() {
     return [
       {
-        source: '/(.*)',
+        // /uploads/* is excluded here and given its own relaxed rule below --
+        // the blanket X-Frame-Options: DENY + frame-ancestors 'none' applied
+        // to every route also applied to uploaded files, which blocked the
+        // app's own same-origin attachment-preview <iframe> (a PDF opened
+        // from a ticket's Attachments list showed Chrome's "refused to
+        // connect", its wording for a framing violation, not an actual
+        // network failure) -- DENY means "never embeddable in ANY iframe,
+        // including this app embedding its own files."
+        source: '/((?!uploads/).*)',
         headers: [
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
@@ -39,6 +47,18 @@ const nextConfig = {
         headers: [
           { key: 'Cache-Control', value: 'no-store, no-cache, must-revalidate' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
+        ],
+      },
+      {
+        // Relaxed to SAMEORIGIN so the app's own attachment-preview iframe
+        // (image/PDF/etc. opened from a ticket) can actually embed these
+        // files -- still blocks any THIRD-PARTY site from framing them,
+        // just no longer blocks this app from framing its own uploads.
+        source: '/uploads/(.*)',
+        headers: [
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'Content-Security-Policy', value: "frame-ancestors 'self';" },
         ],
       },
     ];
