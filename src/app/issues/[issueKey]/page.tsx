@@ -211,6 +211,12 @@ export default function IssueDetailPage() {
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
   const knownCommentIds = useRef<Set<string>>(new Set());
+  // Mirrors of in-progress-edit state for the live-update poll below -- read
+  // at poll-tick time via a ref (not the effect's own dependency array) so
+  // typing a comment or editing a field doesn't tear down and recreate the
+  // interval on every keystroke.
+  const editingCustomFieldRef = useRef<string | null>(null);
+  const commentTextRef = useRef('');
   const audioCtxRef = useRef<AudioContext | null>(null);
   const [showSubtaskModal, setShowSubtaskModal] = useState(false);
   const [subtaskSummary, setSubtaskSummary] = useState('');
@@ -759,35 +765,46 @@ export default function IssueDetailPage() {
     } catch { /* AudioContext not available */ }
   };
 
-  useEffect(() => {
-    // Only poll for CUSTM (Customer_Board) tickets
-    if (!currentIssue?.spaceKey || currentIssue.spaceKey !== 'CUSTM') return;
+  useEffect(() => { editingCustomFieldRef.current = editingCustomField; }, [editingCustomField]);
+  useEffect(() => { commentTextRef.current = commentText; }, [commentText]);
 
-    // Seed known IDs from current comments on mount (no sound for existing)
+  useEffect(() => {
+    if (!currentIssue?.id) return;
+
+    // Seed known comment IDs from current comments on mount (no sound for existing)
     const seed = (currentIssue.comments || []).map((c: any) => c.id);
     knownCommentIds.current = new Set(seed);
 
     const poll = setInterval(async () => {
+      // Don't silently overwrite the ticket out from under someone mid-edit
+      // -- a field being edited or a comment draft in progress means don't
+      // touch local state until they're done, even if the poll fires.
+      if (editingCustomFieldRef.current || commentTextRef.current.trim()) return;
       try {
         const fresh = await api.getIssue(issueKey);
+        const isCustm = currentIssue.spaceKey === 'CUSTM';
         const freshComments = (fresh?.comments || []).filter(
           (c: any) => c.authorName !== 'System' && c.author?.email !== 'system'
         );
-        let hasNew = false;
+        let hasNewComment = false;
         for (const c of freshComments) {
           if (!knownCommentIds.current.has(c.id)) {
             knownCommentIds.current.add(c.id);
             // Only sound for comments by someone other than the current user
             const commenterEmail = (c.author?.email || '').toLowerCase();
             const myEmail = (user?.email || '').toLowerCase();
-            if (commenterEmail !== myEmail) hasNew = true;
+            if (isCustm && commenterEmail !== myEmail) hasNewComment = true;
           }
         }
-        if (hasNew) {
-          playNotificationSound();
-          // Also refresh the issue so the new comment appears
-          loadIssue(issueKey);
-        }
+        // Any change at all (status, assignee, priority, a comment, anything
+        // that bumps updatedAt) should show up without a manual refresh --
+        // not just new comments, and not just on Customer_Board. The
+        // notification chime stays Customer_Board-only (a support-inbox
+        // cue, not something every board needs), but picking up the fresh
+        // data itself applies everywhere.
+        const changed = fresh?.updatedAt && fresh.updatedAt !== useStore.getState().currentIssue?.updatedAt;
+        if (hasNewComment) playNotificationSound();
+        if (hasNewComment || changed) loadIssue(issueKey);
       } catch { /* ignore polling errors */ }
     }, 15000);
 
