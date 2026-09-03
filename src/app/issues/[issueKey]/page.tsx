@@ -2723,13 +2723,41 @@ export default function IssueDetailPage() {
                 )}
                 {issue.activity && issue.activity.length > 0 ? (
                   <div className="space-y-0">
-                    {issue.activity.map(a => (
-                        <div key={a.id} className="flex items-start gap-3 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 px-1 rounded transition-colors">
-                          {/* User avatar */}
-                          <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center text-[10px] text-blue-700 flex-shrink-0 font-bold mt-0.5">
-                            {a.user ? (() => { const parts = (a.user.firstName||'').split(' '); return ((parts[0]?.[0]||'') + (parts[1]?.[0]||parts[0]?.[1]||'')).toUpperCase() || 'U'; })() : 'S'}
-                          </div>
-                          <div className="flex-1 min-w-0">
+                    {/* Real Jira groups everything one action produced under a single
+                        entry (one name/avatar/timestamp, several field lines below it)
+                        -- a single "Routed to Dev" click here produced FOUR separate
+                        entries (Status, Department, and two System SLA lines) all
+                        sharing the same author-and-instant, read as four disconnected
+                        events instead of the one action that actually happened.
+                        Grouping consecutive entries that share both the same author
+                        and the exact same timestamp (down to the millisecond, since
+                        that's genuinely how they were written -- one backend request,
+                        one NOW()) reconstructs that same single-action view without
+                        changing anything about how history is stored. Entries from a
+                        different author (e.g. an automated SYSTEM action interleaved
+                        with a human one) never merge, even at an identical instant --
+                        same rule Jira itself follows. */}
+                    {(() => {
+                      const groups: { key: string; user: any; createdAt: string; items: typeof issue.activity }[] = [];
+                      for (const a of issue.activity) {
+                        const last = groups[groups.length - 1];
+                        const authorKey = a.user ? `${a.user.firstName || ''}_${a.user.lastName || ''}` : 'system';
+                        if (last && last.key === authorKey && last.createdAt === a.createdAt) {
+                          last.items.push(a);
+                        } else {
+                          groups.push({ key: authorKey, user: a.user, createdAt: a.createdAt, items: [a] });
+                        }
+                      }
+                      return groups;
+                    })().map((group, gi) => (
+                      <div key={`${group.key}_${group.createdAt}_${gi}`} className="flex items-start gap-3 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 px-1 rounded transition-colors">
+                        {/* User avatar -- once per group, not once per field */}
+                        <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center text-[10px] text-blue-700 flex-shrink-0 font-bold mt-0.5">
+                          {group.user ? (() => { const parts = (group.user.firstName||'').split(' '); return ((parts[0]?.[0]||'') + (parts[1]?.[0]||parts[0]?.[1]||'')).toUpperCase() || 'U'; })() : 'S'}
+                        </div>
+                        <div className="flex-1 min-w-0 space-y-2">
+                          {group.items.map(a => (
+                          <div key={a.id}>
                             {/* Who did what */}
                             <div className="flex items-center flex-wrap gap-1 text-[13px] mb-1">
                               <span className="font-semibold text-gray-800">{a.user?.firstName || 'System'}</span>
@@ -2819,8 +2847,10 @@ export default function IssueDetailPage() {
                               </div>
                             )}
                           </div>
+                          ))}
                         </div>
-                      ))}
+                      </div>
+                    ))}
                   </div>
                 ) : (
                   <div className="py-12 text-center">
