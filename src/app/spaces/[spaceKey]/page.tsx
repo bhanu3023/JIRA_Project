@@ -3198,6 +3198,17 @@ function SpaceDetailContent() {
                           <div className="flex flex-col">
                             <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">Actual SLA</span>
                             <span className="text-[13px] font-bold text-gray-600">{fmtDuration(pausedSla.goalDurationMs)}</span>
+                            {/* Absolute deadline this duration implies -- paused_at + whatever
+                                budget was left at the moment it paused, same reference point
+                                "Remaining"/"Overdue By" below now shows too, so a real point in
+                                time reads next to the raw duration instead of only a countdown. */}
+                            {pausedSla.paused_at && (
+                              <span className="text-[10px] text-gray-400 font-medium mt-0.5">
+                                Due {new Date(new Date(pausedSla.paused_at).getTime() + pausedSla.remainingMs).toLocaleString('en-GB', {
+                                  day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+                                })}
+                              </span>
+                            )}
                           </div>
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
@@ -3214,8 +3225,19 @@ function SpaceDetailContent() {
                           <div className="h-6 w-px bg-gray-200" />
                           <div className="flex flex-col">
                             <span className="text-[9.5px] uppercase tracking-wide text-gray-400 font-medium">{pausedSla.isBreached ? 'Overdue By' : 'Remaining'}</span>
-                            <span className={`text-[13px] font-bold ${pausedSla.isBreached ? 'text-red-600' : 'text-green-600'}`}>
-                              {pausedSla.isBreached ? fmtDuration(pausedSla.elapsed_ms - pausedSla.goalDurationMs) : fmtDuration(pausedSla.remainingMs)}
+                            {/* Shown as the actual deadline date/time rather than a bare
+                                countdown -- while paused this number doesn't tick down live
+                                anyway, so the point in time it corresponds to is the more
+                                useful thing to see at a glance. */}
+                            <span
+                              className={`text-[13px] font-bold ${pausedSla.isBreached ? 'text-red-600' : 'text-green-600'}`}
+                              title={pausedSla.isBreached ? fmtDuration(pausedSla.elapsed_ms - pausedSla.goalDurationMs) + ' overdue' : fmtDuration(pausedSla.remainingMs) + ' remaining'}
+                            >
+                              {pausedSla.paused_at
+                                ? new Date(new Date(pausedSla.paused_at).getTime() + pausedSla.remainingMs).toLocaleString('en-GB', {
+                                    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+                                  })
+                                : '—'}
                             </span>
                           </div>
                         </div>
