@@ -485,9 +485,10 @@ export async function notifyIssueAssigned(issue: {
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
   previousAssignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
+  adminEmails?: string[];
 }) {
-  // Notify new assignee + reporter
-  const to = recipients(issue.assignee, issue.reporter);
+  // Notify new assignee + reporter + admins
+  const to = recipients(issue.assignee, issue.reporter, ...(issue.adminEmails || []).map(email => ({ email })));
   if (!to.length) return;
 
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
@@ -534,10 +535,14 @@ export async function notifyStatusChanged(issue: {
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
   changedBy?: { email?: string | null; firstName?: string; lastName?: string } | null;
+  adminEmails?: string[];
 }) {
   const changerEmail = (issue.changedBy as any)?.email?.toLowerCase() || '';
-  // Don't notify the person who made the change (no self-spam)
-  const to = recipients(issue.assignee, issue.reporter).filter(e => e !== changerEmail);
+  // Don't notify the person who made the change (no self-spam) -- this also
+  // means an admin who changed the status themselves won't get an email
+  // about their own action, same as assignee/reporter never do.
+  const to = recipients(issue.assignee, issue.reporter, ...(issue.adminEmails || []).map(email => ({ email })))
+    .filter(e => e !== changerEmail);
   if (!to.length) return;
 
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
@@ -584,6 +589,7 @@ export async function notifyCommentAdded(issue: {
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
   comment: { body: string; author?: { email?: string | null; firstName?: string; lastName?: string } | null };
+  adminEmails?: string[];
 }) {
   const commenterEmail = (issue.comment.author?.email || '').toLowerCase();
   const reporterEmail  = (issue.reporter?.email || '').toLowerCase();
@@ -591,7 +597,9 @@ export async function notifyCommentAdded(issue: {
   const assigneeEmails = recipients(issue.assignee).filter(e => e !== commenterEmail);
   // Reporter (customer) gets notified unless THEY wrote the comment (no echo back)
   const reporterEmails = (reporterEmail && reporterEmail !== commenterEmail) ? [reporterEmail] : [];
-  const to = Array.from(new Set([...assigneeEmails, ...reporterEmails])).filter(Boolean);
+  // Admins get notified unless one of them wrote the comment
+  const adminRecipientEmails = (issue.adminEmails || []).map(e => e.toLowerCase()).filter(e => e !== commenterEmail);
+  const to = Array.from(new Set([...assigneeEmails, ...reporterEmails, ...adminRecipientEmails])).filter(Boolean);
   if (!to.length) return;
 
   const displayKey = issue.cfKey || issue.key;
@@ -623,8 +631,9 @@ export async function notifyIssueUpdated(issue: {
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
   updatedBy?: { firstName?: string; lastName?: string } | null;
   changes: Array<{ field: string; from: string; to: string }>;
+  adminEmails?: string[];
 }) {
-  const to = recipients(issue.assignee, issue.reporter);
+  const to = recipients(issue.assignee, issue.reporter, ...(issue.adminEmails || []).map(email => ({ email })));
   if (!to.length) return;
 
   const updatedByName = issue.updatedBy ? `${issue.updatedBy.firstName} ${issue.updatedBy.lastName}`.trim() : 'Someone';

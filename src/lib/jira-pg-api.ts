@@ -450,6 +450,23 @@ async function userWantsNotif(userId: string, type: string): Promise<boolean> {
 }
 
 // Create notification for multiple users (dedup Ã¢â‚¬â€ don't notify the actor, respect preferences)
+// Admin recipients (id + email) for every ticket-lifecycle notification --
+// created, assigned, status changed, commented, updated (incl. root
+// cause/fix description), SLA breach. Cached briefly since a single PATCH
+// can fire several of these notify calls back to back and admins/roles
+// don't change often enough to need a fresh DB hit every time.
+let _adminRecipientsCache: { ids: string[]; emails: string[]; at: number } | null = null;
+async function getAdminRecipients(): Promise<{ ids: string[]; emails: string[] }> {
+  if (_adminRecipientsCache && Date.now() - _adminRecipientsCache.at < 60_000) return _adminRecipientsCache;
+  const admins = await db.user.findMany({ where: { role: 'admin', isActive: true }, select: { id: true, email: true } });
+  _adminRecipientsCache = {
+    ids: admins.map((u: any) => u.id),
+    emails: admins.map((u: any) => u.email).filter(Boolean),
+    at: Date.now(),
+  };
+  return _adminRecipientsCache;
+}
+
 async function notifyUsers(userIds: (string | null | undefined)[], actorId: string | null | undefined, opts: { type: string; title: string; message?: string; issueKey?: string }) {
   const seen = new Set<string>();
   for (const uid of userIds) {
@@ -710,7 +727,8 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
         if (already.has(key)) continue;
         already.add(key); // don't double-notify if more than one policy triggers this run
         const leadIds = await getSpaceLeadUserIds(row.spaceId);
-        await notifyUsers([row.assigneeId, row.reporterId, ...leadIds], null, {
+        const { ids: slaAdminIds, emails: slaAdminEmails } = await getAdminRecipients();
+        await notifyUsers([row.assigneeId, row.reporterId, ...leadIds, ...slaAdminIds], null, {
           type: 'SLA_BREACH',
           title: `SLA breaching in ${minsLeft} min: ${key}`,
           message: `${policyName || 'SLA'} will breach in ${minsLeft} minutes for: ${row.summary || key}`,
@@ -720,7 +738,11 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
           const emailRecipients = row.assigneeId
             ? await db.user.findMany({ where: { id: row.assigneeId }, select: { email: true } })
             : [];
-          const assigneeEmails = emailRecipients.map((u: any) => u.email).filter(Boolean);
+          // Admins now always get the SLA breach email even when the ticket
+          // has no assignee at all -- previously the whole email was skipped
+          // in that case (assigneeEmails.length gated it), so an unassigned
+          // breaching ticket silently never emailed anyone, admin included.
+          const assigneeEmails = Array.from(new Set([...emailRecipients.map((u: any) => u.email).filter(Boolean), ...slaAdminEmails]));
           const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
           if (assigneeEmails.length && spaceRow) {
             notifySLABreach({
@@ -6089,11 +6111,9 @@ async function _handleJiraPgApi(
     });
 
     // Admins should hear about every new ticket, not just ones they're
-    // personally assigned/reporting on -- fetch them once and fan out to
-    // both the email path (notifyIssueCreated) and the in-app path below.
-    const adminUsers = await db.user.findMany({ where: { role: 'admin', isActive: true }, select: { id: true, email: true } });
-    const adminEmails = adminUsers.map((u: any) => u.email).filter(Boolean);
-    const adminIds = adminUsers.map((u: any) => u.id);
+    // personally assigned/reporting on -- fan out to both the email path
+    // (notifyIssueCreated) and the in-app path below.
+    const { ids: adminIds, emails: adminEmails } = await getAdminRecipients();
 
     // Send email notification (fire-and-forget)
     notifyIssueCreated({
@@ -6623,6 +6643,7 @@ async function _handleJiraPgApi(
       // and a department move is exactly the kind of change both of them need
       // to know about (e.g. reporter's Migration ticket moving to Dev).
       if (updatedIssue) {
+        const { ids: deptAdminIds, emails: deptAdminEmails } = await getAdminRecipients();
         notifyIssueUpdated({
           key: updatedIssue.key, cfKey: extraCols.cf_key, summary: updatedIssue.summary, priority: updatedIssue.priority,
           spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
@@ -6630,6 +6651,7 @@ async function _handleJiraPgApi(
           assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
           updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
           changes: [{ field: 'Department', from: oldDept || 'None', to: newDept }],
+          adminEmails: deptAdminEmails,
         }).catch(() => {});
         // The "Department" email above never says WHO the ticket is now
         // assigned to — a separate "Issue Assigned" email is what actually
@@ -6643,8 +6665,15 @@ async function _handleJiraPgApi(
             status: { name: updatedIssue.status?.name ?? newStatusName, category: updatedIssue.status?.category ?? 'todo' },
             assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
             previousAssignee: issue.assignee,
+            adminEmails: deptAdminEmails,
           }).catch(() => {});
         }
+        await notifyUsers(deptAdminIds, userId, {
+          type: 'STATUS_CHANGED',
+          title: `${extraCols.cf_key || updatedIssue.key} moved to ${newDept}`,
+          message: updatedIssue.summary,
+          issueKey: extraCols.cf_key || updatedIssue.key,
+        });
       }
       fireConnectorEvent({
         event: 'issue.department_changed', timestamp: new Date().toISOString(),
@@ -6793,6 +6822,7 @@ async function _handleJiraPgApi(
         ? await db.user.findUnique({ where: { id: rrAgent.userId } })
         : null;
       const targetStatusCategory = firstStatus?.category ?? 'todo';
+      const { ids: transferAdminIds, emails: transferAdminEmails } = await getAdminRecipients();
       notifyIssueUpdated({
         key: newKey, cfKey: newCfKey, summary: issue.summary, priority: issue.priority,
         spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
@@ -6800,6 +6830,7 @@ async function _handleJiraPgApi(
         assignee: newAssigneeUser, reporter: issue.reporter,
         updatedBy: authorUser,
         changes: [{ field: 'Department', from: (issue as any).current_department || 'None', to: newDept }],
+        adminEmails: transferAdminEmails,
       }).catch(() => {});
       if (newAssigneeUser) {
         notifyIssueAssigned({
@@ -6807,9 +6838,10 @@ async function _handleJiraPgApi(
           spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
           status: { name: newStatusName, category: targetStatusCategory },
           assignee: newAssigneeUser, reporter: issue.reporter,
+          adminEmails: transferAdminEmails,
         }).catch(() => {});
       }
-      const inAppIds = [issue.reporterId, newAssigneeUser?.id].filter((id): id is string => !!id);
+      const inAppIds = [issue.reporterId, newAssigneeUser?.id, ...transferAdminIds].filter((id): id is string => !!id);
       if (inAppIds.length) {
         notifyUsers(
           inAppIds,
@@ -7640,6 +7672,7 @@ async function _handleJiraPgApi(
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
                 assignee: issue.assignee, reporter: issue.reporter,
                 changedBy: reopenChanger,
+                adminEmails: (await getAdminRecipients()).emails,
               }).catch(() => {});
             } catch (e: any) { console.error('[SLA resume on reopen failed]', issue.key, e?.message || e); }
           }
@@ -7800,6 +7833,7 @@ async function _handleJiraPgApi(
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
                 assignee: refreshed.assignee, reporter: refreshed.reporter,
                 changedBy: changer,
+                adminEmails: (await getAdminRecipients()).emails,
               }).catch(() => {});
               // This branch returns early right below, so it never reached the
               // generic "Status changed?" block further down that normally
@@ -8320,15 +8354,17 @@ async function _handleJiraPgApi(
 
       const oldStatusRec = issue.space?.statuses?.find((s: any) => s.id === issue.statusId);
       const changer = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+      const { ids: statusAdminIds, emails: statusAdminEmails } = await getAdminRecipients();
       notifyStatusChanged({
         ...issueForNotif,
         oldStatus: { name: oldStatusRec?.name ?? 'Unknown', category: oldStatusRec?.category ?? 'todo' },
         newStatus: issueForNotif.status,
         changedBy: changer,
+        adminEmails: statusAdminEmails,
       }).catch(() => {});
-      // In-app: notify assignee + reporter (not the person who changed it)
+      // In-app: notify assignee + reporter + admins (not the person who changed it)
       await notifyUsers(
-        [updated.assigneeId, updated.reporterId],
+        [updated.assigneeId, updated.reporterId, ...statusAdminIds],
         userId,
         { type: 'STATUS_CHANGED', title: `${updatedDisplayKey} status → ${issueForNotif.status.name}`, message: updated.summary, issueKey: updatedDisplayKey }
       );
@@ -8337,17 +8373,21 @@ async function _handleJiraPgApi(
     // Assignee changed?
     if (assigneeChangedForNotif) {
       const prevAssignee = issue.assigneeId ? await db.user.findUnique({ where: { id: issue.assigneeId } }) : null;
-      notifyIssueAssigned({ ...issueForNotif, previousAssignee: prevAssignee }).catch(() => {});
-      // In-app: notify new assignee + reporter
+      const { ids: assignAdminIds, emails: assignAdminEmails } = await getAdminRecipients();
+      notifyIssueAssigned({ ...issueForNotif, previousAssignee: prevAssignee, adminEmails: assignAdminEmails }).catch(() => {});
+      // In-app: notify new assignee + reporter + admins
       await notifyUsers(
-        [updated.assigneeId, updated.reporterId],
+        [updated.assigneeId, updated.reporterId, ...assignAdminIds],
         userId,
         { type: 'ASSIGNED', title: `${updatedDisplayKey} assigned to you`, message: updated.summary, issueKey: updatedDisplayKey }
       );
     }
-    // General update (summary, description, priority, etc.) -- only when
-    // neither of the above already covered this PATCH.
-    if (!statusChangedForNotif && !assigneeChangedForNotif && Object.keys(data).some(k => ['summary','description','priority','type','labels'].includes(k))) {
+    // General update (summary, description, priority, root cause, fix
+    // description, etc.) -- only when neither of the above already covered
+    // this PATCH. rootCause/fixDescription were missing from this tracked-
+    // field list entirely, so adding a fix description to a ticket sent NO
+    // notification to anyone, admin included -- that's the gap being fixed.
+    if (!statusChangedForNotif && !assigneeChangedForNotif && Object.keys(data).some(k => ['summary','description','priority','type','labels','rootCause','fixDescription'].includes(k))) {
       const changes: Array<{ field: string; from: string; to: string }> = [];
       if (body.summary !== undefined && body.summary !== issue.summary)
         changes.push({ field: 'Summary', from: String(issue.summary), to: String(body.summary) });
@@ -8355,15 +8395,21 @@ async function _handleJiraPgApi(
         changes.push({ field: 'Priority', from: String(issue.priority), to: String(body.priority) });
       if (body.type !== undefined && body.type !== issue.type)
         changes.push({ field: 'Type', from: String(issue.type), to: String(body.type) });
+      if (body.rootCause !== undefined && body.rootCause !== (issue as any).rootCause)
+        changes.push({ field: 'Root Cause', from: String((issue as any).rootCause || ''), to: String(body.rootCause || '') });
+      if (body.fixDescription !== undefined && body.fixDescription !== (issue as any).fixDescription)
+        changes.push({ field: 'Fix Description', from: String((issue as any).fixDescription || ''), to: String(body.fixDescription || '') });
       if (changes.length > 0) {
+        const { ids: updateAdminIds, emails: updateAdminEmails } = await getAdminRecipients();
         notifyIssueUpdated({
           ...issueForNotif,
           updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
           changes,
+          adminEmails: updateAdminEmails,
         }).catch(() => {});
-        // In-app: notify assignee + reporter + watchers
+        // In-app: notify assignee + reporter + admins + watchers
         await notifyUsers(
-          [updated.assigneeId, updated.reporterId],
+          [updated.assigneeId, updated.reporterId, ...updateAdminIds],
           userId,
           { type: 'UPDATED', title: `${updatedDisplayKey} updated`, message: changes.map(c => `${c.field}: ${c.to}`).join(', '), issueKey: updatedDisplayKey }
         );
@@ -8761,7 +8807,8 @@ async function _handleJiraPgApi(
 
 
     const issueDisplayKey = (issue as any).cf_key || issue.key;
-    // Email: notify assignee + reporter (not the commenter)
+    const { ids: commentAdminIds, emails: commentAdminEmails } = await getAdminRecipients();
+    // Email: notify assignee + reporter + admins (not the commenter)
     notifyCommentAdded({
       key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary,
       spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
@@ -8771,6 +8818,7 @@ async function _handleJiraPgApi(
         body: comment.body,
         author: comment.author ?? (authorUser ? { email: authorUser.email, firstName: authorUser.firstName, lastName: authorUser.lastName } : null),
       },
+      adminEmails: commentAdminEmails,
     }).catch((err: any) => console.error('[Comment Email] Failed to send:', err?.message || err));
 
     // In-app: notify assignee + reporter + leads/shift leads + watchers (not the commenter)
@@ -8797,7 +8845,7 @@ async function _handleJiraPgApi(
     (async () => { try {
     const commentLeadIds = await getSpaceLeadUserIds(issue.spaceId);
     await notifyUsers(
-      [issue.assigneeId, issue.reporterId, ...commentLeadIds],
+      [issue.assigneeId, issue.reporterId, ...commentLeadIds, ...commentAdminIds],
       userId,
       { type: 'COMMENTED', title: `New comment on ${issueDisplayKey}`, message: commentPreview, issueKey: issueDisplayKey }
     );
