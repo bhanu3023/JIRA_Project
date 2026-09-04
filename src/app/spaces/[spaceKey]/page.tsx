@@ -663,8 +663,15 @@ function SpaceDetailContent() {
           // Used to also pass includeHistory to keep resolved/moved tickets
           // showing here too — dropped since that meant a resolved ticket
           // could show under BOTH "Assigned to me" and "Worked on" at once.
+          // assigneeStrict:'true' is required to actually GET that "strictly
+          // current" behavior the comment above promises -- without it the
+          // backend's assignee filter broadens to "currently assigned OR
+          // ever worked on" (via user_worked_on_tickets), and this view has
+          // deliberately no client-side re-filter (see the queueFilter ===
+          // 'dept_assigned' branch below) because it trusts the server to
+          // have already scoped this correctly.
           if (queueFilter === 'dept_assigned') {
-            if (user?.id) params.assignee = user.id;
+            if (user?.id) { params.assignee = user.id; params.assigneeStrict = 'true'; }
             params.excludeDone = 'true';
             params.page = String(currentPage);
             params.limit = String(PAGE_SIZE);

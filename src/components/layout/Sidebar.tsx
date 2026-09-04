@@ -986,8 +986,13 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     Promise.all([
       api.getIssues({ spaceKey, limit: '1', page: '1' }),
       api.getIssues({ spaceKey, limit: '1', page: '1', excludeDone: 'true' }),
+      // assigneeStrict:'true' -- without it this "assigned to me" count
+      // silently includes tickets currently assigned to someone else that
+      // this user merely worked on in the past (the backend's non-strict
+      // assignee filter is an OR against user_worked_on_tickets, meant for
+      // the Filters page's exploratory search, not a personal count).
       user?.id
-        ? api.getIssues({ spaceKey, limit: '1', page: '1', excludeDone: 'true', assignee: user.id })
+        ? api.getIssues({ spaceKey, limit: '1', page: '1', excludeDone: 'true', assignee: user.id, assigneeStrict: 'true' })
         : Promise.resolve({ total: 0 }),
       api.getIssues({ spaceKey, limit: '1', page: '1', excludeDone: 'true', unassigned: 'true' }),
     ]).then(([allData, openData, assignedData, unassignedData]: any[]) => {

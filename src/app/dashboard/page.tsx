@@ -125,15 +125,22 @@ export default function DashboardPage() {
   const [openIssuesCount, setOpenIssuesCount] = useState(0);
   const [resolvedTodayCount, setResolvedTodayCount] = useState(0);
 
-  // Fetch per-user stats — assigned tickets split by open vs done
+  // Fetch per-user stats — assigned tickets split by open vs done.
+  // assigneeStrict:'true' is required here -- without it the backend's
+  // assignee filter silently broadens to "currently assigned OR ever
+  // worked on" (via user_worked_on_tickets), which is the right behavior
+  // for the Filters page's exploratory search but wrong for "My ..." stat
+  // cards -- confirmed for real: CF-21875 (actually assigned to Mayank
+  // Jain) showed up under Bhanu's "My Resolved" purely because he'd done
+  // manual testing on that ticket earlier, leaving a worked-on row behind.
   useEffect(() => {
     if (!user?.id) return;
     // Open: my assigned tickets NOT in done status
-    api.getIssues({ assignee: user.id, excludeDone: 'true', limit: '1' })
+    api.getIssues({ assignee: user.id, excludeDone: 'true', limit: '1', assigneeStrict: 'true' })
       .then((d: any) => setOpenIssuesCount(d.total ?? 0))
       .catch(() => {});
     // Resolved: my assigned tickets IN done status
-    api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '1' })
+    api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '1', assigneeStrict: 'true' })
       .then((d: any) => setResolvedTodayCount(d.total ?? 0))
       .catch(() => {});
   }, [user?.id]);
@@ -212,7 +219,7 @@ export default function DashboardPage() {
       setLoading(true);
       try {
         if (user) {
-          const data = await api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '50' });
+          const data = await api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '50', assigneeStrict: 'true' });
           const issues = data.issues || [];
           setAssignedIssues(issues);
           assignedResolvedCache.current = issues;
