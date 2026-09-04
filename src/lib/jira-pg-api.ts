@@ -3039,7 +3039,7 @@ async function ensureCfKeySequence(): Promise<void> {
   `);
 }
 
-async function nextCfKey(): Promise<string> {
+export async function nextCfKey(): Promise<string> {
   await ensureCfKeySequence();
   const r = await pool.query(`SELECT nextval('cf_key_seq') AS n`);
   return `CF-${r.rows[0].n}`;

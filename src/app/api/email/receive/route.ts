@@ -756,6 +756,23 @@ export async function POST(req: NextRequest) {
     } catch { /* non-critical */ }
   }
 
+  // Assign the user-facing CF-prefixed display key -- every issue is shown
+  // to users ONLY by this key everywhere else in the app (the internal
+  // `key` column above, e.g. L2B-30058, is a backend implementation
+  // detail). This path creates issues directly via db.issue.create,
+  // bypassing the main POST /issues handler entirely, which is the only
+  // other place that assigns one -- confirmed for real: an email-created
+  // ticket (an inbound "Automatic reply" auto-import) had cf_key left
+  // completely empty, so it showed its raw internal key in the UI instead
+  // of a normal CF-XXXXX one, unlike every other ticket in the app.
+  try {
+    const { nextCfKey } = await import('@/lib/jira-pg-api');
+    const { pgPool: p3 } = await import('@/lib/pg-pool');
+    const cfKey = await nextCfKey();
+    await p3.query(`UPDATE issues SET cf_key = $1 WHERE id = $2`, [cfKey, issue.id]);
+    (issue as any).cf_key = cfKey;
+  } catch { /* non-critical */ }
+
   // History: record issue creation -- this path (POST /api/email/receive)
   // creates issues directly via db.issue.create, bypassing the main
   // POST /issues handler entirely, which is the only place that normally
