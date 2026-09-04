@@ -103,6 +103,7 @@ export const INFRA_ISSUE_TYPES = [
   'Agent Deployment',
   'Bitbucket Repo Access',
   'Test Account Creation',
+  'Migration Reports',
 ];
 
 const WORK_TYPES = [
