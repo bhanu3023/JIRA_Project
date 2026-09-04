@@ -9546,7 +9546,7 @@ async function _handleJiraPgApi(
     // safety limit -- totalMatched + the "(capped)" UI note stay honest if
     // this is ever actually hit.
     const ticketRows = await pool.query(`
-      SELECT COALESCE(i.cf_key, i.key) AS key, sp.key AS project_key, i.current_department AS dept,
+      SELECT COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name, i.current_department AS dept,
         COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
         COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
         s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
@@ -9566,7 +9566,7 @@ async function _handleJiraPgApi(
     const totalMatched = ticketRows.rows.length > 0 ? Number(ticketRows.rows[0].total_matched) || 0 : 0;
     const tickets = ticketRows.rows.map((r: any) => ({
       key: r.key,
-      project: r.project_key || '',
+      project: r.project_name || '',
       dept: r.dept,
       assignee: r.assignee_name || '',
       reporter: r.reporter_name || '',
@@ -9712,6 +9712,12 @@ async function _handleJiraPgApi(
     const dateTo   = url.searchParams.get('dateTo') || '';
     const person   = (url.searchParams.get('person') || '').toLowerCase();
     const ticketFilter = url.searchParams.get('ticketFilter') || '';
+    // Internal/External split, only ever applied on top of the Total/Resolved
+    // drill-downs (the frontend only shows these two tabs there): "internal"
+    // = self-raised (reporter === current assignee) OR raised by someone on
+    // the QA roster -- i.e. this app's own people generating the ticket,
+    // not a real customer. Everything else is "external".
+    const segment = url.searchParams.get('segment') || '';
     const staleDays = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
     const baseParams: any[] = [dept, roster];
@@ -9793,6 +9799,19 @@ async function _handleJiraPgApi(
     const personMatchSql = person
       ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}))`
       : '';
+    // A person-scoped drill-down (e.g. "Resolved tickets — Adari") can include
+    // a ticket Adari worked on here that's since been reassigned to another
+    // roster member -- personMatchSql above deliberately allows that (CF-29889
+    // pattern). But the ticket table's own assignee_name always shows the
+    // CURRENT roster assignee first, with no awareness of which specific
+    // person this drill-down is scoped to -- so a row under "— Adari" could
+    // legitimately show a completely different name (e.g. K N V S Raj Kumar)
+    // with nothing explaining why, reading as a data bug rather than the
+    // intentional historical-attribution behavior it actually is. Flag it
+    // explicitly per row so the frontend can say so.
+    const personHistoryFlagSql = person
+      ? `(NOT (au.id IS NOT NULL AND LOWER(au.email) = $${personIdx}) AND EXISTS (SELECT 1 FROM user_worked_on_tickets wp3 JOIN users wpu3 ON wpu3.id = wp3.user_id WHERE wp3.issue_id = i.id AND LOWER(wp3.dept) = LOWER($1) AND LOWER(wpu3.email) = $${personIdx}))`
+      : 'FALSE';
 
     // Drill-down filters for the per-person hygiene columns -- each shows the
     // tickets actually FAILING that check (the "what's wrong" list), not the
@@ -9816,6 +9835,19 @@ async function _handleJiraPgApi(
       ticketFilterClause = ` AND s.category = 'done' AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a."issueId" = i.id AND a."mimeType" LIKE 'image/%')`;
     } else if (ticketFilter === 'noRcaFix') {
       ticketFilterClause = ` AND s.category = 'done' AND NOT (length(trim(COALESCE(i."rootCause", ''))) > 0 OR length(trim(COALESCE(i."fixDescription", ''))) > 0)`;
+    }
+
+    // Internal/External split, layered on top of whichever ticketFilter is
+    // already active (only meaningful for the Total/Resolved drill-downs,
+    // but composes fine with any of the others too). "Internal" = self-raised
+    // (reporter is the current assignee) OR raised by someone on the QA
+    // roster -- this app's own people generating the ticket, not a real
+    // customer report.
+    if (segment === 'internal' || segment === 'external') {
+      ticketQueryParams = [...ticketQueryParams, TEAM_ROSTER.qa];
+      const qaRosterIdx = ticketQueryParams.length;
+      const internalCond = `((i."reporterId" IS NOT NULL AND i."reporterId" = i."assigneeId") OR EXISTS (SELECT 1 FROM users ru4 WHERE ru4.id = i."reporterId" AND LOWER(ru4.email) = ANY($${qaRosterIdx}::text[])))`;
+      ticketFilterClause += segment === 'internal' ? ` AND ${internalCond}` : ` AND NOT ${internalCond}`;
     }
 
     // rb_breached (here and in AGG below) used to be COUNT(...) FILTER (WHERE
@@ -9950,7 +9982,7 @@ async function _handleJiraPgApi(
       `, baseParams),
 
       pool.query(`
-        SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.key AS project_key,
+        SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name,
           COALESCE(
             CASE WHEN au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])
               THEN COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
@@ -9972,6 +10004,7 @@ async function _handleJiraPgApi(
             OR EXISTS (SELECT 1 FROM user_worked_on_tickets wt2 JOIN users wtu2 ON wtu2.id = wt2.user_id
                        WHERE wt2.issue_id = i.id AND LOWER(wt2.dept) = LOWER($1) AND LOWER(wtu2.email) = ANY($2::text[]))
           ) AS assignee_outside_roster,
+          ${personHistoryFlagSql} AS matched_via_person_history,
           COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
           s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
           COUNT(*) OVER() AS total_matched
@@ -10104,9 +10137,10 @@ async function _handleJiraPgApi(
     }
     const tickets = ticketRows.slice(0, DISPLAY_CAP).map((r: any) => ({
       key: r.key,
-      project: r.project_key || '',
+      project: r.project_name || '',
       assignee: r.assignee_name || '',
       assigneeOutsideRoster: !!r.assignee_outside_roster,
+      matchedViaPersonHistory: !!r.matched_via_person_history,
       reporter: r.reporter_name || '',
       status: r.status_name || '',
       summary: r.summary || '',

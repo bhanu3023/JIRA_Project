@@ -68,13 +68,21 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  type DrillFilter = 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix';
+  type DrillFilter = 'all' | 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix';
   const [drillDown, setDrillDown] = useState<{ person?: string; filter: DrillFilter; label: string } | null>(null);
   const [drillTickets, setDrillTickets] = useState<any[]>([]);
   const [drillTotal, setDrillTotal] = useState(0);
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillError, setDrillError] = useState<string | null>(null);
-  const openDrill = (filter: DrillFilter, personEmail: string | undefined, label: string) => setDrillDown({ person: personEmail, filter, label });
+  // Internal (self-raised, or raised by QA) vs External split -- only ever
+  // shown for the Total/Resolved drill-downs, per the request that asked for
+  // it specifically there (not the hygiene-column drill-downs).
+  const [drillSegment, setDrillSegment] = useState<'internal' | 'external'>('internal');
+  const drillSegmentable = drillDown?.filter === 'all' || drillDown?.filter === 'resolved';
+  const openDrill = (filter: DrillFilter, personEmail: string | undefined, label: string) => {
+    setDrillSegment('internal');
+    setDrillDown({ person: personEmail, filter, label });
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -89,11 +97,12 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
     if (!drillDown) return;
     setDrillLoading(true);
     setDrillError(null);
-    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, drillDown.person, drillDown.filter)
+    const segmentable = drillDown.filter === 'all' || drillDown.filter === 'resolved';
+    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, drillDown.person, drillDown.filter === 'all' ? undefined : drillDown.filter, undefined, segmentable ? drillSegment : undefined)
       .then((d) => { setDrillTickets(d.tickets); setDrillTotal(d.totalMatched); })
       .catch((err) => { setDrillTickets([]); setDrillTotal(0); setDrillError(err?.message || 'Failed to load tickets'); })
       .finally(() => setDrillLoading(false));
-  }, [drillDown, team, dateFrom, dateTo]);
+  }, [drillDown, team, dateFrom, dateTo, drillSegment]);
 
   if (loading) {
     return (
@@ -235,7 +244,9 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.total}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      <button onClick={(e) => { e.stopPropagation(); openDrill('all', p.email, `All tickets — ${p.name}`); }} className="hover:underline">{p.total}</button>
+                    </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
                       <button onClick={(e) => { e.stopPropagation(); openDrill('resolved', p.email, `Resolved tickets — ${p.name}`); }} className="hover:underline text-blue-600">{p.resolved}</button>{' '}
                       <span className="text-gray-400">({pct(p.resolved, p.total)})</span>
@@ -320,6 +331,11 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                       {t.assigneeOutsideRoster && (
                         <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
                       )}
+                      {t.matchedViaPersonHistory && person && (
+                        <span title={`Currently assigned to ${t.assignee} — counted here because ${people.find((p) => p.email === person)?.name || 'the selected person'} worked this ticket in this department before it moved`} className="ml-1.5 text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
+                          worked by {people.find((p) => p.email === person)?.name || 'selected person'}
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.reporter}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
@@ -353,6 +369,16 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                 <X size={18} />
               </button>
             </div>
+            {drillSegmentable && (
+              <div className="px-6 pt-3 border-b border-gray-100 flex-shrink-0 flex gap-1">
+                {(['internal', 'external'] as const).map((seg) => (
+                  <button key={seg} onClick={() => setDrillSegment(seg)}
+                    className={`px-3 py-2 text-[12.5px] border-b-2 transition-colors capitalize ${drillSegment === seg ? 'border-blue-600 text-blue-600 font-semibold' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                    {seg}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="overflow-auto flex-1">
               {drillLoading ? (
                 <div className="flex items-center justify-center py-20">
@@ -393,6 +419,11 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                           {t.assignee}
                           {t.assigneeOutsideRoster && (
                             <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
+                          )}
+                          {t.matchedViaPersonHistory && drillDown?.person && (
+                            <span title={`Currently assigned to ${t.assignee} — counted here because ${people.find((p) => p.email === drillDown.person)?.name || 'the selected person'} worked this ticket in this department before it moved`} className="ml-1.5 text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
+                              worked by {people.find((p) => p.email === drillDown.person)?.name || 'selected person'}
+                            </span>
                           )}
                         </td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
