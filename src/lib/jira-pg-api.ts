@@ -10047,27 +10047,19 @@ async function _handleJiraPgApi(
 
       pool.query(`
         SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name,
-          COALESCE(
-            CASE WHEN au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])
-              THEN COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
-            END,
-            (SELECT COALESCE(NULLIF(TRIM(wtu."firstName" || ' ' || wtu."lastName"), ''), wtu.email)
-             FROM user_worked_on_tickets wt JOIN users wtu ON wtu.id = wt.user_id
-             WHERE wt.issue_id = i.id AND LOWER(wt.dept) = LOWER($1) AND LOWER(wtu.email) = ANY($2::text[])
-             ORDER BY wt.worked_at DESC LIMIT 1),
-            COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email)
-          ) AS assignee_name,
-          -- Ticket matched via deptMatchSql/rosterMatchSql's worked-on branch with
-          -- no roster member (current or historical) to actually attribute it to --
-          -- the current assignee shown above is real, just outside this team's
-          -- roster (e.g. a different dept picked it up after a roster member's
-          -- work here was done). Surfaced explicitly rather than silently shown
-          -- as if they were a normal roster member.
-          NOT (
-            (au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[]))
-            OR EXISTS (SELECT 1 FROM user_worked_on_tickets wt2 JOIN users wtu2 ON wtu2.id = wt2.user_id
-                       WHERE wt2.issue_id = i.id AND LOWER(wt2.dept) = LOWER($1) AND LOWER(wtu2.email) = ANY($2::text[]))
-          ) AS assignee_outside_roster,
+          -- Always the TRUE current assignee -- never substituted with a
+          -- roster member's historical name. That substitution used to make
+          -- a ticket currently held by someone completely unrelated (e.g.
+          -- Chandra Mouli, ENT, ticket now in Migration) display as if it
+          -- belonged to whichever OTHER roster member last worked it back
+          -- when it briefly passed through this dept -- confirmed for real:
+          -- CF-29978's real assignee/reporter is Chandra Mouli, but this
+          -- query was showing "Lakshmi Adabala" instead because she has a
+          -- worked-on-in-Dev record for it. "Outside roster" and "worked on
+          -- by the selected person" are now independent, honest annotations
+          -- on top of the real name, not replacements for it.
+          COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
+          NOT (au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])) AS assignee_outside_roster,
           ${personHistoryFlagSql} AS matched_via_person_history,
           COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
           s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
