@@ -675,8 +675,13 @@ export async function notifyCommentAdded(issue: {
   // subject's key format here doesn't fork existing reply threads.
   const { emailthreadid: sourceMessageId, inboxEmail } = await getTicketThreadInfo(issue.key);
 
-  // Send a plain reply email — just the comment text, no ticket template
-  // This looks like a normal email reply so the recipient can reply back.
+  // Send a plain reply email — just the comment text, no full ticket
+  // template — so it looks like a normal email reply the recipient can
+  // reply back to. That plainness meant the body alone gave no clue WHO
+  // wrote the comment or WHICH ticket it was on beyond the subject line
+  // (invisible once quoted deeper in a thread, or read out of context on a
+  // phone) -- a small attribution header fixes that without turning this
+  // back into the full templated notification.
   // Pasted images are embedded as inline CID attachments (see
   // embedImagesAsCid) instead of linked by URL -- Outlook and other clients
   // block remote <img> content by default until the sender is trusted, even
@@ -684,9 +689,17 @@ export async function notifyCommentAdded(issue: {
   // "blocked content" box on the recipient's first email from this sender.
   // makeImageSrcsAbsolute still runs afterward as a fallback for any image
   // embedImagesAsCid couldn't find on disk (e.g. already deleted).
+  const commenterName = issue.comment.author
+    ? `${issue.comment.author.firstName || ''} ${issue.comment.author.lastName || ''}`.trim() || issue.comment.author.email || 'Someone'
+    : 'Someone';
   const { html: embeddedBody, attachments } = await embedImagesAsCid(issue.comment.body);
-  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">${makeImageSrcsAbsolute(embeddedBody)}</div>`;
-  const commentText = issue.comment.body.replace(/<[^>]+>/g, '');
+  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">` +
+    `<p style="margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid #e8e8e8;font-size:13px;color:#555">` +
+    `<b style="color:#172B4D">${commenterName}</b> commented on ` +
+    `<a href="${issueUrl(issue.key)}" style="color:#0052CC;text-decoration:none;font-weight:600">[${displayKey}] ${issue.summary}</a>` +
+    `</p>` +
+    `${makeImageSrcsAbsolute(embeddedBody)}</div>`;
+  const commentText = `${commenterName} commented on [${displayKey}] ${issue.summary}:\n\n${issue.comment.body.replace(/<[^>]+>/g, '')}`;
 
   await sendNotification(
     to,
