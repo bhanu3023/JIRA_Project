@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
@@ -310,7 +311,9 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
               <tbody>
                 {tickets.map((t) => (
                   <tr key={t.key} className="hover:bg-gray-50">
-                    <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">{t.key}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">
+                      <Link href={`/issues/${t.key}`} target="_blank" rel="noopener noreferrer" className="hover:underline">{t.key}</Link>
+                    </td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">
                       {t.assignee}
@@ -382,7 +385,9 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <tbody>
                     {drillTickets.map((t) => (
                       <tr key={t.key} className="hover:bg-gray-50">
-                        <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">{t.key}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">
+                      <Link href={`/issues/${t.key}`} target="_blank" rel="noopener noreferrer" className="hover:underline">{t.key}</Link>
+                    </td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">
                           {t.assignee}
@@ -707,7 +712,9 @@ export default function MbrPage() {
                     <tbody>
                       {tickets.map((t) => (
                         <tr key={t.key} className="hover:bg-gray-50">
-                          <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">{t.key}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100 font-semibold text-blue-600">
+                      <Link href={`/issues/${t.key}`} target="_blank" rel="noopener noreferrer" className="hover:underline">{t.key}</Link>
+                    </td>
                           <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
                           {!department && <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.dept}</td>}
                           <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.assignee}</td>
