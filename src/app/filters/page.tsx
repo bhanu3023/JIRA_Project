@@ -1016,13 +1016,15 @@ export default function FiltersPage() {
   /* issues */
   const [issues, setIssues]   = useState<any[]>([]);
   const [total, setTotal]     = useState(0);
-  const PAGE_SIZE = 100;
-  // This page fetched page=1/limit=100 unconditionally with no way to see
-  // anything past the first 100 matches -- confirmed for real: filtering
-  // "Aug 1 - Aug 31" (696 matching tickets, sorted newest first) silently
-  // cut off everything before roughly mid-August, so the real, existing
-  // Aug 1-10 tickets were never unreachable, just past page 1 with no page
-  // 2 control anywhere on this page.
+  // 1000, not 100 -- by request, a normal filtered view (hundreds of
+  // matches) should show entirely on one screen with no clicking through
+  // pages at all. This page used to fetch page=1/limit=100 unconditionally
+  // with no way to see anything past the first 100 matches (confirmed for
+  // real: filtering "Aug 1 - Aug 31", 696 matching tickets sorted newest
+  // first, silently cut off everything before roughly mid-August). The
+  // Prev/Next control added alongside this stays as a safety net only for
+  // the rare case a filter (or no filter at all) matches more than 1000.
+  const PAGE_SIZE = 1000;
   const [page, setPage] = useState(1);
   const [loadingIssues, setLoadingIssues] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
