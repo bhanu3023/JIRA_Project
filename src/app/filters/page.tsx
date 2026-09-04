@@ -1016,6 +1016,16 @@ export default function FiltersPage() {
   /* issues */
   const [issues, setIssues]   = useState<any[]>([]);
   const [total, setTotal]     = useState(0);
+  // 1000, not 100 -- by request, a normal filtered view (hundreds of
+  // matches) should show entirely on one screen with no clicking through
+  // pages at all. This page used to fetch page=1/limit=100 unconditionally
+  // with no way to see anything past the first 100 matches (confirmed for
+  // real: filtering "Aug 1 - Aug 31", 696 matching tickets sorted newest
+  // first, silently cut off everything before roughly mid-August). The
+  // Prev/Next control added alongside this stays as a safety net only for
+  // the rare case a filter (or no filter at all) matches more than 1000.
+  const PAGE_SIZE = 1000;
+  const [page, setPage] = useState(1);
   const [loadingIssues, setLoadingIssues] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -1373,16 +1383,24 @@ export default function FiltersPage() {
         // issue objects with nested status/assignee/reporter), which is what made this
         // page take multiple seconds to load. 100 keeps a generous browsing window
         // while cutting the payload by ~90%.
-        const params = { ...buildFilterParams(), page: '1', limit: '100' };
+        const params = { ...buildFilterParams(), page: String(page), limit: String(PAGE_SIZE) };
         const { issues: list, total: tot } = await api.getIssues(params);
         setIssues(list as any[]);
         setTotal(tot);
       } catch { setIssues([]); setTotal(0); }
       setLoadingIssues(false);
     }, 400);
-  }, [buildFilterParams]);
+  }, [buildFilterParams, page]);
 
   useEffect(() => { fetchIssues(); }, [fetchIssues]);
+
+  // Changing any filter should land back on page 1 -- otherwise narrowing
+  // the result set while sitting on, say, page 5 could point at a page
+  // that no longer exists for the new filter, showing an empty table that
+  // looks like "no matches" instead of what it actually is.
+  useEffect(() => { setPage(1); }, [buildFilterParams]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   // Filters results never refreshed on their own -- someone leaving this
   // page open with a filter applied (e.g. a live Queue view during the
@@ -2210,6 +2228,34 @@ export default function FiltersPage() {
               })}
             </tbody>
           </table>
+        )}
+
+        {/* Pagination -- results beyond the first 100 matches used to be
+            completely unreachable (no page control existed at all), even
+            though the header above correctly showed the true total. */}
+        {!loadingIssues && total > PAGE_SIZE && (
+          <div className="flex items-center justify-between border-t border-gray-200 bg-gray-50 px-5 py-2.5">
+            <p className="text-[12px] text-gray-500">
+              Showing {((page - 1) * PAGE_SIZE) + 1}–{Math.min(page * PAGE_SIZE, total)} of {total.toLocaleString()}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page <= 1}
+                className="rounded border border-gray-300 bg-white px-2.5 py-1 text-[12px] font-medium text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Prev
+              </button>
+              <span className="text-[12px] text-gray-500">Page {page} of {totalPages}</span>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+                className="rounded border border-gray-300 bg-white px-2.5 py-1 text-[12px] font-medium text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+            </div>
+          </div>
         )}
       </div>}
 

@@ -913,23 +913,36 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
         // Empty response here isn't necessarily "this space has never had
         // queues" — the GET filters to only the CALLER's own queues for
         // non-admins/managers, so a member of zero queues legitimately gets
-        // back []. This used to treat that the same as "DB truly empty" and,
-        // if this browser's localStorage had ANY cached queues from an
-        // earlier visit (even a stale/incorrect snapshot), silently PUT that
-        // stale data back to the server as the new "real" list — permanently
-        // overwriting whatever the actual current data was, from a passive
-        // page load with no explicit user action at all. Only ever display
-        // the cached fallback locally now; never write it back automatically.
-        try {
-          const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
-          if (stored) {
-            const local = JSON.parse(stored);
-            if (Array.isArray(local) && local.length > 0) {
-              setCustomQueues(local);
-              setIsDeptQueue(true);
+        // back []. That's why this used to always fall back to displaying
+        // (never writing back) whatever this browser's localStorage had
+        // cached from an earlier visit, even a stale/incorrect snapshot.
+        // But for an admin/manager the backend does NOT filter -- an empty
+        // response to them is the true, unfiltered answer, not a permission
+        // artifact. Treating it the same as a member's filtered [] meant a
+        // space whose queues were deleted server-side (real case: IT
+        // Administration's "Infra" queue, removed on request) kept showing
+        // that phantom queue in the sidebar forever for any admin whose
+        // browser had ever cached it, since isDeptQueue was only ever set
+        // to true here, never corrected back to false on a confirmed-empty
+        // real answer. Privileged callers now trust [] as ground truth and
+        // clear the stale cache instead of resurrecting it.
+        const isPrivilegedCaller = user?.role === 'admin' || isManager(user?.role);
+        if (isPrivilegedCaller) {
+          setCustomQueues([]);
+          setIsDeptQueue(false);
+          try { localStorage.removeItem(`custom_queues_${spaceKey}`); } catch {}
+        } else {
+          try {
+            const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
+            if (stored) {
+              const local = JSON.parse(stored);
+              if (Array.isArray(local) && local.length > 0) {
+                setCustomQueues(local);
+                setIsDeptQueue(true);
+              }
             }
-          }
-        } catch {}
+          } catch {}
+        }
       }
     }).catch(() => {
       try {
@@ -937,7 +950,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
         if (stored) setCustomQueues(JSON.parse(stored));
       } catch {}
     });
-  }, [spaceKey]);
+  }, [spaceKey, user?.role]);
 
   // Load space members for the create-queue form
   useEffect(() => {
@@ -986,8 +999,13 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     Promise.all([
       api.getIssues({ spaceKey, limit: '1', page: '1' }),
       api.getIssues({ spaceKey, limit: '1', page: '1', excludeDone: 'true' }),
+      // assigneeStrict:'true' -- without it this "assigned to me" count
+      // silently includes tickets currently assigned to someone else that
+      // this user merely worked on in the past (the backend's non-strict
+      // assignee filter is an OR against user_worked_on_tickets, meant for
+      // the Filters page's exploratory search, not a personal count).
       user?.id
-        ? api.getIssues({ spaceKey, limit: '1', page: '1', excludeDone: 'true', assignee: user.id })
+        ? api.getIssues({ spaceKey, limit: '1', page: '1', excludeDone: 'true', assignee: user.id, assigneeStrict: 'true' })
         : Promise.resolve({ total: 0 }),
       api.getIssues({ spaceKey, limit: '1', page: '1', excludeDone: 'true', unassigned: 'true' }),
     ]).then(([allData, openData, assignedData, unassignedData]: any[]) => {

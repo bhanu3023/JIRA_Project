@@ -264,7 +264,7 @@ export default function Header() {
                       <span className="text-[13px] text-gray-800 truncate">{issue.summary}</span>
                     </div>
                     <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-[11px] text-gray-400">{issue.spaceKey || issue.spaceId}</span>
+                      <span className="text-[11px] text-gray-400">{(issue as any).spaceName || issue.spaceKey || issue.spaceId}</span>
                       {issue.status?.name && (
                         <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full"
                           style={{ color: issue.status.color, backgroundColor: `${issue.status.color}18`, border: `1px solid ${issue.status.color}40` }}>

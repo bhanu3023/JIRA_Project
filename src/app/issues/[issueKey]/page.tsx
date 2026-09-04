@@ -1249,12 +1249,29 @@ export default function IssueDetailPage() {
       const dept = (issue as any).current_department;
       if (dept) {
         const prevDeptStatuses = (issue as any).dept_statuses;
+        const prevDepartment = (issue as any).current_department;
         const queueSt = {
           id: statusId, name: (targetStatus as any).name,
           color: (targetStatus as any).color || '#64748B', category: (targetStatus as any).category || 'todo',
         };
+        // Picking a queue-scoped "Routed to X" status (the common case --
+        // most departments' own custom queues offer these, e.g. Dev's
+        // "Routed to Migration") triggers the SAME backend department
+        // handoff as the plain-status "Routed to X" path above (dept_sla
+        // pause/resume, current_department change, round-robin assignee),
+        // but this branch's optimistic patch only ever touched
+        // dept_statuses -- Department visibly lagged a full network
+        // round-trip behind the status badge until loadIssue() landed.
+        // Same routedMatch fix as the plain-status branch: parse the
+        // target department out of the status name and update both
+        // fields in the one optimistic patch.
+        const queueRoutedMatch = queueSt.name?.match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
         useStore.setState(s => ({
-          currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: { ...(s.currentIssue as any).dept_statuses, [dept]: queueSt } } as any : s.currentIssue,
+          currentIssue: s.currentIssue ? {
+            ...s.currentIssue,
+            dept_statuses: { ...(s.currentIssue as any).dept_statuses, [dept]: queueSt },
+            ...(queueRoutedMatch ? { current_department: queueRoutedMatch[1].trim() } : {}),
+          } as any : s.currentIssue,
         }));
         setShowStatusDropdown(false);
         pendingUpdateRef.current = true;
@@ -1269,7 +1286,7 @@ export default function IssueDetailPage() {
         } catch (err: any) {
           console.error(err);
           useStore.setState(s => ({
-            currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: prevDeptStatuses } as any : s.currentIssue,
+            currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: prevDeptStatuses, current_department: prevDepartment } as any : s.currentIssue,
           }));
           alert(err?.message || 'Failed to change status.');
         } finally {
@@ -1286,7 +1303,7 @@ export default function IssueDetailPage() {
     // "changing twice" report: one field updates, then the other catches up
     // separately instead of together). Parse the target department straight
     // from the status name so both update in the same optimistic patch.
-    const routedMatch = targetStatus?.name?.match(/^Routed to (.+)$/i);
+    const routedMatch = targetStatus?.name?.match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
     await handleUpdate('statusId', statusId, targetStatus
       ? {
           status: { id: targetStatus.id, name: targetStatus.name, category: (targetStatus as any).category, color: (targetStatus as any).color },
@@ -3514,13 +3531,18 @@ export default function IssueDetailPage() {
             {/* Department — only shown when the field is assigned to this space.
                 canEdit is deliberately NOT the general `canEdit` permission flag
                 above (that one governs whether this person can edit the ticket
-                AT ALL, and is true for anyone) -- Department specifically should
-                only ever change as a side effect of a "Routed to X" status
-                transition, never picked directly from a plain dropdown, so it's
-                hardcoded non-editable here regardless of who's viewing. */}
+                AT ALL, and is true for anyone) -- once a ticket already has a
+                department, it should only ever change as a side effect of a
+                "Routed to X" status transition, never picked directly from a
+                plain dropdown. But a ticket created with NO department at all
+                (current_department is null/empty) has no queue context to pull
+                a "Routed to X" option from in the first place, so locking it
+                unconditionally leaves it permanently stuck with no department
+                and no way to ever get one -- allow the one-time direct pick
+                only while it's still empty. */}
             <DepartmentField
               issueKey={issueKey}
-              canEdit={false}
+              canEdit={!(issue as any).current_department}
               currentDepartment={(issue as any).current_department || null}
               spaceKey={issue.spaceKey || issueKey.split('-').slice(0, -1).join('-')}
               spaceId={issue.spaceId}

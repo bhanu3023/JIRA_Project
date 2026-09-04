@@ -87,10 +87,16 @@ function StatCards({ totalSpaces, openIssues, resolvedToday, teamMembers, isAdmi
   totalSpaces: number; openIssues: number; resolvedToday: number; teamMembers: number; isAdmin: boolean;
   highlightedBox: DashboardHighlight | null; toggleHighlight: (id: DashboardHighlight) => void;
 }) {
+  // Open Issues / Resolved count only the signed-in user's OWN assigned
+  // tickets (see the assignee: user.id fetch below) -- sitting unlabeled
+  // next to Total Spaces / Team Members, which really are org-wide, made
+  // them read as (wrong-looking) org totals. Labeled "My ..." instead of
+  // changing the underlying query, since the click-to-filter "My Assigned
+  // Tickets" behavior below only makes sense for a personal count.
   const stats = [
     { label: 'Total Spaces',   value: totalSpaces,   icon: <Zap size={16} />,         iconClass: 'text-blue-500 bg-blue-50' },
-    { label: 'Open Issues',    value: openIssues,    icon: <AlertCircle size={16} />,  iconClass: 'text-orange-500 bg-orange-50' },
-    { label: 'Resolved',       value: resolvedToday, icon: <CheckCircle2 size={16} />, iconClass: 'text-green-500 bg-green-50' },
+    { label: 'My Open Issues', value: openIssues,    icon: <AlertCircle size={16} />,  iconClass: 'text-orange-500 bg-orange-50' },
+    { label: 'My Resolved',    value: resolvedToday, icon: <CheckCircle2 size={16} />, iconClass: 'text-green-500 bg-green-50' },
     // Org-wide member count is admin-only info
     ...(isAdmin ? [{ label: 'Team Members', value: teamMembers, icon: <Users size={16} />, iconClass: 'text-purple-500 bg-purple-50' }] : []),
   ];
@@ -119,15 +125,22 @@ export default function DashboardPage() {
   const [openIssuesCount, setOpenIssuesCount] = useState(0);
   const [resolvedTodayCount, setResolvedTodayCount] = useState(0);
 
-  // Fetch per-user stats — assigned tickets split by open vs done
+  // Fetch per-user stats — assigned tickets split by open vs done.
+  // assigneeStrict:'true' is required here -- without it the backend's
+  // assignee filter silently broadens to "currently assigned OR ever
+  // worked on" (via user_worked_on_tickets), which is the right behavior
+  // for the Filters page's exploratory search but wrong for "My ..." stat
+  // cards -- confirmed for real: CF-21875 (actually assigned to Mayank
+  // Jain) showed up under Bhanu's "My Resolved" purely because he'd done
+  // manual testing on that ticket earlier, leaving a worked-on row behind.
   useEffect(() => {
     if (!user?.id) return;
     // Open: my assigned tickets NOT in done status
-    api.getIssues({ assignee: user.id, excludeDone: 'true', limit: '1' })
+    api.getIssues({ assignee: user.id, excludeDone: 'true', limit: '1', assigneeStrict: 'true' })
       .then((d: any) => setOpenIssuesCount(d.total ?? 0))
       .catch(() => {});
     // Resolved: my assigned tickets IN done status
-    api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '1' })
+    api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '1', assigneeStrict: 'true' })
       .then((d: any) => setResolvedTodayCount(d.total ?? 0))
       .catch(() => {});
   }, [user?.id]);
@@ -206,7 +219,7 @@ export default function DashboardPage() {
       setLoading(true);
       try {
         if (user) {
-          const data = await api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '50' });
+          const data = await api.getIssues({ assignee: user.id, statusCategory: 'done', limit: '50', assigneeStrict: 'true' });
           const issues = data.issues || [];
           setAssignedIssues(issues);
           assignedResolvedCache.current = issues;

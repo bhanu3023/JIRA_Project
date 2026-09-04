@@ -103,6 +103,7 @@ export const INFRA_ISSUE_TYPES = [
   'Agent Deployment',
   'Bitbucket Repo Access',
   'Test Account Creation',
+  'Migration Reports',
 ];
 
 const WORK_TYPES = [
@@ -369,6 +370,9 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // migration-style department, never requires them to create a ticket --
   // by request.
   const skipsInfraOptionalFields = form.department.trim().toLowerCase() === 'infra';
+  // IT Administration's own board never requires Infra Issue Type -- by
+  // request. Every other board keeps it required when department is Infra.
+  const isITAdminBoard = selectedSpaceKey.toUpperCase() === 'IA';
   const showMigrationFields = !NON_MIGRATION_SPACE_KEYS.has(selectedSpaceKey.toUpperCase());
 
   // Narrow the Status dropdown to the selected queue's own status list, same
@@ -452,7 +456,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingProductType    = showMigrationFields && !skipsInfraOptionalFields && form.productType.length === 0;
     const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !skipsProjectManager;
     const missingProjectPool    = showMigrationFields && !skipsInfraOptionalFields && !form.projectPool.trim();
-    const missingInfraIssueType = skipsInfraOptionalFields && !form.infraIssueType.trim();
+    const missingInfraIssueType = skipsInfraOptionalFields && !isITAdminBoard && !form.infraIssueType.trim();
     const missingCustomFields = createIssueFields.filter((cf: any) => cf.required && !String(customFieldValues[cf.id] || '').trim());
 
     setSummaryError(missingSummary);
@@ -756,10 +760,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 </div>
 
                 {/* Infra Issue Type -- shown on every ticket (by request), required
-                    only when the ticket is actually going to Infra */}
+                    only when the ticket is actually going to Infra, except on
+                    the IT Administration board itself (also by request) */}
                 <div className="mb-4">
                   <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">
-                    Infra Issue Type {skipsInfraOptionalFields && <span className="text-red-500">*</span>}
+                    Infra Issue Type {skipsInfraOptionalFields && !isITAdminBoard && <span className="text-red-500">*</span>}
                   </label>
                   <select
                     value={form.infraIssueType}
