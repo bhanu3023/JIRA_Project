@@ -52,6 +52,60 @@ function makeImageSrcsAbsolute(html: string): string {
   return html.replace(/(<img\b[^>]*\bsrc=["'])\/(?!\/)/gi, `$1${APP_URL}/`);
 }
 
+// makeImageSrcsAbsolute fixes the URL, but the URL was never actually the
+// problem for Outlook specifically -- confirmed for real: the absolute URL
+// loads correctly on its own (fetched directly, outside any mail client),
+// yet Outlook still showed a blank box with "Some content in this message
+// has been blocked because the sender isn't in your Safe senders list."
+// That's Outlook's default block on REMOTE content in HTML email, applied
+// to any external image URL regardless of whether the URL itself works --
+// it's not fixable by changing the URL. The actual fix is to stop the image
+// from being remote content at all: embed it as an inline CID attachment
+// (part of the MIME message itself), which every major mail client renders
+// unconditionally since there's no external fetch to block. Reads the file
+// straight off local disk using the same path layout the upload/serving
+// routes in jira-pg-api.ts use (uploads/tmp/<id>/<name> for pasted
+// comment/description images, public/uploads/<name> for attachments) --
+// falls back to leaving the (still-absolutized) remote src untouched for
+// any image it can't find on disk, e.g. one hosted on some other domain.
+async function embedImagesAsCid(html: string): Promise<{ html: string; attachments: Array<{ filename: string; content: Buffer; cid: string; contentType: string }> }> {
+  const imgSrcRe = /<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
+  const srcs = Array.from(new Set(Array.from(html.matchAll(imgSrcRe)).map(m => m[1])));
+  if (!srcs.length) return { html, attachments: [] };
+
+  const { readFile } = await import('fs/promises');
+  const nodePath = await import('path');
+  const MIME: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+  const attachments: Array<{ filename: string; content: Buffer; cid: string; contentType: string }> = [];
+  const cidBySrc = new Map<string, string>();
+  let idx = 0;
+
+  for (const src of srcs) {
+    let urlPath = src;
+    try { urlPath = new URL(src, APP_URL).pathname; } catch { /* relative path, use as-is */ }
+    const tmpMatch = urlPath.match(/^\/api\/uploads\/tmp\/([^/]+)\/([^/?#]+)/);
+    const attachMatch = urlPath.match(/^\/uploads\/([^?#]+)/);
+    let diskPath: string | null = null;
+    if (tmpMatch) diskPath = nodePath.join(process.cwd(), 'uploads', 'tmp', tmpMatch[1], decodeURIComponent(tmpMatch[2]));
+    else if (attachMatch) diskPath = nodePath.join(process.cwd(), 'public', 'uploads', decodeURIComponent(attachMatch[1]));
+    if (!diskPath) continue;
+    try {
+      const buf = await readFile(diskPath);
+      const ext = (diskPath.split('.').pop() || '').toLowerCase();
+      const cid = `img${idx++}_${Date.now()}@neutara`;
+      attachments.push({ filename: nodePath.basename(diskPath), content: buf, cid, contentType: MIME[ext] || 'application/octet-stream' });
+      cidBySrc.set(src, cid);
+    } catch { /* file missing on disk -- leave this one src untouched, falls back to a remote link */ }
+  }
+  if (!cidBySrc.size) return { html, attachments: [] };
+
+  const out = html.replace(imgSrcRe, (full, srcVal) => {
+    const cid = cidBySrc.get(srcVal);
+    return cid ? full.replace(srcVal, `cid:${cid}`) : full;
+  });
+  return { html: out, attachments };
+}
+
 // ── Priority colors (same as Jira) ────────────────────────────────────────────
 const PRIORITY_COLOR: Record<string, string> = {
   highest: '#FF0000',
@@ -199,7 +253,7 @@ async function getGraphMailToken(email: string): Promise<string | null> {
 }
 
 // ── Send via Microsoft Graph API (OAuth fallback when SMTP not configured) ─────
-async function sendViaGraph(opts: { from: string; to: string[]; subject: string; html: string; text: string; inReplyTo?: string }) {
+async function sendViaGraph(opts: { from: string; to: string[]; subject: string; html: string; text: string; inReplyTo?: string; attachments?: Array<{ filename: string; content: Buffer; cid: string; contentType: string }> }) {
   try {
     const { getOAuthTokens } = await import('@/lib/oauth-service');
     const tokens = getOAuthTokens(opts.from);
@@ -226,6 +280,16 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
         // ignores this field entirely, so this can't fix that case.
         from: { emailAddress: { name: FROM_NAME, address: opts.from } },
       };
+      if (opts.attachments?.length) {
+        message.attachments = opts.attachments.map(a => ({
+          '@odata.type': '#microsoft.graph.fileAttachment',
+          name: a.filename,
+          contentType: a.contentType,
+          contentBytes: a.content.toString('base64'),
+          isInline: true,
+          contentId: a.cid,
+        }));
+      }
       // Thread the email into the original conversation
       if (opts.inReplyTo) {
         message.internetMessageHeaders = [
@@ -340,7 +404,7 @@ async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: 
 // SMTP account (Microsoft 365 rejects legacy basic-auth SMTP for many
 // tenants) silently dropped the notification instead of falling back —
 // assignees and reporters got nothing, with no visible error.
-export async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string) {
+export async function sendNotification(to: string[], subject: string, html: string, text: string, inReplyTo?: string, fromEmail?: string, attachments?: Array<{ filename: string; content: Buffer; cid: string; contentType: string }>) {
   const uniqueTo = Array.from(new Set(to.filter(Boolean)));
   if (!uniqueTo.length) return;
 
@@ -357,7 +421,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
   }
 
   if (fromEmail) {
-    const sentViaTicketInbox = await sendViaGraph({ from: fromEmail, to: uniqueTo, subject, html, text, inReplyTo });
+    const sentViaTicketInbox = await sendViaGraph({ from: fromEmail, to: uniqueTo, subject, html, text, inReplyTo, attachments });
     if (sentViaTicketInbox) return;
   }
 
@@ -383,6 +447,9 @@ export async function sendNotification(to: string[], subject: string, html: stri
         mailOpts.inReplyTo = inReplyTo;
         mailOpts.references = inReplyTo;
       }
+      if (attachments?.length) {
+        mailOpts.attachments = attachments.map(a => ({ filename: a.filename, content: a.content, cid: a.cid, contentType: a.contentType }));
+      }
       await transporter.sendMail(mailOpts);
       console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')} via SMTP (${FROM_EMAIL})`);
       smtpBrokenUntil = 0;
@@ -406,7 +473,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
   // (or several) accounts' tokens having quietly expired without turning a
   // single notification send into a long serial sweep of the whole table.
   for (const candidate of candidates.slice(0, 10)) {
-    if (await sendViaGraph({ from: candidate, to: uniqueTo, subject, html, text, inReplyTo })) return;
+    if (await sendViaGraph({ from: candidate, to: uniqueTo, subject, html, text, inReplyTo, attachments })) return;
   }
   console.error(`[Notification] All send methods failed for "${subject}" to ${uniqueTo.join(', ')}`);
 }
@@ -609,8 +676,16 @@ export async function notifyCommentAdded(issue: {
   const { emailthreadid: sourceMessageId, inboxEmail } = await getTicketThreadInfo(issue.key);
 
   // Send a plain reply email — just the comment text, no ticket template
-  // This looks like a normal email reply so the recipient can reply back
-  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">${makeImageSrcsAbsolute(issue.comment.body)}</div>`;
+  // This looks like a normal email reply so the recipient can reply back.
+  // Pasted images are embedded as inline CID attachments (see
+  // embedImagesAsCid) instead of linked by URL -- Outlook and other clients
+  // block remote <img> content by default until the sender is trusted, even
+  // when the URL itself works fine, so a linked image showed as a blank
+  // "blocked content" box on the recipient's first email from this sender.
+  // makeImageSrcsAbsolute still runs afterward as a fallback for any image
+  // embedImagesAsCid couldn't find on disk (e.g. already deleted).
+  const { html: embeddedBody, attachments } = await embedImagesAsCid(issue.comment.body);
+  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">${makeImageSrcsAbsolute(embeddedBody)}</div>`;
   const commentText = issue.comment.body.replace(/<[^>]+>/g, '');
 
   await sendNotification(
@@ -620,6 +695,7 @@ export async function notifyCommentAdded(issue: {
     commentText,
     sourceMessageId,
     inboxEmail,
+    attachments,
   );
 }
 
