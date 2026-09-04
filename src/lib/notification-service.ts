@@ -168,7 +168,7 @@ function buildEmailHtml(opts: {
         <span style="font-size:12px;color:#0052CC;font-weight:600">${opts.issueKey}</span>
         <h2 style="margin:4px 0 0;font-size:18px;color:#172B4D;line-height:1.3">${opts.issueSummary}</h2>
       </a>
-      <p style="margin:4px 0 0;font-size:12px;color:#888">${opts.spaceName} (${opts.spaceKey})</p>
+      <p style="margin:4px 0 0;font-size:12px;color:#888">${opts.spaceName}</p>
     </div>
 
     <!-- Fields table -->
@@ -615,6 +615,7 @@ export async function notifyStatusChanged(issue: {
   const changedByName = issue.changedBy ? `${issue.changedBy.firstName} ${issue.changedBy.lastName}`.trim() : 'Someone';
   const isResolved = ['done'].includes(issue.newStatus.category);
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';
+  const reporterName = issue.reporter ? `${issue.reporter.firstName} ${issue.reporter.lastName}`.trim() : null;
   const displayKey = issue.cfKey || issue.key;
   const { emailthreadid, inboxEmail } = await getTicketThreadInfo(issue.key);
 
@@ -626,8 +627,14 @@ export async function notifyStatusChanged(issue: {
     spaceName:    issue.spaceName,
     eventLabel:   isResolved ? 'Issue Resolved' : 'Status Changed',
     eventColor:   isResolved ? '#10B981' : '#FF991F',
+    // Three distinct roles were easy to blur together with only "Assigned
+    // to"/"Changed by" shown -- who originally raised the ticket (reporter)
+    // never appeared at all, so a reader had to infer it, or mistake
+    // "Changed by" (whoever just made THIS status change) for the reporter.
+    // Explicit "Raised by" makes all three unambiguous in one glance.
     fields: [
       { label: 'Status',      value: `${issue.oldStatus.name}  →  ${issue.newStatus.name}`, color: STATUS_COLOR[issue.newStatus.category] },
+      ...(reporterName ? [{ label: 'Raised by', value: reporterName }] : []),
       { label: 'Assigned to', value: assigneeName, color: '#0052CC' },
       { label: 'Changed by',  value: changedByName },
       { label: 'Priority',    value: issue.priority, color: PRIORITY_COLOR[issue.priority.toLowerCase()] },
