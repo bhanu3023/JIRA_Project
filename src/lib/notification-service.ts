@@ -434,8 +434,14 @@ export async function notifyIssueCreated(issue: {
   assignee?: { email?: string | null; firstName?: string; lastName?: string } | null;
   reporter?: { email?: string | null; firstName?: string; lastName?: string } | null;
   description?: string | null;
+  adminEmails?: string[];
 }) {
-  const to = recipients(issue.assignee, issue.reporter);
+  // Admins are appended on top of assignee/reporter (not the only path in)
+  // so they see every new ticket across every space, not just ones they're
+  // personally on -- previously this function only ever notified the
+  // assignee/reporter, so an admin with no stake in a given ticket never
+  // heard about it at all.
+  const to = recipients(issue.assignee, issue.reporter, ...(issue.adminEmails || []).map(email => ({ email })));
   if (!to.length) return;
 
   const assigneeName = issue.assignee ? `${issue.assignee.firstName} ${issue.assignee.lastName}`.trim() : 'Unassigned';

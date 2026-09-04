@@ -6088,6 +6088,13 @@ async function _handleJiraPgApi(
       data: { issueCount: { increment: 1 } },
     });
 
+    // Admins should hear about every new ticket, not just ones they're
+    // personally assigned/reporting on -- fetch them once and fan out to
+    // both the email path (notifyIssueCreated) and the in-app path below.
+    const adminUsers = await db.user.findMany({ where: { role: 'admin', isActive: true }, select: { id: true, email: true } });
+    const adminEmails = adminUsers.map((u: any) => u.email).filter(Boolean);
+    const adminIds = adminUsers.map((u: any) => u.id);
+
     // Send email notification (fire-and-forget)
     notifyIssueCreated({
       key: issue.key, cfKey: (issue as any).cf_key || null, summary: issue.summary,
@@ -6096,6 +6103,7 @@ async function _handleJiraPgApi(
       spaceName: issue.space?.name ?? sk,
       status: { name: issue.status?.name ?? 'Open', category: issue.status?.category ?? 'todo' },
       assignee: issue.assignee, reporter: issue.reporter,
+      adminEmails,
     }).catch(() => {});
 
     // If ticket has no assignee, email leads + shift leads so they can pick it up
@@ -6121,10 +6129,10 @@ async function _handleJiraPgApi(
       } catch { /* non-critical */ }
     }
 
-    // In-app notification: notify assignee + leads/shift leads for this dept (reporter created it, so skip them)
+    // In-app notification: notify assignee + leads/shift leads for this dept + admins (reporter created it, so skip them)
     const createdLeadIds = await getSpaceLeadUserIds(sp.id, issueDept);
     await notifyUsers(
-      [issue.assigneeId, ...createdLeadIds],
+      [issue.assigneeId, ...createdLeadIds, ...adminIds],
       issue.reporterId,
       { type: 'CREATED', title: `New issue: ${displayKey}`, message: issue.summary, issueKey: displayKey }
     );
