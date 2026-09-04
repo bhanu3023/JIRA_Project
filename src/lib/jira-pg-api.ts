@@ -6114,6 +6114,14 @@ async function _handleJiraPgApi(
     // personally assigned/reporting on -- fan out to both the email path
     // (notifyIssueCreated) and the in-app path below.
     const { ids: adminIds, emails: adminEmails } = await getAdminRecipients();
+    // IT Administration board: Vamshi Gande and Pavan B want an email for
+    // every new ticket created here, regardless of assignee/reporter/admin
+    // status -- by request. Reuses the adminEmails channel on
+    // notifyIssueCreated rather than adding a new param, since it already
+    // means "extra recipients beyond assignee/reporter" for this event.
+    const boardCreateNotifyEmails = (issue.space?.key ?? sk) === 'IA'
+      ? [...adminEmails, 'vamshi.gande@cloudfuze.com', 'pavan@cloudfuze.com']
+      : adminEmails;
 
     // Send email notification (fire-and-forget)
     notifyIssueCreated({
@@ -6123,7 +6131,7 @@ async function _handleJiraPgApi(
       spaceName: issue.space?.name ?? sk,
       status: { name: issue.status?.name ?? 'Open', category: issue.status?.category ?? 'todo' },
       assignee: issue.assignee, reporter: issue.reporter,
-      adminEmails,
+      adminEmails: boardCreateNotifyEmails,
     }).catch(() => {});
 
     // If ticket has no assignee, email leads + shift leads so they can pick it up
