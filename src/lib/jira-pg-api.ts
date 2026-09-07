@@ -3140,7 +3140,14 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
     // using the (by-then-advanced) `checkpoint` produced a jql that no
     // longer matched the token from the previous page's response, and Jira
     // rejected the mismatched pair with a 400 on every page after the first.
-    const jql = encodeURIComponent(`project = ${jiraProject} AND issuekey > ${prefix}-${checkpoint} ORDER BY issuekey ASC`);
+    // issuekey's RHS must be a quoted string literal -- an unquoted
+    // "issuekey > PREFIX-123" silently matches ZERO issues (confirmed for
+    // real against the live Jira API: identical query, only difference
+    // quotes around the key, went from {issues:[]} to real results) rather
+    // than erroring, which is exactly why this sync ran successfully every
+    // 5 minutes with zero errors AND zero imports forever -- the checkpoint
+    // never had a chance to advance past whatever it started at.
+    const jql = encodeURIComponent(`project = ${jiraProject} AND issuekey > "${prefix}-${checkpoint}" ORDER BY issuekey ASC`);
     while (imported.length + errors.length < maxPerRun) {
       let url = `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=50&fields=summary`;
       if (pageToken) url += `&nextPageToken=${encodeURIComponent(pageToken)}`;
@@ -3195,7 +3202,9 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
     await ensureJiraSourceKeyUniqueIndex();
     let cfitsCheckpoint = await getCfitsSyncCheckpoint();
     let cfitsPageToken: string | undefined;
-    const cfitsJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND issuekey > ${CFITS_JIRA_PROJECT}-${cfitsCheckpoint} ORDER BY issuekey ASC`);
+    // Same quoting fix as the SYNC_PROJECTS jql above -- unquoted issuekey
+    // silently matches zero issues instead of erroring.
+    const cfitsJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND issuekey > "${CFITS_JIRA_PROJECT}-${cfitsCheckpoint}" ORDER BY issuekey ASC`);
     while (imported.length + errors.length < maxPerRun) {
       let url = `${creds.base}/rest/api/3/search/jql?jql=${cfitsJql}&maxResults=50&fields=summary`;
       if (cfitsPageToken) url += `&nextPageToken=${encodeURIComponent(cfitsPageToken)}`;
