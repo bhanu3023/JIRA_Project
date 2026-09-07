@@ -2445,9 +2445,18 @@ function parseDateRange(range: string): { from: Date; to: Date } {
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ On-demand Jira import Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
+// The real, current Jira token now lives in the app_settings DB table
+// (jira_url/jira_email/jira_token), set once via a direct SQL insert rather
+// than through any code path here -- getJiraCredentials() below already
+// checks there first. A live API token used to sit hardcoded directly in
+// this file (and therefore in git history) as the fallback when that table
+// was empty; removed entirely rather than rotated-and-kept, since a secret
+// baked into source is a real security exposure -- if app_settings is ever
+// cleared, this now fails cleanly (empty credentials -> Jira 401) instead of
+// silently falling back to a committed secret.
 const JIRA_BASE_URL = process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net';
-const JIRA_EMAIL    = process.env.JIRA_EMAIL    || 'sujana.manapuram@cloudfuze.com';
-const JIRA_TOKEN    = process.env.JIRA_TOKEN    || 'REDACTED_API_TOKEN';
+const JIRA_EMAIL    = process.env.JIRA_EMAIL    || '';
+const JIRA_TOKEN    = process.env.JIRA_TOKEN    || '';
 const JIRA_AUTH_HDR = 'Basic ' + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString('base64');
 
 // Lazily loaded Jira credentials from app_settings DB (set during import)
