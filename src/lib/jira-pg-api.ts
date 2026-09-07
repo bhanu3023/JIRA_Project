@@ -9538,12 +9538,23 @@ async function _handleJiraPgApi(
     // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo] —
     // same convention as reports/mbr-team's team tabs, so the date-range filter
     // means the same thing everywhere in the MBR page.
+    // Anchored to IST (+05:30), not parsed as bare UTC -- a bare
+    // "YYYY-MM-DD" string is parsed as UTC midnight by Date's ISO handling,
+    // which is 5:30 AM IST, not midnight IST. This app's users operate in
+    // IST regardless of the server's own timezone (a Docker container
+    // defaults to UTC with no TZ set), so an unanchored boundary quietly
+    // dropped up to 5.5 hours of real tickets at each end of the range --
+    // the same class of bug already fixed for the Filters page's own
+    // custom date-range picker (see parseDateRange's "between:" branch),
+    // just never applied here, so MBR and Filters disagreed on the same
+    // date range for the same department (confirmed for real comparing
+    // Dev/Migration counts for Aug 1-31 between the two pages).
     const filterParams: any[] = [];
     let fromIdx: number | null = null;
     let toIdx: number | null = null;
-    if (dateFrom) { filterParams.push(new Date(dateFrom).toISOString()); fromIdx = filterParams.length; }
+    if (dateFrom) { filterParams.push(new Date(`${dateFrom}T00:00:00+05:30`).toISOString()); fromIdx = filterParams.length; }
     if (dateTo) {
-      const toExclusive = new Date(dateTo);
+      const toExclusive = new Date(`${dateTo}T00:00:00+05:30`);
       toExclusive.setDate(toExclusive.getDate() + 1);
       filterParams.push(toExclusive.toISOString());
       toIdx = filterParams.length;
@@ -9784,12 +9795,17 @@ async function _handleJiraPgApi(
     const segment = url.searchParams.get('segment') || '';
     const staleDays = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
+    // IST-anchored, same fix and same reasoning as reports/mbr just above --
+    // a bare "YYYY-MM-DD" parses as UTC midnight (5:30 AM IST), quietly
+    // dropping up to 5.5 hours of real tickets at each boundary and
+    // disagreeing with the Filters page's already-IST-anchored date range
+    // for the same department/date selection.
     const baseParams: any[] = [dept, roster];
     let fromIdx: number | null = null;
     let toIdx: number | null = null;
-    if (dateFrom) { baseParams.push(new Date(dateFrom).toISOString()); fromIdx = baseParams.length; }
+    if (dateFrom) { baseParams.push(new Date(`${dateFrom}T00:00:00+05:30`).toISOString()); fromIdx = baseParams.length; }
     if (dateTo) {
-      const toExclusive = new Date(dateTo);
+      const toExclusive = new Date(`${dateTo}T00:00:00+05:30`);
       toExclusive.setDate(toExclusive.getDate() + 1);
       baseParams.push(toExclusive.toISOString());
       toIdx = baseParams.length;
@@ -10116,8 +10132,13 @@ async function _handleJiraPgApi(
     const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     // Mirrors monthlyBucketExpr's SQL rule exactly, so a breached ticket lands
     // in the same monthly row its total/resolved counts already landed in.
-    const rangeFromMs = fromIdx ? new Date(dateFrom).getTime() : null;
-    const rangeToMs = toIdx ? (() => { const d = new Date(dateTo); d.setDate(d.getDate() + 1); return d.getTime(); })() : null;
+    // Same IST anchor as the baseParams boundaries above -- re-deriving this
+    // from the unanchored dateFrom/dateTo strings again here (instead of
+    // reusing baseParams' own already-anchored values) would silently put
+    // this monthly-bucket display 5.5 hours out of sync with the actual
+    // ticket-list query's boundaries.
+    const rangeFromMs = fromIdx ? new Date(`${dateFrom}T00:00:00+05:30`).getTime() : null;
+    const rangeToMs = toIdx ? (() => { const d = new Date(`${dateTo}T00:00:00+05:30`); d.setDate(d.getDate() + 1); return d.getTime(); })() : null;
     const monthLabelFor = (row: any): string => {
       let d = new Date(row.createdAt);
       if (rangeFromMs !== null || rangeToMs !== null) {
