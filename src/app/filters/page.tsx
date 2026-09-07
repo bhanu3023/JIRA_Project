@@ -1526,11 +1526,16 @@ export default function FiltersPage() {
   // that can desync, e.g. an older deep link that set one without the
   // other). Reporter, Priority, Department, and Updated are excluded here --
   // they're already always-visible fixed columns, not extras.
-  // "Created" is table-only (kept out of EXPORT_EXTRA_COLUMNS since the CSV
-  // export already always includes its own fixed Created column -- adding
-  // it there too would double it up in the export).
+  // "Created"/"Updated" are table-only (kept out of EXPORT_EXTRA_COLUMNS
+  // since the CSV export already always includes its own fixed Created/
+  // Updated columns -- adding them there too would double them up in the
+  // export). "Updated" was missing here entirely even though it's a real,
+  // selectable filter (EXTRA_FILTER_OPTIONS) and the CSV export already
+  // shows it as a fixed column -- selecting the Updated date filter had no
+  // way to actually show that value anywhere in the on-screen table.
   const TABLE_ONLY_COLUMNS: Record<string, { label: string; getValue: (issue: any) => string }> = {
     created: { label: 'Created', getValue: (i) => i.createdAt ? new Date(i.createdAt).toLocaleDateString() : '' },
+    updated: { label: 'Updated', getValue: (i) => i.updatedAt ? new Date(i.updatedAt).toLocaleDateString() : '' },
   };
   const TABLE_COLUMN_DEFS: Record<string, { label: string; getValue: (issue: any) => string }> = {
     ...TABLE_ONLY_COLUMNS,
@@ -1538,6 +1543,7 @@ export default function FiltersPage() {
   };
   const EXTRA_COLUMN_HAS_VALUE: Record<string, boolean> = {
     created: !!selCreated,
+    updated: !!selUpdated,
     productType: selProductType.length > 0,
     combination: !!selCombination,
     projectManager: selProjectManager.length > 0,
