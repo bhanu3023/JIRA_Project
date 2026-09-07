@@ -2058,6 +2058,14 @@ export default function FiltersPage() {
             </p>
           </div>
         ) : (
+          // Wrapped in its own horizontal-scroll container -- the card
+          // around this table uses overflow-hidden (for its rounded
+          // corners), which with no inner scroll wrapper CLIPPED away any
+          // column past the visible width instead of making it reachable
+          // by scrolling. Adding fields via "More filters" pushes the
+          // table well past 1800px, so those columns were being cut off
+          // entirely, not just off-screen.
+          <div className="overflow-x-auto">
           <table className="table-fixed">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
@@ -2228,6 +2236,7 @@ export default function FiltersPage() {
               })}
             </tbody>
           </table>
+          </div>
         )}
 
         {/* Pagination -- results beyond the first 100 matches used to be
