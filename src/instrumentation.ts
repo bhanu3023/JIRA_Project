@@ -136,6 +136,28 @@ export async function register() {
     }
   }
 
+  // One-time correction: jira_sla_breached (+_due_at/_start_at) was only ever
+  // populated by a one-time static snapshot (jira-sla-breach-backfill-ids.json)
+  // taken against Jira at some point in the past -- it can never cover a
+  // ticket synced after that snapshot, and the ongoing sync never fetched
+  // these Jira fields at all until now (see extractJiraSlaBreach). Reconciles
+  // every L2B/L3B/PSM/SOPS/QA/CFITS ticket directly against live Jira instead.
+  // Idempotent (app_settings flag), same shape as backfillClientNames/
+  // backfillUpdatedAt above.
+  async function backfillSlaBreach(label: string): Promise<void> {
+    try {
+      const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
+      const res = await fetch(`${internalUrl}/api/admin/backfill-sla-breach`, {
+        method: 'POST',
+        headers: { 'x-internal-job-secret': INTERNAL_JOB_SECRET },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.fixed > 0) console.log(`[SLA breach backfill] ${label} — checked ${data.checked}, corrected ${data.fixed} ticket(s), ${data.breachedFound} confirmed breached.`);
+    } catch (err) {
+      console.error(`[SLA breach backfill] ${label} — failed:`, err);
+    }
+  }
+
   // Fire-and-forget: schedule the boot-time run and both 5-minute intervals,
   // but do NOT await any of it here — see the note above for why.
   setTimeout(() => {
@@ -143,6 +165,7 @@ export async function register() {
     syncJiraIssues('Boot');
     backfillClientNames('Boot');
     backfillUpdatedAt('Boot');
+    backfillSlaBreach('Boot');
 
     // Retry loop: every 5 minutes, restart any pollers that are down.
     // This handles OAuth token expiry, network blips, and tokens that

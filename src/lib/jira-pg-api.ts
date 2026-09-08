@@ -2514,7 +2514,51 @@ const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> 
 // (real Jira field names, not guessed). Neither was fetched at all before, so
 // a ticket that had real values for both in Jira showed them empty here after
 // migration -- importIssueFromJira/importCfitsIssue never had the data to map.
-const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665,customfield_10059,customfield_10402';
+const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665,customfield_10059,customfield_10402,customfield_10917,customfield_10849,customfield_10306,customfield_10309,customfield_10043';
+
+// customfield_10917 = "SLA Breached" (Dev/L2B/L3B's own field), customfield_10849
+// = "Resolution SLA Breach" (Migration/CFITS's own field) -- neither is exclusive
+// to one department, so both are always checked (breached if EITHER says "Yes"),
+// same as the one-time jira-sla-breach-backfill-ids.json reconciliation this
+// mirrors. customfield_10306/10309 = SLA Due/Start Time, only populated
+// alongside the select fields on some tickets. Many tickets never got the
+// select field set at all but still carry real breach data in Jira's own
+// native SLA metric (customfield_10043, "Time to resolution") instead -- its
+// clock just never got formally closed out with a Yes/No. A reopened ticket
+// can have multiple completed cycles (the SLA restarts each time); treat it as
+// breached if ANY cycle was, using that cycle's own due/start time, same
+// fallback backfill-jira-sla-breach.mjs already established as correct.
+// Returns null only when there is genuinely no SLA data of any kind (a brand
+// new, not-yet-tracked ticket) -- callers should leave the existing
+// jira_sla_breached value alone in that case, not stomp it to false.
+function extractJiraSlaBreach(fields: any): { breached: boolean; dueAt: Date | null; startAt: Date | null } | null {
+  const pick = (raw: any) => (Array.isArray(raw) ? raw[0] : raw);
+  const devOption = pick(fields?.customfield_10917);
+  const migrationOption = pick(fields?.customfield_10849);
+  const devBreached = String(devOption?.value || '').toLowerCase() === 'yes';
+  const migrationBreached = String(migrationOption?.value || '').toLowerCase() === 'yes';
+  if (devOption || migrationOption) {
+    return {
+      breached: devBreached || migrationBreached,
+      dueAt: fields?.customfield_10306 ? new Date(fields.customfield_10306) : null,
+      startAt: fields?.customfield_10309 ? new Date(fields.customfield_10309) : null,
+    };
+  }
+  const native = fields?.customfield_10043;
+  if (!native || typeof native !== 'object') return null;
+  const cycles = [
+    ...(Array.isArray(native.completedCycles) ? native.completedCycles : []),
+    ...(native.ongoingCycle ? [native.ongoingCycle] : []),
+  ];
+  if (!cycles.length) return null;
+  const breachedCycle = cycles.find((c: any) => c.breached);
+  const cycle = breachedCycle || cycles[cycles.length - 1];
+  return {
+    breached: !!breachedCycle,
+    dueAt: cycle.breachTime?.epochMillis ? new Date(cycle.breachTime.epochMillis) : null,
+    startAt: cycle.startTime?.epochMillis ? new Date(cycle.startTime.epochMillis) : null,
+  };
+}
 
 function extractJiraValue(raw: any): string | null {
   if (!raw) return null;
@@ -2721,6 +2765,19 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
       if (f.resolutiondate) {
         await pool.query(`UPDATE issues SET "resolvedAt" = $1 WHERE id = $2`, [new Date(f.resolutiondate), issueId]);
       }
+      // jira_sla_breached/_due_at/_start_at also aren't in the Prisma schema.
+      // Keep them live on every re-sync instead of only at creation -- Jira's
+      // own SLA select field can flip from empty/No to Yes well after the
+      // ticket was first imported (e.g. once its clock formally closes), and
+      // this update branch runs on every subsequent sync of an already-
+      // migrated ticket, not just its first import.
+      const slaBreach = extractJiraSlaBreach(f);
+      if (slaBreach) {
+        await pool.query(
+          `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+          [slaBreach.breached, slaBreach.dueAt, slaBreach.startAt, issueId]
+        );
+      }
     } else {
       const created = await db.issue.create({
         data: {
@@ -2764,6 +2821,19 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
       // resolutiondate is Jira's own field for exactly this.
       if (f.resolutiondate) {
         await pool.query(`UPDATE issues SET "resolvedAt" = $1 WHERE id = $2`, [new Date(f.resolutiondate), issueId]);
+      }
+      // jira_sla_breached/_due_at/_start_at (also not in the Prisma schema) --
+      // without this, every newly-synced ticket kept reporting "not breached"
+      // regardless of Jira's own real SLA history, since only a one-time
+      // static list (jira-sla-breach-backfill-ids.json) ever populated this
+      // column, and that list can never cover a ticket synced after it was
+      // generated.
+      const slaBreachNew = extractJiraSlaBreach(f);
+      if (slaBreachNew) {
+        await pool.query(
+          `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+          [slaBreachNew.breached, slaBreachNew.dueAt, slaBreachNew.startAt, issueId]
+        );
       }
       // A ticket imported from Jira never got a CF-#### display key at all --
       // every other place a ticket comes into existence (manual creation, the
@@ -2843,11 +2913,24 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
 // Projects that get an automatic, recurring catch-up sync from Jira -- see
 // runJiraIssueSync below. Add a prefix here to bring another board under the
 // same "never miss new tickets again" coverage. Only valid for boards where
-// the local key IS the Jira key (confirmed true for L2B/L3B). CFITS is NOT
-// one of these -- see importCfitsIssue below for why.
-const SYNC_PROJECTS: { prefix: string; jiraProject: string }[] = [
-  { prefix: 'L2B', jiraProject: 'L2B' },
-  { prefix: 'L3B', jiraProject: 'L3B' },
+// the local key IS the Jira key (confirmed true for L2B/L3B, and for PSM/
+// SOPS/QA below). CFITS is NOT one of these -- see importCfitsIssue below for
+// why.
+//
+// PSM/SOPS/QA added after a full Jira-vs-local audit found they'd been
+// migrated ONCE and never synced again since (no jira_sync_last_num_* row
+// for any of the three, unlike L2B/L3B/CFITS) -- confirmed for real: PSM was
+// missing 165 tickets, QA 161, SOPS 5, every one of them created after the
+// original one-time migration. defaultDepartment matches each board's own
+// single, 100%-consistent existing department (confirmed for real: every
+// already-migrated PSM ticket is 'Pre-Sales', every SOPS ticket 'SalesOps',
+// every QA ticket 'QA' -- NOT 'Dev', which is only right for L2B/L3B).
+const SYNC_PROJECTS: { prefix: string; jiraProject: string; defaultDepartment: string }[] = [
+  { prefix: 'L2B',  jiraProject: 'L2B',  defaultDepartment: 'Dev' },
+  { prefix: 'L3B',  jiraProject: 'L3B',  defaultDepartment: 'Dev' },
+  { prefix: 'PSM',  jiraProject: 'PSM',  defaultDepartment: 'Pre-Sales' },
+  { prefix: 'SOPS', jiraProject: 'SOPS', defaultDepartment: 'SalesOps' },
+  { prefix: 'QA',   jiraProject: 'QA',   defaultDepartment: 'QA' },
 ];
 
 const CFITS_JIRA_PROJECT = 'CFITS';
@@ -2971,10 +3054,21 @@ async function importCfitsIssue(cfitsKey: string): Promise<string | null> {
     // that clamps to 0 once already over budget, showing DUE == START,
     // confirmed live on CF-29312/L1BOAR-15132). resolutiondate is Jira's own
     // field for exactly this.
+    // jira_sla_breached/_due_at/_start_at: without this, every CFITS-imported
+    // ticket kept reporting "not breached" regardless of Jira's own real SLA
+    // history -- only a one-time static list (jira-sla-breach-backfill-ids.json)
+    // ever populated this column, and that list can never cover a ticket
+    // migrated after it was generated. See extractJiraSlaBreach's own comment
+    // for why both customfield_10849 (this board's own field) and
+    // customfield_10917 are checked, with a native-SLA-metric fallback.
+    const cfitsSlaBreach = extractJiraSlaBreach(f);
     try {
       await pool.query(
-        `UPDATE issues SET current_department = $1, jira_source_key = $2, "resolvedAt" = COALESCE($4, "resolvedAt") WHERE id = $3`,
-        [CFITS_DEFAULT_DEPARTMENT, cfitsKey, created.id, f.resolutiondate ? new Date(f.resolutiondate) : null]
+        `UPDATE issues SET current_department = $1, jira_source_key = $2, "resolvedAt" = COALESCE($4, "resolvedAt"),
+           jira_sla_breached = COALESCE($5, jira_sla_breached), jira_sla_due_at = COALESCE($6, jira_sla_due_at), jira_sla_start_at = COALESCE($7, jira_sla_start_at)
+         WHERE id = $3`,
+        [CFITS_DEFAULT_DEPARTMENT, cfitsKey, created.id, f.resolutiondate ? new Date(f.resolutiondate) : null,
+         cfitsSlaBreach ? cfitsSlaBreach.breached : null, cfitsSlaBreach?.dueAt ?? null, cfitsSlaBreach?.startAt ?? null]
       );
     } catch (e: any) {
       if (e?.code === '23505') {
@@ -3119,6 +3213,26 @@ async function setSyncCheckpoint(prefix: string, num: number): Promise<void> {
   );
 }
 
+// One-time correction, run once ever (checked via the checkpoint row's own
+// existence, same idempotency check getSyncCheckpoint itself uses): QA's
+// real Jira numbering has an interior gap BELOW its local max at the time
+// QA was added to SYNC_PROJECTS -- QA-1443 was missing from Jira sync while
+// QA-1444 already existed locally (confirmed for real via a full Jira-vs-
+// local audit). getSyncCheckpoint's normal bootstrap-from-MAX(local) would
+// set the checkpoint to 1444 and never look back (issuekey > 1444 can never
+// match 1443), permanently skipping it forever. Seeds 1442 (one below the
+// earliest real gap) instead, so the very first sync run picks up 1443
+// naturally along with everything else already missing above it. PSM/SOPS
+// needed no such seed -- their own gaps start cleanly right after their
+// local max, which is exactly what the normal bootstrap already produces.
+async function seedQaSyncCheckpointIfMissing(): Promise<void> {
+  try {
+    await ensureAppSettingsTable();
+    const row = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'jira_sync_last_num_QA'`);
+    if (!row.rows[0]) await setSyncCheckpoint('QA', 1442);
+  } catch { /* fall through to the normal bootstrap-from-local-max if this fails */ }
+}
+
 // Same storage shape as getSyncCheckpoint (reuses setSyncCheckpoint('CFITS', n)
 // to persist), but a different bootstrap query: CFITS has no local key to
 // scan since local L1BOAR numbers don't match Jira CFITS numbers at all (see
@@ -3165,7 +3279,8 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
   const imported: string[] = [];
   const errors: string[] = [];
   const creds = await getJiraCredentials();
-  for (const { prefix, jiraProject } of SYNC_PROJECTS) {
+  await seedQaSyncCheckpointIfMissing();
+  for (const { prefix, jiraProject, defaultDepartment } of SYNC_PROJECTS) {
     if (imported.length + errors.length >= maxPerRun) break;
     let checkpoint = await getSyncCheckpoint(prefix);
     let pageToken: string | undefined;
@@ -3208,7 +3323,7 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
           // check just finds it and moves on.
           let ok = !!existing;
           if (!existing) {
-            const result = await importIssueFromJira(key, { defaultDepartment: 'Dev' });
+            const result = await importIssueFromJira(key, { defaultDepartment });
             if (result) { imported.push(key); ok = true; } else { errors.push(`${key}: import returned null`); }
           }
           if (ok) {
@@ -3536,7 +3651,7 @@ async function _handleJiraPgApi(
   // to send -- they authenticate with this per-process secret instead (see
   // internal-job-secret.ts). Scoped to one specific path rather than a
   // blanket bypass, since anything landing here has no session to audit.
-  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at')
+  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach')
     && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
 
   if (!userId && !isPublicPath && !isInternalJob) {
@@ -5131,9 +5246,20 @@ async function _handleJiraPgApi(
           // when Created/Updated is active, so a ticket that's moved on still
           // counts here as long as someone actually worked it in this dept.
           const broadenIt = (createdRange || updatedRange) && queueMembersOnlyParam;
+          // reason != 'passed': a 'passed' row only means someone in this dept
+          // routed the ticket onward (or was auto-credited as the assignee at
+          // the time of a move with no assignee yet) -- not that they did any
+          // real work. Confirmed for real: 8 Migration/Infra tickets counted
+          // here purely because their ONLY Dev record was a 'passed' hand-off,
+          // which made Filters' "Queue: Dev" count 8 higher than MBR's
+          // Customer Engineering tab for the identical scope even after MBR's
+          // own roster was fixed to match the live Dev queue -- MBR's
+          // rosterMatchSql already excludes 'passed' for this exact reason
+          // (see its own comment re: Shiva Amuda), this was the one place in
+          // Filters that still counted it.
           deptExtraClauses.push(
             broadenIt
-              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)))`
+              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2) AND w4.reason != 'passed'))`
               : memberClause
           );
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
@@ -5401,7 +5527,7 @@ async function _handleJiraPgApi(
              )) = LOWER($2)
              OR EXISTS (
                SELECT 1 FROM user_worked_on_tickets w
-               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)
+               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
              )
            )`
         : null;
@@ -5439,11 +5565,22 @@ async function _handleJiraPgApi(
                )
                OR EXISTS (
                  SELECT 1 FROM user_worked_on_tickets w
-                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)
+                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
                )
              ))
            )`
         : null;
+      // originDeptMatchSql/updatedDeptMatchSql/memberClause's broadenIt above
+      // all exclude reason = 'passed' now -- a 'passed' row only means someone
+      // in this dept routed the ticket onward (or was auto-credited as the
+      // assignee at the time of a move with no assignee yet), not that they
+      // did real work; it's deleted outright once real work follows (see the
+      // DELETE ... WHERE reason='passed' elsewhere in this file). Confirmed
+      // for real: 8 Migration/Infra tickets were counted under Queue: Dev +
+      // Updated: Aug purely because their only Dev record was a 'passed'
+      // hand-off, which is exactly the class of false positive already fixed
+      // in reports/mbr-team's own rosterMatchSql/deptMatchSql (see their
+      // comment re: Shiva Amuda) -- this brings Filters in line with that.
       // Department-scope (which of the three modes above decides "does this
       // ticket belong to dept $2") and assignee-scope (does the selected
       // person match, optionally including their historical work here) are
@@ -7028,6 +7165,12 @@ async function _handleJiraPgApi(
             const creds = await getJiraCredentials();
             const jiraKey = prefix === 'L1BOAR' ? null : key;
             let jiraFields: Record<string, string | null> | null = null;
+            // Piggybacked onto this same fetch rather than its own trigger --
+            // CFITS/L1BOAR tickets never get re-synced by the periodic job the
+            // way L2B/L3B do (see importCfitsIssue: it returns early once a
+            // ticket is already migrated), so this on-demand load is the ONLY
+            // ongoing chance to catch up jira_sla_breached for them at all.
+            let slaBreachRefresh: { breached: boolean; dueAt: Date | null; startAt: Date | null } | null = null;
 
             if (jiraKey) {
               // Direct lookup by key for L2B / L3B
@@ -7048,6 +7191,7 @@ async function _handleJiraPgApi(
                   rootCause:      extractJiraValue(f.customfield_10059),
                   fixDescription: extractJiraValue(f.customfield_10402),
                 };
+                slaBreachRefresh = extractJiraSlaBreach(f);
               }
             } else if (issue.summary) {
               // Title-based search in CFITS for L1BOAR tickets
@@ -7076,8 +7220,16 @@ async function _handleJiraPgApi(
                     rootCause:      extractJiraValue(f.customfield_10059),
                     fixDescription: extractJiraValue(f.customfield_10402),
                   };
+                  slaBreachRefresh = extractJiraSlaBreach(f);
                 }
               }
+            }
+
+            if (slaBreachRefresh) {
+              await pool.query(
+                `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+                [slaBreachRefresh.breached, slaBreachRefresh.dueAt, slaBreachRefresh.startAt, issue.id]
+              ).catch(() => {});
             }
 
             if (jiraFields) {
@@ -9617,9 +9769,14 @@ async function _handleJiraPgApi(
     const dateTo     = url.searchParams.get('dateTo') || '';
     const staleDays  = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
-    // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo] —
-    // same convention as reports/mbr-team's team tabs, so the date-range filter
-    // means the same thing everywhere in the MBR page.
+    // Matches ONLY updatedAt, not createdAt -- explicitly requested: MBR's date
+    // range used to mean "touched" (createdAt OR updatedAt in range), which
+    // counted tickets merely CREATED in the window even if last updated well
+    // outside it, so MBR came back higher than Filters' own "Updated: <range>"
+    // for the identical Queue + range (confirmed for real: tickets created in
+    // Aug but not updated in Aug accounted for the gap). MBR has no separate
+    // Created/Updated toggle the way Filters does, so it's pinned to Updated
+    // only -- the same convention as reports/mbr-team's team tabs below.
     // Anchored to IST (+05:30), not parsed as bare UTC -- a bare
     // "YYYY-MM-DD" string is parsed as UTC midnight by Date's ISO handling,
     // which is 5:30 AM IST, not midnight IST. This app's users operate in
@@ -9651,16 +9808,41 @@ async function _handleJiraPgApi(
     if (dateTo)   { filterParams.push(dateTo);   toIdx = filterParams.length; }
     let dateClause = '';
     if (fromIdx || toIdx) {
-      const createdConds: string[] = [];
       const updatedConds: string[] = [];
-      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
-      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
-      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
+      if (fromIdx) updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`);
+      if (toIdx)   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`);
+      dateClause = ` AND (${updatedConds.join(' AND ')})`;
     }
     let deptClause = '';
     if (department) {
       filterParams.push(department);
-      deptClause = ` AND i.current_department = $${filterParams.length}`;
+      const dIdx = filterParams.length;
+      // Was a plain current_department match -- narrower than Filters' own
+      // "Queue: X" scope (queueMembersOnlyParam/originDeptMatchSql/
+      // updatedDeptMatchSql/deptScopeSql above), which also counts a ticket
+      // that originated in or was genuinely worked in dept X even after it's
+      // since moved to another department. Confirmed for real: this page
+      // showed a smaller Open/count total for "Dev" than Filters' "Queue:
+      // Dev" for the identical date range, purely because those moved-on
+      // tickets dropped out here but not there. Mirrors reports/mbr-team's
+      // own deptMatchSql exactly (see its long comment) so MBR's two tabs and
+      // Filters all agree on what "belongs to this department" means:
+      // currently tagged X, OR originated in X (issue_history's earliest
+      // department change, falling back to current_department if it never
+      // moved), OR its frozen per-dept snapshot shows it completed while in
+      // X, OR there's a genuine user_worked_on_tickets row for X --
+      // excluding 'passed' hand-off credit, which just means someone
+      // assigned it onward, not that they did real work (see mbr-team's own
+      // comment on this for the confirmed real false-positive it caused).
+      deptClause = ` AND (
+        LOWER(i.current_department) = LOWER($${dIdx})
+        OR LOWER(COALESCE(
+             (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+             i.current_department
+           )) = LOWER($${dIdx})
+        OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($${dIdx}) AND LOWER(v->>'category') = 'done')
+        OR EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($${dIdx}) AND w.reason != 'passed')
+      )`;
     }
 
     const deptRows = await pool.query(`
@@ -9830,14 +10012,22 @@ async function _handleJiraPgApi(
     // they're told apart purely by roster.
     const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra', ent: 'Migration', smb: 'Migration' };
 
-    // Fixed roster, deliberately NOT read from custom_queues.queues[].memberIds
-    // (the "Dev" queue's live config on CloudFuze Board): that queue's real
-    // membership includes people who aren't this specific MBR team roster
-    // (e.g. bharath.tummaganti@cloudfuze.com, abhinav.surattu@cloudfuze.com) --
-    // a broader operational/support group, not the Customer Engineering/QA/
-    // Infra/Migration ENT/SMB teams this report is scoped to. Reverted to a
-    // fixed list per explicit request after the live-queue version surfaced
-    // exactly those extra names in the Team roster panel.
+    // Fallback roster, used only if the live custom_queues lookup below (for
+    // eng/qa/infra) comes back empty -- e.g. the Dev/QA/Infra queue's config
+    // was ever missing or its member list temporarily empty. Was the ONLY
+    // roster source for these three teams for a while (deliberately NOT read
+    // from custom_queues.queues[].memberIds, since that queue's live
+    // membership at the time included people outside this specific MBR team,
+    // e.g. bharath.tummaganti@cloudfuze.com, abhinav.surattu@cloudfuze.com --
+    // a broader operational/support group). Since reverted back to the live
+    // queue (see below): confirmed for real that a fixed list drifts out of
+    // sync as the queue's real membership changes -- this MBR tab and
+    // Filters' own "Queue: Dev" disagreed on Aug 2026's ticket count purely
+    // because of names on one list but not the other, with zero other cause
+    // once the extra names were accounted for. Migration ENT/SMB have no
+    // live-queue equivalent to fall back to at all (Migration is a single,
+    // undivided queue -- there's no way to tell ENT/SMB apart except by a
+    // hand-maintained list), so they stay on this fixed roster permanently.
     const TEAM_ROSTER: Record<string, string[]> = {
       eng: [
         'abhinandan.kumar@cloudfuze.com', 'akhila.aenkoju@cloudfuze.com', 'akib.mohd@cloudfuze.com', 'ankit@cloudfuze.com',
@@ -9870,8 +10060,29 @@ async function _handleJiraPgApi(
 
     const team = url.searchParams.get('team') || '';
     const dept = TEAM_DEPT[team];
-    const roster = TEAM_ROSTER[team];
     if (!dept) return json({ error: 'team must be one of eng, qa, infra, ent, smb' }, 400);
+
+    // eng/qa/infra map 1:1 onto a real, single queue (Dev/QA/Infra) on
+    // CloudFuze Board -- pull that queue's LIVE member list (same source
+    // Filters' own "Queue: X" uses) instead of the fixed TEAM_ROSTER list, so
+    // this tab never again drifts out of sync with Filters as people join or
+    // leave the queue. Migration ENT/SMB have no live-queue equivalent
+    // (Migration is one undivided queue, so the fixed list is the only way
+    // to tell them apart) and stay on TEAM_ROSTER permanently.
+    let roster: string[] = TEAM_ROSTER[team];
+    if (team === 'eng' || team === 'qa' || team === 'infra') {
+      try {
+        const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = 'TESTIN'`);
+        const queues: any[] = cq.rows[0]?.queues || [];
+        const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === dept.toLowerCase());
+        const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+        if (memberIds.length) {
+          const memberRows = await pool.query(`SELECT email FROM users WHERE id = ANY($1::text[]) AND email IS NOT NULL`, [memberIds]);
+          const liveEmails = memberRows.rows.map((r: any) => String(r.email).toLowerCase()).filter(Boolean);
+          if (liveEmails.length) roster = liveEmails;
+        }
+      } catch { /* fall back to the fixed TEAM_ROSTER list above if this lookup fails */ }
+    }
 
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
@@ -9906,43 +10117,55 @@ async function _handleJiraPgApi(
     let toIdx: number | null = null;
     if (dateFrom) { baseParams.push(dateFrom); fromIdx = baseParams.length; }
     if (dateTo)   { baseParams.push(dateTo);   toIdx = baseParams.length; }
+    // Matches ONLY updatedAt, not createdAt -- explicitly requested: this used
+    // to mean "touched" (createdAt OR updatedAt in range), which counted
+    // tickets merely CREATED in the window even if last updated well outside
+    // it, so this team tab came back higher than Filters' own "Updated:
+    // <range>" for the same Queue + range (confirmed for real: tickets
+    // created in Aug but not updated in Aug accounted for the gap). There's no
+    // separate Created/Updated toggle here the way Filters has one, so it's
+    // pinned to Updated only, same as reports/mbr above.
     let dateClause = '';
-    let createdInRangeSql = 'TRUE';
     if (fromIdx || toIdx) {
-      const createdConds: string[] = [];
       const updatedConds: string[] = [];
-      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
-      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
-      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
-      createdInRangeSql = createdConds.join(' AND ');
+      if (fromIdx) updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`);
+      if (toIdx)   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`);
+      dateClause = ` AND (${updatedConds.join(' AND ')})`;
     }
-    // Monthly buckets have to sum back to the exact same total the summary
-    // cards show for the same selection -- a ticket that only matched via
-    // dateClause's updatedAt side (its createdAt falls outside the window)
-    // must NOT be bucketed by that out-of-range createdAt month, or it both
-    // vanishes from the visible monthly rows (undercounting them) and, if a
-    // range spans multiple months, can misattribute it to the wrong one.
-    // Bucket by whichever of the two dates is the one actually inside the
-    // selected range; with no range selected there's no "in range" date to
-    // prefer, so it falls back to plain createdAt (original behavior).
-    const monthlyBucketExpr = (fromIdx || toIdx)
-      ? `CASE WHEN (${createdInRangeSql}) THEN i."createdAt" ELSE i."updatedAt" END`
-      : `i."createdAt"`;
+    // Bucket by updatedAt too, once a range is active -- matches whichever
+    // field dateClause actually filtered on, so a ticket never lands in a
+    // Monthly summary row its own createdAt disagrees with. No range
+    // selected has no "in range" date to prefer, so it falls back to plain
+    // createdAt (original behavior).
+    const monthlyBucketExpr = (fromIdx || toIdx) ? `i."updatedAt"` : `i."createdAt"`;
 
-    // Deliberately mirrors the Filters page's own "Queue: <dept> + date range"
-    // matching exactly (see queueMembersOnlyParam / originDeptMatchSql /
-    // updatedDeptMatchSql / deptExtraClauses above in this file) -- MBR and
-    // Filters are two independent reimplementations of "what counts as this
-    // dept's queue data," and every time they've drifted apart it's shown up
-    // as a real, confusing discrepancy (this handler previously undercounted
-    // Filters by more than half on a real date range: 161 vs Filters' true
-    // 423 for Queue: Dev + Updated: Aug 2026). A ticket belongs to dept $1 if
-    // ANY of: it's currently tagged $1; it originated in $1 (issue_history's
-    // earliest department change, or current_department if it never moved);
-    // its frozen per-dept snapshot (dept_statuses) shows it was completed
-    // while in $1; or there's a genuine user_worked_on_tickets row for $1 --
-    // this last check has no roster restriction on the worker, matching
-    // Filters' own broadenIt clause exactly.
+    // Deliberately mirrors the Filters page's own "Queue: <dept> + Updated:
+    // <range>" matching exactly (see queueMembersOnlyParam / updatedDeptMatchSql
+    // / deptExtraClauses above in this file) -- MBR and Filters are two
+    // independent reimplementations of "what counts as this dept's queue
+    // data," and every time they've drifted apart it's shown up as a real,
+    // confusing discrepancy (this handler previously undercounted Filters by
+    // more than half on a real date range: 161 vs Filters' true 423 for
+    // Queue: Dev + Updated: Aug 2026). A ticket belongs to dept $1 if ANY of:
+    // it's currently tagged $1; its frozen per-dept snapshot (dept_statuses)
+    // shows it was completed while in $1; or there's a genuine
+    // user_worked_on_tickets row for $1 -- this last check has no roster
+    // restriction on the worker, matching Filters' own broadenIt clause
+    // exactly.
+    //
+    // Used to ALSO match a ticket that merely originated in $1 (issue_history's
+    // earliest department change) regardless of date type -- correct for
+    // Filters' own Created-scoped originDeptMatchSql, but this handler's date
+    // range is pinned to Updated only (see monthlyBucketExpr/dateClause above
+    // -- there's no Created/Updated toggle here at all), and Filters' own
+    // updatedDeptMatchSql deliberately does NOT consider origin. Confirmed
+    // for real: CF-27177 originated in Dev but moved to Migration the same
+    // day with Dev's own dept_statuses snapshot still 'In Progress' (not
+    // done) and no non-'passed' Dev worked-on record -- Filters' Updated: Aug
+    // correctly excludes it (nothing Dev-related actually happened in
+    // August), but this unconditional origin check still counted it, one
+    // ticket higher than Filters for the identical Queue: Dev + Aug scope.
+    // Dropped to match.
     //
     // reason != 'passed' on every user_worked_on_tickets check in this
     // handler: 'passed' isn't evidence this person did any real work on the
@@ -9957,10 +10180,6 @@ async function _handleJiraPgApi(
     // 'returned' all still mean genuine involvement and stay valid evidence.
     const deptMatchSql = `(
       LOWER(i.current_department) = LOWER($1)
-      OR LOWER(COALESCE(
-           (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
-           i.current_department
-         )) = LOWER($1)
       OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($1) AND LOWER(v->>'category') = 'done')
       OR EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND w.reason != 'passed')
     )`;
@@ -11711,7 +11930,22 @@ async function _handleJiraPgApi(
           checked++;
           const localId = byJiraKey.get(issue.key);
           if (!localId || !issue.fields?.updated) continue;
-          await pool.query(`UPDATE issues SET "updatedAt" = $1 WHERE id = $2`, [new Date(issue.fields.updated), localId]);
+          // GREATEST against the ticket's own real activity (comments,
+          // history), not a blind overwrite -- confirmed for real that a
+          // blind overwrite masked genuine recent local activity on 26
+          // tickets the first time this ran (Jira has no visibility into
+          // work done in this app after migration, so its own `updated`
+          // field can legitimately be OLDER than real local activity here).
+          // Restoring the corruption bug's damage should never regress a
+          // ticket that was never actually touched by that bug.
+          await pool.query(
+            `UPDATE issues i SET "updatedAt" = GREATEST(
+               $1::timestamptz,
+               COALESCE((SELECT MAX(h."createdAt") FROM issue_history h WHERE h."issueId" = i.id), $1::timestamptz),
+               COALESCE((SELECT MAX(c."createdAt") FROM comments c WHERE c."issueId" = i.id), $1::timestamptz)
+             ) WHERE i.id = $2`,
+            [new Date(issue.fields.updated), localId]
+          );
           fixed++;
         }
         await new Promise((r) => setTimeout(r, 250));
@@ -11724,6 +11958,72 @@ async function _handleJiraPgApi(
       return json({ checked, fixed });
     } catch (e: any) {
       console.error('[backfill-updated-at] failed:', e?.message || e);
+      return json({ error: 'Backfill failed', details: e?.message }, 500);
+    }
+  }
+
+  // POST /admin/backfill-sla-breach -- one-time correction of jira_sla_breached
+  // (+_due_at/_start_at) for every L2B/L3B/PSM/SOPS/QA/CFITS ticket, reconciled
+  // directly against live Jira instead of the old static
+  // jira-sla-breach-backfill-ids.json snapshot (a point-in-time list that can
+  // never cover a ticket synced after it was generated -- confirmed for real:
+  // none of PSM/SOPS/QA ever got a single entry in it, and the ongoing sync
+  // never fetched these Jira fields at all until now, see extractJiraSlaBreach
+  // and its call sites in importIssueFromJira/importCfitsIssue). Batched 100
+  // keys per request, same shape as backfill-updated-at above. Idempotent via
+  // its own app_settings flag.
+  if (path === 'admin/backfill-sla-breach' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+      const already = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'sla_breach_backfill_v1_done'`);
+      if (already.rows.length > 0 && url.searchParams.get('force') !== 'true') {
+        return json({ checked: 0, fixed: 0, breachedFound: 0, alreadyRan: true });
+      }
+
+      const creds = await getJiraCredentials();
+      const directRows = await pool.query(`SELECT id, key AS jira_key FROM issues WHERE key LIKE 'L2B-%' OR key LIKE 'L3B-%' OR key LIKE 'PSM-%' OR key LIKE 'SOPS-%' OR key LIKE 'QA-%'`);
+      const cfitsRows = await pool.query(`SELECT id, jira_source_key AS jira_key FROM issues WHERE key LIKE 'L1BOAR-%' AND jira_source_key IS NOT NULL`);
+      const all = [...directRows.rows, ...cfitsRows.rows];
+      const byJiraKey = new Map(all.map((r: any) => [r.jira_key, r.id]));
+      const batches: string[][] = [];
+      const keys = all.map((r: any) => r.jira_key);
+      for (let i = 0; i < keys.length; i += 100) batches.push(keys.slice(i, i + 100));
+
+      const slaFields = 'customfield_10917,customfield_10849,customfield_10306,customfield_10309,customfield_10043';
+      let checked = 0, fixed = 0, breachedFound = 0;
+      for (const batch of batches) {
+        const jql = encodeURIComponent(`issuekey in (${batch.map((k) => `"${k}"`).join(',')})`);
+        const res = await fetch(`${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=100&fields=${slaFields}`, {
+          headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+          signal: AbortSignal.timeout(15000),
+        }).catch(() => null);
+        if (!res || !res.ok) continue;
+        const data: any = await res.json().catch(() => null);
+        if (!data || !Array.isArray(data.issues)) continue;
+        for (const jiraIssue of data.issues) {
+          checked++;
+          const localId = byJiraKey.get(jiraIssue.key);
+          if (!localId) continue;
+          const slaBreach = extractJiraSlaBreach(jiraIssue.fields || {});
+          if (!slaBreach) continue; // genuinely no SLA data in Jira -- leave existing value alone
+          if (slaBreach.breached) breachedFound++;
+          await pool.query(
+            `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+            [slaBreach.breached, slaBreach.dueAt, slaBreach.startAt, localId]
+          );
+          fixed++;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      await pool.query(
+        `INSERT INTO app_settings (key, value) VALUES ('sla_breach_backfill_v1_done', 'true')
+         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()`
+      );
+      return json({ checked, fixed, breachedFound });
+    } catch (e: any) {
+      console.error('[backfill-sla-breach] failed:', e?.message || e);
       return json({ error: 'Backfill failed', details: e?.message }, 500);
     }
   }

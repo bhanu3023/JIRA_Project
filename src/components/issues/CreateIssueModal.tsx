@@ -891,7 +891,23 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 )}
                 <select
                   value={selectedSpaceKey}
-                  onChange={e => setSelectedSpaceKey(e.target.value)}
+                  onChange={e => {
+                    // form.department can arrive pre-filled from a completely
+                    // different context (initialDept -- the URL's ?dept= or a
+                    // queue id from wherever "+Create" was clicked), which is
+                    // only ever meaningful for the space the modal opened on.
+                    // Switching to a DIFFERENT space here never cleared it, so
+                    // that stale department silently rode along into the new
+                    // space's create request even when it has no matching
+                    // queue at all. Confirmed for real: an "Infra"-pre-filled
+                    // create, switched to IT Administration (a board with no
+                    // department routing whatsoever at the time), still
+                    // created the ticket with current_department='Infra' and
+                    // started a real Infra SLA clock for it -- IA-25 / CF-31525.
+                    setSelectedSpaceKey(e.target.value);
+                    setForm(f => (f.department ? { ...f, department: '' } : f));
+                    setSelectedQueueId('');
+                  }}
                   className="w-full pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   {spaces.map(s => (
