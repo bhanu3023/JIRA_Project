@@ -2623,7 +2623,7 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
     const jiraKey = localKey; // key prefix matches Jira project for all other boards
 
     const creds = await getJiraCredentials();
-    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,attachment,created,updated,${JIRA_CUSTOM_FIELDS}`;
+    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,attachment,created,updated,resolutiondate,${JIRA_CUSTOM_FIELDS}`;
     const url = `${creds.base}/rest/api/3/issue/${jiraKey}?fields=${fields}&expand=changelog`;
     // This fetch had no timeout, so whenever an issue (very often a stale or
     // broken linked-ticket key) isn't found locally, GET /issues/:key would
@@ -2708,6 +2708,12 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
         },
       });
       issueId = existingIssue.id;
+      // resolvedAt isn't in the Prisma schema (added via a raw migration,
+      // same as current_department below) -- set with a plain UPDATE. See
+      // the note on the create() branch for why this matters.
+      if (f.resolutiondate) {
+        await pool.query(`UPDATE issues SET "resolvedAt" = $1 WHERE id = $2`, [new Date(f.resolutiondate), issueId]);
+      }
     } else {
       const created = await db.issue.create({
         data: {
@@ -2739,6 +2745,16 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
       // UPDATE rather than through the Prisma client, so do the same here.
       if (opts?.defaultDepartment) {
         await pool.query(`UPDATE issues SET current_department = $1 WHERE id = $2`, [opts.defaultDepartment, issueId]);
+      }
+      // A ticket imported already-resolved from Jira never got resolvedAt
+      // set at all (also not in the Prisma schema, see above) -- the SLA
+      // due-time calc only uses its correct, resolvedAt-anchored formula
+      // when resolvedAt is present, otherwise it falls back to a formula
+      // that clamps to 0 once a ticket is already over budget, showing
+      // DUE == START (confirmed live on CF-29312/L1BOAR-15132).
+      // resolutiondate is Jira's own field for exactly this.
+      if (f.resolutiondate) {
+        await pool.query(`UPDATE issues SET "resolvedAt" = $1 WHERE id = $2`, [new Date(f.resolutiondate), issueId]);
       }
       // A ticket imported from Jira never got a CF-#### display key at all --
       // every other place a ticket comes into existence (manual creation, the
@@ -2866,7 +2882,7 @@ async function importCfitsIssue(cfitsKey: string): Promise<string | null> {
     if (already.rows[0]) return already.rows[0].key;
 
     const creds = await getJiraCredentials();
-    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,created,updated,${JIRA_CUSTOM_FIELDS}`;
+    const fields = `summary,description,issuetype,priority,status,assignee,reporter,parent,labels,comment,created,updated,resolutiondate,${JIRA_CUSTOM_FIELDS}`;
     const res = await fetch(`${creds.base}/rest/api/3/issue/${cfitsKey}?fields=${fields}&expand=changelog`, {
       headers: { Authorization: creds.authHdr, Accept: 'application/json' },
       signal: AbortSignal.timeout(8000),
@@ -2928,19 +2944,26 @@ async function importCfitsIssue(cfitsKey: string): Promise<string | null> {
         updatedAt: f.updated ? new Date(f.updated) : undefined,
       },
     });
-    // current_department and jira_source_key aren't in the Prisma schema
-    // (added via raw migrations) -- set with a plain UPDATE like every other
-    // place in this file that touches them. This UPDATE, not the create
-    // above, is where the "already migrated?" race actually lands: two
-    // concurrent calls for the same cfitsKey both pass the SELECT check at
-    // the top, both create a distinct local issue (different allocated
-    // keys, so that insert never conflicts), and then both try to stamp the
-    // same jira_source_key here -- the unique index added above lets the
-    // second one fail loudly instead of silently duplicating the ticket.
+    // current_department, jira_source_key and resolvedAt aren't in the
+    // Prisma schema (added via raw migrations) -- set with a plain UPDATE
+    // like every other place in this file that touches them. This UPDATE,
+    // not the create above, is where the "already migrated?" race actually
+    // lands: two concurrent calls for the same cfitsKey both pass the SELECT
+    // check at the top, both create a distinct local issue (different
+    // allocated keys, so that insert never conflicts), and then both try to
+    // stamp the same jira_source_key here -- the unique index added above
+    // lets the second one fail loudly instead of silently duplicating the
+    // ticket.
+    //
+    // resolvedAt: a ticket imported already-resolved from Jira never got it
+    // set at all, breaking the SLA due-time calc (it falls back to a formula
+    // that clamps to 0 once already over budget, showing DUE == START,
+    // confirmed live on CF-29312/L1BOAR-15132). resolutiondate is Jira's own
+    // field for exactly this.
     try {
       await pool.query(
-        `UPDATE issues SET current_department = $1, jira_source_key = $2 WHERE id = $3`,
-        [CFITS_DEFAULT_DEPARTMENT, cfitsKey, created.id]
+        `UPDATE issues SET current_department = $1, jira_source_key = $2, "resolvedAt" = COALESCE($4, "resolvedAt") WHERE id = $3`,
+        [CFITS_DEFAULT_DEPARTMENT, cfitsKey, created.id, f.resolutiondate ? new Date(f.resolutiondate) : null]
       );
     } catch (e: any) {
       if (e?.code === '23505') {
