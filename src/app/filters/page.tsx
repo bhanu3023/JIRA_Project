@@ -1526,11 +1526,16 @@ export default function FiltersPage() {
   // that can desync, e.g. an older deep link that set one without the
   // other). Reporter, Priority, Department, and Updated are excluded here --
   // they're already always-visible fixed columns, not extras.
-  // "Created" is table-only (kept out of EXPORT_EXTRA_COLUMNS since the CSV
-  // export already always includes its own fixed Created column -- adding
-  // it there too would double it up in the export).
+  // "Created"/"Updated" are table-only (kept out of EXPORT_EXTRA_COLUMNS
+  // since the CSV export already always includes its own fixed Created/
+  // Updated columns -- adding them there too would double them up in the
+  // export). "Updated" was missing here entirely even though it's a real,
+  // selectable filter (EXTRA_FILTER_OPTIONS) and the CSV export already
+  // shows it as a fixed column -- selecting the Updated date filter had no
+  // way to actually show that value anywhere in the on-screen table.
   const TABLE_ONLY_COLUMNS: Record<string, { label: string; getValue: (issue: any) => string }> = {
     created: { label: 'Created', getValue: (i) => i.createdAt ? new Date(i.createdAt).toLocaleDateString() : '' },
+    updated: { label: 'Updated', getValue: (i) => i.updatedAt ? new Date(i.updatedAt).toLocaleDateString() : '' },
   };
   const TABLE_COLUMN_DEFS: Record<string, { label: string; getValue: (issue: any) => string }> = {
     ...TABLE_ONLY_COLUMNS,
@@ -1538,6 +1543,7 @@ export default function FiltersPage() {
   };
   const EXTRA_COLUMN_HAS_VALUE: Record<string, boolean> = {
     created: !!selCreated,
+    updated: !!selUpdated,
     productType: selProductType.length > 0,
     combination: !!selCombination,
     projectManager: selProjectManager.length > 0,
@@ -2058,6 +2064,14 @@ export default function FiltersPage() {
             </p>
           </div>
         ) : (
+          // Wrapped in its own horizontal-scroll container -- the card
+          // around this table uses overflow-hidden (for its rounded
+          // corners), which with no inner scroll wrapper CLIPPED away any
+          // column past the visible width instead of making it reachable
+          // by scrolling. Adding fields via "More filters" pushes the
+          // table well past 1800px, so those columns were being cut off
+          // entirely, not just off-screen.
+          <div className="overflow-x-auto">
           <table className="table-fixed">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
@@ -2090,7 +2104,18 @@ export default function FiltersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {issues.slice(0, 100).map((issue: any) => {
+              {/* Used to hard-cap rendering to the first 100 of whatever was
+                  fetched, regardless of how many rows actually came back --
+                  confirmed for real: with PAGE_SIZE now 1000, a filter
+                  matching hundreds of tickets (sorted newest first) fetched
+                  all of them correctly but only ever SHOWED the newest ~100,
+                  silently cutting off everything older mid-range (e.g. a
+                  same-day cluster of ~100 tickets on one date made the whole
+                  rest of the selected date range invisible, with no visual
+                  sign anything was missing). The fetch itself is already
+                  the real limit (page/limit params); rendering everything
+                  that comes back is the correct behavior now. */}
+              {issues.map((issue: any) => {
                 // Carries which queue this row was shown under, same as the
                 // Queue Dashboard's own "Worked on" list -- without it, the
                 // issue detail page had no way to know it was opened from a
@@ -2228,6 +2253,7 @@ export default function FiltersPage() {
               })}
             </tbody>
           </table>
+          </div>
         )}
 
         {/* Pagination -- results beyond the first 100 matches used to be

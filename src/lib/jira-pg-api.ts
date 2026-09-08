@@ -2445,9 +2445,18 @@ function parseDateRange(range: string): { from: Date; to: Date } {
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ On-demand Jira import Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
+// The real, current Jira token now lives in the app_settings DB table
+// (jira_url/jira_email/jira_token), set once via a direct SQL insert rather
+// than through any code path here -- getJiraCredentials() below already
+// checks there first. A live API token used to sit hardcoded directly in
+// this file (and therefore in git history) as the fallback when that table
+// was empty; removed entirely rather than rotated-and-kept, since a secret
+// baked into source is a real security exposure -- if app_settings is ever
+// cleared, this now fails cleanly (empty credentials -> Jira 401) instead of
+// silently falling back to a committed secret.
 const JIRA_BASE_URL = process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net';
-const JIRA_EMAIL    = process.env.JIRA_EMAIL    || 'sujana.manapuram@cloudfuze.com';
-const JIRA_TOKEN    = process.env.JIRA_TOKEN    || 'REDACTED_API_TOKEN';
+const JIRA_EMAIL    = process.env.JIRA_EMAIL    || '';
+const JIRA_TOKEN    = process.env.JIRA_TOKEN    || '';
 const JIRA_AUTH_HDR = 'Basic ' + Buffer.from(`${JIRA_EMAIL}:${JIRA_TOKEN}`).toString('base64');
 
 // Lazily loaded Jira credentials from app_settings DB (set during import)
@@ -3131,7 +3140,14 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
     // using the (by-then-advanced) `checkpoint` produced a jql that no
     // longer matched the token from the previous page's response, and Jira
     // rejected the mismatched pair with a 400 on every page after the first.
-    const jql = encodeURIComponent(`project = ${jiraProject} AND issuekey > ${prefix}-${checkpoint} ORDER BY issuekey ASC`);
+    // issuekey's RHS must be a quoted string literal -- an unquoted
+    // "issuekey > PREFIX-123" silently matches ZERO issues (confirmed for
+    // real against the live Jira API: identical query, only difference
+    // quotes around the key, went from {issues:[]} to real results) rather
+    // than erroring, which is exactly why this sync ran successfully every
+    // 5 minutes with zero errors AND zero imports forever -- the checkpoint
+    // never had a chance to advance past whatever it started at.
+    const jql = encodeURIComponent(`project = ${jiraProject} AND issuekey > "${prefix}-${checkpoint}" ORDER BY issuekey ASC`);
     while (imported.length + errors.length < maxPerRun) {
       let url = `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=50&fields=summary`;
       if (pageToken) url += `&nextPageToken=${encodeURIComponent(pageToken)}`;
@@ -3186,7 +3202,9 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
     await ensureJiraSourceKeyUniqueIndex();
     let cfitsCheckpoint = await getCfitsSyncCheckpoint();
     let cfitsPageToken: string | undefined;
-    const cfitsJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND issuekey > ${CFITS_JIRA_PROJECT}-${cfitsCheckpoint} ORDER BY issuekey ASC`);
+    // Same quoting fix as the SYNC_PROJECTS jql above -- unquoted issuekey
+    // silently matches zero issues instead of erroring.
+    const cfitsJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND issuekey > "${CFITS_JIRA_PROJECT}-${cfitsCheckpoint}" ORDER BY issuekey ASC`);
     while (imported.length + errors.length < maxPerRun) {
       let url = `${creds.base}/rest/api/3/search/jql?jql=${cfitsJql}&maxResults=50&fields=summary`;
       if (cfitsPageToken) url += `&nextPageToken=${encodeURIComponent(cfitsPageToken)}`;
@@ -9538,12 +9556,23 @@ async function _handleJiraPgApi(
     // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo] —
     // same convention as reports/mbr-team's team tabs, so the date-range filter
     // means the same thing everywhere in the MBR page.
+    // Anchored to IST (+05:30), not parsed as bare UTC -- a bare
+    // "YYYY-MM-DD" string is parsed as UTC midnight by Date's ISO handling,
+    // which is 5:30 AM IST, not midnight IST. This app's users operate in
+    // IST regardless of the server's own timezone (a Docker container
+    // defaults to UTC with no TZ set), so an unanchored boundary quietly
+    // dropped up to 5.5 hours of real tickets at each end of the range --
+    // the same class of bug already fixed for the Filters page's own
+    // custom date-range picker (see parseDateRange's "between:" branch),
+    // just never applied here, so MBR and Filters disagreed on the same
+    // date range for the same department (confirmed for real comparing
+    // Dev/Migration counts for Aug 1-31 between the two pages).
     const filterParams: any[] = [];
     let fromIdx: number | null = null;
     let toIdx: number | null = null;
-    if (dateFrom) { filterParams.push(new Date(dateFrom).toISOString()); fromIdx = filterParams.length; }
+    if (dateFrom) { filterParams.push(new Date(`${dateFrom}T00:00:00+05:30`).toISOString()); fromIdx = filterParams.length; }
     if (dateTo) {
-      const toExclusive = new Date(dateTo);
+      const toExclusive = new Date(`${dateTo}T00:00:00+05:30`);
       toExclusive.setDate(toExclusive.getDate() + 1);
       filterParams.push(toExclusive.toISOString());
       toIdx = filterParams.length;
@@ -9784,12 +9813,17 @@ async function _handleJiraPgApi(
     const segment = url.searchParams.get('segment') || '';
     const staleDays = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
+    // IST-anchored, same fix and same reasoning as reports/mbr just above --
+    // a bare "YYYY-MM-DD" parses as UTC midnight (5:30 AM IST), quietly
+    // dropping up to 5.5 hours of real tickets at each boundary and
+    // disagreeing with the Filters page's already-IST-anchored date range
+    // for the same department/date selection.
     const baseParams: any[] = [dept, roster];
     let fromIdx: number | null = null;
     let toIdx: number | null = null;
-    if (dateFrom) { baseParams.push(new Date(dateFrom).toISOString()); fromIdx = baseParams.length; }
+    if (dateFrom) { baseParams.push(new Date(`${dateFrom}T00:00:00+05:30`).toISOString()); fromIdx = baseParams.length; }
     if (dateTo) {
-      const toExclusive = new Date(dateTo);
+      const toExclusive = new Date(`${dateTo}T00:00:00+05:30`);
       toExclusive.setDate(toExclusive.getDate() + 1);
       baseParams.push(toExclusive.toISOString());
       toIdx = baseParams.length;
@@ -10117,8 +10151,13 @@ async function _handleJiraPgApi(
     const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     // Mirrors monthlyBucketExpr's SQL rule exactly, so a breached ticket lands
     // in the same monthly row its total/resolved counts already landed in.
-    const rangeFromMs = fromIdx ? new Date(dateFrom).getTime() : null;
-    const rangeToMs = toIdx ? (() => { const d = new Date(dateTo); d.setDate(d.getDate() + 1); return d.getTime(); })() : null;
+    // Same IST anchor as the baseParams boundaries above -- re-deriving this
+    // from the unanchored dateFrom/dateTo strings again here (instead of
+    // reusing baseParams' own already-anchored values) would silently put
+    // this monthly-bucket display 5.5 hours out of sync with the actual
+    // ticket-list query's boundaries.
+    const rangeFromMs = fromIdx ? new Date(`${dateFrom}T00:00:00+05:30`).getTime() : null;
+    const rangeToMs = toIdx ? (() => { const d = new Date(`${dateTo}T00:00:00+05:30`); d.setDate(d.getDate() + 1); return d.getTime(); })() : null;
     const monthLabelFor = (row: any): string => {
       let d = new Date(row.createdAt);
       if (rangeFromMs !== null || rangeToMs !== null) {
