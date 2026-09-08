@@ -9654,7 +9654,33 @@ async function _handleJiraPgApi(
     let deptClause = '';
     if (department) {
       filterParams.push(department);
-      deptClause = ` AND i.current_department = $${filterParams.length}`;
+      const dIdx = filterParams.length;
+      // Was a plain current_department match -- narrower than Filters' own
+      // "Queue: X" scope (queueMembersOnlyParam/originDeptMatchSql/
+      // updatedDeptMatchSql/deptScopeSql above), which also counts a ticket
+      // that originated in or was genuinely worked in dept X even after it's
+      // since moved to another department. Confirmed for real: this page
+      // showed a smaller Open/count total for "Dev" than Filters' "Queue:
+      // Dev" for the identical date range, purely because those moved-on
+      // tickets dropped out here but not there. Mirrors reports/mbr-team's
+      // own deptMatchSql exactly (see its long comment) so MBR's two tabs and
+      // Filters all agree on what "belongs to this department" means:
+      // currently tagged X, OR originated in X (issue_history's earliest
+      // department change, falling back to current_department if it never
+      // moved), OR its frozen per-dept snapshot shows it completed while in
+      // X, OR there's a genuine user_worked_on_tickets row for X --
+      // excluding 'passed' hand-off credit, which just means someone
+      // assigned it onward, not that they did real work (see mbr-team's own
+      // comment on this for the confirmed real false-positive it caused).
+      deptClause = ` AND (
+        LOWER(i.current_department) = LOWER($${dIdx})
+        OR LOWER(COALESCE(
+             (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+             i.current_department
+           )) = LOWER($${dIdx})
+        OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($${dIdx}) AND LOWER(v->>'category') = 'done')
+        OR EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($${dIdx}) AND w.reason != 'passed')
+      )`;
     }
 
     const deptRows = await pool.query(`
