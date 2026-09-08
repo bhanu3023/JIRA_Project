@@ -11705,7 +11705,22 @@ async function _handleJiraPgApi(
           checked++;
           const localId = byJiraKey.get(issue.key);
           if (!localId || !issue.fields?.updated) continue;
-          await pool.query(`UPDATE issues SET "updatedAt" = $1 WHERE id = $2`, [new Date(issue.fields.updated), localId]);
+          // GREATEST against the ticket's own real activity (comments,
+          // history), not a blind overwrite -- confirmed for real that a
+          // blind overwrite masked genuine recent local activity on 26
+          // tickets the first time this ran (Jira has no visibility into
+          // work done in this app after migration, so its own `updated`
+          // field can legitimately be OLDER than real local activity here).
+          // Restoring the corruption bug's damage should never regress a
+          // ticket that was never actually touched by that bug.
+          await pool.query(
+            `UPDATE issues i SET "updatedAt" = GREATEST(
+               $1::timestamptz,
+               COALESCE((SELECT MAX(h."createdAt") FROM issue_history h WHERE h."issueId" = i.id), $1::timestamptz),
+               COALESCE((SELECT MAX(c."createdAt") FROM comments c WHERE c."issueId" = i.id), $1::timestamptz)
+             ) WHERE i.id = $2`,
+            [new Date(issue.fields.updated), localId]
+          );
           fixed++;
         }
         await new Promise((r) => setTimeout(r, 250));
