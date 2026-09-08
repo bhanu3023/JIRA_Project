@@ -10503,7 +10503,14 @@ async function _handleJiraPgApi(
         slaPoliciesBySpace[row.spaceId] || [],
         false
       );
-      const breached = instances.some((x: any) => x.isBreached);
+      // computeSLAInstancesPure only ever evaluates policies for the ticket's
+      // CURRENT department (see its own issueDept filter) -- so a ticket that
+      // matched this team historically (moved on since, e.g. Dev -> Migration)
+      // would otherwise get counted as a Dev breach here using its live
+      // Migration SLA state. A ticket breached in Migration is Migration's
+      // breach, not this team's, regardless of where it started.
+      const breached = String(row.current_department || '').toLowerCase() === dept.toLowerCase()
+        && instances.some((x: any) => x.isBreached);
       slaById.set(row.id, breached);
       if (!breached) continue;
 
