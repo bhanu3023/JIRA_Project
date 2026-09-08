@@ -2843,11 +2843,24 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
 // Projects that get an automatic, recurring catch-up sync from Jira -- see
 // runJiraIssueSync below. Add a prefix here to bring another board under the
 // same "never miss new tickets again" coverage. Only valid for boards where
-// the local key IS the Jira key (confirmed true for L2B/L3B). CFITS is NOT
-// one of these -- see importCfitsIssue below for why.
-const SYNC_PROJECTS: { prefix: string; jiraProject: string }[] = [
-  { prefix: 'L2B', jiraProject: 'L2B' },
-  { prefix: 'L3B', jiraProject: 'L3B' },
+// the local key IS the Jira key (confirmed true for L2B/L3B, and for PSM/
+// SOPS/QA below). CFITS is NOT one of these -- see importCfitsIssue below for
+// why.
+//
+// PSM/SOPS/QA added after a full Jira-vs-local audit found they'd been
+// migrated ONCE and never synced again since (no jira_sync_last_num_* row
+// for any of the three, unlike L2B/L3B/CFITS) -- confirmed for real: PSM was
+// missing 165 tickets, QA 161, SOPS 5, every one of them created after the
+// original one-time migration. defaultDepartment matches each board's own
+// single, 100%-consistent existing department (confirmed for real: every
+// already-migrated PSM ticket is 'Pre-Sales', every SOPS ticket 'SalesOps',
+// every QA ticket 'QA' -- NOT 'Dev', which is only right for L2B/L3B).
+const SYNC_PROJECTS: { prefix: string; jiraProject: string; defaultDepartment: string }[] = [
+  { prefix: 'L2B',  jiraProject: 'L2B',  defaultDepartment: 'Dev' },
+  { prefix: 'L3B',  jiraProject: 'L3B',  defaultDepartment: 'Dev' },
+  { prefix: 'PSM',  jiraProject: 'PSM',  defaultDepartment: 'Pre-Sales' },
+  { prefix: 'SOPS', jiraProject: 'SOPS', defaultDepartment: 'SalesOps' },
+  { prefix: 'QA',   jiraProject: 'QA',   defaultDepartment: 'QA' },
 ];
 
 const CFITS_JIRA_PROJECT = 'CFITS';
@@ -3119,6 +3132,26 @@ async function setSyncCheckpoint(prefix: string, num: number): Promise<void> {
   );
 }
 
+// One-time correction, run once ever (checked via the checkpoint row's own
+// existence, same idempotency check getSyncCheckpoint itself uses): QA's
+// real Jira numbering has an interior gap BELOW its local max at the time
+// QA was added to SYNC_PROJECTS -- QA-1443 was missing from Jira sync while
+// QA-1444 already existed locally (confirmed for real via a full Jira-vs-
+// local audit). getSyncCheckpoint's normal bootstrap-from-MAX(local) would
+// set the checkpoint to 1444 and never look back (issuekey > 1444 can never
+// match 1443), permanently skipping it forever. Seeds 1442 (one below the
+// earliest real gap) instead, so the very first sync run picks up 1443
+// naturally along with everything else already missing above it. PSM/SOPS
+// needed no such seed -- their own gaps start cleanly right after their
+// local max, which is exactly what the normal bootstrap already produces.
+async function seedQaSyncCheckpointIfMissing(): Promise<void> {
+  try {
+    await ensureAppSettingsTable();
+    const row = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'jira_sync_last_num_QA'`);
+    if (!row.rows[0]) await setSyncCheckpoint('QA', 1442);
+  } catch { /* fall through to the normal bootstrap-from-local-max if this fails */ }
+}
+
 // Same storage shape as getSyncCheckpoint (reuses setSyncCheckpoint('CFITS', n)
 // to persist), but a different bootstrap query: CFITS has no local key to
 // scan since local L1BOAR numbers don't match Jira CFITS numbers at all (see
@@ -3165,7 +3198,8 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
   const imported: string[] = [];
   const errors: string[] = [];
   const creds = await getJiraCredentials();
-  for (const { prefix, jiraProject } of SYNC_PROJECTS) {
+  await seedQaSyncCheckpointIfMissing();
+  for (const { prefix, jiraProject, defaultDepartment } of SYNC_PROJECTS) {
     if (imported.length + errors.length >= maxPerRun) break;
     let checkpoint = await getSyncCheckpoint(prefix);
     let pageToken: string | undefined;
@@ -3208,7 +3242,7 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
           // check just finds it and moves on.
           let ok = !!existing;
           if (!existing) {
-            const result = await importIssueFromJira(key, { defaultDepartment: 'Dev' });
+            const result = await importIssueFromJira(key, { defaultDepartment });
             if (result) { imported.push(key); ok = true; } else { errors.push(`${key}: import returned null`); }
           }
           if (ok) {
