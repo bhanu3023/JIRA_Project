@@ -113,12 +113,36 @@ export async function register() {
     }
   }
 
+  // One-time correction for every L2B/L3B/CFITS ticket whose updatedAt was
+  // silently corrupted by the custom-field auto-refresh bug (a plain
+  // db.issue.update() call bumped updatedAt to NOW() via Prisma's
+  // `@updatedAt`, even though that job only backfills previously-null
+  // metadata fields, not anything a user would consider a real ticket
+  // change -- see the fix and full explanation next to the endpoint itself).
+  // Same idempotent, safe-to-call-every-boot pattern as backfillClientNames
+  // above; batches through Jira 100 keys at a time, so a full run over the
+  // whole ticket set can take a few minutes the first time.
+  async function backfillUpdatedAt(label: string): Promise<void> {
+    try {
+      const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
+      const res = await fetch(`${internalUrl}/api/admin/backfill-updated-at`, {
+        method: 'POST',
+        headers: { 'x-internal-job-secret': INTERNAL_JOB_SECRET },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.fixed > 0) console.log(`[updatedAt backfill] ${label} — restored ${data.fixed} of ${data.checked} checked ticket(s).`);
+    } catch (err) {
+      console.error(`[updatedAt backfill] ${label} — failed:`, err);
+    }
+  }
+
   // Fire-and-forget: schedule the boot-time run and both 5-minute intervals,
   // but do NOT await any of it here — see the note above for why.
   setTimeout(() => {
     tryRestartPollers('Boot');
     syncJiraIssues('Boot');
     backfillClientNames('Boot');
+    backfillUpdatedAt('Boot');
 
     // Retry loop: every 5 minutes, restart any pollers that are down.
     // This handles OAuth token expiry, network blips, and tokens that

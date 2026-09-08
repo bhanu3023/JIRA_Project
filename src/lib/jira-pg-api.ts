@@ -3536,7 +3536,7 @@ async function _handleJiraPgApi(
   // to send -- they authenticate with this per-process secret instead (see
   // internal-job-secret.ts). Scoped to one specific path rather than a
   // blanket bypass, since anything landing here has no session to audit.
-  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names')
+  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at')
     && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
 
   if (!userId && !isPublicPath && !isInternalJob) {
@@ -11658,6 +11658,66 @@ async function _handleJiraPgApi(
       return json({ updated: result.rowCount ?? 0 });
     } catch (e: any) {
       console.error('[backfill-client-names] failed:', e?.message || e);
+      return json({ error: 'Backfill failed', details: e?.message }, 500);
+    }
+  }
+
+  // POST /admin/backfill-updated-at -- one-time correction for every L2B/L3B/
+  // CFITS ticket whose updatedAt was silently corrupted by the custom-field
+  // auto-refresh bug (see the fix in _handleJiraPgApi's on-demand refresh
+  // block above: it used to call db.issue.update(), and updatedAt is
+  // `DateTime @updatedAt` in the Prisma schema, so Prisma bumped it to NOW()
+  // on every write regardless of what the call actually changed). Confirmed
+  // for real: CF-27236/CFITS-8077 last genuinely updated 2026-07-08 in Jira,
+  // showed updatedAt of today locally. Restores the real value straight from
+  // Jira's own `updated` field, batched 100 keys per request. Idempotent
+  // (app_settings flag, same as backfill-client-names above) so wiring it
+  // into the boot sequence never re-runs it once it's completed successfully.
+  if (path === 'admin/backfill-updated-at' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+      const already = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'updatedat_backfill_v1_done'`);
+      if (already.rows.length > 0 && url.searchParams.get('force') !== 'true') {
+        return json({ checked: 0, fixed: 0, alreadyRan: true });
+      }
+
+      const creds = await getJiraCredentials();
+      const l2bRows = await pool.query(`SELECT id, key AS jira_key FROM issues WHERE key LIKE 'L2B-%' OR key LIKE 'L3B-%'`);
+      const cfitsRows = await pool.query(`SELECT id, jira_source_key AS jira_key FROM issues WHERE key LIKE 'L1BOAR-%' AND jira_source_key IS NOT NULL`);
+      const all = [...l2bRows.rows, ...cfitsRows.rows];
+      const byJiraKey = new Map(all.map((r: any) => [r.jira_key, r.id]));
+      const batches: string[][] = [];
+      const keys = all.map((r: any) => r.jira_key);
+      for (let i = 0; i < keys.length; i += 100) batches.push(keys.slice(i, i + 100));
+
+      let checked = 0, fixed = 0;
+      for (const batch of batches) {
+        const jql = encodeURIComponent(`issuekey in (${batch.map((k) => `"${k}"`).join(',')})`);
+        const res = await fetch(`${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=100&fields=updated`, {
+          headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+          signal: AbortSignal.timeout(15000),
+        }).catch(() => null);
+        if (!res || !res.ok) continue;
+        const data: any = await res.json().catch(() => null);
+        if (!data || !Array.isArray(data.issues)) continue;
+        for (const issue of data.issues) {
+          checked++;
+          const localId = byJiraKey.get(issue.key);
+          if (!localId || !issue.fields?.updated) continue;
+          await pool.query(`UPDATE issues SET "updatedAt" = $1 WHERE id = $2`, [new Date(issue.fields.updated), localId]);
+          fixed++;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      await pool.query(
+        `INSERT INTO app_settings (key, value) VALUES ('updatedat_backfill_v1_done', 'true')
+         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()`
+      );
+      return json({ checked, fixed });
+    } catch (e: any) {
+      console.error('[backfill-updated-at] failed:', e?.message || e);
       return json({ error: 'Backfill failed', details: e?.message }, 500);
     }
   }
