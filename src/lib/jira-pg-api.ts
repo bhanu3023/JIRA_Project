@@ -8529,9 +8529,15 @@ async function _handleJiraPgApi(
     // existing 'passed'/'returned'/'closed' row's more specific reason).
     try {
       const statusChangedNow = body.statusId !== undefined && issue.statusId !== data.statusId;
-      const assigneeChangedNow = body.assigneeId !== undefined && issue.assigneeId !== data.assigneeId;
+      // The person assigned to a ticket is the one who worked it -- not
+      // whoever performed the assignment (often a shift lead/manager routing
+      // it, not the one doing the work). Being the assignee already counts
+      // this ticket toward that person directly via assigneeId, so an
+      // assignee-change action itself shouldn't ALSO write a 'worked' credit
+      // for whoever clicked the dropdown, self-assign included: only a real
+      // action (status change) is evidence of actually working the ticket.
       const workedDept: string | null = (updated as any).current_department || null;
-      if (userId && workedDept && (statusChangedNow || assigneeChangedNow)) {
+      if (userId && workedDept && statusChangedNow) {
         await pool.query(
           `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
            ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET worked_at=NOW()`,
