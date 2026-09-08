@@ -9947,6 +9947,12 @@ async function _handleJiraPgApi(
       ticketFilterClause = ` AND s.category = 'done' AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a."issueId" = i.id AND a."mimeType" LIKE 'image/%')`;
     } else if (ticketFilter === 'noRcaFix') {
       ticketFilterClause = ` AND s.category = 'done' AND NOT (length(trim(COALESCE(i."rootCause", ''))) > 0 OR length(trim(COALESCE(i."fixDescription", ''))) > 0)`;
+    } else if (ticketFilter === 'hasResolutionTime') {
+      // The exact set of tickets Avg. resolution (hrs) is actually averaged
+      // over -- resolvedAt is unpopulated for every ticket in this DB today,
+      // so this will show "no tickets" until that starts getting filled in,
+      // same caveat as the RCA/Fix and closing-comment checks above.
+      ticketFilterClause = ` AND i."resolvedAt" IS NOT NULL`;
     }
 
     // Internal/External split, layered on top of whichever ticketFilter is

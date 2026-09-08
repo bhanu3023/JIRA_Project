@@ -68,7 +68,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  type DrillFilter = 'all' | 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix';
+  type DrillFilter = 'all' | 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix' | 'hasResolutionTime';
   const [drillDown, setDrillDown] = useState<{ person?: string; month?: string; filter: DrillFilter; label: string } | null>(null);
   const [drillTickets, setDrillTickets] = useState<any[]>([]);
   const [drillTotal, setDrillTotal] = useState(0);
@@ -259,7 +259,11 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     <td className={`px-4 py-3 text-[13px] ${p.rbBreached > 0 ? 'text-red-600' : 'text-gray-700'}`}>
                       <button onClick={(e) => { e.stopPropagation(); openDrill('rb', p.email, `Resolution SLA breached — ${p.name}`); }} className="hover:underline">{p.rbBreached} / {p.rbTracked}</button>
                     </td>
-                    <td className="px-4 py-3 text-[13px] text-gray-700">{p.avgResolutionHours === null ? '—' : p.avgResolutionHours}</td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      {p.avgResolutionHours === null ? '—' : (
+                        <button onClick={(e) => { e.stopPropagation(); openDrill('hasResolutionTime', p.email, `Tickets with a recorded resolution time — ${p.name}`); }} className="hover:underline">{p.avgResolutionHours}</button>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
                       <button onClick={(e) => { e.stopPropagation(); openDrill('stale', p.email, `Stale tickets — ${p.name}`); }} className="hover:underline">{p.stale}</button>
                     </td>
