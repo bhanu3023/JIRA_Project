@@ -2509,7 +2509,12 @@ const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> 
   QA:      { jiraProject: 'QA',     spaceKey: 'TESTIN' },
 };
 
-const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665';
+// customfield_10059 = "Root Cause :- Describe the root cause.(why, where, when)",
+// customfield_10402 = "Fix description" -- confirmed via /rest/api/3/field lookup
+// (real Jira field names, not guessed). Neither was fetched at all before, so
+// a ticket that had real values for both in Jira showed them empty here after
+// migration -- importIssueFromJira/importCfitsIssue never had the data to map.
+const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665,customfield_10059,customfield_10402';
 
 function extractJiraValue(raw: any): string | null {
   if (!raw) return null;
@@ -2705,6 +2710,8 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
           productType:    extractJiraValue(f.customfield_10203) ?? existingIssue.productType,
           combination:    extractJiraValue(f.customfield_10236) ?? existingIssue.combination,
           productionTicket: extractJiraValue(f.customfield_10665) ?? existingIssue.productionTicket,
+          rootCause:      extractJiraValue(f.customfield_10059) ?? existingIssue.rootCause,
+          fixDescription: extractJiraValue(f.customfield_10402) ?? existingIssue.fixDescription,
         },
       });
       issueId = existingIssue.id;
@@ -2732,6 +2739,8 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
           productType:    extractJiraValue(f.customfield_10203),
           combination:    extractJiraValue(f.customfield_10236),
           productionTicket: extractJiraValue(f.customfield_10665),
+          rootCause:      extractJiraValue(f.customfield_10059),
+          fixDescription: extractJiraValue(f.customfield_10402),
           // Preserve real Jira history instead of stamping "now" -- these feed
           // aging/SLA/timeline analytics, so a bulk backfill imported today
           // must still show its issues' true original creation dates.
@@ -2939,6 +2948,8 @@ async function importCfitsIssue(cfitsKey: string): Promise<string | null> {
         productType:    extractJiraValue(f.customfield_10203),
         combination:    extractJiraValue(f.customfield_10236),
         productionTicket: extractJiraValue(f.customfield_10665),
+        rootCause:      extractJiraValue(f.customfield_10059),
+        fixDescription: extractJiraValue(f.customfield_10402),
         // Real Jira history, not "now" -- see the same note in importIssueFromJira.
         createdAt: f.created ? new Date(f.created) : undefined,
         updatedAt: f.updated ? new Date(f.updated) : undefined,
@@ -6995,14 +7006,19 @@ async function _handleJiraPgApi(
     // indefinitely if Jira is slow, unreachable, or rate-limiting. Running it
     // in the background means this load won't show the freshly-synced fields,
     // but the next load will, and the page never hangs waiting on Jira.
-    // productionTicket is checked with its own OR, not folded into the
-    // all-null AND above -- a ticket already fully synced before this field
-    // existed has every other field populated, so the all-null check alone
-    // would never re-visit Jira to pick up just this newer one.
+    // productionTicket, rootCause and fixDescription are each checked with
+    // their own OR, not folded into the all-null AND above -- a ticket
+    // already fully synced before these fields existed has every OTHER
+    // field populated, so the all-null check alone would never re-visit
+    // Jira to pick up just a newer one (rootCause/fixDescription: neither
+    // was ever fetched at all before, so every already-migrated ticket has
+    // them null regardless of sync status).
     if (
       (issue.customerName === null && issue.clientName === null &&
        issue.projectManager === null && issue.productType === null && issue.combination === null)
       || issue.productionTicket === null
+      || (issue as any).rootCause === null
+      || (issue as any).fixDescription === null
     ) {
       (async () => {
         try {
@@ -7029,6 +7045,8 @@ async function _handleJiraPgApi(
                   productType:    extractJiraValue(f.customfield_10203),
                   combination:    extractJiraValue(f.customfield_10236),
                   productionTicket: extractJiraValue(f.customfield_10665),
+                  rootCause:      extractJiraValue(f.customfield_10059),
+                  fixDescription: extractJiraValue(f.customfield_10402),
                 };
               }
             } else if (issue.summary) {
@@ -7055,6 +7073,8 @@ async function _handleJiraPgApi(
                     productType:    extractJiraValue(f.customfield_10203),
                     combination:    extractJiraValue(f.customfield_10236),
                     productionTicket: extractJiraValue(f.customfield_10665),
+                    rootCause:      extractJiraValue(f.customfield_10059),
+                    fixDescription: extractJiraValue(f.customfield_10402),
                   };
                 }
               }
