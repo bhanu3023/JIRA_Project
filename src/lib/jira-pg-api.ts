@@ -5131,9 +5131,20 @@ async function _handleJiraPgApi(
           // when Created/Updated is active, so a ticket that's moved on still
           // counts here as long as someone actually worked it in this dept.
           const broadenIt = (createdRange || updatedRange) && queueMembersOnlyParam;
+          // reason != 'passed': a 'passed' row only means someone in this dept
+          // routed the ticket onward (or was auto-credited as the assignee at
+          // the time of a move with no assignee yet) -- not that they did any
+          // real work. Confirmed for real: 8 Migration/Infra tickets counted
+          // here purely because their ONLY Dev record was a 'passed' hand-off,
+          // which made Filters' "Queue: Dev" count 8 higher than MBR's
+          // Customer Engineering tab for the identical scope even after MBR's
+          // own roster was fixed to match the live Dev queue -- MBR's
+          // rosterMatchSql already excludes 'passed' for this exact reason
+          // (see its own comment re: Shiva Amuda), this was the one place in
+          // Filters that still counted it.
           deptExtraClauses.push(
             broadenIt
-              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)))`
+              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2) AND w4.reason != 'passed'))`
               : memberClause
           );
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
@@ -5401,7 +5412,7 @@ async function _handleJiraPgApi(
              )) = LOWER($2)
              OR EXISTS (
                SELECT 1 FROM user_worked_on_tickets w
-               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)
+               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
              )
            )`
         : null;
@@ -5439,11 +5450,22 @@ async function _handleJiraPgApi(
                )
                OR EXISTS (
                  SELECT 1 FROM user_worked_on_tickets w
-                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)
+                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
                )
              ))
            )`
         : null;
+      // originDeptMatchSql/updatedDeptMatchSql/memberClause's broadenIt above
+      // all exclude reason = 'passed' now -- a 'passed' row only means someone
+      // in this dept routed the ticket onward (or was auto-credited as the
+      // assignee at the time of a move with no assignee yet), not that they
+      // did real work; it's deleted outright once real work follows (see the
+      // DELETE ... WHERE reason='passed' elsewhere in this file). Confirmed
+      // for real: 8 Migration/Infra tickets were counted under Queue: Dev +
+      // Updated: Aug purely because their only Dev record was a 'passed'
+      // hand-off, which is exactly the class of false positive already fixed
+      // in reports/mbr-team's own rosterMatchSql/deptMatchSql (see their
+      // comment re: Shiva Amuda) -- this brings Filters in line with that.
       // Department-scope (which of the three modes above decides "does this
       // ticket belong to dept $2") and assignee-scope (does the selected
       // person match, optionally including their historical work here) are
@@ -9854,14 +9876,22 @@ async function _handleJiraPgApi(
     // they're told apart purely by roster.
     const TEAM_DEPT: Record<string, string> = { eng: 'Dev', qa: 'QA', infra: 'Infra', ent: 'Migration', smb: 'Migration' };
 
-    // Fixed roster, deliberately NOT read from custom_queues.queues[].memberIds
-    // (the "Dev" queue's live config on CloudFuze Board): that queue's real
-    // membership includes people who aren't this specific MBR team roster
-    // (e.g. bharath.tummaganti@cloudfuze.com, abhinav.surattu@cloudfuze.com) --
-    // a broader operational/support group, not the Customer Engineering/QA/
-    // Infra/Migration ENT/SMB teams this report is scoped to. Reverted to a
-    // fixed list per explicit request after the live-queue version surfaced
-    // exactly those extra names in the Team roster panel.
+    // Fallback roster, used only if the live custom_queues lookup below (for
+    // eng/qa/infra) comes back empty -- e.g. the Dev/QA/Infra queue's config
+    // was ever missing or its member list temporarily empty. Was the ONLY
+    // roster source for these three teams for a while (deliberately NOT read
+    // from custom_queues.queues[].memberIds, since that queue's live
+    // membership at the time included people outside this specific MBR team,
+    // e.g. bharath.tummaganti@cloudfuze.com, abhinav.surattu@cloudfuze.com --
+    // a broader operational/support group). Since reverted back to the live
+    // queue (see below): confirmed for real that a fixed list drifts out of
+    // sync as the queue's real membership changes -- this MBR tab and
+    // Filters' own "Queue: Dev" disagreed on Aug 2026's ticket count purely
+    // because of names on one list but not the other, with zero other cause
+    // once the extra names were accounted for. Migration ENT/SMB have no
+    // live-queue equivalent to fall back to at all (Migration is a single,
+    // undivided queue -- there's no way to tell ENT/SMB apart except by a
+    // hand-maintained list), so they stay on this fixed roster permanently.
     const TEAM_ROSTER: Record<string, string[]> = {
       eng: [
         'abhinandan.kumar@cloudfuze.com', 'akhila.aenkoju@cloudfuze.com', 'akib.mohd@cloudfuze.com', 'ankit@cloudfuze.com',
@@ -9894,8 +9924,29 @@ async function _handleJiraPgApi(
 
     const team = url.searchParams.get('team') || '';
     const dept = TEAM_DEPT[team];
-    const roster = TEAM_ROSTER[team];
     if (!dept) return json({ error: 'team must be one of eng, qa, infra, ent, smb' }, 400);
+
+    // eng/qa/infra map 1:1 onto a real, single queue (Dev/QA/Infra) on
+    // CloudFuze Board -- pull that queue's LIVE member list (same source
+    // Filters' own "Queue: X" uses) instead of the fixed TEAM_ROSTER list, so
+    // this tab never again drifts out of sync with Filters as people join or
+    // leave the queue. Migration ENT/SMB have no live-queue equivalent
+    // (Migration is one undivided queue, so the fixed list is the only way
+    // to tell them apart) and stay on TEAM_ROSTER permanently.
+    let roster: string[] = TEAM_ROSTER[team];
+    if (team === 'eng' || team === 'qa' || team === 'infra') {
+      try {
+        const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = 'TESTIN'`);
+        const queues: any[] = cq.rows[0]?.queues || [];
+        const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === dept.toLowerCase());
+        const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+        if (memberIds.length) {
+          const memberRows = await pool.query(`SELECT email FROM users WHERE id = ANY($1::text[]) AND email IS NOT NULL`, [memberIds]);
+          const liveEmails = memberRows.rows.map((r: any) => String(r.email).toLowerCase()).filter(Boolean);
+          if (liveEmails.length) roster = liveEmails;
+        }
+      } catch { /* fall back to the fixed TEAM_ROSTER list above if this lookup fails */ }
+    }
 
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
@@ -9952,20 +10003,33 @@ async function _handleJiraPgApi(
     // createdAt (original behavior).
     const monthlyBucketExpr = (fromIdx || toIdx) ? `i."updatedAt"` : `i."createdAt"`;
 
-    // Deliberately mirrors the Filters page's own "Queue: <dept> + date range"
-    // matching exactly (see queueMembersOnlyParam / originDeptMatchSql /
-    // updatedDeptMatchSql / deptExtraClauses above in this file) -- MBR and
-    // Filters are two independent reimplementations of "what counts as this
-    // dept's queue data," and every time they've drifted apart it's shown up
-    // as a real, confusing discrepancy (this handler previously undercounted
-    // Filters by more than half on a real date range: 161 vs Filters' true
-    // 423 for Queue: Dev + Updated: Aug 2026). A ticket belongs to dept $1 if
-    // ANY of: it's currently tagged $1; it originated in $1 (issue_history's
-    // earliest department change, or current_department if it never moved);
-    // its frozen per-dept snapshot (dept_statuses) shows it was completed
-    // while in $1; or there's a genuine user_worked_on_tickets row for $1 --
-    // this last check has no roster restriction on the worker, matching
-    // Filters' own broadenIt clause exactly.
+    // Deliberately mirrors the Filters page's own "Queue: <dept> + Updated:
+    // <range>" matching exactly (see queueMembersOnlyParam / updatedDeptMatchSql
+    // / deptExtraClauses above in this file) -- MBR and Filters are two
+    // independent reimplementations of "what counts as this dept's queue
+    // data," and every time they've drifted apart it's shown up as a real,
+    // confusing discrepancy (this handler previously undercounted Filters by
+    // more than half on a real date range: 161 vs Filters' true 423 for
+    // Queue: Dev + Updated: Aug 2026). A ticket belongs to dept $1 if ANY of:
+    // it's currently tagged $1; its frozen per-dept snapshot (dept_statuses)
+    // shows it was completed while in $1; or there's a genuine
+    // user_worked_on_tickets row for $1 -- this last check has no roster
+    // restriction on the worker, matching Filters' own broadenIt clause
+    // exactly.
+    //
+    // Used to ALSO match a ticket that merely originated in $1 (issue_history's
+    // earliest department change) regardless of date type -- correct for
+    // Filters' own Created-scoped originDeptMatchSql, but this handler's date
+    // range is pinned to Updated only (see monthlyBucketExpr/dateClause above
+    // -- there's no Created/Updated toggle here at all), and Filters' own
+    // updatedDeptMatchSql deliberately does NOT consider origin. Confirmed
+    // for real: CF-27177 originated in Dev but moved to Migration the same
+    // day with Dev's own dept_statuses snapshot still 'In Progress' (not
+    // done) and no non-'passed' Dev worked-on record -- Filters' Updated: Aug
+    // correctly excludes it (nothing Dev-related actually happened in
+    // August), but this unconditional origin check still counted it, one
+    // ticket higher than Filters for the identical Queue: Dev + Aug scope.
+    // Dropped to match.
     //
     // reason != 'passed' on every user_worked_on_tickets check in this
     // handler: 'passed' isn't evidence this person did any real work on the
@@ -9980,10 +10044,6 @@ async function _handleJiraPgApi(
     // 'returned' all still mean genuine involvement and stay valid evidence.
     const deptMatchSql = `(
       LOWER(i.current_department) = LOWER($1)
-      OR LOWER(COALESCE(
-           (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
-           i.current_department
-         )) = LOWER($1)
       OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($1) AND LOWER(v->>'category') = 'done')
       OR EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND w.reason != 'passed')
     )`;
