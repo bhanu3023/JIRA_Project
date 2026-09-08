@@ -2104,7 +2104,18 @@ export default function FiltersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {issues.slice(0, 100).map((issue: any) => {
+              {/* Used to hard-cap rendering to the first 100 of whatever was
+                  fetched, regardless of how many rows actually came back --
+                  confirmed for real: with PAGE_SIZE now 1000, a filter
+                  matching hundreds of tickets (sorted newest first) fetched
+                  all of them correctly but only ever SHOWED the newest ~100,
+                  silently cutting off everything older mid-range (e.g. a
+                  same-day cluster of ~100 tickets on one date made the whole
+                  rest of the selected date range invisible, with no visual
+                  sign anything was missing). The fetch itself is already
+                  the real limit (page/limit params); rendering everything
+                  that comes back is the correct behavior now. */}
+              {issues.map((issue: any) => {
                 // Carries which queue this row was shown under, same as the
                 // Queue Dashboard's own "Worked on" list -- without it, the
                 // issue detail page had no way to know it was opened from a
