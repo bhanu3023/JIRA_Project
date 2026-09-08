@@ -7086,7 +7086,22 @@ async function _handleJiraPgApi(
                 if (v !== null && v !== '') updateData[k] = v;
               }
               if (Object.keys(updateData).length > 0) {
-                await db.issue.update({ where: { id: issue.id }, data: updateData });
+                // Raw SQL instead of db.issue.update(), deliberately -- Prisma's
+                // schema has updatedAt DateTime @updatedAt, so a plain
+                // db.issue.update() call here silently bumps updatedAt to NOW()
+                // on every write, even though this is only backfilling
+                // previously-null metadata fields (customerName, rootCause,
+                // etc.), not anything a user would consider a real change to
+                // the ticket. Confirmed for real: CF-27236 and CF-27134 (last
+                // genuinely updated in Jira back in July) showed updatedAt of
+                // today, corrupting "Updated" date-range accuracy in Filters/
+                // MBR for any ticket whose detail page happened to load while
+                // one of these fields was still null. This background sync
+                // firing at all should never itself count as "the ticket was
+                // updated."
+                const cols = Object.keys(updateData);
+                const setClause = cols.map((c, idx) => `"${c}" = $${idx + 2}`).join(', ');
+                await pool.query(`UPDATE issues SET ${setClause} WHERE id = $1`, [issue.id, ...cols.map((c) => updateData[c])]);
                 Object.assign(issue, updateData);
               }
             }
