@@ -9903,14 +9903,15 @@ async function _handleJiraPgApi(
 
     // Internal/External split, layered on top of whichever ticketFilter is
     // already active (only meaningful for the Total/Resolved drill-downs,
-    // but composes fine with any of the others too). "Internal" = self-raised
-    // (reporter is the current assignee) OR raised by someone on the QA
-    // roster -- this app's own people generating the ticket, not a real
-    // customer report.
+    // but composes fine with any of the others too). "Internal" = reported
+    // by a Customer Engineering roster member -- CE is this app's front-line
+    // team, so a ticket THEY raised (as opposed to a real customer) isn't a
+    // genuine external complaint, regardless of which team's tab it's being
+    // viewed from. Everything else is External.
     if (segment === 'internal' || segment === 'external') {
-      ticketQueryParams = [...ticketQueryParams, TEAM_ROSTER.qa];
-      const qaRosterIdx = ticketQueryParams.length;
-      const internalCond = `((i."reporterId" IS NOT NULL AND i."reporterId" = i."assigneeId") OR EXISTS (SELECT 1 FROM users ru4 WHERE ru4.id = i."reporterId" AND LOWER(ru4.email) = ANY($${qaRosterIdx}::text[])))`;
+      ticketQueryParams = [...ticketQueryParams, TEAM_ROSTER.eng];
+      const ceRosterIdx = ticketQueryParams.length;
+      const internalCond = `EXISTS (SELECT 1 FROM users ru4 WHERE ru4.id = i."reporterId" AND LOWER(ru4.email) = ANY($${ceRosterIdx}::text[]))`;
       ticketFilterClause += segment === 'internal' ? ` AND ${internalCond}` : ` AND NOT ${internalCond}`;
     }
 
