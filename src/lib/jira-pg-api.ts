@@ -9567,22 +9567,30 @@ async function _handleJiraPgApi(
     // just never applied here, so MBR and Filters disagreed on the same
     // date range for the same department (confirmed for real comparing
     // Dev/Migration counts for Aug 1-31 between the two pages).
+    // The +05:30-then-.toISOString() version of this (still used a moment
+    // ago) round-trips the boundary through a real UTC instant, but issues'
+    // createdAt/updatedAt are `timestamp without time zone` and this DB
+    // session is UTC -- Postgres takes an incoming "...Z" string literally
+    // (dropping the Z, not converting it) when casting to a naive column, so
+    // the "IST midnight" boundary silently lands 5.5 hours EARLY on the
+    // stored wall-clock values. Confirmed for real: a ticket created
+    // 2026-05-31 21:49 (raw column value) was pulled into a "2026-06-01
+    // onward" query and then labeled "May 2026" in Monthly summary --
+    // exactly a boundary-bleed from this. Comparing plain ::date casts needs
+    // no timezone reasoning at all: it just truncates each naive timestamp
+    // to its own calendar date and compares that directly against the plain
+    // YYYY-MM-DD strings the date pickers already produce.
     const filterParams: any[] = [];
     let fromIdx: number | null = null;
     let toIdx: number | null = null;
-    if (dateFrom) { filterParams.push(new Date(`${dateFrom}T00:00:00+05:30`).toISOString()); fromIdx = filterParams.length; }
-    if (dateTo) {
-      const toExclusive = new Date(`${dateTo}T00:00:00+05:30`);
-      toExclusive.setDate(toExclusive.getDate() + 1);
-      filterParams.push(toExclusive.toISOString());
-      toIdx = filterParams.length;
-    }
+    if (dateFrom) { filterParams.push(dateFrom); fromIdx = filterParams.length; }
+    if (dateTo)   { filterParams.push(dateTo);   toIdx = filterParams.length; }
     let dateClause = '';
     if (fromIdx || toIdx) {
       const createdConds: string[] = [];
       const updatedConds: string[] = [];
-      if (fromIdx) { createdConds.push(`i."createdAt" >= $${fromIdx}`); updatedConds.push(`i."updatedAt" >= $${fromIdx}`); }
-      if (toIdx)   { createdConds.push(`i."createdAt" < $${toIdx}`);    updatedConds.push(`i."updatedAt" < $${toIdx}`); }
+      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
+      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
       dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
     let deptClause = '';
@@ -9807,34 +9815,40 @@ async function _handleJiraPgApi(
     const ticketFilter = url.searchParams.get('ticketFilter') || '';
     // Internal/External split, only ever applied on top of the Total/Resolved
     // drill-downs (the frontend only shows these two tabs there): "internal"
-    // = self-raised (reporter === current assignee) OR raised by someone on
-    // the QA roster -- i.e. this app's own people generating the ticket,
-    // not a real customer. Everything else is "external".
+    // = reported by a Customer Engineering roster member. Everything else is
+    // "external".
     const segment = url.searchParams.get('segment') || '';
+    // Drill-down from a specific Monthly summary row (e.g. "Jul 2026") --
+    // matched against the exact same monthlyBucketExpr used to build that
+    // row in the first place, so "click this month's Total tickets" always
+    // shows precisely the tickets that row's own count came from.
+    const month = url.searchParams.get('month') || '';
     const staleDays = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
-    // IST-anchored, same fix and same reasoning as reports/mbr just above --
-    // a bare "YYYY-MM-DD" parses as UTC midnight (5:30 AM IST), quietly
-    // dropping up to 5.5 hours of real tickets at each boundary and
-    // disagreeing with the Filters page's already-IST-anchored date range
-    // for the same department/date selection.
+    // Plain ::date comparison, not a +05:30-then-.toISOString() instant --
+    // issues.createdAt/updatedAt are `timestamp without time zone` and this
+    // DB session is UTC, so Postgres takes an incoming "...Z" string
+    // literally (drops the Z, doesn't convert it) when casting to a naive
+    // column -- the "IST midnight" boundary that approach computed landed
+    // 5.5 hours EARLY on the actual stored values. Confirmed for real: a
+    // ticket created 2026-05-31 21:49 (raw column value) was pulled into a
+    // "2026-06-01 onward" query and then labeled "May 2026" in Monthly
+    // summary -- exactly a boundary-bleed from this. ::date needs no
+    // timezone reasoning at all: it just truncates each naive timestamp to
+    // its own calendar date and compares that directly against the plain
+    // YYYY-MM-DD strings the date pickers already produce.
     const baseParams: any[] = [dept, roster];
     let fromIdx: number | null = null;
     let toIdx: number | null = null;
-    if (dateFrom) { baseParams.push(new Date(`${dateFrom}T00:00:00+05:30`).toISOString()); fromIdx = baseParams.length; }
-    if (dateTo) {
-      const toExclusive = new Date(`${dateTo}T00:00:00+05:30`);
-      toExclusive.setDate(toExclusive.getDate() + 1);
-      baseParams.push(toExclusive.toISOString());
-      toIdx = baseParams.length;
-    }
+    if (dateFrom) { baseParams.push(dateFrom); fromIdx = baseParams.length; }
+    if (dateTo)   { baseParams.push(dateTo);   toIdx = baseParams.length; }
     let dateClause = '';
     let createdInRangeSql = 'TRUE';
     if (fromIdx || toIdx) {
       const createdConds: string[] = [];
       const updatedConds: string[] = [];
-      if (fromIdx) { createdConds.push(`i."createdAt" >= $${fromIdx}`); updatedConds.push(`i."updatedAt" >= $${fromIdx}`); }
-      if (toIdx)   { createdConds.push(`i."createdAt" < $${toIdx}`);    updatedConds.push(`i."updatedAt" < $${toIdx}`); }
+      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
+      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
       dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
       createdInRangeSql = createdConds.join(' AND ');
     }
@@ -9947,6 +9961,16 @@ async function _handleJiraPgApi(
       const ceRosterIdx = ticketQueryParams.length;
       const internalCond = `EXISTS (SELECT 1 FROM users ru4 WHERE ru4.id = i."reporterId" AND LOWER(ru4.email) = ANY($${ceRosterIdx}::text[]))`;
       ticketFilterClause += segment === 'internal' ? ` AND ${internalCond}` : ` AND NOT ${internalCond}`;
+    }
+
+    // Monthly summary row drill-down -- matched against the exact same
+    // expression that row's own Monthly summary query grouped by, so this
+    // always shows precisely the tickets behind that row's Total tickets
+    // count (and never a ticket from a neighboring month).
+    if (month) {
+      ticketQueryParams = [...ticketQueryParams, month];
+      const monthIdx = ticketQueryParams.length;
+      ticketFilterClause += ` AND to_char(${monthlyBucketExpr}, 'Mon YYYY') = $${monthIdx}`;
     }
 
     // rb_breached (here and in AGG below) used to be COUNT(...) FILTER (WHERE
@@ -10151,18 +10175,19 @@ async function _handleJiraPgApi(
     const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     // Mirrors monthlyBucketExpr's SQL rule exactly, so a breached ticket lands
     // in the same monthly row its total/resolved counts already landed in.
-    // Same IST anchor as the baseParams boundaries above -- re-deriving this
-    // from the unanchored dateFrom/dateTo strings again here (instead of
-    // reusing baseParams' own already-anchored values) would silently put
-    // this monthly-bucket display 5.5 hours out of sync with the actual
-    // ticket-list query's boundaries.
-    const rangeFromMs = fromIdx ? new Date(`${dateFrom}T00:00:00+05:30`).getTime() : null;
-    const rangeToMs = toIdx ? (() => { const d = new Date(`${dateTo}T00:00:00+05:30`); d.setDate(d.getDate() + 1); return d.getTime(); })() : null;
+    // Matches the SQL side's ::date comparison exactly -- plain calendar-date
+    // string comparison, no timezone/epoch math at all. node-pg hands back
+    // issues.createdAt/updatedAt (naive `timestamp` columns) as JS Dates
+    // built by treating the raw wall-clock digits as UTC, so getUTC*()
+    // losslessly recovers those same original digits; comparing an epoch-ms
+    // "IST midnight" instant against that (the previous version of this)
+    // silently drifted 5.5 hours off the actual ::date boundaries above.
+    const dateStrUTC = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
     const monthLabelFor = (row: any): string => {
       let d = new Date(row.createdAt);
-      if (rangeFromMs !== null || rangeToMs !== null) {
-        const createdMs = d.getTime();
-        const createdInRange = (rangeFromMs === null || createdMs >= rangeFromMs) && (rangeToMs === null || createdMs < rangeToMs);
+      if (dateFrom || dateTo) {
+        const createdDateStr = dateStrUTC(d);
+        const createdInRange = (!dateFrom || createdDateStr >= dateFrom) && (!dateTo || createdDateStr <= dateTo);
         if (!createdInRange) d = new Date(row.updatedAt);
       }
       return `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCFullYear()}`;

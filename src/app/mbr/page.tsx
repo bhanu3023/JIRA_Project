@@ -69,7 +69,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   const [error, setError] = useState<string | null>(null);
 
   type DrillFilter = 'all' | 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix';
-  const [drillDown, setDrillDown] = useState<{ person?: string; filter: DrillFilter; label: string } | null>(null);
+  const [drillDown, setDrillDown] = useState<{ person?: string; month?: string; filter: DrillFilter; label: string } | null>(null);
   const [drillTickets, setDrillTickets] = useState<any[]>([]);
   const [drillTotal, setDrillTotal] = useState(0);
   const [drillLoading, setDrillLoading] = useState(false);
@@ -79,9 +79,9 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   // it specifically there (not the hygiene-column drill-downs).
   const [drillSegment, setDrillSegment] = useState<'internal' | 'external'>('internal');
   const drillSegmentable = drillDown?.filter === 'all' || drillDown?.filter === 'resolved';
-  const openDrill = (filter: DrillFilter, personEmail: string | undefined, label: string) => {
+  const openDrill = (filter: DrillFilter, personEmail: string | undefined, label: string, month?: string) => {
     setDrillSegment('internal');
-    setDrillDown({ person: personEmail, filter, label });
+    setDrillDown({ person: personEmail, filter, label, month });
   };
 
   useEffect(() => {
@@ -98,7 +98,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
     setDrillLoading(true);
     setDrillError(null);
     const segmentable = drillDown.filter === 'all' || drillDown.filter === 'resolved';
-    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, drillDown.person, drillDown.filter === 'all' ? undefined : drillDown.filter, undefined, segmentable ? drillSegment : undefined)
+    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, drillDown.person, drillDown.filter === 'all' ? undefined : drillDown.filter, undefined, segmentable ? drillSegment : undefined, drillDown.month)
       .then((d) => { setDrillTickets(d.tickets); setDrillTotal(d.totalMatched); })
       .catch((err) => { setDrillTickets([]); setDrillTotal(0); setDrillError(err?.message || 'Failed to load tickets'); })
       .finally(() => setDrillLoading(false));
@@ -189,8 +189,13 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                 {monthly.map((m) => (
                   <tr key={m.label} className="hover:bg-gray-50 transition-colors">
                     <td className="px-5 py-3 text-[13px] font-medium text-gray-800">{m.label}</td>
-                    <td className="px-5 py-3 text-[13px] text-gray-700">{m.total}</td>
-                    <td className="px-5 py-3 text-[13px] text-gray-700">{m.resolved} <span className="text-gray-400">({pct(m.resolved, m.total)})</span></td>
+                    <td className="px-5 py-3 text-[13px] text-gray-700">
+                      <button onClick={() => openDrill('all', person || undefined, `All tickets — ${m.label}`, m.label)} className="hover:underline">{m.total}</button>
+                    </td>
+                    <td className="px-5 py-3 text-[13px] text-gray-700">
+                      <button onClick={() => openDrill('resolved', person || undefined, `Resolved tickets — ${m.label}`, m.label)} className="hover:underline">{m.resolved}</button>{' '}
+                      <span className="text-gray-400">({pct(m.resolved, m.total)})</span>
+                    </td>
                     <td className={`px-5 py-3 text-[13px] ${m.rbBreached > 0 ? 'text-red-600' : 'text-gray-700'}`}>{m.rbBreached} / {m.rbTracked}</td>
                     <td className="px-5 py-3 text-[13px] text-gray-700">{pct(m.rbBreached, m.rbTracked)}</td>
                   </tr>

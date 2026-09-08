@@ -331,7 +331,7 @@ class ApiClient {
     const qs = params.toString();
     return this.request<{ departments: any[]; people: any[]; tickets: any[]; totalMatched: number }>(`/reports/mbr${qs ? `?${qs}` : ''}`);
   }
-  getMbrTeamData(team: 'eng' | 'qa' | 'infra' | 'ent' | 'smb', dateFrom?: string, dateTo?: string, person?: string, ticketFilter?: 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix', staleDays?: number, segment?: 'internal' | 'external') {
+  getMbrTeamData(team: 'eng' | 'qa' | 'infra' | 'ent' | 'smb', dateFrom?: string, dateTo?: string, person?: string, ticketFilter?: 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix', staleDays?: number, segment?: 'internal' | 'external', month?: string) {
     const params = new URLSearchParams({ team });
     if (dateFrom)     params.set('dateFrom',     dateFrom);
     if (dateTo)       params.set('dateTo',       dateTo);
@@ -339,6 +339,7 @@ class ApiClient {
     if (ticketFilter) params.set('ticketFilter', ticketFilter);
     if (staleDays)    params.set('staleDays',    String(staleDays));
     if (segment)      params.set('segment',      segment);
+    if (month)        params.set('month',        month);
     return this.request<{ people: any[]; monthly: any[]; summary: any; tickets: any[]; totalMatched: number }>(`/reports/mbr-team?${params}`);
   }
   getFileHealth() {
