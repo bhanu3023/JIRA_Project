@@ -9611,9 +9611,14 @@ async function _handleJiraPgApi(
     const dateTo     = url.searchParams.get('dateTo') || '';
     const staleDays  = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
-    // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo] —
-    // same convention as reports/mbr-team's team tabs, so the date-range filter
-    // means the same thing everywhere in the MBR page.
+    // Matches ONLY updatedAt, not createdAt -- explicitly requested: MBR's date
+    // range used to mean "touched" (createdAt OR updatedAt in range), which
+    // counted tickets merely CREATED in the window even if last updated well
+    // outside it, so MBR came back higher than Filters' own "Updated: <range>"
+    // for the identical Queue + range (confirmed for real: tickets created in
+    // Aug but not updated in Aug accounted for the gap). MBR has no separate
+    // Created/Updated toggle the way Filters does, so it's pinned to Updated
+    // only -- the same convention as reports/mbr-team's team tabs below.
     // Anchored to IST (+05:30), not parsed as bare UTC -- a bare
     // "YYYY-MM-DD" string is parsed as UTC midnight by Date's ISO handling,
     // which is 5:30 AM IST, not midnight IST. This app's users operate in
@@ -9645,11 +9650,10 @@ async function _handleJiraPgApi(
     if (dateTo)   { filterParams.push(dateTo);   toIdx = filterParams.length; }
     let dateClause = '';
     if (fromIdx || toIdx) {
-      const createdConds: string[] = [];
       const updatedConds: string[] = [];
-      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
-      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
-      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
+      if (fromIdx) updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`);
+      if (toIdx)   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`);
+      dateClause = ` AND (${updatedConds.join(' AND ')})`;
     }
     let deptClause = '';
     if (department) {
@@ -9926,28 +9930,27 @@ async function _handleJiraPgApi(
     let toIdx: number | null = null;
     if (dateFrom) { baseParams.push(dateFrom); fromIdx = baseParams.length; }
     if (dateTo)   { baseParams.push(dateTo);   toIdx = baseParams.length; }
+    // Matches ONLY updatedAt, not createdAt -- explicitly requested: this used
+    // to mean "touched" (createdAt OR updatedAt in range), which counted
+    // tickets merely CREATED in the window even if last updated well outside
+    // it, so this team tab came back higher than Filters' own "Updated:
+    // <range>" for the same Queue + range (confirmed for real: tickets
+    // created in Aug but not updated in Aug accounted for the gap). There's no
+    // separate Created/Updated toggle here the way Filters has one, so it's
+    // pinned to Updated only, same as reports/mbr above.
     let dateClause = '';
-    let createdInRangeSql = 'TRUE';
     if (fromIdx || toIdx) {
-      const createdConds: string[] = [];
       const updatedConds: string[] = [];
-      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
-      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
-      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
-      createdInRangeSql = createdConds.join(' AND ');
+      if (fromIdx) updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`);
+      if (toIdx)   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`);
+      dateClause = ` AND (${updatedConds.join(' AND ')})`;
     }
-    // Monthly buckets have to sum back to the exact same total the summary
-    // cards show for the same selection -- a ticket that only matched via
-    // dateClause's updatedAt side (its createdAt falls outside the window)
-    // must NOT be bucketed by that out-of-range createdAt month, or it both
-    // vanishes from the visible monthly rows (undercounting them) and, if a
-    // range spans multiple months, can misattribute it to the wrong one.
-    // Bucket by whichever of the two dates is the one actually inside the
-    // selected range; with no range selected there's no "in range" date to
-    // prefer, so it falls back to plain createdAt (original behavior).
-    const monthlyBucketExpr = (fromIdx || toIdx)
-      ? `CASE WHEN (${createdInRangeSql}) THEN i."createdAt" ELSE i."updatedAt" END`
-      : `i."createdAt"`;
+    // Bucket by updatedAt too, once a range is active -- matches whichever
+    // field dateClause actually filtered on, so a ticket never lands in a
+    // Monthly summary row its own createdAt disagrees with. No range
+    // selected has no "in range" date to prefer, so it falls back to plain
+    // createdAt (original behavior).
+    const monthlyBucketExpr = (fromIdx || toIdx) ? `i."updatedAt"` : `i."createdAt"`;
 
     // Deliberately mirrors the Filters page's own "Queue: <dept> + date range"
     // matching exactly (see queueMembersOnlyParam / originDeptMatchSql /
