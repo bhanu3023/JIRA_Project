@@ -1627,6 +1627,13 @@ export default function IssueDetailPage() {
   const viewDeptParam = searchParams?.get('viewDept') || '';
   const currentDeptForView = ((issue as any)?.current_department || '').trim();
   const isHistoricalDeptView = !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
+  // Admins can still edit the live ticket while viewing another queue's frozen
+  // snapshot -- the read-only lock below exists so a regular user can't mistake
+  // a historical snapshot for the live ticket and edit it by accident, not to
+  // block someone who needs to fix the ticket regardless of which queue they
+  // opened it from. The "Showing X's own..." banners stay visible either way,
+  // so an editing admin still sees they're looking at a historical snapshot.
+  const isHistoricalDeptLocked = isHistoricalDeptView && user?.role !== 'admin';
   const historicalDeptStatuses: Record<string, any> = (issue as any)?.dept_statuses || {};
   const historicalStatusKey = Object.keys(historicalDeptStatuses).find(k => k.toLowerCase() === viewDeptParam.toLowerCase());
   const historicalStatusSnap = isHistoricalDeptView && historicalStatusKey ? historicalDeptStatuses[historicalStatusKey] : null;
@@ -2971,10 +2978,10 @@ export default function IssueDetailPage() {
                   Read-only (not editable) while showing another queue's frozen
                   historical snapshot instead of the ticket's live status. */}
               <button
-                onClick={() => canEdit && !isHistoricalDeptView && setShowStatusDropdown(v => !v)}
-                disabled={!canEdit || isHistoricalDeptView}
-                title={isHistoricalDeptView ? `Historical status as last seen in ${viewDeptParam}` : canEdit ? undefined : 'This ticket has moved to another queue — only that queue can change its status'}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-bold uppercase tracking-wide transition-all select-none ${canEdit && !isHistoricalDeptView ? 'hover:brightness-95' : 'cursor-not-allowed opacity-70'}`}
+                onClick={() => canEdit && !isHistoricalDeptLocked && setShowStatusDropdown(v => !v)}
+                disabled={!canEdit || isHistoricalDeptLocked}
+                title={isHistoricalDeptLocked ? `Historical status as last seen in ${viewDeptParam}` : canEdit ? undefined : 'This ticket has moved to another queue — only that queue can change its status'}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-bold uppercase tracking-wide transition-all select-none ${canEdit && !isHistoricalDeptLocked ? 'hover:brightness-95' : 'cursor-not-allowed opacity-70'}`}
                 style={{
                   backgroundColor: displayStat.color + '25',
                   color: displayStat.color,
@@ -2982,7 +2989,7 @@ export default function IssueDetailPage() {
                 }}
               >
                 {displayStat.name}
-                {canEdit && !isHistoricalDeptView && <ChevronDown size={11} strokeWidth={2.5} />}
+                {canEdit && !isHistoricalDeptLocked && <ChevronDown size={11} strokeWidth={2.5} />}
               </button>
 
               {showStatusDropdown && (() => {
@@ -3107,10 +3114,10 @@ export default function IssueDetailPage() {
                       Showing {viewDeptParam}&rsquo;s own assignee — this ticket has since moved to {currentDeptForView || 'another queue'}.
                     </p>
                   )}
-                  <button onClick={() => !isHistoricalDeptView && setShowAssigneeDropdown(!showAssigneeDropdown)}
-                    disabled={isHistoricalDeptView}
-                    title={isHistoricalDeptView ? `Historical assignee as last seen in ${viewDeptParam}` : undefined}
-                    className={`flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full ${isHistoricalDeptView ? 'cursor-not-allowed opacity-70' : ''}`}>
+                  <button onClick={() => !isHistoricalDeptLocked && setShowAssigneeDropdown(!showAssigneeDropdown)}
+                    disabled={isHistoricalDeptLocked}
+                    title={isHistoricalDeptLocked ? `Historical assignee as last seen in ${viewDeptParam}` : undefined}
+                    className={`flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full ${isHistoricalDeptLocked ? 'cursor-not-allowed opacity-70' : ''}`}>
                     {displayAssignee ? (
                       <>
                         <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
@@ -3378,10 +3385,10 @@ export default function IssueDetailPage() {
                     Showing {viewDeptParam}&rsquo;s own assignee — this ticket has since moved to {currentDeptForView || 'another queue'}.
                   </p>
                 )}
-                <button onClick={() => !isHistoricalDeptView && setShowAssigneeDropdown(!showAssigneeDropdown)}
-                  disabled={isHistoricalDeptView}
-                  title={isHistoricalDeptView ? `Historical assignee as last seen in ${viewDeptParam}` : undefined}
-                  className={`flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full ${isHistoricalDeptView ? 'cursor-not-allowed opacity-70' : ''}`}>
+                <button onClick={() => !isHistoricalDeptLocked && setShowAssigneeDropdown(!showAssigneeDropdown)}
+                  disabled={isHistoricalDeptLocked}
+                  title={isHistoricalDeptLocked ? `Historical assignee as last seen in ${viewDeptParam}` : undefined}
+                  className={`flex items-center gap-2 hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full ${isHistoricalDeptLocked ? 'cursor-not-allowed opacity-70' : ''}`}>
                   {displayAssignee ? (
                     <>
                       <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0">
