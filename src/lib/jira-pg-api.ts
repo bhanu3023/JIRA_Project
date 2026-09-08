@@ -10361,7 +10361,17 @@ async function _handleJiraPgApi(
 
     const summaryParams = [...scopedParams, staleDays];
     const summaryStaleIdx = summaryParams.length;
-    const peopleParams = [...baseParams, staleDays];
+    // The per-person breakdown always lists the curated team roster, even
+    // though totals/matching above use the live queue's full membership
+    // (kept broad on purpose to stay in sync with Filters' own counts).
+    // Live queue membership for eng/qa/infra includes broader operational/
+    // support accounts (e.g. admins) alongside actual team members -- fine
+    // for "does this ticket count," wrong for "list this team's people."
+    // Same params shape as baseParams (dept, roster, ...dateFrom/dateTo) so
+    // dateClause's positional $3/$4 refs still line up -- only the roster
+    // at position 2 changes.
+    const peopleBaseParams = [dept, TEAM_ROSTER[team] || roster, ...baseParams.slice(2)];
+    const peopleParams = [...peopleBaseParams, staleDays];
     const peopleStaleIdx = peopleParams.length;
 
     const [summaryRes, peopleRes, monthlyRes, ticketsRes] = await Promise.all([
