@@ -2514,7 +2514,51 @@ const PREFIX_TO_META: Record<string, { jiraProject: string; spaceKey: string }> 
 // (real Jira field names, not guessed). Neither was fetched at all before, so
 // a ticket that had real values for both in Jira showed them empty here after
 // migration -- importIssueFromJira/importCfitsIssue never had the data to map.
-const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665,customfield_10059,customfield_10402';
+const JIRA_CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,customfield_10203,customfield_10236,customfield_11404,customfield_10016,customfield_10665,customfield_10059,customfield_10402,customfield_10917,customfield_10849,customfield_10306,customfield_10309,customfield_10043';
+
+// customfield_10917 = "SLA Breached" (Dev/L2B/L3B's own field), customfield_10849
+// = "Resolution SLA Breach" (Migration/CFITS's own field) -- neither is exclusive
+// to one department, so both are always checked (breached if EITHER says "Yes"),
+// same as the one-time jira-sla-breach-backfill-ids.json reconciliation this
+// mirrors. customfield_10306/10309 = SLA Due/Start Time, only populated
+// alongside the select fields on some tickets. Many tickets never got the
+// select field set at all but still carry real breach data in Jira's own
+// native SLA metric (customfield_10043, "Time to resolution") instead -- its
+// clock just never got formally closed out with a Yes/No. A reopened ticket
+// can have multiple completed cycles (the SLA restarts each time); treat it as
+// breached if ANY cycle was, using that cycle's own due/start time, same
+// fallback backfill-jira-sla-breach.mjs already established as correct.
+// Returns null only when there is genuinely no SLA data of any kind (a brand
+// new, not-yet-tracked ticket) -- callers should leave the existing
+// jira_sla_breached value alone in that case, not stomp it to false.
+function extractJiraSlaBreach(fields: any): { breached: boolean; dueAt: Date | null; startAt: Date | null } | null {
+  const pick = (raw: any) => (Array.isArray(raw) ? raw[0] : raw);
+  const devOption = pick(fields?.customfield_10917);
+  const migrationOption = pick(fields?.customfield_10849);
+  const devBreached = String(devOption?.value || '').toLowerCase() === 'yes';
+  const migrationBreached = String(migrationOption?.value || '').toLowerCase() === 'yes';
+  if (devOption || migrationOption) {
+    return {
+      breached: devBreached || migrationBreached,
+      dueAt: fields?.customfield_10306 ? new Date(fields.customfield_10306) : null,
+      startAt: fields?.customfield_10309 ? new Date(fields.customfield_10309) : null,
+    };
+  }
+  const native = fields?.customfield_10043;
+  if (!native || typeof native !== 'object') return null;
+  const cycles = [
+    ...(Array.isArray(native.completedCycles) ? native.completedCycles : []),
+    ...(native.ongoingCycle ? [native.ongoingCycle] : []),
+  ];
+  if (!cycles.length) return null;
+  const breachedCycle = cycles.find((c: any) => c.breached);
+  const cycle = breachedCycle || cycles[cycles.length - 1];
+  return {
+    breached: !!breachedCycle,
+    dueAt: cycle.breachTime?.epochMillis ? new Date(cycle.breachTime.epochMillis) : null,
+    startAt: cycle.startTime?.epochMillis ? new Date(cycle.startTime.epochMillis) : null,
+  };
+}
 
 function extractJiraValue(raw: any): string | null {
   if (!raw) return null;
@@ -2721,6 +2765,19 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
       if (f.resolutiondate) {
         await pool.query(`UPDATE issues SET "resolvedAt" = $1 WHERE id = $2`, [new Date(f.resolutiondate), issueId]);
       }
+      // jira_sla_breached/_due_at/_start_at also aren't in the Prisma schema.
+      // Keep them live on every re-sync instead of only at creation -- Jira's
+      // own SLA select field can flip from empty/No to Yes well after the
+      // ticket was first imported (e.g. once its clock formally closes), and
+      // this update branch runs on every subsequent sync of an already-
+      // migrated ticket, not just its first import.
+      const slaBreach = extractJiraSlaBreach(f);
+      if (slaBreach) {
+        await pool.query(
+          `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+          [slaBreach.breached, slaBreach.dueAt, slaBreach.startAt, issueId]
+        );
+      }
     } else {
       const created = await db.issue.create({
         data: {
@@ -2764,6 +2821,19 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
       // resolutiondate is Jira's own field for exactly this.
       if (f.resolutiondate) {
         await pool.query(`UPDATE issues SET "resolvedAt" = $1 WHERE id = $2`, [new Date(f.resolutiondate), issueId]);
+      }
+      // jira_sla_breached/_due_at/_start_at (also not in the Prisma schema) --
+      // without this, every newly-synced ticket kept reporting "not breached"
+      // regardless of Jira's own real SLA history, since only a one-time
+      // static list (jira-sla-breach-backfill-ids.json) ever populated this
+      // column, and that list can never cover a ticket synced after it was
+      // generated.
+      const slaBreachNew = extractJiraSlaBreach(f);
+      if (slaBreachNew) {
+        await pool.query(
+          `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+          [slaBreachNew.breached, slaBreachNew.dueAt, slaBreachNew.startAt, issueId]
+        );
       }
       // A ticket imported from Jira never got a CF-#### display key at all --
       // every other place a ticket comes into existence (manual creation, the
@@ -2984,10 +3054,21 @@ async function importCfitsIssue(cfitsKey: string): Promise<string | null> {
     // that clamps to 0 once already over budget, showing DUE == START,
     // confirmed live on CF-29312/L1BOAR-15132). resolutiondate is Jira's own
     // field for exactly this.
+    // jira_sla_breached/_due_at/_start_at: without this, every CFITS-imported
+    // ticket kept reporting "not breached" regardless of Jira's own real SLA
+    // history -- only a one-time static list (jira-sla-breach-backfill-ids.json)
+    // ever populated this column, and that list can never cover a ticket
+    // migrated after it was generated. See extractJiraSlaBreach's own comment
+    // for why both customfield_10849 (this board's own field) and
+    // customfield_10917 are checked, with a native-SLA-metric fallback.
+    const cfitsSlaBreach = extractJiraSlaBreach(f);
     try {
       await pool.query(
-        `UPDATE issues SET current_department = $1, jira_source_key = $2, "resolvedAt" = COALESCE($4, "resolvedAt") WHERE id = $3`,
-        [CFITS_DEFAULT_DEPARTMENT, cfitsKey, created.id, f.resolutiondate ? new Date(f.resolutiondate) : null]
+        `UPDATE issues SET current_department = $1, jira_source_key = $2, "resolvedAt" = COALESCE($4, "resolvedAt"),
+           jira_sla_breached = COALESCE($5, jira_sla_breached), jira_sla_due_at = COALESCE($6, jira_sla_due_at), jira_sla_start_at = COALESCE($7, jira_sla_start_at)
+         WHERE id = $3`,
+        [CFITS_DEFAULT_DEPARTMENT, cfitsKey, created.id, f.resolutiondate ? new Date(f.resolutiondate) : null,
+         cfitsSlaBreach ? cfitsSlaBreach.breached : null, cfitsSlaBreach?.dueAt ?? null, cfitsSlaBreach?.startAt ?? null]
       );
     } catch (e: any) {
       if (e?.code === '23505') {
@@ -3570,7 +3651,7 @@ async function _handleJiraPgApi(
   // to send -- they authenticate with this per-process secret instead (see
   // internal-job-secret.ts). Scoped to one specific path rather than a
   // blanket bypass, since anything landing here has no session to audit.
-  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at')
+  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach')
     && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
 
   if (!userId && !isPublicPath && !isInternalJob) {
@@ -7084,6 +7165,12 @@ async function _handleJiraPgApi(
             const creds = await getJiraCredentials();
             const jiraKey = prefix === 'L1BOAR' ? null : key;
             let jiraFields: Record<string, string | null> | null = null;
+            // Piggybacked onto this same fetch rather than its own trigger --
+            // CFITS/L1BOAR tickets never get re-synced by the periodic job the
+            // way L2B/L3B do (see importCfitsIssue: it returns early once a
+            // ticket is already migrated), so this on-demand load is the ONLY
+            // ongoing chance to catch up jira_sla_breached for them at all.
+            let slaBreachRefresh: { breached: boolean; dueAt: Date | null; startAt: Date | null } | null = null;
 
             if (jiraKey) {
               // Direct lookup by key for L2B / L3B
@@ -7104,6 +7191,7 @@ async function _handleJiraPgApi(
                   rootCause:      extractJiraValue(f.customfield_10059),
                   fixDescription: extractJiraValue(f.customfield_10402),
                 };
+                slaBreachRefresh = extractJiraSlaBreach(f);
               }
             } else if (issue.summary) {
               // Title-based search in CFITS for L1BOAR tickets
@@ -7132,8 +7220,16 @@ async function _handleJiraPgApi(
                     rootCause:      extractJiraValue(f.customfield_10059),
                     fixDescription: extractJiraValue(f.customfield_10402),
                   };
+                  slaBreachRefresh = extractJiraSlaBreach(f);
                 }
               }
+            }
+
+            if (slaBreachRefresh) {
+              await pool.query(
+                `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+                [slaBreachRefresh.breached, slaBreachRefresh.dueAt, slaBreachRefresh.startAt, issue.id]
+              ).catch(() => {});
             }
 
             if (jiraFields) {
@@ -11856,6 +11952,72 @@ async function _handleJiraPgApi(
       return json({ checked, fixed });
     } catch (e: any) {
       console.error('[backfill-updated-at] failed:', e?.message || e);
+      return json({ error: 'Backfill failed', details: e?.message }, 500);
+    }
+  }
+
+  // POST /admin/backfill-sla-breach -- one-time correction of jira_sla_breached
+  // (+_due_at/_start_at) for every L2B/L3B/PSM/SOPS/QA/CFITS ticket, reconciled
+  // directly against live Jira instead of the old static
+  // jira-sla-breach-backfill-ids.json snapshot (a point-in-time list that can
+  // never cover a ticket synced after it was generated -- confirmed for real:
+  // none of PSM/SOPS/QA ever got a single entry in it, and the ongoing sync
+  // never fetched these Jira fields at all until now, see extractJiraSlaBreach
+  // and its call sites in importIssueFromJira/importCfitsIssue). Batched 100
+  // keys per request, same shape as backfill-updated-at above. Idempotent via
+  // its own app_settings flag.
+  if (path === 'admin/backfill-sla-breach' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+      const already = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'sla_breach_backfill_v1_done'`);
+      if (already.rows.length > 0 && url.searchParams.get('force') !== 'true') {
+        return json({ checked: 0, fixed: 0, breachedFound: 0, alreadyRan: true });
+      }
+
+      const creds = await getJiraCredentials();
+      const directRows = await pool.query(`SELECT id, key AS jira_key FROM issues WHERE key LIKE 'L2B-%' OR key LIKE 'L3B-%' OR key LIKE 'PSM-%' OR key LIKE 'SOPS-%' OR key LIKE 'QA-%'`);
+      const cfitsRows = await pool.query(`SELECT id, jira_source_key AS jira_key FROM issues WHERE key LIKE 'L1BOAR-%' AND jira_source_key IS NOT NULL`);
+      const all = [...directRows.rows, ...cfitsRows.rows];
+      const byJiraKey = new Map(all.map((r: any) => [r.jira_key, r.id]));
+      const batches: string[][] = [];
+      const keys = all.map((r: any) => r.jira_key);
+      for (let i = 0; i < keys.length; i += 100) batches.push(keys.slice(i, i + 100));
+
+      const slaFields = 'customfield_10917,customfield_10849,customfield_10306,customfield_10309,customfield_10043';
+      let checked = 0, fixed = 0, breachedFound = 0;
+      for (const batch of batches) {
+        const jql = encodeURIComponent(`issuekey in (${batch.map((k) => `"${k}"`).join(',')})`);
+        const res = await fetch(`${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=100&fields=${slaFields}`, {
+          headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+          signal: AbortSignal.timeout(15000),
+        }).catch(() => null);
+        if (!res || !res.ok) continue;
+        const data: any = await res.json().catch(() => null);
+        if (!data || !Array.isArray(data.issues)) continue;
+        for (const jiraIssue of data.issues) {
+          checked++;
+          const localId = byJiraKey.get(jiraIssue.key);
+          if (!localId) continue;
+          const slaBreach = extractJiraSlaBreach(jiraIssue.fields || {});
+          if (!slaBreach) continue; // genuinely no SLA data in Jira -- leave existing value alone
+          if (slaBreach.breached) breachedFound++;
+          await pool.query(
+            `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+            [slaBreach.breached, slaBreach.dueAt, slaBreach.startAt, localId]
+          );
+          fixed++;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      await pool.query(
+        `INSERT INTO app_settings (key, value) VALUES ('sla_breach_backfill_v1_done', 'true')
+         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()`
+      );
+      return json({ checked, fixed, breachedFound });
+    } catch (e: any) {
+      console.error('[backfill-sla-breach] failed:', e?.message || e);
       return json({ error: 'Backfill failed', details: e?.message }, 500);
     }
   }
