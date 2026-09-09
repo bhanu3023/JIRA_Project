@@ -4740,7 +4740,12 @@ async function _handleJiraPgApi(
     if (projectManagerParam) {
       const vals = projectManagerParam.split('|||').map(v => v.trim()).filter(Boolean);
       if (vals.length) {
-        const pmOr = vals.map((v) => ({ projectManager: { contains: v, mode: 'insensitive' as const } }));
+        const pmOr: any[] = vals.map((v) => ({ projectManager: { contains: v, mode: 'insensitive' as const } }));
+        // "Others" also catches a ticket with no PM set at all -- see the
+        // matching comment on the dept-scoped branch below for why.
+        if (vals.some((v) => v.toLowerCase() === 'others')) {
+          pmOr.push({ projectManager: null }, { projectManager: '' });
+        }
         if (!where.AND) where.AND = [];
         (where.AND as any[]).push({ OR: pmOr });
       }
@@ -4964,7 +4969,11 @@ async function _handleJiraPgApi(
           if (projectManagerParam) {
             const pmVals = projectManagerParam.split('|||').map((v) => v.trim()).filter(Boolean);
             if (pmVals.length) {
-              sentExtraClauses.push(`i."projectManager" ILIKE ANY($${sentParamIdx}::text[])`);
+              // "Others" also catches a ticket with no PM set at all -- see the
+              // matching comment on the dept-scoped branch above for why.
+              const hasOthers = pmVals.some((v) => v.toLowerCase() === 'others');
+              const nullClause = hasOthers ? ` OR i."projectManager" IS NULL OR i."projectManager" = ''` : '';
+              sentExtraClauses.push(`(i."projectManager" ILIKE ANY($${sentParamIdx}::text[])${nullClause})`);
               sentExtraParams.push(pmVals.map((v) => `%${v}%`));
               sentParamIdx++;
             }
@@ -5398,7 +5407,16 @@ async function _handleJiraPgApi(
         // stored value can be several names joined together.
         const pmVals = projectManagerParam.split('|||').map((v) => v.trim()).filter(Boolean);
         if (pmVals.length) {
-          deptExtraClauses.push(`i."projectManager" ILIKE ANY($${deptParamIdx}::text[])`);
+          // "Others" is meant to catch tickets with no specific PM picked, too --
+          // a ticket whose projectManager was simply never set doesn't literally
+          // contain the text "Others", so it silently never matched this filter
+          // even though it conceptually belongs there. Confirmed for real:
+          // Queue: Migration + Updated: Aug + PM: Others returned only the 1
+          // ticket actually labeled "Others", with every genuinely-unset ticket
+          // invisible to this filter no matter what.
+          const hasOthers = pmVals.some((v) => v.toLowerCase() === 'others');
+          const nullClause = hasOthers ? ` OR i."projectManager" IS NULL OR i."projectManager" = ''` : '';
+          deptExtraClauses.push(`(i."projectManager" ILIKE ANY($${deptParamIdx}::text[])${nullClause})`);
           deptExtraParams.push(pmVals.map((v) => `%${v}%`));
           deptParamIdx++;
         }
