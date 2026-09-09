@@ -6082,6 +6082,17 @@ async function _handleJiraPgApi(
       }
     } catch { /* attribution is best-effort — never block the list on it */ }
 
+    // Which department a breach belongs to -- shown right alongside "by
+    // <name>" above, since a plain "SLA Breached: Yes" says nothing about
+    // where. Uses the ticket's CURRENT department, matching the exact same
+    // rule reports/mbr-team just adopted for its own SLA-breach counts (a
+    // breach belongs to whichever department the ticket is in now, not
+    // wherever it originated) -- Filters and MBR need to agree on this, not
+    // run two different definitions of "which dept" side by side.
+    enrichedIssues = enrichedIssues.map((i: any) =>
+      i.sla_breached ? { ...i, sla_breached_dept: i.current_department || null } : i
+    );
+
     if (includeTimeSpentParam && enrichedIssues.length) {
       try {
         const histIds = enrichedIssues.map((i: any) => i.id);

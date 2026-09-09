@@ -2243,6 +2243,17 @@ export default function FiltersPage() {
                             by {issue.sla_breached_by}
                           </span>
                         )}
+                        {/* Which department this breach belongs to -- a plain
+                            "Yes" said nothing about where. Matches the same
+                            rule MBR's own SLA-breach counts use (the ticket's
+                            CURRENT department), so Filters and MBR agree on
+                            "which dept" instead of each implying a different
+                            answer. */}
+                        {issue.sla_breached_dept && (
+                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="The department this breach is attributed to (the ticket's current department)">
+                            in {issue.sla_breached_dept}
+                          </span>
+                        )}
                       </div>
                     ) : (
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
