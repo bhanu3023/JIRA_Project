@@ -8851,8 +8851,21 @@ async function _handleJiraPgApi(
       // assignee-change action itself shouldn't ALSO write a 'worked' credit
       // for whoever clicked the dropdown, self-assign included: only a real
       // action (status change) is evidence of actually working the ticket.
+      //
+      // That reasoning had a gap: a status change is only real evidence of
+      // work when the person making it is ALSO the one left holding the
+      // ticket. A lead triaging an unassigned ticket -- routing it to a
+      // specific developer AND bumping its status in the same request --
+      // isn't doing the work themselves, but this still credited them with
+      // 'worked'. Confirmed for real: 36 of Ravi Srivastava's 46 August
+      // 'worked'/'closed' Dev credits landed at the exact same moment he
+      // reassigned the ticket away (mostly null -> a specific developer),
+      // so he'd never actually held it. Skip the credit whenever this same
+      // request is ALSO reassigning the ticket to someone other than the
+      // person making the change -- that's routing, not working it.
+      const reassigningToSomeoneElse = data.assigneeId !== undefined && data.assigneeId !== userId;
       const workedDept: string | null = (updated as any).current_department || null;
-      if (userId && workedDept && statusChangedNow) {
+      if (userId && workedDept && statusChangedNow && !reassigningToSomeoneElse) {
         await pool.query(
           `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
            ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET worked_at=NOW()`,
