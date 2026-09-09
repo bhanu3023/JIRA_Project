@@ -2168,6 +2168,24 @@ export default function FiltersPage() {
                         <span className="text-[12px] text-gray-600 truncate">
                           {`${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim()}
                         </span>
+                        {/* This queue's OWN historical assignee for this ticket, not
+                            whoever holds it now -- shown whenever the ticket has since
+                            moved to a different department (the same "Queue: X + date
+                            range" broadening that surfaces the ticket at all here in
+                            the first place). Without this, a Migration-queue result
+                            could show a Dev or Pre-Sales person's name with nothing
+                            explaining why, reading as a data bug instead of the
+                            intentional per-department view it is -- the ticket detail
+                            page already has an amber banner saying exactly this when
+                            opened via ?viewDept=, this table had no equivalent at all. */}
+                        {issue.assigneeIsHistorical && (
+                          <span
+                            className="ml-0.5 inline-flex items-center px-1 py-0.5 rounded-full text-[9px] font-medium bg-amber-50 text-amber-700 whitespace-nowrap"
+                            title={`Who this ticket was assigned to while it was in ${selQueue || 'this queue'} -- it has since moved to a different department`}
+                          >
+                            in {selQueue || 'queue'}
+                          </span>
+                        )}
                       </div>
                     ) : (
                       <span className="text-[11.5px] text-gray-300">Unassigned</span>

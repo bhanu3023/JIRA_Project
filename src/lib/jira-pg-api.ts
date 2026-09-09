@@ -5822,7 +5822,18 @@ async function _handleJiraPgApi(
               assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
             }
           }
-          return formatIssue({
+          // Surfaced to the frontend so the Filters table can flag it inline --
+          // the ticket detail page already shows an amber "Showing <dept>'s own
+          // assignee — this ticket has since moved to <dept>" banner for this
+          // exact substitution when opened via ?viewDept=, but this table had
+          // no equivalent at all: a Migration-queue result could show a Dev or
+          // Pre-Sales person's name in the Assignee column with nothing
+          // explaining why, reading as a data bug rather than the intentional
+          // per-department historical view it actually is. Confirmed for real:
+          // CF-29568 (assignee snapshot) and CF-29902 (reporter fallback, no
+          // snapshot existed) under Queue: Migration.
+          const assigneeIsHistorical = !!assigneeOverride;
+          return { ...formatIssue({
           // Truncated — see comment above the other formatIssue list call site.
           // This branch's SELECT i.* pulls the full raw description for every
           // row; a single legacy ticket with a base64-embedded image in it can
@@ -5850,7 +5861,7 @@ async function _handleJiraPgApi(
           jira_assignee_name: row.jira_assignee_name || null,
           jira_reporter_name: row.jira_reporter_name || null,
           space: { key: row.space_key || spaceKey },
-        });
+        }), assigneeIsHistorical };
         });
       } catch { /* keep Prisma results as fallback */ }
     }
