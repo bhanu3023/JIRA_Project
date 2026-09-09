@@ -1319,16 +1319,20 @@ export default function FiltersPage() {
 
         if (selAssignees.length) {
           params.assignees = Array.from(new Set(selAssignees.flatMap(expandMember))).join(',');
-          // Queue + Assignee together should mean "did this person work this
-          // dept's tickets", not "is this person the ticket's CURRENT owner
-          // right now" -- without this, a ticket this person genuinely
-          // worked here (e.g. resolved it) but which has since moved to
-          // another department and been reassigned there silently drops out,
-          // even though it's exactly the kind of ticket this combination is
-          // meant to surface. Backend already supports this (includeHistory
-          // folds in user_worked_on_tickets alongside the plain current-
-          // assignee match) -- just never wired up from this page before.
-          if (selQueue) params.includeHistory = 'true';
+          // Queue + Assignee means "who currently holds this ticket in this
+          // dept" -- NOT "who has ever worked it here". includeHistory used
+          // to be forced on for every Queue+Assignee combination (to surface
+          // a ticket someone resolved here but which has since moved on and
+          // been reassigned elsewhere), but that made it the unconditional
+          // default rather than an opt-in view, and confirmed for real: Ravi
+          // Srivastava's Dev queue showed dozens of Migration/QA/Pre-Sales
+          // tickets under his name that he'd genuinely worked once but had
+          // long since been reassigned away from, with nothing to suggest he
+          // wasn't still the current owner. Plain current-assignee matching
+          // (the `assignees` param alone, no includeHistory) is what this
+          // combination should mean by default now -- see workedRange
+          // (the "Worked" date-filter mode) for the still-available
+          // deliberate "who did the work" view.
         }
 
         if (selReporters.length) {
