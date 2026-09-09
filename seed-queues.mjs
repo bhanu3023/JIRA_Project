@@ -19,10 +19,24 @@ await pool.query(`
   )
 `);
 
+// IT Administration has no department/queue concept at all (confirmed for
+// real: IA-25 twice got a stray current_department='Infra' from its
+// CreateIssueModal pre-fill leaking through, which this script then read
+// back as "real department data in use" and auto-created a matching queue
+// for -- which made that department selectable again in the UI, letting the
+// next ticket repeat the leak. Skipping this space here breaks that loop at
+// the source: a stray value can still land on an issue, but it will never
+// get promoted into a selectable queue again.
+const NO_DEPARTMENT_SPACE_KEYS = new Set(['IA']);
+
 // Get all spaces
 const spaces = await pool.query(`SELECT id, key, name FROM spaces`);
 
 for (const space of spaces.rows) {
+  if (NO_DEPARTMENT_SPACE_KEYS.has((space.key || '').toUpperCase())) {
+    console.log(`⊘ ${space.key} (${space.name}) — no department/queue concept for this space, skipping`);
+    continue;
+  }
   const existing = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [space.key]);
   const existingQueues = existing.rows.length > 0 ? existing.rows[0].queues : [];
   const existingNames = new Set(existingQueues.map((q) => (q.name || '').toLowerCase()));
