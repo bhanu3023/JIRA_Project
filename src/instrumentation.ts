@@ -158,6 +158,27 @@ export async function register() {
     }
   }
 
+  // One-time correction: Root Cause / Fix Description are rich-text ADF
+  // fields in Jira, and extractJiraValue only knew how to read plain
+  // values/selects until now -- every sync of these two fields silently
+  // wrote nothing for L2B/L3B (see adfNodeToPlainText and its call site in
+  // jira-pg-api.ts). Reconciles every already-imported L2B/L3B ticket
+  // directly against live Jira. Idempotent (app_settings flag), same shape
+  // as backfillSlaBreach above.
+  async function backfillRootCauseFixDescription(label: string): Promise<void> {
+    try {
+      const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
+      const res = await fetch(`${internalUrl}/api/admin/backfill-root-cause-fix-description`, {
+        method: 'POST',
+        headers: { 'x-internal-job-secret': INTERNAL_JOB_SECRET },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.fixed > 0) console.log(`[Root Cause/Fix Description backfill] ${label} — checked ${data.checked}, restored ${data.fixed} ticket(s).`);
+    } catch (err) {
+      console.error(`[Root Cause/Fix Description backfill] ${label} — failed:`, err);
+    }
+  }
+
   // Fire-and-forget: schedule the boot-time run and both 5-minute intervals,
   // but do NOT await any of it here — see the note above for why.
   setTimeout(() => {
@@ -166,6 +187,7 @@ export async function register() {
     backfillClientNames('Boot');
     backfillUpdatedAt('Boot');
     backfillSlaBreach('Boot');
+    backfillRootCauseFixDescription('Boot');
 
     // Retry loop: every 5 minutes, restart any pollers that are down.
     // This handles OAuth token expiry, network blips, and tokens that

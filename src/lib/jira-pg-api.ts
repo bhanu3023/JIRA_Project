@@ -2560,6 +2560,28 @@ function extractJiraSlaBreach(fields: any): { breached: boolean; dueAt: Date | n
   };
 }
 
+// Flattens an ADF document to plain text (paragraphs separated by a blank
+// line, hardBreak as a single newline) -- used for rich-text custom fields
+// like Root Cause / Fix Description, whose local counterpart is a plain
+// textarea (rendered with whitespace-pre-wrap), not rich HTML like
+// description, so this deliberately doesn't reuse adfNodeToHtml.
+function adfNodeToPlainText(node: any): string {
+  if (!node) return '';
+  if (node.type === 'doc' || node.type === 'blockquote' || node.type === 'expand' || node.type === 'nestedExpand' || node.type === 'panel') {
+    return (node.content || []).map(adfNodeToPlainText).join('\n\n');
+  }
+  if (node.type === 'paragraph' || node.type === 'heading') return (node.content || []).map(adfNodeToPlainText).join('');
+  if (node.type === 'text') return node.text || '';
+  if (node.type === 'hardBreak') return '\n';
+  if (node.type === 'bulletList' || node.type === 'orderedList') return (node.content || []).map(adfNodeToPlainText).join('\n');
+  if (node.type === 'listItem') return `- ${(node.content || []).map(adfNodeToPlainText).join(' ')}`;
+  if (node.type === 'codeBlock') return (node.content || []).map((n: any) => n.text || '').join('');
+  if (node.type === 'mention') return `@${node.attrs?.text?.replace(/^@/, '') || node.attrs?.id || ''}`;
+  if (node.type === 'emoji') return node.attrs?.text || node.attrs?.shortName || '';
+  if (node.type === 'inlineCard' || node.type === 'blockCard') return node.attrs?.url || '';
+  return (node.content || []).map(adfNodeToPlainText).join('');
+}
+
 function extractJiraValue(raw: any): string | null {
   if (!raw) return null;
   if (typeof raw === 'string') return raw.trim() || null;
@@ -2567,6 +2589,19 @@ function extractJiraValue(raw: any): string | null {
   if (Array.isArray(raw)) {
     const vals = raw.map((v: any) => v?.value ?? v?.name ?? v?.displayName ?? String(v)).filter(Boolean);
     return vals.length ? vals.join(', ') : null;
+  }
+  // Rich-text custom fields (Root Cause, Fix Description, etc.) come back as
+  // Atlassian Document Format, not a plain value -- none of the lookups
+  // below (.value/.name/.displayName/.emailAddress) exist on an ADF doc, so
+  // this always silently returned null and any real content typed into one
+  // of these fields in Jira never made it into the matching local field.
+  // Confirmed for real: L2B-15994, L2B-15986, L3B-656, L3B-510 all have
+  // genuine Root Cause / Fix Description text in Jira that read as
+  // completely empty here -- 16,563 L2B/L3B tickets had both fields NULL
+  // locally as a result.
+  if (raw.type === 'doc' && Array.isArray(raw.content)) {
+    const text = adfNodeToPlainText(raw).trim();
+    return text || null;
   }
   return (raw.value ?? raw.name ?? raw.displayName ?? raw.emailAddress ?? null);
 }
@@ -3674,7 +3709,7 @@ async function _handleJiraPgApi(
   // to send -- they authenticate with this per-process secret instead (see
   // internal-job-secret.ts). Scoped to one specific path rather than a
   // blanket bypass, since anything landing here has no session to audit.
-  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach')
+  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach' || path === 'admin/backfill-root-cause-fix-description')
     && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
 
   if (!userId && !isPublicPath && !isInternalJob) {
@@ -12178,6 +12213,74 @@ async function _handleJiraPgApi(
       return json({ checked, fixed, breachedFound });
     } catch (e: any) {
       console.error('[backfill-sla-breach] failed:', e?.message || e);
+      return json({ error: 'Backfill failed', details: e?.message }, 500);
+    }
+  }
+
+  // POST /admin/backfill-root-cause-fix-description -- one-time correction
+  // for L2B/L3B (Dev queue): Root Cause and Fix Description are rich-text
+  // ADF fields in Jira (customfield_10059 / customfield_10402), the same
+  // shape as the ticket description, but extractJiraValue only knew how to
+  // read plain values/selects -- it silently returned null for an ADF doc
+  // (see adfNodeToPlainText and its call site above), so every sync of
+  // these two fields wrote nothing, no matter what was actually typed in
+  // Jira. Confirmed for real: L2B-15994, L2B-15986, L3B-656, L3B-510 all
+  // have genuine Root Cause / Fix Description text in Jira that read as
+  // completely empty here -- 16,563 L2B/L3B tickets had both fields NULL
+  // locally. The ongoing sync is fixed for anything touched from now on;
+  // this one-time pass reconciles everything already imported, batched 100
+  // keys per request like the other backfills above. Idempotent via its own
+  // app_settings flag; only overwrites a local field when Jira actually has
+  // real content for it, never clobbers a value someone typed directly here.
+  if (path === 'admin/backfill-root-cause-fix-description' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+      const already = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'root_cause_fix_desc_backfill_v1_done'`);
+      if (already.rows.length > 0 && url.searchParams.get('force') !== 'true') {
+        return json({ checked: 0, fixed: 0, alreadyRan: true });
+      }
+
+      const creds = await getJiraCredentials();
+      const rows = await pool.query(`SELECT id, key FROM issues WHERE key LIKE 'L2B-%' OR key LIKE 'L3B-%'`);
+      const byKey = new Map(rows.rows.map((r: any) => [r.key, r.id]));
+      const keys = rows.rows.map((r: any) => r.key);
+      const batches: string[][] = [];
+      for (let i = 0; i < keys.length; i += 100) batches.push(keys.slice(i, i + 100));
+
+      let checked = 0, fixed = 0;
+      for (const batch of batches) {
+        const jql = encodeURIComponent(`issuekey in (${batch.map((k) => `"${k}"`).join(',')})`);
+        const res = await fetch(`${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=100&fields=customfield_10059,customfield_10402`, {
+          headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+          signal: AbortSignal.timeout(15000),
+        }).catch(() => null);
+        if (!res || !res.ok) continue;
+        const data: any = await res.json().catch(() => null);
+        if (!data || !Array.isArray(data.issues)) continue;
+        for (const jiraIssue of data.issues) {
+          checked++;
+          const localId = byKey.get(jiraIssue.key);
+          if (!localId) continue;
+          const rootCause = extractJiraValue(jiraIssue.fields?.customfield_10059);
+          const fixDescription = extractJiraValue(jiraIssue.fields?.customfield_10402);
+          if (rootCause === null && fixDescription === null) continue; // genuinely nothing in Jira -- leave existing value alone
+          await pool.query(
+            `UPDATE issues SET "rootCause" = COALESCE($1, "rootCause"), "fixDescription" = COALESCE($2, "fixDescription") WHERE id = $3`,
+            [rootCause, fixDescription, localId]
+          );
+          fixed++;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      await pool.query(
+        `INSERT INTO app_settings (key, value) VALUES ('root_cause_fix_desc_backfill_v1_done', 'true')
+         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()`
+      );
+      return json({ checked, fixed });
+    } catch (e: any) {
+      console.error('[backfill-root-cause-fix-description] failed:', e?.message || e);
       return json({ error: 'Backfill failed', details: e?.message }, 500);
     }
   }
