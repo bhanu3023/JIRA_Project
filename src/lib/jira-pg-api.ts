@@ -10281,13 +10281,22 @@ async function _handleJiraPgApi(
       )
     )`;
     // Roster/member scope: current assignee is a configured queue member, OR
-    // a genuine member of $1's own roster has a worked-on-in-$1 record.
+    // a genuine member of $1's own roster has a worked-on-in-$1 record, OR
+    // (mirrors Filters' own memberClause fix exactly) the ticket is
+    // UNASSIGNED and currently sitting right in dept $1 -- nobody's credited
+    // with it at all, so there's no "wrong person" for the roster check to
+    // exclude; it's unambiguously this dept's own queue work regardless of
+    // team split. For ent/smb specifically this means an unassigned Migration
+    // ticket can show under BOTH tabs (there's no way to know which of the
+    // two it would have gone to), same as a genuinely-worked-by-both-teams
+    // ticket already legitimately can.
     const rosterMatchSql = `(
       EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
       OR EXISTS (
         SELECT 1 FROM user_worked_on_tickets w4 JOIN users wu4 ON wu4.id = w4.user_id
         WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND w4.reason != 'passed' AND LOWER(wu4.email) = ANY($2::text[])
       )
+      OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($1))
     )`;
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
