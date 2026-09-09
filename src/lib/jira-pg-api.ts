@@ -5217,6 +5217,15 @@ async function _handleJiraPgApi(
       const deptExtraClauses: string[] = [];
       const deptExtraParams: any[] = [];
       let deptParamIdx = deptSearchParam ? 4 : 3;
+      // Populated below (queueMembersOnly branch) with deptParam's own live
+      // queue member ids -- used to restrict every "worked in this dept"
+      // broadening (origin/updated/member-clause) to genuine members of that
+      // dept's queue, not literally anyone who ever touched the ticket while
+      // it happened to be labeled with this dept. See its use further down.
+      let deptQueueMemberIds: string[] = [];
+      // The bound parameter index deptQueueMemberIds was pushed at (null if
+      // it was never pushed, i.e. this dept has no configured queue at all).
+      let deptMemberIdsParamIdx: number | null = null;
       // "Queue" filter on the main /filters page (opt-in via queueMembersOnly) --
       // restricts to tickets whose assignee is an actual configured member of
       // this department's queue, instead of every ticket merely labeled with
@@ -5232,6 +5241,12 @@ async function _handleJiraPgApi(
           const queues: any[] = cq.rows[0]?.queues || [];
           const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
           const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
+          deptQueueMemberIds = memberIds;
+          // Captured here (before deptParamIdx advances below) so originDeptMatchSql/
+          // updatedDeptMatchSql -- built later, against the same params array -- can
+          // reference this exact same bound parameter instead of needing one of
+          // their own.
+          if (memberIds.length) deptMemberIdsParamIdx = deptParamIdx;
           const memberClause = memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0';
           // Same gap as origin/updated matching had, one layer up: this
           // membership check runs unconditionally whenever queueMembersOnly is
@@ -5257,9 +5272,23 @@ async function _handleJiraPgApi(
           // rosterMatchSql already excludes 'passed' for this exact reason
           // (see its own comment re: Shiva Amuda), this was the one place in
           // Filters that still counted it.
+          //
+          // w4.user_id = ANY(memberIds): a real 'worked'/'closed' record for
+          // this dept used to count regardless of whether the person who did
+          // it is even a configured member of this dept's own queue --
+          // confirmed for real: Queue: Migration showed CF-29568/CF-29902,
+          // both genuinely commented on / reassigned while their department
+          // was Migration, but by Ravi Srivastava and Adari Venkata Jaswanth --
+          // both Dev-team members, not Migration's. Real activity, wrong
+          // department to credit it to for "who worked Migration" purposes.
+          // Restricted to memberIds whenever this dept actually has a
+          // configured queue (falls back to the old unrestricted check for a
+          // dept with no queue config at all, rather than silently excluding
+          // everything for it).
+          const workedByMemberSql = memberIds.length ? ` AND w4.user_id = ANY($${deptParamIdx}::text[])` : '';
           deptExtraClauses.push(
             broadenIt
-              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2) AND w4.reason != 'passed'))`
+              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2) AND w4.reason != 'passed'${workedByMemberSql}))`
               : memberClause
           );
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
@@ -5519,6 +5548,11 @@ async function _handleJiraPgApi(
       // used for Updated, see updatedDeptMatchSql below) surfaces every ticket
       // someone actually worked in this dept and created in the window, not
       // just the ones this dept happened to raise itself.
+      // AND w.user_id = ANY(deptQueueMemberIds): same "genuine member of THIS
+      // dept's own queue" restriction as memberClause's broadenIt above (see
+      // its comment re: CF-29568/CF-29902) -- only applied when this dept
+      // actually has a configured queue to check against.
+      const originWorkedByMemberSql = deptMemberIdsParamIdx !== null ? ` AND w.user_id = ANY($${deptMemberIdsParamIdx}::text[])` : '';
       const originDeptMatchSql = createdRange && queueMembersOnlyParam
         ? `(
              LOWER(COALESCE(
@@ -5527,7 +5561,7 @@ async function _handleJiraPgApi(
              )) = LOWER($2)
              OR EXISTS (
                SELECT 1 FROM user_worked_on_tickets w
-               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
+               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${originWorkedByMemberSql}
              )
            )`
         : null;
@@ -5565,7 +5599,7 @@ async function _handleJiraPgApi(
                )
                OR EXISTS (
                  SELECT 1 FROM user_worked_on_tickets w
-                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
+                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${originWorkedByMemberSql}
                )
              ))
            )`
@@ -10189,21 +10223,31 @@ async function _handleJiraPgApi(
     // to someone else from an unassigned state, which is exactly this
     // fallback case writing 'passed' under his name. 'worked'/'closed'/
     // 'returned' all still mean genuine involvement and stay valid evidence.
+    // AND w.user_id IN (roster): a real worked-on-$1 record used to count
+    // regardless of whether the person who did it is even a member of $1's
+    // own team roster -- confirmed for real: Queue: Migration in Filters
+    // showed CF-29568 (real comment/reassignment logged while its department
+    // was Migration) credited to Ravi Srivastava, a Dev-team member, not
+    // Migration's. Real activity, wrong department to credit it to. $2
+    // (roster) is already exactly this team's own member list (live queue
+    // emails for eng/qa/infra, the fixed list for ent/smb), so no extra
+    // lookup is needed to restrict both checks below to it.
     const deptMatchSql = `(
       LOWER(i.current_department) = LOWER($1)
       OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($1) AND LOWER(v->>'category') = 'done')
-      OR EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND w.reason != 'passed')
+      OR EXISTS (
+        SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
+        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND w.reason != 'passed' AND LOWER(wu.email) = ANY($2::text[])
+      )
     )`;
     // Roster/member scope: current assignee is a configured queue member, OR
-    // anyone at all has a genuine worked-on-in-$1 record -- again, no roster
-    // restriction on that worked-on branch (Filters' memberClause OR EXISTS
-    // pattern). A ticket can pass deptMatchSql+rosterMatchSql via a
-    // non-roster worker's history, which is why the ticket table's assignee
-    // display below can legitimately show a name outside the roster list --
-    // that's Filters' own real behavior too, not a bug to hide.
+    // a genuine member of $1's own roster has a worked-on-in-$1 record.
     const rosterMatchSql = `(
       EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
-      OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND w4.reason != 'passed')
+      OR EXISTS (
+        SELECT 1 FROM user_worked_on_tickets w4 JOIN users wu4 ON wu4.id = w4.user_id
+        WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND w4.reason != 'passed' AND LOWER(wu4.email) = ANY($2::text[])
+      )
     )`;
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
