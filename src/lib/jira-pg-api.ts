@@ -6347,7 +6347,17 @@ async function _handleJiraPgApi(
             }
           } catch {}
           const queueOpenStatus = queueStatuses.find((s: any) => s.category === 'todo') || queueStatuses[0];
-          const initStatus = queueOpenStatus || openStatus || sp.statuses[0];
+          // issue.status is whatever the create form actually submitted
+          // (via body.statusId, resolved into `finalStatus` above) -- it must
+          // win over the queue's own default "open" status. Confirmed for
+          // real: picking "Resolved" in Create Issue for a department/queue
+          // ticket still showed "Open" right after creation, because this
+          // snapshot used to always seed itself from queueOpenStatus and
+          // ignore whatever status the ticket was actually created with.
+          // queueOpenStatus/openStatus only matter now as a fallback for the
+          // (effectively unreachable) case where the issue came back with no
+          // status at all.
+          const initStatus = issue.status || queueOpenStatus || openStatus || sp.statuses[0];
           const initDeptStatuses = initStatus
             ? JSON.stringify({ [deptToSet]: { id: initStatus.id, name: initStatus.name, color: initStatus.color, category: initStatus.category } })
             : '{}';
