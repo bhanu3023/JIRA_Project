@@ -5605,7 +5605,7 @@ async function _handleJiraPgApi(
       // views (All Tickets, Assigned to me, etc., which never send
       // createdRange) on the original current-department behavior.
       const workedDeptMatchSql = workedRange
-        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})
+        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${workedRangeSql})
            AND (
              (LOWER(i.current_department) = LOWER($2) AND s.category = 'done')
              OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
@@ -5749,7 +5749,7 @@ async function _handleJiraPgApi(
             (i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) AND LOWER(i.current_department) = LOWER($2))
             OR EXISTS (
               SELECT 1 FROM user_worked_on_tickets w
-              WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2)
+              WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
             )
           )`
         : null;
@@ -5858,10 +5858,20 @@ async function _handleJiraPgApi(
         if (historyAssigneeFilterIds && historyAssigneeFilterIds.length && rows.rows.length) {
           try {
             const issueIds = rows.rows.map((r: any) => r.id);
+            // reason != 'passed' -- same guard as every other worked-on check
+            // in this file (see the note above workedByMemberSql): a 'passed'
+            // row only means this person routed/reassigned the ticket, not
+            // that they did real work on it. Without this, a lead who just
+            // assigns tickets to their team (never touching them again) got
+            // credited here as if they'd worked every one of them -- showing
+            // their name as the Assignee for tickets they only ever handed
+            // off. Confirmed for real: Ravi Srivastava's Dev-queue tickets
+            // under an Assignee filter showed his name on tickets he'd
+            // reassigned to someone else and never worked again.
             const workedRows = await pool.query(
               `SELECT DISTINCT ON (w.issue_id) w.issue_id, w.user_id
                FROM user_worked_on_tickets w
-               WHERE w.issue_id = ANY($1::text[]) AND w.user_id = ANY($2::text[]) AND LOWER(w.dept) = LOWER($3)
+               WHERE w.issue_id = ANY($1::text[]) AND w.user_id = ANY($2::text[]) AND LOWER(w.dept) = LOWER($3) AND w.reason != 'passed'
                ORDER BY w.issue_id, w.worked_at DESC`,
               [issueIds, historyAssigneeFilterIds, deptParam]
             );
