@@ -6032,7 +6032,20 @@ async function _handleJiraPgApi(
         // against. Track whether any policy actually applies to this
         // ticket's department so the final value below can report "N/A"
         // instead of a misleading "not breached".
-        const dept = (i.current_department || '').trim().toLowerCase();
+        //
+        // Scoped to the QUERIED department (deptParam, e.g. viewing the Dev
+        // queue) when one is active, not always i.current_department -- a
+        // ticket that breached Migration's own SLA after moving on from Dev
+        // was showing "Breached: Yes" (with Migration's name/dept attached)
+        // even inside a Dev-scoped export, when Dev's own time-in-department
+        // never came close to its own SLA goal. Confirmed for real: CF-30766
+        // spent ~19.7h in Migration against its 10h goal (genuinely breached
+        // there) but only ~2h in Dev against Dev's own, much longer goal --
+        // a Dev queue view/export should show "No" for it, only Migration's
+        // own view should show "Yes". Plain (non-dept-scoped) views like "My
+        // Tickets" have no deptParam and keep using current_department, same
+        // as before.
+        const dept = (deptParam || i.current_department || '').trim().toLowerCase();
         const hasApplicablePolicy = (policiesBySpace[i.spaceId] || []).some((p: any) => {
           const pDept = (p.dept_name || '').trim().toLowerCase();
           return !pDept || pDept === dept;
@@ -6099,7 +6112,21 @@ async function _handleJiraPgApi(
               // common one (a ticket resolved on its first and only stint in
               // this department).
               const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
-              if (isResolved) {
+              // The "project forward with remaining budget vs now" formula
+              // below is only valid while THIS department's clock is
+              // actually still running -- true when there's no dept scope
+              // at all, or when the queried department (dept, now possibly
+              // deptParam) IS the ticket's current one. When deptParam scopes
+              // to a department the ticket has since moved AWAY from while
+              // still unresolved, that department's clock is paused (same
+              // as the resolved case below) -- its own accumulated
+              // priorElapsedMs is everything there is to compare, not a
+              // live-ticking projection using slaStartedAt, which reflects
+              // whichever OTHER department is currently active, not this one.
+              const deptClockIsLive = isResolved
+                ? false
+                : !deptParam || (i.current_department || '').trim().toLowerCase() === dept;
+              if (isResolved || !deptClockIsLive) {
                 // The clock is frozen -- priorElapsedMs already reflects the
                 // FULL total time logged across every period up to and
                 // including the one that just ended (pauseDeptSLA folds it
