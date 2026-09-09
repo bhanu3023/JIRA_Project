@@ -5247,7 +5247,18 @@ async function _handleJiraPgApi(
           // reference this exact same bound parameter instead of needing one of
           // their own.
           if (memberIds.length) deptMemberIdsParamIdx = deptParamIdx;
-          const memberClause = memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0';
+          // OR (assigneeId IS NULL AND currently in this dept): an UNASSIGNED
+          // ticket sitting right now in the exact department being queried has
+          // no "wrong person" to narrow against -- nobody's credited with it at
+          // all, so the configured-member restriction (which exists to keep out
+          // tickets merely LABELED with this dept but held by someone outside
+          // its roster) has nothing to check. Excluding it anyway meant a
+          // ticket could be unambiguously, currently sitting in Migration's own
+          // queue and still never show up under "Queue: Migration" at all.
+          // Confirmed for real: CF-29619 -- current_department = 'Migration',
+          // unassigned, updated inside the selected range -- silently missing
+          // from Queue: Migration + Updated: Aug with zero other explanation.
+          const memberClause = `(${memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0'} OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($2)))`;
           // Same gap as origin/updated matching had, one layer up: this
           // membership check runs unconditionally whenever queueMembersOnly is
           // set, even when Created/Updated has already broadened department
