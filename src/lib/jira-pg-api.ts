@@ -2736,28 +2736,51 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
     let issueId: string;
 
     if (existingIssue) {
-      // Update existing
-      await db.issue.update({
-        where: { key: localKey },
-        data: {
-          summary: f.summary || localKey,
-          type: (f.issuetype?.name || 'task').toLowerCase(),
-          priority: (f.priority?.name || 'medium').toLowerCase(),
-          statusId: localStatus?.id ?? existingIssue.statusId,
-          assigneeId: assigneeId ?? existingIssue.assigneeId,
-          reporterId: reporterId ?? existingIssue.reporterId,
-          parentKey: f.parent?.key ?? existingIssue.parentKey,
-          labels: Array.isArray(f.labels) ? f.labels : existingIssue.labels,
-          customerName:   extractJiraValue(f.customfield_10401) ?? existingIssue.customerName,
-          clientName:     extractJiraValue(f.customfield_10883) ?? existingIssue.clientName,
-          projectManager: extractJiraValue(f.customfield_11380) ?? existingIssue.projectManager,
-          productType:    extractJiraValue(f.customfield_10203) ?? existingIssue.productType,
-          combination:    extractJiraValue(f.customfield_10236) ?? existingIssue.combination,
-          productionTicket: extractJiraValue(f.customfield_10665) ?? existingIssue.productionTicket,
-          rootCause:      extractJiraValue(f.customfield_10059) ?? existingIssue.rootCause,
-          fixDescription: extractJiraValue(f.customfield_10402) ?? existingIssue.fixDescription,
-        },
-      });
+      // Update existing -- raw SQL instead of db.issue.update(), deliberately:
+      // the Prisma schema has updatedAt DateTime @updatedAt, so a plain
+      // db.issue.update() call silently bumps updatedAt to NOW() on EVERY
+      // periodic re-sync poll of every already-imported ticket, whether or
+      // not anything actually changed in Jira. This is the same disease as
+      // the one already fixed further down this file for the on-demand
+      // detail-page refresh path (search "silently bumps updatedAt to NOW()")
+      // -- but this is the recurring full-project sync, which runs against
+      // every L2B/L3B/PSM/SOPS/QA ticket on every pass, so its blast radius
+      // is far bigger. Confirmed for real: comparing live Jira's own
+      // "updated in last 30 days" count against ours showed PSM at 110 vs
+      // 656 locally, SOPS at 2 vs 59 -- almost entirely routine sync polls
+      // masquerading as real updates, corrupting "Updated" date-range
+      // accuracy in Filters/MBR for these projects. Set updatedAt from
+      // Jira's own f.updated (the authoritative last-modified time) instead
+      // of NOW(), so it only advances when Jira itself says the ticket
+      // changed.
+      await pool.query(
+        `UPDATE issues SET
+           summary=$1, type=$2, priority=$3, "statusId"=$4, "assigneeId"=$5, "reporterId"=$6,
+           "parentKey"=$7, labels=$8::text[], "customerName"=$9, "clientName"=$10,
+           "projectManager"=$11, "productType"=$12, combination=$13, "productionTicket"=$14,
+           "rootCause"=$15, "fixDescription"=$16, "updatedAt"=$17
+         WHERE key=$18`,
+        [
+          f.summary || localKey,
+          (f.issuetype?.name || 'task').toLowerCase(),
+          (f.priority?.name || 'medium').toLowerCase(),
+          localStatus?.id ?? existingIssue.statusId,
+          assigneeId ?? existingIssue.assigneeId,
+          reporterId ?? existingIssue.reporterId,
+          f.parent?.key ?? existingIssue.parentKey,
+          Array.isArray(f.labels) ? f.labels : existingIssue.labels,
+          extractJiraValue(f.customfield_10401) ?? existingIssue.customerName,
+          extractJiraValue(f.customfield_10883) ?? existingIssue.clientName,
+          extractJiraValue(f.customfield_11380) ?? existingIssue.projectManager,
+          extractJiraValue(f.customfield_10203) ?? existingIssue.productType,
+          extractJiraValue(f.customfield_10236) ?? existingIssue.combination,
+          extractJiraValue(f.customfield_10665) ?? existingIssue.productionTicket,
+          extractJiraValue(f.customfield_10059) ?? existingIssue.rootCause,
+          extractJiraValue(f.customfield_10402) ?? existingIssue.fixDescription,
+          f.updated ? new Date(f.updated) : existingIssue.updatedAt,
+          localKey,
+        ]
+      );
       issueId = existingIssue.id;
       // resolvedAt isn't in the Prisma schema (added via a raw migration,
       // same as current_department below) -- set with a plain UPDATE. See
