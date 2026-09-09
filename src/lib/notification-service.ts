@@ -425,6 +425,20 @@ export async function sendNotification(to: string[], subject: string, html: stri
     if (sentViaTicketInbox) return;
   }
 
+  // A configured shared sender (DEFAULT_NOTIFICATION_SENDER, e.g.
+  // no-reply@cloudfuze.com) goes out via Graph BEFORE the global SMTP
+  // fallback below -- that SMTP account is a different domain entirely
+  // (EMAIL_USER, e.g. leo@fuzebot.io) and was only ever a stand-in for
+  // when no better sender was configured. Microsoft 365 tenants (like
+  // cloudfuze.com's) block legacy basic-auth SMTP outright (see the
+  // circuit-breaker comment below), so a cloudfuze.com shared mailbox can
+  // only ever send through Graph/OAuth, never through this SMTP path --
+  // it has to be tried up here, not as SMTP's fallback.
+  const defaultSender = (process.env.DEFAULT_NOTIFICATION_SENDER || '').toLowerCase().trim();
+  if (defaultSender && await sendViaGraph({ from: defaultSender, to: uniqueTo, subject, html, text, inReplyTo, attachments })) {
+    return;
+  }
+
   // Circuit breaker: a rejected SMTP login (bad password, or — as confirmed
   // in production — Microsoft 365 blocking legacy basic-auth SMTP tenant-wide)
   // still costs a full TLS handshake + AUTH round-trip before failing, on
