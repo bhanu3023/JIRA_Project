@@ -62,7 +62,7 @@ function computeDurationMs(policy, priority) {
 async function main() {
   const { rows } = await pool.query(
     `SELECT id, key, "spaceId", priority, current_department, dept_sla_log, sla_waivers, "resolvedAt"
-     FROM issues WHERE key = $1 LIMIT 1`,
+     FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`,
     [KEY]
   );
   const issue = rows[0];
