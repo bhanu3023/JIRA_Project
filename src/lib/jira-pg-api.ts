@@ -10199,17 +10199,53 @@ async function _handleJiraPgApi(
         COUNT(*) FILTER (WHERE s.category != 'done') AS open,
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."assigneeId" IS NULL) AS unassigned,
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."createdAt" <= now() - interval '30 days') AS old30,
-        COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
-        COUNT(*) FILTER (WHERE s.category != 'done' AND (i.jira_sla_breached = true OR i."dueDate" < now())) AS sla_breached
+        COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue
       FROM issues i LEFT JOIN statuses s ON i."statusId" = s.id
       WHERE i.current_department IS NOT NULL AND i.current_department != ''
         ${dateClause}${deptClause}
       GROUP BY i.current_department
       ORDER BY open DESC
     `, filterParams);
+
+    // SLA breach, computed the same way as everywhere else in the app
+    // (computeSLAInstancesPure, honoring sla_waivers and each policy's own
+    // goal duration/dept_sla_log elapsed carryover) instead of the raw
+    // "jira_sla_breached OR dueDate<now(), open tickets only" formula this
+    // used to hand-roll. That formula couldn't see a waived breach (still
+    // showed "Yes" here after an admin waived it everywhere else) AND, by
+    // gating on s.category != 'done', silently excluded every resolved
+    // ticket entirely -- a ticket resolved 3 days late showed "not
+    // breached" here purely because it was done, the same undercount bug
+    // already fixed for the dept-queue Summary sidebar (commit 92b3094).
+    const slaRawRows = await pool.query(`
+      SELECT i.id, i."spaceId", i.current_department AS dept, i.priority, i."createdAt",
+        i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i.sla_waivers, i.jira_sla_breached,
+        s.name AS status_name, s.category AS status_category
+      FROM issues i LEFT JOIN statuses s ON i."statusId" = s.id
+      WHERE i.current_department IS NOT NULL AND i.current_department != ''
+        ${dateClause}${deptClause}
+    `, filterParams);
+    const slaSpaceIds = Array.from(new Set(slaRawRows.rows.map((r: any) => r.spaceId).filter(Boolean)));
+    const slaPoliciesBySpace: Record<string, any[]> = {};
+    if (slaSpaceIds.length) {
+      const slaPolRows = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`, [slaSpaceIds]);
+      for (const p of slaPolRows.rows) (slaPoliciesBySpace[p.spaceId] ??= []).push(p);
+    }
+    const slaBreachedByIssue: Record<string, boolean> = {};
+    const slaBreachedByDept: Record<string, number> = {};
+    for (const r of slaRawRows.rows) {
+      const instances = computeSLAInstancesPure(
+        { ...r, current_department: r.dept, status: { name: r.status_name, category: r.status_category } },
+        slaPoliciesBySpace[r.spaceId] || [],
+        false
+      );
+      const breached = instances.length ? instances.some((x: any) => x.isBreached) : !!r.jira_sla_breached;
+      slaBreachedByIssue[r.id] = breached;
+      if (breached) slaBreachedByDept[r.dept] = (slaBreachedByDept[r.dept] || 0) + 1;
+    }
     console.log('[DEBUG mbr-department-tab]', JSON.stringify({
       dateFrom, dateTo, department,
-      rows: deptRows.rows.map((r: any) => ({ dept: r.dept, open: r.open, unassigned: r.unassigned, old30: r.old30, overdue: r.overdue, sla_breached: r.sla_breached })),
+      rows: deptRows.rows.map((r: any) => ({ dept: r.dept, open: r.open, unassigned: r.unassigned, old30: r.old30, overdue: r.overdue, sla_breached: slaBreachedByDept[r.dept] || 0 })),
     }));
 
     const staleParams = [...filterParams, staleDays];
@@ -10242,11 +10278,10 @@ async function _handleJiraPgApi(
     // safety limit -- totalMatched + the "(capped)" UI note stay honest if
     // this is ever actually hit.
     const ticketRows = await pool.query(`
-      SELECT COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name, i.current_department AS dept,
+      SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name, i.current_department AS dept,
         COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
         COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
         s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
-        (i.jira_sla_breached = true OR (s.category != 'done' AND i."dueDate" < now())) AS sla_breached,
         COUNT(*) OVER() AS total_matched
       FROM issues i
       LEFT JOIN statuses s ON i."statusId" = s.id
@@ -10270,7 +10305,7 @@ async function _handleJiraPgApi(
       summary: r.summary || '',
       created: r.createdAt,
       updated: r.updatedAt,
-      slaBreached: !!r.sla_breached,
+      slaBreached: !!slaBreachedByIssue[r.id],
     }));
 
     const departments = deptRows.rows.map((r: any) => ({
@@ -10279,7 +10314,7 @@ async function _handleJiraPgApi(
       unassigned: Number(r.unassigned) || 0,
       old30: Number(r.old30) || 0,
       overdue: Number(r.overdue) || 0,
-      slaBreached: Number(r.sla_breached) || 0,
+      slaBreached: slaBreachedByDept[r.dept] || 0,
     }));
 
     // Selecting a department's per-person list should only show people who
