@@ -4794,6 +4794,12 @@ async function _handleJiraPgApi(
     // a stale snapshot" rule the dept-scoped branch already applies.
     let generalAssigneeFilterIds: string[] | null = null;
     let generalWorkedByIssue: Record<string, { id: string; firstName: string; lastName: string; email: string; avatarUrl: string | null }> = {};
+    // Populated by the Status filter below when it matches via a
+    // dept_statuses entry (e.g. "Routed to X") rather than the ticket's real
+    // statusId -- consumed after enrichedIssues is built, same spot as
+    // generalWorkedByIssue above, to show the matched department's own
+    // status instead of the ticket's current-department one.
+    let generalRoutedStatusByIssue: Record<string, { dept: string; id: string; name: string; color: string; category: string }> = {};
 
     // Space filter
     if (spaceKey) {
@@ -4922,11 +4928,32 @@ async function _handleJiraPgApi(
         if (scopedSpaceIds.length) {
           const lowerNames = names.map((n) => n.toLowerCase());
           const deptMatchRows = await pool.query(
-            `SELECT DISTINCT i.id FROM issues i, jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
-             WHERE i."spaceId" = ANY($1::text[]) AND LOWER(v->>'name') = ANY($2::text[])`,
+            `SELECT i.id, ds.k AS dept, ds.v AS status_obj FROM issues i, jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+             WHERE i."spaceId" = ANY($1::text[]) AND LOWER(ds.v->>'name') = ANY($2::text[])`,
             [scopedSpaceIds, lowerNames]
           );
-          deptStatusMatchIds = deptMatchRows.rows.map((r: any) => r.id);
+          // A ticket can match via more than one department's own snapshot
+          // (rare, but possible) -- one is enough to explain why the row is
+          // here, so first-seen wins. Recorded so the Status column can show
+          // THIS (the reason the row matched the filter) instead of the
+          // ticket's current-department status, which is what
+          // getEffectiveIssueStatus falls back to with no Queue selected --
+          // confirmed for real: filtering by "Routed to Dev" with no Queue
+          // active found the right tickets but displayed each one's
+          // unrelated current status ("Open"/"In Progress"), not the
+          // "Routed to Dev" record that's the whole reason it matched.
+          for (const r of deptMatchRows.rows) {
+            if (!generalRoutedStatusByIssue[r.id]) {
+              generalRoutedStatusByIssue[r.id] = {
+                dept: r.dept,
+                id: r.status_obj?.id ?? '',
+                name: r.status_obj?.name ?? '',
+                color: r.status_obj?.color ?? '#F59E0B',
+                category: r.status_obj?.category ?? 'in_progress',
+              };
+            }
+          }
+          deptStatusMatchIds = Array.from(new Set(deptMatchRows.rows.map((r: any) => r.id)));
         }
       } catch { /* best-effort -- falls back to the real-statusId match alone */ }
       addOrGroup([
@@ -5447,6 +5474,25 @@ async function _handleJiraPgApi(
             displayName: `${worked.firstName || ''} ${worked.lastName || ''}`.trim() || worked.email,
             avatarUrl: avatarRef(worked.id, worked.avatarUrl),
           },
+        };
+      });
+    }
+    // Status filter matched some of these via a dept_statuses entry (e.g.
+    // "Routed to Dev"), not the ticket's real global status -- show that
+    // matched department's own status instead of getEffectiveIssueStatus's
+    // default fallback (the ticket's CURRENT department, which is usually a
+    // different, unrelated status once the ticket has actually moved on).
+    // Confirmed for real: filtering by "Routed to Dev" with no Queue active
+    // found the right tickets but every row displayed its own current
+    // status ("Open"/"In Progress") instead of the "Routed to Dev" record
+    // that's the entire reason it matched the filter.
+    if (Object.keys(generalRoutedStatusByIssue).length) {
+      enrichedIssues = enrichedIssues.map((iss: any) => {
+        const routed = generalRoutedStatusByIssue[iss.id];
+        if (!routed) return iss;
+        return {
+          ...iss,
+          status: { id: routed.id, name: routed.name, color: routed.color, category: routed.category },
         };
       });
     }
