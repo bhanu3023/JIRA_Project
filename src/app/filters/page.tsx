@@ -2130,13 +2130,18 @@ export default function FiltersPage() {
                     {TABLE_COLUMN_DEFS[id].label}
                   </th>
                 ))}
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Assignee</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Reported By</th>
+                {/* Assignee/Reported By/Time Spent narrowed further (176px/176px/96px
+                    -> 144px/144px/80px), same reasoning as Work above -- matches the
+                    more compact column sizing the space board view (spaces/[spaceKey]/
+                    page.tsx's STATIC_COLUMNS, ~150px per text column) already uses, so
+                    more of the row fits on screen before needing to scroll. */}
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
-                <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24">Time Spent</th>
+                <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-20">Time Spent</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
