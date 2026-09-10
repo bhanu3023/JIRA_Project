@@ -12,12 +12,29 @@
 // "Routed to X".
 //
 // Renames every dept_statuses["<dept>"] entry across ALL issues whose name
-// matches "Waiting for X" AND whose id is a virtual "qst_"-prefixed one, to
-// "Routed to X" -- id/color/category/order unchanged, exactly like the
-// queue-config script. Does NOT touch the real `statuses` table or a
-// ticket's live statusId column -- "Waiting for X"/"Routed to X" only ever
-// exists as a per-queue virtual dept_statuses snapshot in this app (see
-// isRoutingLabel in jira-pg-api.ts), never a real status row.
+// matches "Waiting for X", to "Routed to X" -- id/color/category/order
+// unchanged, exactly like the queue-config script. Does NOT touch the real
+// `statuses` table or a ticket's live statusId column.
+//
+// Originally gated on the entry's id starting with "qst_" (the virtual
+// queue-status id prefix), on the assumption that's the only way a
+// dept_statuses entry gets this name. Confirmed wrong for real: CF-29358's
+// own Migration entry has id "status_open" (a REAL statuses-table id) but
+// name "Open" -- proving dept_statuses entries for the SAME kind of routing
+// event can carry either a virtual qst_ id or a real one depending on how
+// the transition happened, and the id-gated version silently skipped every
+// non-qst_ case. A live count of "waiting for%" names across all tickets'
+// dept_statuses came back far higher than the 3 tickets the id-gated
+// version found, confirming real scope was being missed.
+//
+// Matching on name alone instead -- but that alone risks renaming an
+// unrelated, legitimate status that merely starts with "Waiting for" (e.g.
+// "Waiting for Customer Response") into nonsense ("Routed to Customer
+// Response"). Guard against that by only renaming when the captured suffix
+// matches an ACTUAL configured department/queue name, pulled live from
+// custom_queues -- "Waiting for Dev"/"Waiting for Migration"/etc. are real
+// department-routing labels, "Waiting for Customer Response" is not a
+// queue name and is correctly left alone.
 //
 // Usage:
 //   node backfill-rename-dept-status-labels.mjs             # dry run
@@ -28,12 +45,25 @@ import pg from 'pg';
 const APPLY = process.argv.includes('--apply');
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
-function renamedName(name) {
-  const m = String(name || '').match(/^waiting\s+for\s+(.+)$/i);
-  return m ? `Routed to ${m[1].trim()}` : null;
-}
-
 async function main() {
+  const { rows: queueRows } = await pool.query(`SELECT queues FROM custom_queues`);
+  const knownDeptNames = new Set();
+  for (const row of queueRows) {
+    for (const q of (row.queues || [])) {
+      const name = String(q?.name || '').trim().toLowerCase();
+      if (name) knownDeptNames.add(name);
+    }
+  }
+  console.log(`Known department/queue names: ${Array.from(knownDeptNames).join(', ')}`);
+
+  function renamedName(name) {
+    const m = String(name || '').match(/^waiting\s+for\s+(.+)$/i);
+    if (!m) return null;
+    const suffix = m[1].trim();
+    if (!knownDeptNames.has(suffix.toLowerCase())) return null; // not a real dept name -- leave it alone
+    return `Routed to ${suffix}`;
+  }
+
   const { rows } = await pool.query(`
     SELECT id, cf_key, key, dept_statuses, "statusId"
     FROM issues
@@ -47,7 +77,7 @@ async function main() {
     let changed = false;
     const newDeptStatuses = {};
     for (const [dept, st] of Object.entries(deptStatuses)) {
-      const renamed = st && typeof st.id === 'string' && st.id.startsWith('qst_') ? renamedName(st.name) : null;
+      const renamed = st ? renamedName(st.name) : null;
       if (renamed && renamed !== st.name) {
         changed = true;
         newDeptStatuses[dept] = { ...st, name: renamed };
