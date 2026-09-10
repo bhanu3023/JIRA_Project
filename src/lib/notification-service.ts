@@ -714,12 +714,36 @@ export async function notifyCommentAdded(issue: {
     ? `${issue.comment.author.firstName || ''} ${issue.comment.author.lastName || ''}`.trim() || issue.comment.author.email || 'Someone'
     : 'Someone';
   const { html: embeddedBody, attachments } = await embedImagesAsCid(issue.comment.body);
-  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;">` +
-    `<p style="margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid #e8e8e8;font-size:13px;color:#555">` +
+  // Kept deliberately lightweight (not the full buildEmailHtml card with its
+  // own header/footer/CTA section) -- this needs to still read as a normal
+  // reply-able email, not a branded notification, so hitting Reply naturally
+  // adds another comment. But "lightweight" doesn't have to mean bare: an
+  // avatar initial, a highlighted comment body, and a real "View ticket"
+  // link give it the same visual polish as this app's other templates
+  // without the heavier multi-section shell that would make a plain reply
+  // feel out of place.
+  // Table-based layout, not flexbox -- Outlook desktop (this app's primary
+  // client, per its Graph API / outlook.office365.com integration) renders
+  // HTML email through Word's engine, which doesn't support display:flex at
+  // all; it would silently drop the side-by-side avatar+text layout and
+  // stack them as separate blocks instead. Tables are the actual reliable
+  // cross-client layout primitive for HTML email.
+  const commenterInitials = (commenterName.match(/\b\w/g) || ['?']).slice(0, 2).join('').toUpperCase();
+  const commentHtml = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;max-width:600px">` +
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid #e8e8e8;width:100%">` +
+    `<tr>` +
+    `<td style="width:42px;vertical-align:top"><span style="display:inline-block;width:32px;height:32px;line-height:32px;border-radius:50%;background:#0052CC;color:#fff;font-size:12px;font-weight:700;text-align:center">${commenterInitials}</span></td>` +
+    `<td style="vertical-align:middle;font-size:13px;color:#555">` +
     `<b style="color:#172B4D">${commenterName}</b> commented on ` +
     `<a href="${issueUrl(issue.key)}" style="color:#0052CC;text-decoration:none;font-weight:600">[${displayKey}] ${issue.summary}</a>` +
-    `</p>` +
-    `${makeImageSrcsAbsolute(embeddedBody)}</div>`;
+    `</td>` +
+    `</tr>` +
+    `</table>` +
+    `<div style="padding:14px 16px;background:#f7f9fc;border-left:3px solid #0052CC;border-radius:0 6px 6px 0;margin:0 0 16px">` +
+    `${makeImageSrcsAbsolute(embeddedBody)}` +
+    `</div>` +
+    `<a href="${issueUrl(issue.key)}" style="display:inline-block;font-size:12.5px;font-weight:600;color:#0052CC;text-decoration:none">View ticket [${displayKey}] →</a>` +
+    `</div>`;
   const commentText = `${commenterName} commented on [${displayKey}] ${issue.summary}:\n\n${issue.comment.body.replace(/<[^>]+>/g, '')}`;
 
   await sendNotification(
