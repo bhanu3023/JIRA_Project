@@ -2374,6 +2374,13 @@ function formatIssue(issue: any) {
     dept_sla_log: (issue as any).dept_sla_log ?? {},
     dept_assignees: (issue as any).dept_assignees ?? {},
     dept_statuses: (issue as any).dept_statuses ?? {},
+    // Carried through so the Filters-page list/export SLA-breach recompute
+    // below can honor an admin's waiver the same way the ticket detail
+    // page's own computeSLAInstancesPure does -- previously dropped here,
+    // so a waived breach (e.g. CF-30920, CF-30911, CF-29386) still showed
+    // "Yes" in the exported CSV even though the detail page correctly
+    // showed it resolved in time.
+    sla_waivers: (issue as any).sla_waivers ?? {},
     createdAt: issue.createdAt?.toISOString() ?? nowIso(),
     updatedAt: issue.updatedAt?.toISOString() ?? nowIso(),
     sla_breached: issue.sla_breached ?? false,
@@ -4899,7 +4906,7 @@ async function _handleJiraPgApi(
         const issueKeys = issues.map((i: any) => i.key);
         if (issueKeys.length) {
           const deptRows = await pool.query(
-            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_sla_log, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at FROM issues WHERE key = ANY($1::text[])`,
+            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_sla_log, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at, sla_waivers FROM issues WHERE key = ANY($1::text[])`,
             [issueKeys]
           );
           for (const row of deptRows.rows) {
@@ -4909,7 +4916,14 @@ async function _handleJiraPgApi(
             // branch's enriched issues never see any prior elapsed time and the
             // breach check falls back to a fresh full countdown every time,
             // same bug as the dept-scoped branch had before that fix.
-            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_sla_log: row.dept_sla_log, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at };
+            // sla_waivers likewise has to be carried through this map -- Prisma's
+            // own `issues` rows above don't have it (raw ALTER TABLE column, not
+            // in the Prisma schema), so without it here the breach-computation
+            // block below never sees an admin's waiver and recomputes "Breached:
+            // Yes" purely from elapsed time, even for a ticket whose detail page
+            // (which reads sla_waivers directly) already shows it resolved in
+            // time. Confirmed for real: CF-30920, CF-30911, CF-29386.
+            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_sla_log: row.dept_sla_log, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at, sla_waivers: row.sla_waivers };
           }
         }
       } catch { /* ignore */ }
@@ -5995,6 +6009,7 @@ async function _handleJiraPgApi(
           jira_sla_breached: row.jira_sla_breached,
           jira_sla_due_at: row.jira_sla_due_at,
           jira_sla_start_at: row.jira_sla_start_at,
+          sla_waivers: row.sla_waivers,
           status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
           assignee: assigneeOverride || (row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null),
           reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) } : null,
@@ -6076,6 +6091,16 @@ async function _handleJiraPgApi(
               const pDept = (p.dept_name || '').trim().toLowerCase();
               return !pDept || pDept === dept;
             });
+            // An admin can waive a specific policy's breach on a specific
+            // ticket (see the "SLA Breach Waiver" endpoint and
+            // computeSLAInstancesPure's own `waiver ? false : rawIsBreached`
+            // on the ticket detail page). This recompute never looked at
+            // sla_waivers at all, so a ticket waived on the detail page
+            // (correctly showing "resolved in time" there) still elapsed-
+            // computed straight to "Breached: Yes" here, e.g. in the
+            // Filters-page export. Confirmed for real: CF-30920, CF-30911,
+            // CF-29386.
+            const waivers: Record<string, any> = i.sla_waivers || {};
             for (const policy of policies) {
               const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
                 ? policy.pauseStatuses.map((s: string) => s.trim().toLowerCase())
@@ -6121,6 +6146,7 @@ async function _handleJiraPgApi(
               // common one (a ticket resolved on its first and only stint in
               // this department).
               const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
+              const waiver = waivers[policy.id] || null;
               // The "project forward with remaining budget vs now" formula
               // below is only valid while THIS department's clock is
               // actually still running -- true when there's no dept scope
@@ -6144,10 +6170,10 @@ async function _handleJiraPgApi(
                 // formula below (slaStartedAt + remaining vs "now") would
                 // double-count that same just-ended period on top of itself
                 // if reused here across more than one pause/resume cycle.
-                if (priorElapsedMs >= durationMs) { breached = true; break; }
+                if (priorElapsedMs >= durationMs && !waiver) { breached = true; break; }
               } else {
                 const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
-                if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs) { breached = true; break; }
+                if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs && !waiver) { breached = true; break; }
               }
             }
           }
