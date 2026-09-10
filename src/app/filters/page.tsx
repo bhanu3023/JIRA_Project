@@ -1257,7 +1257,21 @@ export default function FiltersPage() {
   const filteredSpacesForStatus = selSpaces.length > 0
     ? spaces.filter((sp: any) => selSpaces.includes(sp.key))
     : spaces;
-  const ALLOWED_STATUSES = new Set(['open', 'in progress', 'waiting for dev', 'waiting for migration', 'waiting for qa', 'waiting for infra', 'resolved']);
+  // "waiting for X" entries kept for backward compatibility with any space
+  // whose real statuses table still literally has one (distinct from the
+  // dept_statuses virtual routing labels this session renamed to "Routed to
+  // X") -- but this hardcoded list never included the new "routed to X"
+  // names at all, so even a real status genuinely named "Routed to Dev"
+  // would be silently filtered out of the dropdown regardless of any
+  // backend/data fix. Confirmed for real: the Status dropdown kept showing
+  // "Waiting for Dev"/"Waiting for Migration"/"Waiting for Infra" no matter
+  // what got fixed elsewhere, because this allowlist -- not ticket data or
+  // queue config -- is what actually gates this dropdown's options.
+  const ALLOWED_STATUSES = new Set([
+    'open', 'in progress', 'resolved',
+    'waiting for dev', 'waiting for migration', 'waiting for qa', 'waiting for infra',
+    'routed to dev', 'routed to migration', 'routed to qa', 'routed to infra',
+  ]);
   const availableStatuses: { value: string; label: string }[] = Array.from(
     new Map([
       ...filteredSpacesForStatus
