@@ -168,8 +168,17 @@ pool.query(`
 // to be "Yes" in real Jira; guarded to only ever SET true (never flips a
 // genuinely-correct false), so it's safe to run again.
 const JIRA_CONFIRMED_BREACHED_ISSUE_IDS: string[] = require('./jira-sla-breach-backfill-ids.json');
+// Guarded to only ever touch a ticket that's ACTUALLY Jira-sourced --
+// confirmed for real that this static list has at least a few stale/wrong
+// entries: ids belonging to genuinely local-only tickets (created directly
+// in the app, no jira_source_key, no L2B/L3B/PSM/SOPS/QA key at all) that
+// this unconditional UPDATE was force-stamping breached on every single
+// boot, with no way for a later correction to stick since it just got
+// reapplied on the next restart.
 pool.query(
-  `UPDATE issues SET jira_sla_breached = true WHERE id = ANY($1::text[]) AND jira_sla_breached IS DISTINCT FROM true`,
+  `UPDATE issues SET jira_sla_breached = true
+   WHERE id = ANY($1::text[]) AND jira_sla_breached IS DISTINCT FROM true
+     AND (jira_source_key IS NOT NULL OR key LIKE 'L2B-%' OR key LIKE 'L3B-%' OR key LIKE 'PSM-%' OR key LIKE 'SOPS-%' OR key LIKE 'QA-%')`,
   [JIRA_CONFIRMED_BREACHED_ISSUE_IDS]
 ).catch(() => {});
 
@@ -7383,23 +7392,31 @@ async function _handleJiraPgApi(
                 };
                 slaBreachRefresh = extractJiraSlaBreach(f);
               }
-            } else if (issue.summary) {
-              // Title-based search in CFITS for L1BOAR tickets
-              const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-              const jql = encodeURIComponent(`project=CFITS AND summary ~ "${issue.summary.replace(/"/g, ' ').slice(0, 80)}" ORDER BY updated DESC`);
-              const srRes = await fetch(
-                `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=5&fields=summary,${JIRA_CUSTOM_FIELDS}`,
-                { headers: { Authorization: creds.authHdr, Accept: 'application/json' } }
-              );
-              if (srRes.ok) {
-                const srData = await srRes.json();
-                const localNorm = norm(issue.summary);
-                const match = (srData.issues || []).find((ji: any) => {
-                  const jNorm = norm(ji.fields?.summary || '');
-                  return jNorm === localNorm || (jNorm.length >= 15 && (jNorm.includes(localNorm.slice(0, 60)) || localNorm.includes(jNorm.slice(0, 60))));
-                });
-                if (match) {
-                  const f = match.fields || {};
+            } else {
+              // Direct lookup by the ticket's own jira_source_key -- the
+              // authoritative mapping importCfitsIssue itself sets at import
+              // time -- instead of a fuzzy title search. That search had no
+              // check for whether this L1BOAR ticket was ever actually
+              // CFITS-imported at all: it ran for EVERY L1BOAR ticket,
+              // matching by summary text against real Jira issues it had no
+              // real connection to, and importing THEIR SLA breach status
+              // (and other Jira-sourced fields) onto a purely local ticket.
+              // Confirmed for real: CF-29941, CF-29460, CF-29312 are all
+              // genuinely local-only tickets (created directly in the app,
+              // no jira_source_key, own history starts with "Issue created
+              // by <a real person>") that ended up with jira_sla_breached
+              // stamped true anyway. A ticket with no jira_source_key has
+              // nothing to refresh from Jira -- leave it alone entirely.
+              const sourceRow = await pool.query(`SELECT jira_source_key FROM issues WHERE id = $1`, [issue.id]);
+              const realJiraKey = sourceRow.rows[0]?.jira_source_key;
+              if (realJiraKey) {
+                const cfRes = await fetch(
+                  `${creds.base}/rest/api/3/issue/${realJiraKey}?fields=${JIRA_CUSTOM_FIELDS}`,
+                  { headers: { Authorization: creds.authHdr, Accept: 'application/json' } }
+                );
+                if (cfRes.ok) {
+                  const d = await cfRes.json();
+                  const f = d.fields || {};
                   jiraFields = {
                     customerName:   extractJiraValue(f.customfield_10401),
                     clientName:     extractJiraValue(f.customfield_10883),
