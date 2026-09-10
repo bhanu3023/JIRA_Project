@@ -1,5 +1,12 @@
+// Connection string was hardcoded to a stale host/db (localhost:5433/neutara_db)
+// from an earlier infrastructure iteration -- this app's actual production
+// database is postgresql://jirauser:...@localhost:5434/jiradb (see .env.server),
+// so running this script never actually touched the real database it was meant
+// to index. Use DATABASE_URL like every other script in this repo instead of a
+// second, independently-maintained (and silently stale) copy of the connection
+// details.
 const { Pool } = require('pg');
-const pool = new Pool({ connectionString: 'postgresql://postgres:neutara123@localhost:5433/neutara_db' });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 async function main() {
   const indexes = [
