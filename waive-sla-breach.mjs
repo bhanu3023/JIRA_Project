@@ -63,7 +63,7 @@ function computeDurationMs(policy, priority) {
 
 async function main() {
   const { rows } = await pool.query(
-    `SELECT id, key, cf_key, "spaceId", priority, current_department, dept_sla_log, sla_waivers, "resolvedAt"
+    `SELECT id, key, cf_key, "spaceId", priority, current_department, dept_sla_log, sla_waivers, "resolvedAt", jira_sla_breached
      FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`,
     [KEY]
   );
@@ -80,8 +80,12 @@ async function main() {
   const deptSlaLog = issue.dept_sla_log || {};
   const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
   const priorElapsedMs = deptLogKey ? (deptSlaLog[deptLogKey].elapsed_ms || 0) : 0;
+  const isResolved = !!issue.resolvedAt;
 
-  console.log(`${displayKey} -- resolvedAt=${issue.resolvedAt}, current_department=${issue.current_department}, elapsed in that dept=${(priorElapsedMs / 3_600_000).toFixed(2)}h`);
+  console.log(`${displayKey} -- resolvedAt=${issue.resolvedAt}, current_department=${issue.current_department}, elapsed in that dept=${(priorElapsedMs / 3_600_000).toFixed(2)}h, jira_sla_breached=${issue.jira_sla_breached}`);
+  if (issue.jira_sla_breached && !deptLogKey) {
+    console.log(`  NOTE: jira_sla_breached is true but there's no dept_sla_log entry for "${issue.current_department}" at all -- this ticket was never tracked by this app's own live SLA clock in its current department. The breach comes purely from an imported/backfilled flag, not from elapsed time measured here.`);
+  }
 
   const { rows: policies } = await pool.query(
     `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
@@ -96,7 +100,16 @@ async function main() {
   const toWaive = [];
   for (const policy of applicable) {
     const durationMs = computeDurationMs(policy, priority);
-    const breached = priorElapsedMs >= durationMs;
+    // Same formula as computeSLAInstancesPure's resolved-branch rawIsBreached
+    // -- either the imported jira_sla_breached flag (historical Jira/CFITS
+    // breach, counts even with zero elapsed time tracked in THIS app) OR
+    // this app's own elapsed-vs-goal comparison. Previously only checked
+    // elapsed time, so a ticket breached purely via the imported flag (no
+    // dept_sla_log entry at all) was invisible to this script -- it would
+    // report "not breached" and refuse to waive a ticket that's showing
+    // "Breached: Yes" everywhere else in the app. Confirmed for real:
+    // CF-30911 and CF-30920.
+    const breached = isResolved && (!!issue.jira_sla_breached || priorElapsedMs >= durationMs);
     const already = !!waivers[policy.id];
     console.log(
       `  Policy "${policy.name}" (${policy.id}): goal=${(durationMs / 3_600_000).toFixed(2)}h -> ${breached ? 'BREACHED' : 'ok'}${already ? ' [already waived]' : ''}`
