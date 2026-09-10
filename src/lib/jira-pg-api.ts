@@ -5625,16 +5625,30 @@ async function _handleJiraPgApi(
         // statusId for a non-done category (see the queueStatusId PATCH
         // handler), so LOWER(s.name) alone can never match it; confirmed
         // for real, zero tickets in this space have a global status
-        // literally named "Routed to X". OR in the ticket's CURRENT
-        // department's own dept_statuses snapshot name, case-insensitive
-        // key match same as updatedDeptMatchSql's done-category check
-        // above, so a selected "Routed to X" filter actually finds tickets
-        // instead of silently matching nothing.
+        // literally named "Routed to X". OR in dept_statuses, keyed to the
+        // QUERIED queue ($2, deptParam) -- not i.current_department. A
+        // "Routed to X" label is recorded by the SOURCE department as its
+        // own outgoing record; the moment a ticket is genuinely routed, its
+        // current_department becomes the TARGET, not the source that wrote
+        // the label. Keying this to current_department meant "Status:
+        // Routed to Migration" could only ever match a ticket that was
+        // routed to Migration and is SOMEHOW STILL sitting in Migration's
+        // own current_department with Migration's own snapshot literally
+        // named "Routed to Migration" -- which never happens, since arriving
+        // in Migration immediately overwrites its own snapshot with an
+        // arrival status (Open/In Progress/etc). Confirmed for real:
+        // CF-29611 (Dev's own snapshot says "Routed to Migration", but
+        // current_department is Migration with Migration's own snapshot
+        // saying "Resolved") never matched this filter no matter what.
+        // Keying to deptParam -- "while it sat in the queue I'm actually
+        // viewing" -- is what this filter is supposed to mean; same queue-
+        // scoping principle already applied to the Assignee/Status DISPLAY
+        // columns (see assigneeOverride / getEffectiveIssueStatus's viewDept).
         deptExtraClauses.push(
           `(LOWER(s.name) = ANY($${deptParamIdx}::text[])
              OR EXISTS (
                SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
-               WHERE LOWER(k) = LOWER(i.current_department) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
+               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
              ))`
         );
         deptExtraParams.push(statusParam.split(',').map((s2) => s2.trim().toLowerCase()));
