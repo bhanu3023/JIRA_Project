@@ -4901,7 +4901,38 @@ async function _handleJiraPgApi(
         statusWhere.spaceId = { in: (where.spaceId as any).in };
       }
       const statuses = await db.status.findMany({ where: statusWhere as any, select: { id: true } });
-      where.statusId = { in: statuses.map((s) => s.id) };
+      // "Routed to X" (and every other custom queue-status-style label) is
+      // confirmed to never actually be used as a ticket's real statusId --
+      // every such row has zero tickets referencing it (it only exists so
+      // the Status filter dropdown has something real to show -- see
+      // ALLOWED_STATUSES on the Filters page). The actual record of a
+      // ticket having this status lives in dept_statuses, a raw/unmapped
+      // JSONB column Prisma's `where` can't reach. Without this, selecting
+      // "Routed to X" here (the no-Queue-selected general view -- the
+      // dept-scoped branch already has its own equivalent fix, keyed to the
+      // one queue being viewed) always returned zero results no matter what
+      // data existed, since where.statusId alone can never match anything.
+      // No single department to scope to here (no deptParam), so this
+      // checks EVERY department's own dept_statuses entry for a match --
+      // "does ANY department's snapshot on this ticket say this" is the
+      // sensible reading for a filter with no queue context.
+      let deptStatusMatchIds: string[] = [];
+      try {
+        const scopedSpaceIds = typeof where.spaceId === 'string' ? [where.spaceId] : ((where.spaceId as any)?.in || []);
+        if (scopedSpaceIds.length) {
+          const lowerNames = names.map((n) => n.toLowerCase());
+          const deptMatchRows = await pool.query(
+            `SELECT DISTINCT i.id FROM issues i, jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+             WHERE i."spaceId" = ANY($1::text[]) AND LOWER(v->>'name') = ANY($2::text[])`,
+            [scopedSpaceIds, lowerNames]
+          );
+          deptStatusMatchIds = deptMatchRows.rows.map((r: any) => r.id);
+        }
+      } catch { /* best-effort -- falls back to the real-statusId match alone */ }
+      addOrGroup([
+        { statusId: { in: statuses.map((s) => s.id) } },
+        ...(deptStatusMatchIds.length ? [{ id: { in: deptStatusMatchIds } }] : []),
+      ]);
     }
 
     // Priority filter
