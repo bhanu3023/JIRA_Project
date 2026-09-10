@@ -2124,7 +2124,13 @@ export default function FiltersPage() {
                     it size to its natural (sum-of-columns) width and leaving
                     any leftover space as plain page margin reads as a normal
                     right-aligned table, not a stretched column. */}
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[380px]">Work</th>
+                {/* Narrowed from 380px -- at typical laptop/browser widths this
+                    pushed Assignee/Status/Priority/SLA Breached off-screen,
+                    forcing a horizontal scroll just to see them. The cell
+                    below already truncates with an ellipsis, so this only
+                    trades off how much of a long title shows before
+                    truncating, not readability of what does fit. */}
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[220px]">Work</th>
                 {tableExtraCols.map((id) => (
                   <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
                     {TABLE_COLUMN_DEFS[id].label}
