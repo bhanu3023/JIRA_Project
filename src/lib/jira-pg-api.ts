@@ -4241,7 +4241,7 @@ async function _handleJiraPgApi(
           `WITH merged AS (${mergedSourceSql}),
            dedup AS (SELECT issue_id, MAX(closed_at) AS closed_at, MAX(dept_name) AS dept_name FROM merged GROUP BY issue_id)
            SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
-                  i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at, i.jira_sla_breached,
+                  i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at, i.jira_sla_breached, i.sla_waivers,
                   d.closed_at, d.dept_name,
                   s.name AS status_name, s.color AS status_color, s.category AS status_category,
                   i.dept_sla_log, i.dept_assignees, i.dept_statuses,
@@ -4352,15 +4352,33 @@ async function _handleJiraPgApi(
       // Status/priority breakdown + total, scoped to this dept and the
       // selected range (by creation date) -- same shape the existing charts
       // already render, just now range-aware instead of always "all time".
-      const deptIssuesRes = await pool.query(
-        `SELECT i.id, i.priority, i."createdAt", i.jira_sla_breached, i."dueDate",
-                s.name AS status_name, s.color AS status_color, s.category AS status_category
-         FROM issues i
-         LEFT JOIN statuses s ON i."statusId" = s.id
-         WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)
-           AND i."createdAt" >= $3 AND i."createdAt" <= $4`,
-        [spaceId, dept, from, to]
-      );
+      // Also fetch this space's active SLA policies once, up front -- every
+      // breach check below (dept total, per-user worked/done, per-user
+      // current) now runs the SAME computeSLAInstancesPure the ticket detail
+      // page and the Filters-page export use, instead of each hand-rolling
+      // its own "imported flag or simple due-date-overdue" approximation.
+      // That approximation never looked at sla_waivers at all and ignored
+      // each policy's own goal duration / dept_sla_log elapsed-time
+      // carryover, so a ticket an admin had waived (correctly "resolved in
+      // time" everywhere else) still counted as a breach against that
+      // person's name here, and a ticket genuinely over its policy goal
+      // but not yet past its raw dueDate didn't count at all. Confirmed for
+      // real: this is the same class of bug already fixed for the Filters
+      // list/export (see the sla_waivers comment on formatIssue above).
+      const [deptIssuesRes, slaPoliciesRes] = await Promise.all([
+        pool.query(
+          `SELECT i.id, i.priority, i."createdAt", i.jira_sla_breached, i."dueDate",
+                  i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i.sla_waivers,
+                  s.name AS status_name, s.color AS status_color, s.category AS status_category
+           FROM issues i
+           LEFT JOIN statuses s ON i."statusId" = s.id
+           WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)
+             AND i."createdAt" >= $3 AND i."createdAt" <= $4`,
+          [spaceId, dept, from, to]
+        ),
+        pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`, [spaceId]),
+      ]);
+      const slaPolicies = slaPoliciesRes.rows;
       const statusMap: Record<string, { count: number; color: string; category: string }> = {};
       const priorityMap: Record<string, number> = { highest: 0, high: 0, medium: 0, low: 0, lowest: 0 };
       let slaBreachedCount = 0;
@@ -4370,15 +4388,12 @@ async function _handleJiraPgApi(
         statusMap[name].count++;
         const p = (row.priority || 'medium').toLowerCase();
         if (p in priorityMap) priorityMap[p]++;
-        // Same "prefer the imported historical flag, else a simple due-date
-        // check" rule as the general issue list -- not the full per-policy
-        // computation (that needs each ticket's own SLA policy/goal duration
-        // and pause state), just a practical approximation for a team-wide
-        // count. Good enough to spot a trend, not a substitute for the
-        // per-ticket SLA panel's exact figure.
-        const isDone = row.status_category === 'done';
-        const dueBreach = !isDone && row.dueDate && new Date(row.dueDate).getTime() < Date.now();
-        if (row.jira_sla_breached || dueBreach) slaBreachedCount++;
+        const instances = computeSLAInstancesPure(
+          { ...row, current_department: dept, status: { name: row.status_name, category: row.status_category } },
+          slaPolicies, false
+        );
+        const breached = instances.length ? instances.some((x: any) => x.isBreached) : !!row.jira_sla_breached;
+        if (breached) slaBreachedCount++;
       }
 
       // Per-user breakdown -- every member of this queue. Two different
@@ -4407,7 +4422,9 @@ async function _handleJiraPgApi(
       let perUserByProduct: Record<string, any[]> = {};
       if (memberIds.length) {
         const workedRes = await pool.query(
-          `SELECT w.user_id, i.id AS issue_id, i.jira_sla_breached, i."dueDate", s.category AS status_category,
+          `SELECT w.user_id, i.id AS issue_id, i.priority, i."createdAt", i.jira_sla_breached, i."dueDate",
+                  i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i.sla_waivers,
+                  s.category AS status_category,
                   u."firstName", u."lastName", u.email, u."avatarUrl"
            FROM user_worked_on_tickets w
            JOIN issues i ON i.id = w.issue_id
@@ -4436,7 +4453,18 @@ async function _handleJiraPgApi(
             };
           }
           byUser[r.user_id].ticketIds.add(r.issue_id);
-          if (r.jira_sla_breached) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
+          // Every row here is already filtered to isDone above, so
+          // computeSLAInstancesPure's own resolved-branch (priorElapsedMs vs
+          // each policy's goal duration, honoring sla_waivers) applies --
+          // not just the imported jira_sla_breached flag, which is false for
+          // nearly every locally-tracked ticket and silently undercounted
+          // real local breaches here.
+          const workedInstances = computeSLAInstancesPure(
+            { ...r, current_department: dept, status: { category: r.status_category } },
+            slaPolicies, false
+          );
+          const workedBreached = workedInstances.length ? workedInstances.some((x: any) => x.isBreached) : !!r.jira_sla_breached;
+          if (workedBreached) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
         }
         // Include every queue member even with zero worked tickets in this
         // range, not just the ones with activity -- otherwise a member who
@@ -4456,6 +4484,7 @@ async function _handleJiraPgApi(
         // is still sitting on always counts.
         const currentRes = await pool.query(
           `SELECT i.department_assignee_id, i."assigneeId", i."dueDate", i.jira_sla_breached, i."productType",
+                  i.priority, i."createdAt", i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i.sla_waivers,
                   s.name AS status_name, s.category AS status_category
            FROM issues i
            LEFT JOIN statuses s ON s.id = i."statusId"
@@ -4482,8 +4511,23 @@ async function _handleJiraPgApi(
           else if (waiting) bucket.waiting++;
           else if (r.status_category === 'in_progress') bucket.inProgress++;
           else bucket.open++;
-          const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
-          if (!isDone && (r.jira_sla_breached || dueBreach)) bucket.slaBreached++;
+          // Full per-policy check (goal duration, dept_sla_log elapsed
+          // carryover, pause statuses, sla_waivers) instead of the previous
+          // raw-dueDate-vs-now approximation -- a still-open ticket whose
+          // breach was waived (e.g. legitimately delayed for a reason
+          // outside anyone's control) kept counting against this person
+          // here even though the ticket detail page's own SLA panel already
+          // shows it waived.
+          if (!isDone) {
+            const currentInstances = computeSLAInstancesPure(
+              { ...r, current_department: dept, status: { name: r.status_name, category: r.status_category } },
+              slaPolicies, false
+            );
+            const currentBreached = currentInstances.length
+              ? currentInstances.some((x: any) => x.isBreached)
+              : !!(r.jira_sla_breached || (r.dueDate && new Date(r.dueDate).getTime() < Date.now()));
+            if (currentBreached) bucket.slaBreached++;
+          }
 
           if (r.productType && PRODUCT_TYPES.includes(r.productType)) {
             const ptBucket = ((currentByUserByProduct[r.productType] ??= {})[owner] ??= { total: 0, done: 0 });
