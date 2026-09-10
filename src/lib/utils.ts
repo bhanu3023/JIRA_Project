@@ -158,7 +158,23 @@ export function getEffectiveIssueStatus(issue: {
   // to current_department, so every other caller's behavior is unchanged.
   const currentDept = viewDept || issue.current_department;
   const deptQueueSt = currentDept ? rawDeptStatuses[currentDept] : null;
-  if (deptQueueSt && typeof deptQueueSt.id === 'string' && (deptQueueSt.id.startsWith('qst_') || (deptQueueSt.id === '' && deptQueueSt.name))) {
+  // A "Routed to X"/"Waiting for X" queue status is a record of an OUTGOING
+  // handoff -- valid while the ticket is still actively out being worked
+  // elsewhere, but stale once it's reached a genuinely final resolution.
+  // Without this, a department that routed an open ticket away and never
+  // touched it again kept showing "Routed to Dev" forever in its own queue
+  // view, even after Dev (or wherever it ended up) actually resolved it --
+  // so the routing department's own view never reflected the ticket's real
+  // outcome. Once the ticket's actual current status is done, fall through
+  // to that live status instead of the frozen routing label; this doesn't
+  // change worked-on credit/counts anywhere, only what status this display
+  // helper shows.
+  const isStaleRoutingLabel = deptQueueSt
+    && typeof deptQueueSt.id === 'string'
+    && deptQueueSt.id.startsWith('qst_')
+    && /^(?:waiting\s+for|routed\s+to)\s+/i.test(String(deptQueueSt.name || ''))
+    && issue.status?.category === 'done';
+  if (!isStaleRoutingLabel && deptQueueSt && typeof deptQueueSt.id === 'string' && (deptQueueSt.id.startsWith('qst_') || (deptQueueSt.id === '' && deptQueueSt.name))) {
     return { ...deptQueueSt, color: resolveStatusColor(deptQueueSt) };
   }
   return getIssueStatus(issue);
