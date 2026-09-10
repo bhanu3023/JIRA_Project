@@ -1160,11 +1160,36 @@ async function pauseDeptSLA(issueKey: string | null, issueId: string | null, dep
 /**
  * Mark a dept as "running" in dept_sla_log (called after dept_sla_started_at = NOW()).
  */
+// Same priority -> goal-duration resolution used everywhere else in this
+// file (Filters' breach recompute, the dept-queue Summary sidebar, MBR's
+// By-Department tab, computeSLAInstancesPure) -- extracted once here since
+// this is a new call site, not touching the other several inline copies.
+function computeSlaGoalDurationMs(policy: any, priority: string): number {
+  let durationMs = 8 * 60 * 60 * 1000; // default 8h
+  for (const goal of (policy.goals || [])) {
+    if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
+      const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
+      if (row?.timeValue) {
+        const val = parseFloat(row.timeValue);
+        const unit = (row.timeUnit || 'hours').toLowerCase();
+        durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+        break;
+      }
+    } else if (goal.timeValue) {
+      const val = parseFloat(goal.timeValue);
+      const unit = (goal.timeUnit || 'hours').toLowerCase();
+      durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+      break;
+    }
+  }
+  return durationMs;
+}
+
 async function startDeptSLA(issueKey: string | null, issueId: string | null, dept: string): Promise<void> {
   if (!dept) return;
   try {
     const row = await pool.query(
-      `SELECT dept_sla_log FROM issues WHERE ${issueKey ? 'key=$1' : 'id=$1'}`,
+      `SELECT dept_sla_log, "spaceId", priority FROM issues WHERE ${issueKey ? 'key=$1' : 'id=$1'}`,
       [issueKey || issueId]
     );
     const log: Record<string, any> = row.rows[0]?.dept_sla_log || {};
@@ -1177,6 +1202,40 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
       status: 'running',
       paused_at: null,
     };
+    // The ticket's plain "Due Date" property (sidebar/Filters/Overdue-badge/
+    // export) had NO connection to the SLA policies configured per queue by
+    // priority at all -- it was a purely manual field, so "Due Date" and the
+    // SLA panel's own priority-driven due time could show two unrelated
+    // things, and the property only ever got a value if someone typed one in
+    // by hand. Compute it the same way the SLA panel does (goal duration by
+    // priority, minus whatever budget this department already burned across
+    // earlier visits) every time this department's SLA clock starts/resumes,
+    // so it stays a real, current deadline instead of a stale manual guess.
+    // When more than one policy applies, use the earliest (most urgent)
+    // resulting deadline -- the ticket property is a single value, and "when
+    // is this actually due" should mean the soonest clock that can breach.
+    let computedDueDate: Date | null = null;
+    try {
+      const spaceId = row.rows[0]?.spaceId;
+      const priority = (row.rows[0]?.priority || 'medium').toLowerCase();
+      if (spaceId) {
+        const polRes = await pool.query(
+          `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
+          [spaceId]
+        );
+        const applicable = polRes.rows.filter((p: any) => {
+          const pDept = (p.dept_name || '').trim().toLowerCase();
+          return !pDept || pDept === dept.trim().toLowerCase();
+        });
+        const priorElapsedMs = log[dept]?.elapsed_ms || 0;
+        for (const policy of applicable) {
+          const durationMs = computeSlaGoalDurationMs(policy, priority);
+          const remainingMs = Math.max(0, durationMs - priorElapsedMs);
+          const candidate = new Date(nowTs.getTime() + remainingMs);
+          if (!computedDueDate || candidate < computedDueDate) computedDueDate = candidate;
+        }
+      }
+    } catch { /* dueDate computation is best-effort -- never block the SLA start itself */ }
     // dept_sla_started_at (the top-level column, not this dept-scoped log)
     // is what both computeSLAInstancesPure's dueTime calculation AND this
     // function's own counterpart pauseDeptSLA use as "when did the current
@@ -1191,8 +1250,8 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
     // gets a correct resume for free instead of each having to remember to
     // update this column itself.
     await pool.query(
-      `UPDATE issues SET dept_sla_log=$1::jsonb, dept_sla_started_at=NOW() WHERE ${issueKey ? 'key=$2' : 'id=$2'}`,
-      [JSON.stringify(log), issueKey || issueId]
+      `UPDATE issues SET dept_sla_log=$1::jsonb, dept_sla_started_at=NOW()${computedDueDate ? ', "dueDate"=$3' : ''} WHERE ${issueKey ? 'key=$2' : 'id=$2'}`,
+      computedDueDate ? [JSON.stringify(log), issueKey || issueId, computedDueDate.toISOString()] : [JSON.stringify(log), issueKey || issueId]
     );
     await logSlaHistory(issueKey, issueId, `${wasStartedBefore ? 'SLA resumed' : 'SLA started'} — ${dept}`);
   } catch { /* non-fatal */ }
