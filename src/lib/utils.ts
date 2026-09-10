@@ -146,9 +146,17 @@ export function getEffectiveIssueStatus(issue: {
   status?: IssueStatusShape | null;
   dept_statuses?: Record<string, any> | null;
   current_department?: string | null;
-}): IssueStatusShape {
+}, viewDept?: string | null): IssueStatusShape {
   const rawDeptStatuses = issue.dept_statuses || {};
-  const currentDept = issue.current_department;
+  // viewDept lets a caller ask "what did this status look like while the
+  // ticket sat in THIS specific department" instead of always reading its
+  // current one -- e.g. the Filters page showing a Queue: X result for a
+  // ticket that's since moved to department Y. Without this, a row's
+  // Assignee column (already fixed to show X's own historical snapshot)
+  // and its Status column right next to it could silently represent two
+  // different departments with no indication why they disagree. Defaults
+  // to current_department, so every other caller's behavior is unchanged.
+  const currentDept = viewDept || issue.current_department;
   const deptQueueSt = currentDept ? rawDeptStatuses[currentDept] : null;
   if (deptQueueSt && typeof deptQueueSt.id === 'string' && (deptQueueSt.id.startsWith('qst_') || (deptQueueSt.id === '' && deptQueueSt.name))) {
     return { ...deptQueueSt, color: resolveStatusColor(deptQueueSt) };

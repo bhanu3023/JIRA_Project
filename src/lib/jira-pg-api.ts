@@ -6066,6 +6066,16 @@ async function _handleJiraPgApi(
           // CF-29568 (assignee snapshot) and CF-29902 (reporter fallback, no
           // snapshot existed) under Queue: Migration.
           const assigneeIsHistorical = !!assigneeOverride;
+          // Surfaced separately from assigneeIsHistorical -- that flag can
+          // also fire purely because a specific Assignee-history filter
+          // matched (historyAssigneeFilterIds), independent of whether the
+          // ticket actually left this queue. The Status column needs the
+          // narrower "did this ticket specifically move away from the
+          // queried queue" signal on its own, so the frontend can show the
+          // queue's own dept_statuses snapshot (same fix already applied to
+          // Assignee) instead of the ticket's current, possibly
+          // different-department status with no indication why it disagrees
+          // with the Assignee column sitting right next to it.
           return { ...formatIssue({
           // Truncated — see comment above the other formatIssue list call site.
           // This branch's SELECT i.* pulls the full raw description for every
@@ -6095,7 +6105,7 @@ async function _handleJiraPgApi(
           jira_assignee_name: row.jira_assignee_name || null,
           jira_reporter_name: row.jira_reporter_name || null,
           space: { key: row.space_key || spaceKey },
-        }), assigneeIsHistorical };
+        }), assigneeIsHistorical, movedAwayFromQueue };
         });
       } catch { /* keep Prisma results as fallback */ }
     }

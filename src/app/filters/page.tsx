@@ -1488,7 +1488,11 @@ export default function FiltersPage() {
           issue.summary ?? '',
           issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
           issue.reporter ? `${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim() : '',
-          issue.status?.name ?? '',
+          // Same queue-scoped effective status the on-screen table shows --
+          // exporting the raw issue.status?.name here could show a
+          // different value than what the table right above it displays
+          // for the identical row.
+          getEffectiveIssueStatus(issue, selQueue || undefined).name || '',
           issue.priority ?? '',
           issue.sla_breached == null ? 'N/A' : issue.sla_breached ? 'Yes' : 'No',
           issue.sla_breached ? (issue.sla_breached_by ?? '') : '',
@@ -2212,7 +2216,13 @@ export default function FiltersPage() {
                   </td>
                   <td className="px-2 py-2.5">
                     {(() => {
-                      const effectiveStatus = getEffectiveIssueStatus(issue);
+                      // Queue-scoped, same as the Assignee column right next
+                      // to it -- a Migration-queue result for a ticket that's
+                      // since moved to Infra should show Migration's own
+                      // status snapshot (what it looked like while it sat
+                      // here), not Infra's current one, which has nothing to
+                      // do with why this row appeared in this queue's export.
+                      const effectiveStatus = getEffectiveIssueStatus(issue, selQueue || undefined);
                       return (
                         <span
                           className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
