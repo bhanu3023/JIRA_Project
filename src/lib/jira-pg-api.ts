@@ -4373,8 +4373,27 @@ async function _handleJiraPgApi(
         const deptStatuses: Record<string, any> = r.dept_statuses || {};
         const statusSnapKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
         const statusSnap = statusSnapKey ? deptStatuses[statusSnapKey] : null;
+        // A "Routed to X"/"Waiting for X" snapshot is a record of an
+        // OUTGOING handoff, not this dept's own resolution -- once the
+        // ticket's actual current status (r.status_category, the live
+        // global one, not this frozen snapshot) is done, that routing label
+        // is stale and should give way to the real outcome. Without this, a
+        // dept that routed an open ticket away and never touched it again
+        // kept it stuck showing "Routed to X" here forever, even after it
+        // was genuinely resolved elsewhere -- so it could never surface in
+        // this "Worked on" list (which only includes done-category
+        // entries), staying in "Assigned to me" indefinitely even though
+        // there's nothing left to act on. Same principle as
+        // getEffectiveIssueStatus's own stale-routing-label fallback, just
+        // applied here so list MEMBERSHIP (not just the displayed label)
+        // agrees with it.
+        const isStaleRoutingLabel = statusSnap
+          && typeof statusSnap.id === 'string'
+          && statusSnap.id.startsWith('qst_')
+          && /^(?:waiting\s+for|routed\s+to)\s+/i.test(String(statusSnap.name || ''))
+          && r.status_category === 'done';
         const { dept_assignees, dept_statuses, ...rest } = r;
-        const withStatus = statusSnap
+        const withStatus = statusSnap && !isStaleRoutingLabel
           ? { ...rest, status_name: statusSnap.name, status_color: statusSnap.color, status_category: statusSnap.category }
           : rest;
 
