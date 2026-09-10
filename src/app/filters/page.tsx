@@ -974,6 +974,21 @@ export default function FiltersPage() {
 
   /* filter bar state */
   const [text, setText]                   = useState('');
+  // Only the free-text search box needs debouncing (avoid firing a request
+  // per keystroke) -- every OTHER filter (dropdowns, checkboxes, the Queue
+  // picker, SLA Breached toggle, ...) is a single discrete click that should
+  // fetch immediately. Debouncing the INPUT here (text -> debouncedText,
+  // consumed by buildFilterParams below) instead of debouncing the FETCH
+  // itself (the previous approach: every filter change, click or keystroke,
+  // waited a flat 400ms before the request even started) means a filter
+  // click now fires right away while typing still only fetches once you
+  // pause. Confirmed for real: every single filter click felt sluggish
+  // because of this shared, unconditional 400ms delay.
+  const [debouncedText, setDebouncedText] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedText(text), 400);
+    return () => clearTimeout(t);
+  }, [text]);
   const [selSpaces, setSelSpaces]         = useState<string[]>([]);
   const [selQueue, setSelQueue]           = useState('');  // custom queue name within a single selected space
   // "Routed to X" (and any other custom queue status) only lives inside that
@@ -1027,7 +1042,6 @@ export default function FiltersPage() {
   const PAGE_SIZE = 1000;
   const [page, setPage] = useState(1);
   const [loadingIssues, setLoadingIssues] = useState(false);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* saved filters */
   const [savedFilters, setSavedFilters]         = useState<SavedFilter[]>([]);
@@ -1371,16 +1385,22 @@ export default function FiltersPage() {
         if (selBreached) params.slaBreached = selBreached;
         if (selOverdue) params.overdue = selOverdue;
 
-        // Text search
-        if (text.trim()) params.q = text.trim();
+        // Text search -- debounced separately (see debouncedText above), so
+        // this only changes once the user pauses typing.
+        if (debouncedText.trim()) params.q = debouncedText.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, debouncedText]);
 
-  /* fetch issues — all filtering done server-side for accuracy */
+  /* fetch issues — all filtering done server-side for accuracy.
+     No artificial delay here anymore -- buildFilterParams only changes
+     immediately (any discrete filter click) or after the debouncedText
+     settles (typing), so there's nothing left to debounce at this level;
+     doing it here too just added a flat 400ms to every single click on top
+     of whatever the debounced text input already handled. */
   const fetchIssues = useCallback(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(async () => {
+    let cancelled = false;
+    (async () => {
       setLoadingIssues(true);
       try {
         // limit was 1000 — on an unfiltered view that's a ~2.7MB response (1000 full
@@ -1389,14 +1409,21 @@ export default function FiltersPage() {
         // while cutting the payload by ~90%.
         const params = { ...buildFilterParams(), page: String(page), limit: String(PAGE_SIZE) };
         const { issues: list, total: tot } = await api.getIssues(params);
+        if (cancelled) return;
         setIssues(list as any[]);
         setTotal(tot);
-      } catch { setIssues([]); setTotal(0); }
-      setLoadingIssues(false);
-    }, 400);
+      } catch { if (!cancelled) { setIssues([]); setTotal(0); } }
+      if (!cancelled) setLoadingIssues(false);
+    })();
+    return () => { cancelled = true; };
   }, [buildFilterParams, page]);
 
-  useEffect(() => { fetchIssues(); }, [fetchIssues]);
+  // fetchIssues returns a cancel function -- without wiring it up as this
+  // effect's own cleanup, firing filter clicks in quick succession (no
+  // longer debounced at this level, see fetchIssues' own comment) could let
+  // an earlier, slower request's response land AFTER a later one's and
+  // overwrite the table with stale results.
+  useEffect(() => fetchIssues(), [fetchIssues]);
 
   // Changing any filter should land back on page 1 -- otherwise narrowing
   // the result set while sitting on, say, page 5 could point at a page
