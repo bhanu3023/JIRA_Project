@@ -4762,11 +4762,18 @@ async function _handleJiraPgApi(
       // selected (includeHistory, gated on selQueue in the frontend); the
       // request here is for it to just always apply whenever an Assignee
       // filter is active, Queue selected or not.
+      // reason != 'passed' -- a 'passed' row only means this person routed/
+      // reassigned the ticket onward, not that they did real work on it
+      // (same guard every other user_worked_on_tickets join in this file
+      // applies). Missing it here meant filtering Assignee by someone who
+      // only ever handed a ticket off to someone else still surfaced that
+      // ticket and showed THEIR name as Assignee, same false-positive
+      // already confirmed and fixed elsewhere for Ravi Srivastava/CF-30614.
       const workedRows = userIds.length
         ? await pool.query(
             `SELECT DISTINCT ON (w.issue_id) w.issue_id, u.id, u."firstName", u."lastName", u.email, u."avatarUrl"
              FROM user_worked_on_tickets w JOIN users u ON u.id = w.user_id
-             WHERE w.user_id = ANY($1::text[])
+             WHERE w.user_id = ANY($1::text[]) AND w.reason != 'passed'
              ORDER BY w.issue_id, w.worked_at DESC`,
             [userIds]
           )
@@ -6113,7 +6120,19 @@ async function _handleJiraPgApi(
       }
       const nowMs = Date.now();
       enrichedIssues = enrichedIssues.map((i: any) => {
-        const isResolved = i.status?.category === 'done';
+        // Same dept_statuses fallback computeSLAInstancesPure uses (see its
+        // own long comment) -- a ticket can visibly show "Resolved" via its
+        // per-department status snapshot while the real statusId column
+        // never caught up. Checking only i.status?.category here (as this
+        // block did before) let such a ticket keep ticking its live-clock
+        // breach projection forever on the Filters table/export, even
+        // though the ticket detail page's own SLA panel (which already used
+        // this fallback) correctly stopped the clock for it.
+        const issueDeptForStatus = (i.current_department || '').trim().toLowerCase();
+        const deptStatusesForStatus: Record<string, any> = i.dept_statuses || {};
+        const deptStatusKeyForStatus = Object.keys(deptStatusesForStatus).find((k) => k.toLowerCase() === issueDeptForStatus);
+        const deptStatusCategoryForStatus = deptStatusKeyForStatus ? deptStatusesForStatus[deptStatusKeyForStatus]?.category : undefined;
+        const isResolved = i.status?.category === 'done' || deptStatusCategoryForStatus === 'done';
         // Historical breach imported from Jira (L2B/L3B) always counts, even
         // for a ticket that's since been resolved here -- the checks below
         // all force `breached` back to false once resolved, which is right
@@ -6295,8 +6314,20 @@ async function _handleJiraPgApi(
     // hasn't been "caused" by anyone yet, so attributing it to whoever most
     // recently touched its (still not-done) status would just be noise.
     try {
+      // Same dept_statuses fallback as the isResolved check above -- a
+      // ticket resolved only per its per-department status snapshot (real
+      // statusId column not yet caught up) was silently excluded here,
+      // so it never got an "SLA Breached By" attribution even though
+      // sla_breached was already correctly true for it.
+      const isResolvedForAttribution = (i: any) => {
+        if (i.status?.category === 'done') return true;
+        const dept = (i.current_department || '').trim().toLowerCase();
+        const deptStatuses: Record<string, any> = i.dept_statuses || {};
+        const key = Object.keys(deptStatuses).find((k) => k.toLowerCase() === dept);
+        return key ? deptStatuses[key]?.category === 'done' : false;
+      };
       const breachedIds = enrichedIssues
-        .filter((i: any) => i.sla_breached && i.status?.category === 'done')
+        .filter((i: any) => i.sla_breached && isResolvedForAttribution(i))
         .map((i: any) => i.id);
       if (breachedIds.length) {
         const breachHistRows = await pool.query(

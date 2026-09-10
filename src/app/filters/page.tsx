@@ -1476,7 +1476,7 @@ export default function FiltersPage() {
         (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
       );
       const header = [
-        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'Overdue', 'Department',
+        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'SLA Breached Dept', 'Overdue', 'Department',
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
@@ -1492,6 +1492,7 @@ export default function FiltersPage() {
           issue.priority ?? '',
           issue.sla_breached == null ? 'N/A' : issue.sla_breached ? 'Yes' : 'No',
           issue.sla_breached ? (issue.sla_breached_by ?? '') : '',
+          issue.sla_breached ? (issue.sla_breached_dept ?? '') : '',
           issue.overdue ? 'Yes' : 'No',
           issue.current_department ?? '',
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
