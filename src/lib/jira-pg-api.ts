@@ -10163,9 +10163,28 @@ async function _handleJiraPgApi(
       dateClause = ` AND (${updatedConds.join(' AND ')})`;
     }
     let deptClause = '';
+    let personDeptClause = '';
     if (department) {
       filterParams.push(department);
       const dIdx = filterParams.length;
+      // personRows' hygiene metrics (stale/missing/overdue/no_closure/
+      // screenshots) describe a ticket's LIVE state right now -- a ticket
+      // that's since moved to a different department isn't part of THIS
+      // department's current hygiene picture anymore, no matter how it
+      // originated or who once worked it there. deptClause below
+      // deliberately broadens to include such tickets for the totals/ticket
+      // list (see its own comment), but reusing that same broadened match
+      // for personRows pulled a moved-on ticket into the selected
+      // department's per-person table anyway, credited to whoever CURRENTLY
+      // holds it -- even though personRows groups by i.current_department,
+      // which for that ticket is a DIFFERENT department than the one
+      // selected. Confirmed for real: selecting "Dev" could show a person
+      // with no real Dev involvement, holding a ticket that only ever
+      // touched Dev via a stale worked-on record before moving to
+      // Migration. Scope this one query to the strict current-department
+      // match instead, same restriction Filters already applies to a plain
+      // department-board view.
+      personDeptClause = ` AND LOWER(i.current_department) = LOWER($${dIdx})`;
       // Was a plain current_department match -- narrower than Filters' own
       // "Queue: X" scope (queueMembersOnlyParam/originDeptMatchSql/
       // updatedDeptMatchSql/deptScopeSql above), which also counts a ticket
@@ -10266,7 +10285,7 @@ async function _handleJiraPgApi(
       LEFT JOIN statuses s ON i."statusId" = s.id
       LEFT JOIN users u ON u.id = i."assigneeId"
       WHERE i."assigneeId" IS NOT NULL AND i.current_department IS NOT NULL AND i.current_department != ''
-        ${dateClause}${deptClause}
+        ${dateClause}${personDeptClause}
       GROUP BY i.current_department, i."assigneeId", u."firstName", u."lastName", u.email
     `, staleParams);
 
