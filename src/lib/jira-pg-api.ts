@@ -1625,6 +1625,26 @@ async function enrichSlaWithResolver(
   const resolvedByName = statusHistory.length ? (statusHistory[statusHistory.length - 1].authorName || null) : null;
   const events = statusHistory
     .filter((row) => doneNames.has((row.newValue || '').trim().toLowerCase()))
+    // Drop a "resolved" transition the SAME person reverted within minutes --
+    // e.g. an admin toggling status while investigating a ticket they don't
+    // actually own, not a settled resolution attempt. Without this, Resolution
+    // History showed that person as having "resolved" (and, if late, being
+    // flagged for it) a ticket they never actually worked, purely because they
+    // clicked Resolved and immediately undid it themselves. Confirmed for
+    // real: CF-29697 -- Bhanu Srikakulam resolved it, then reopened his own
+    // change 7 seconds later while debugging an unrelated SLA issue; the
+    // ticket's real, settled resolution came from someone else afterward.
+    .filter((row) => {
+      const rowTime = new Date(row.createdAt).getTime();
+      const selfReverted = statusHistory.some((later) => {
+        if (later === row) return false;
+        const laterTime = new Date(later.createdAt).getTime();
+        if (laterTime <= rowTime || laterTime - rowTime > 5 * 60 * 1000) return false;
+        if ((later.authorName || '') !== (row.authorName || '')) return false;
+        return !doneNames.has((later.newValue || '').trim().toLowerCase());
+      });
+      return !selfReverted;
+    })
     .map((row) => ({ resolvedByName: row.authorName || 'Unknown', resolvedAt: row.createdAt?.toISOString?.() || row.createdAt }));
   return slaInstances.map((s: any) => {
     if (!s.isCompleted) return s;

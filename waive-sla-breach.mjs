@@ -1,34 +1,36 @@
-// One-off: waive CF-30766's genuinely-breached SLA policy (see the
-// "CF-30766 spent ~19.7h in Migration against its 10h goal" comment in
-// src/lib/jira-pg-api.ts, around the Filters-page breach recompute).
+// Generic: waive a specific ticket's breached SLA policy/policies.
 //
-// Per the ticket owner: Amulya resolved this before the real deadline --
-// the elapsed-time reading is a dept-transfer timing artifact, not a real
-// miss. This does NOT touch the underlying dept_sla_log/elapsed-time
-// numbers (computeSLAInstancesPure still sees the same history) -- it only
-// writes a waiver, the exact same mechanism the ticket detail page's own
-// "Waive this breach" button uses (PATCH /issues/:key/sla-waiver in
-// src/lib/jira-pg-api.ts), so the audit trail (who/why/when) stays intact
-// and computeSLAInstancesPure's `waiver ? false : rawIsBreached` picks it
-// up automatically -- both the detail page and (after the earlier export
-// fix) the Filters-page CSV will read it as "resolved in time".
+// This does NOT touch the underlying dept_sla_log/elapsed-time numbers
+// (computeSLAInstancesPure still sees the same history) -- it only writes a
+// waiver, the exact same mechanism the ticket detail page's own "Waive this
+// breach" button uses (PATCH /issues/:key/sla-waiver in src/lib/jira-pg-api.ts),
+// so the audit trail (who/why/when) stays intact and
+// computeSLAInstancesPure's `waiver ? false : rawIsBreached` picks it up
+// automatically everywhere: the detail page, Resolution History's per-event
+// "Late" badges, and the Filters-page CSV export.
 //
 // Run this ON the production server, where DATABASE_URL in .env.server
 // actually resolves (it's bound to 127.0.0.1:5434, not reachable remotely):
 //
-//   node --env-file=.env.server waive-cf30766-sla-breach.mjs             # dry run
-//   node --env-file=.env.server waive-cf30766-sla-breach.mjs --apply     # writes the waiver
+//   node --env-file=.env.server waive-sla-breach.mjs CF-29697             # dry run
+//   node --env-file=.env.server waive-sla-breach.mjs CF-29697 --apply     # writes the waiver
 //
 // Optional overrides:
-//   WAIVED_BY_NAME="Your Name" WAIVER_REASON="..." node --env-file=.env.server waive-cf30766-sla-breach.mjs --apply
+//   WAIVED_BY_NAME="Your Name" WAIVER_REASON="..." node --env-file=.env.server waive-sla-breach.mjs CF-29697 --apply
 
 import pg from 'pg';
 
-const KEY = 'CF-30766';
+const args = process.argv.slice(2);
+const APPLY = args.includes('--apply');
+const KEY = args.find((a) => !a.startsWith('--'));
+if (!KEY) {
+  console.error('Usage: node waive-sla-breach.mjs <CF-KEY> [--apply]');
+  process.exit(1);
+}
+
 const WAIVED_BY_NAME = process.env.WAIVED_BY_NAME || 'Bhanu Srikakulam';
 const REASON = process.env.WAIVER_REASON
-  || 'Resolved before the actual SLA deadline -- dept-transfer timing logged incorrectly.';
-const APPLY = process.argv.includes('--apply');
+  || 'Breach was an artifact of an admin toggling status while investigating the ticket, not a real SLA miss.';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -61,7 +63,7 @@ function computeDurationMs(policy, priority) {
 
 async function main() {
   const { rows } = await pool.query(
-    `SELECT id, key, "spaceId", priority, current_department, dept_sla_log, sla_waivers, "resolvedAt"
+    `SELECT id, key, cf_key, "spaceId", priority, current_department, dept_sla_log, sla_waivers, "resolvedAt"
      FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`,
     [KEY]
   );
@@ -72,13 +74,14 @@ async function main() {
     process.exit(1);
   }
 
+  const displayKey = issue.cf_key || issue.key;
   const dept = (issue.current_department || '').trim().toLowerCase();
   const priority = (issue.priority || 'medium').toLowerCase();
   const deptSlaLog = issue.dept_sla_log || {};
   const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
   const priorElapsedMs = deptLogKey ? (deptSlaLog[deptLogKey].elapsed_ms || 0) : 0;
 
-  console.log(`${KEY} -- resolvedAt=${issue.resolvedAt}, current_department=${issue.current_department}, elapsed in that dept=${(priorElapsedMs / 3_600_000).toFixed(2)}h`);
+  console.log(`${displayKey} -- resolvedAt=${issue.resolvedAt}, current_department=${issue.current_department}, elapsed in that dept=${(priorElapsedMs / 3_600_000).toFixed(2)}h`);
 
   const { rows: policies } = await pool.query(
     `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
@@ -132,7 +135,7 @@ async function main() {
     console.warn('issue_history log skipped:', e.message);
   }
 
-  console.log(`\nWaived ${toWaive.length} polic${toWaive.length === 1 ? 'y' : 'ies'} on ${KEY}. It will now read as "resolved in time" on both the ticket detail page and the Filters-page export.`);
+  console.log(`\nWaived ${toWaive.length} polic${toWaive.length === 1 ? 'y' : 'ies'} on ${displayKey}. It will now read as "resolved in time" on the ticket detail page, Resolution History, and the Filters-page export.`);
   await pool.end();
 }
 
