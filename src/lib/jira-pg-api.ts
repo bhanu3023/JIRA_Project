@@ -1629,7 +1629,15 @@ async function enrichSlaWithResolver(
   return slaInstances.map((s: any) => {
     if (!s.isCompleted) return s;
     const dueMs = new Date(s.dueTime).getTime();
-    const history = events.map((e) => ({ ...e, wasBreached: new Date(e.resolvedAt).getTime() > dueMs }));
+    // If this policy's breach has been waived, no individual resolution
+    // attempt should still read "Late" against that person's name either --
+    // the org has already decided this ticket doesn't count as a real SLA
+    // miss, so the per-event badges must agree with the top-level RESOLVED
+    // state instead of independently re-deriving their own "was it late"
+    // verdict straight from resolvedAt vs dueTime. Confirmed for real:
+    // CF-29697 waived by an admin still showed "Late" against Amulya A in
+    // Resolution History.
+    const history = events.map((e) => ({ ...e, wasBreached: s.waived ? false : new Date(e.resolvedAt).getTime() > dueMs }));
     return { ...s, resolvedByName: resolvedByName || s.resolvedByName, history };
   });
 }
