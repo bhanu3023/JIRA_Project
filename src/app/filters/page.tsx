@@ -1024,7 +1024,18 @@ export default function FiltersPage() {
   // first, silently cut off everything before roughly mid-August). The
   // Prev/Next control added alongside this stays as a safety net only for
   // the rare case a filter (or no filter at all) matches more than 1000.
-  const PAGE_SIZE = 1000;
+  // Confirmed for real via DevTools Network tab: an unfiltered view's
+  // issues fetch was taking 11+ seconds and transferring 2.64MB (1000 full
+  // issue objects, each with nested status/assignee/reporter) -- exactly
+  // what the comment at this constant's own use-site already described as
+  // the problem, but the constant itself had drifted back up to 1000 at
+  // some point independent of that comment. The OTHER historical bug this
+  // value's size was once entangled with (the render loop silently only
+  // ever showing the first 100 of whatever was fetched, regardless of
+  // PAGE_SIZE) is a separate, already-fixed issue -- see the comment above
+  // the issues.map() render loop -- so lowering this again does not
+  // reintroduce it.
+  const PAGE_SIZE = 100;
   const [page, setPage] = useState(1);
   const [loadingIssues, setLoadingIssues] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2147,14 +2158,17 @@ export default function FiltersPage() {
             <tbody className="divide-y divide-gray-100">
               {/* Used to hard-cap rendering to the first 100 of whatever was
                   fetched, regardless of how many rows actually came back --
-                  confirmed for real: with PAGE_SIZE now 1000, a filter
+                  confirmed for real: back when PAGE_SIZE was 1000, a filter
                   matching hundreds of tickets (sorted newest first) fetched
                   all of them correctly but only ever SHOWED the newest ~100,
                   silently cutting off everything older mid-range (e.g. a
                   same-day cluster of ~100 tickets on one date made the whole
                   rest of the selected date range invisible, with no visual
-                  sign anything was missing). The fetch itself is already
-                  the real limit (page/limit params); rendering everything
+                  sign anything was missing). PAGE_SIZE is back to 100 now
+                  (see its own declaration -- the 1000 value that caused an
+                  11s/2.64MB unfiltered load turned out to have crept back
+                  in independent of this fix), so fetch and render size
+                  always match again regardless; rendering everything
                   that comes back is the correct behavior now. */}
               {issues.map((issue: any) => {
                 // Carries which queue this row was shown under, same as the
