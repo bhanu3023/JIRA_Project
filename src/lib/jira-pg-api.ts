@@ -8351,6 +8351,27 @@ async function _handleJiraPgApi(
       try {
         const qRow = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE key=$1 LIMIT 1`, [key]);
         const dept: string = qRow.rows[0]?.current_department;
+        // Guard against a stale-department race. The frontend built
+        // queueStatusId/Name/Color/Category from the queue-status dropdown of
+        // WHATEVER department it had rendered (queueStatusDept, sent alongside
+        // them) -- but current_department can change between that render and
+        // this PATCH actually landing (another handoff, a second rapid click,
+        // etc.). Without this check, a status picked for department X got
+        // written into deptStatuses[freshly-read current department] below
+        // regardless of whether that still matched X, silently mislabeling
+        // whatever department the ticket had already moved to with a status
+        // object that belongs to a different one. Confirmed for real on
+        // CF-29456: dept_statuses["Dev"] ended up holding id
+        // "qst_migration_resolved" -- a Migration-flavored queue status --
+        // because the department changed out from under an in-flight request.
+        // Reject instead of silently corrupting the snapshot; the frontend's
+        // catch block already reverts its optimistic update and surfaces the
+        // message via alert(). Old clients that don't send queueStatusDept
+        // yet skip this check (unchanged, pre-fix behavior) rather than being
+        // blocked outright.
+        if (dept && body.queueStatusDept && String(body.queueStatusDept).trim().toLowerCase() !== dept.trim().toLowerCase()) {
+          return json({ error: `This ticket has moved to ${dept} since you opened it — refresh and try again.` }, 409);
+        }
         if (dept) {
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
           const oldQueueStatusName = deptMapGet(deptStatuses, dept)?.name || 'Unknown';

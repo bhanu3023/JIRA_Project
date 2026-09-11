@@ -1281,6 +1281,14 @@ export default function IssueDetailPage() {
             queueStatusName: queueSt.name,
             queueStatusColor: queueSt.color,
             queueStatusCategory: queueSt.category,
+            // The department this status was picked FOR -- the dropdown that
+            // produced statusId/queueSt above was rendered for THIS department's
+            // own queue. Lets the backend detect the ticket having moved to a
+            // different department between dropdown-render and this request
+            // landing (see the queueStatusDept check in jira-pg-api.ts) instead
+            // of silently writing this department's picked status under
+            // whatever department the ticket happens to be in by then.
+            queueStatusDept: dept,
           } as any);
           loadIssue(issueKey);
         } catch (err: any) {
