@@ -8374,6 +8374,7 @@ async function _handleJiraPgApi(
         }
         if (dept) {
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
+          const oldDeptStatusObjForRollback = deptMapGet(deptStatuses, dept) || null;
           const oldQueueStatusName = deptMapGet(deptStatuses, dept)?.name || 'Unknown';
           const oldQueueStatusCategory = deptMapGet(deptStatuses, dept)?.category || 'todo';
           const queueStatusEntry = {
@@ -8533,6 +8534,31 @@ async function _handleJiraPgApi(
                 console.log(`[DeptHandoff] ${issue.key}: ${queueHandoffOldDept} → ${queueHandoffTargetDept} (via queue status)`);
               } catch (handoffErr: any) {
                 console.error(`[DeptHandoff ERROR - queueStatus] ${issue.key}:`, handoffErr?.message || handoffErr);
+              }
+              if (!queueHandoffDone) {
+                // performDeptHandoff threw -- this used to fall through silently:
+                // dept_statuses[dept] was already committed to the picked "Routed
+                // to X" label a few lines above, so the response still returned
+                // 200 with the label showing, while current_department never
+                // actually moved. That's exactly the confusing half-state
+                // reported for real on CF-29525 -- status pill said "Routed to
+                // Dev" (Migration's own dept_statuses entry, legitimately
+                // recording what Migration just tried to do) while Department
+                // stayed on Migration, because the actual handoff silently died
+                // and nothing ever told the client. Roll dept_statuses[dept]
+                // back to what it was before this action and return a real
+                // error instead -- the frontend's existing catch block already
+                // reverts its optimistic patch and alert()s the message.
+                try {
+                  const rollbackRow = await pool.query(`SELECT dept_statuses FROM issues WHERE key=$1 LIMIT 1`, [key]);
+                  const rollbackDeptStatuses: Record<string, any> = rollbackRow.rows[0]?.dept_statuses || {};
+                  if (oldDeptStatusObjForRollback) deptMapSet(rollbackDeptStatuses, dept, oldDeptStatusObjForRollback);
+                  else deptMapDelete(rollbackDeptStatuses, dept);
+                  await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(rollbackDeptStatuses), key]);
+                } catch (rollbackErr: any) {
+                  console.error(`[DeptHandoff ROLLBACK ERROR] ${issue.key}:`, rollbackErr?.message || rollbackErr);
+                }
+                return json({ error: `Could not route this ticket to ${queueHandoffTargetDept} — please try again.` }, 500);
               }
             } else {
               // A queue-scoped status that's neither done, a from-done reopen,
