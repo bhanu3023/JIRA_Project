@@ -1544,7 +1544,18 @@ export default function FiltersPage() {
           issue.sla_breached ? (issue.sla_breached_by ?? '') : '',
           issue.sla_breached ? (issue.sla_breached_dept ?? '') : '',
           issue.overdue ? 'Yes' : 'No',
-          issue.current_department ?? '',
+          // Same queue-scoped view as the Assignee column right next to it --
+          // a row surfaced here because someone genuinely worked it in the
+          // QUERIED queue (assigneeIsHistorical, see the on-screen table's
+          // "in {selQueue}" badge) but has since moved to a different
+          // department read as contradictory/wrong exporting the ticket's
+          // raw CURRENT department here: Assignee showing the Migration
+          // engineer who did the work, right next to a Department column
+          // saying "Dev", with nothing explaining the mismatch. Confirmed
+          // for real on CF-29525's export row. Show the queue this row was
+          // actually pulled for whenever that's the case, same reasoning
+          // already applied to the Status column above.
+          (issue.assigneeIsHistorical && selQueue) ? selQueue : (issue.current_department ?? ''),
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
           issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
           ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].getValue(issue)),
