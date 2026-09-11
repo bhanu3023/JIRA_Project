@@ -10344,14 +10344,16 @@ async function _handleJiraPgApi(
     const dateTo     = url.searchParams.get('dateTo') || '';
     const staleDays  = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
-    // Matches ONLY updatedAt, not createdAt -- explicitly requested: MBR's date
-    // range used to mean "touched" (createdAt OR updatedAt in range), which
-    // counted tickets merely CREATED in the window even if last updated well
-    // outside it, so MBR came back higher than Filters' own "Updated: <range>"
-    // for the identical Queue + range (confirmed for real: tickets created in
-    // Aug but not updated in Aug accounted for the gap). MBR has no separate
-    // Created/Updated toggle the way Filters does, so it's pinned to Updated
-    // only -- the same convention as reports/mbr-team's team tabs below.
+    // Matches createdAt OR updatedAt -- MBR's date range means "touched" here,
+    // same as Filters' own "Queue: X" scope with BOTH its Created and Updated
+    // filters active at once (see queueMembersOnlyParam's dateClause union
+    // and deptScopeSql's origin-OR-updated union above in this file). MBR has
+    // no separate Created/Updated toggle the way Filters does, so its one
+    // date range is applied to both fields and OR'd together -- the same
+    // convention as reports/mbr-team's team tabs below. (This handler used to
+    // pin to updatedAt only, to match Filters' Updated-only mode specifically
+    // -- that's no longer the comparison point now that both fields are
+    // meant to count.)
     // Anchored to IST (+05:30), not parsed as bare UTC -- a bare
     // "YYYY-MM-DD" string is parsed as UTC midnight by Date's ISO handling,
     // which is 5:30 AM IST, not midnight IST. This app's users operate in
@@ -10383,10 +10385,11 @@ async function _handleJiraPgApi(
     if (dateTo)   { filterParams.push(dateTo);   toIdx = filterParams.length; }
     let dateClause = '';
     if (fromIdx || toIdx) {
+      const createdConds: string[] = [];
       const updatedConds: string[] = [];
-      if (fromIdx) updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`);
-      if (toIdx)   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`);
-      dateClause = ` AND (${updatedConds.join(' AND ')})`;
+      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
+      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
+      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
     let deptClause = '';
     let personDeptClause = '';
@@ -10851,55 +10854,63 @@ async function _handleJiraPgApi(
     let toIdx: number | null = null;
     if (dateFrom) { baseParams.push(dateFrom); fromIdx = baseParams.length; }
     if (dateTo)   { baseParams.push(dateTo);   toIdx = baseParams.length; }
-    // Matches ONLY updatedAt, not createdAt -- explicitly requested: this used
-    // to mean "touched" (createdAt OR updatedAt in range), which counted
-    // tickets merely CREATED in the window even if last updated well outside
-    // it, so this team tab came back higher than Filters' own "Updated:
-    // <range>" for the same Queue + range (confirmed for real: tickets
-    // created in Aug but not updated in Aug accounted for the gap). There's no
-    // separate Created/Updated toggle here the way Filters has one, so it's
-    // pinned to Updated only, same as reports/mbr above.
+    // Matches createdAt OR updatedAt -- "touched" -- same as Filters' own
+    // "Queue: X" scope with BOTH its Created and Updated filters active at
+    // once (see queueMembersOnlyParam's dateClause union and deptScopeSql's
+    // origin-OR-updated union above in this file: "Confirmed with the user
+    // this is meant to be a union instead: everything created in that
+    // window, plus everything updated in that window"). There's no separate
+    // Created/Updated toggle here the way Filters has one, so the one range
+    // is applied to both fields and OR'd, same as reports/mbr above. (This
+    // used to be pinned to updatedAt only, to match Filters' Updated-only
+    // mode specifically -- no longer the comparison point now that both
+    // fields are meant to count.)
     let dateClause = '';
+    const createdConds: string[] = [];
+    const updatedConds: string[] = [];
     if (fromIdx || toIdx) {
-      const updatedConds: string[] = [];
-      if (fromIdx) updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`);
-      if (toIdx)   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`);
-      dateClause = ` AND (${updatedConds.join(' AND ')})`;
+      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
+      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
+      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
-    // Bucket by updatedAt too, once a range is active -- matches whichever
-    // field dateClause actually filtered on, so a ticket never lands in a
-    // Monthly summary row its own createdAt disagrees with. No range
-    // selected has no "in range" date to prefer, so it falls back to plain
-    // createdAt (original behavior).
-    const monthlyBucketExpr = (fromIdx || toIdx) ? `i."updatedAt"` : `i."createdAt"`;
+    // Bucket by whichever field actually put this ticket in range, preferring
+    // createdAt -- mirrors monthLabelFor's own JS-side fallback below exactly
+    // (its own comment explains why: a ticket only counts via updatedAt when
+    // createdAt itself falls outside the window). A ticket whose createdAt is
+    // OUTSIDE the range only matched at all because its updatedAt is inside
+    // it, so bucketing it by createdAt would land it in some other month
+    // entirely (or off the Monthly summary's visible range altogether). No
+    // range selected has no "in range" date to prefer, so it falls back to
+    // plain createdAt (original behavior).
+    const monthlyBucketExpr = (fromIdx || toIdx)
+      ? `CASE WHEN (${createdConds.join(' AND ')}) THEN i."createdAt" ELSE i."updatedAt" END`
+      : `i."createdAt"`;
 
-    // Deliberately mirrors the Filters page's own "Queue: <dept> + Updated:
-    // <range>" matching exactly (see queueMembersOnlyParam / updatedDeptMatchSql
-    // / deptExtraClauses above in this file) -- MBR and Filters are two
-    // independent reimplementations of "what counts as this dept's queue
-    // data," and every time they've drifted apart it's shown up as a real,
-    // confusing discrepancy (this handler previously undercounted Filters by
-    // more than half on a real date range: 161 vs Filters' true 423 for
-    // Queue: Dev + Updated: Aug 2026). A ticket belongs to dept $1 if ANY of:
-    // it's currently tagged $1; its frozen per-dept snapshot (dept_statuses)
-    // shows it was completed while in $1; or there's a genuine
-    // user_worked_on_tickets row for $1 -- this last check has no roster
-    // restriction on the worker, matching Filters' own broadenIt clause
-    // exactly.
+    // Deliberately mirrors the Filters page's own "Queue: <dept>" matching
+    // with BOTH Created and Updated active (see queueMembersOnlyParam /
+    // originDeptMatchSql / updatedDeptMatchSql / deptScopeSql's union above
+    // in this file) -- MBR and Filters are two independent reimplementations
+    // of "what counts as this dept's queue data," and every time they've
+    // drifted apart it's shown up as a real, confusing discrepancy (this
+    // handler previously undercounted Filters by more than half on a real
+    // date range: 161 vs Filters' true 423 for Queue: Dev + Updated: Aug
+    // 2026). A ticket belongs to dept $1 if ANY of: it's currently tagged
+    // $1; it originated in $1 (issue_history's earliest department-change
+    // oldValue, falling back to current_department if it never moved -- same
+    // as Filters' originDeptMatchSql and reports/mbr's own deptClause above);
+    // its frozen per-dept snapshot (dept_statuses) shows it was completed
+    // while in $1; or there's a genuine user_worked_on_tickets row for $1.
     //
-    // Used to ALSO match a ticket that merely originated in $1 (issue_history's
-    // earliest department change) regardless of date type -- correct for
-    // Filters' own Created-scoped originDeptMatchSql, but this handler's date
-    // range is pinned to Updated only (see monthlyBucketExpr/dateClause above
-    // -- there's no Created/Updated toggle here at all), and Filters' own
-    // updatedDeptMatchSql deliberately does NOT consider origin. Confirmed
-    // for real: CF-27177 originated in Dev but moved to Migration the same
-    // day with Dev's own dept_statuses snapshot still 'In Progress' (not
-    // done) and no non-'passed' Dev worked-on record -- Filters' Updated: Aug
-    // correctly excludes it (nothing Dev-related actually happened in
-    // August), but this unconditional origin check still counted it, one
-    // ticket higher than Filters for the identical Queue: Dev + Aug scope.
-    // Dropped to match.
+    // The origin branch was dropped for a while (see git history) when this
+    // handler was pinned to matching updatedAt only -- Filters' own
+    // updatedDeptMatchSql deliberately excludes origin, so keeping it caused
+    // a real overcount (CF-27177: originated in Dev, moved to Migration the
+    // same day with no finished Dev work, so Filters' Updated: Aug correctly
+    // excluded it but this handler's unconditional origin check still
+    // counted it). Restored now that dateClause matches createdAt OR
+    // updatedAt (see above) -- a ticket that only matches via its createdAt
+    // being in range needs the origin check to know it belongs to $1 at all,
+    // the same way Filters' own Created-scoped originDeptMatchSql does.
     //
     // reason != 'passed' on every user_worked_on_tickets check in this
     // handler: 'passed' isn't evidence this person did any real work on the
@@ -10923,6 +10934,10 @@ async function _handleJiraPgApi(
     // lookup is needed to restrict both checks below to it.
     const deptMatchSql = `(
       LOWER(i.current_department) = LOWER($1)
+      OR LOWER(COALESCE(
+           (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+           i.current_department
+         )) = LOWER($1)
       OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($1) AND LOWER(v->>'category') = 'done')
       OR EXISTS (
         SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
