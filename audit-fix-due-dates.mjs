@@ -1,23 +1,13 @@
-// Audits/backfills stale Due Date values across every OPEN (not-done)
-// ticket. Root cause (fixed going forward in commit 8836f0a): Due Date was
-// only ever recomputed by startDeptSLA -- a department handoff or reopen --
-// using whichever priority was set at THAT moment. Any ticket whose priority
-// was edited afterward with no handoff following it kept its due date frozen
-// at the OLD priority's goal, silently disagreeing with the SLA panel's own
-// live, priority-driven countdown. This finds and corrects every one of
-// those, using the exact same formula startDeptSLA/computeSlaGoalDurationMs
-// already use (read straight from jira-pg-api.ts).
+// Audits/backfills stale Due Date values on every OPEN (not-done) ticket.
 //
-// For a ticket whose current department's SLA clock is 'running':
-//   due = dept_sla_started_at + max(0, goalDuration(current priority) - elapsed_ms already logged)
-// picking the EARLIEST due date across every active SLA policy that applies
-// to that department (same "most urgent wins" rule as startDeptSLA).
-//
-// Tickets whose current department's clock is 'paused' or has no log entry
-// at all are skipped and reported separately -- that's not the bug being
-// fixed here (a paused clock isn't actively counting toward a due date the
-// same way), and guessing a value for an unusual state risks writing
-// something wrong rather than something merely stale.
+// Due date model (per explicit request, matching what computeSLAInstancesPure
+// and startDeptSLA now both use): dueDate = createdAt + priority's goal
+// duration for whichever active SLA policy applies to the ticket's current
+// department (earliest/most-urgent across multiple applicable policies).
+// This replaced an earlier per-department elapsed/pause-based model --
+// confirmed for real on CF-29525 that the old model could compute a due
+// date wildly inconsistent with the ticket's own displayed creation-based
+// Start time (a "1 day" SLA showing a 25-day span).
 //
 // Usage:
 //   node audit-fix-due-dates.mjs           # dry run, full report
@@ -27,11 +17,6 @@ import pg from 'pg';
 
 const APPLY = process.argv.includes('--apply');
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-
-function deptMapGet(map, dept) {
-  const key = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
-  return key ? map[key] : undefined;
-}
 
 function computeSlaGoalDurationMs(policy, priority) {
   let durationMs = 8 * 60 * 60 * 1000;
@@ -58,7 +43,7 @@ const MISMATCH_TOLERANCE_MS = 60_000; // ignore sub-minute float/precision noise
 
 async function main() {
   const { rows: issues } = await pool.query(`
-    SELECT i.id, i.cf_key, i.key, i."spaceId", i.priority, i.current_department, i.dept_sla_log, i."dueDate", i."statusId"
+    SELECT i.id, i.cf_key, i.key, i."spaceId", i.priority, i.current_department, i."createdAt", i."dueDate", i."statusId"
     FROM issues i
     LEFT JOIN statuses s ON s.id = i."statusId"
     WHERE s.category IS DISTINCT FROM 'done'
@@ -73,31 +58,23 @@ async function main() {
   console.log(`Scanning ${issues.length} open (not-done) issues...`);
 
   const mismatches = [];
-  let skippedNotRunning = 0;
   let skippedNoPolicy = 0;
 
   for (const issue of issues) {
-    const dept = issue.current_department;
-    if (!dept) { skippedNotRunning++; continue; }
-    const slaLog = issue.dept_sla_log || {};
-    const entry = deptMapGet(slaLog, dept);
-    if (!entry || entry.status !== 'running' || !entry.started_at) { skippedNotRunning++; continue; }
-
+    const dept = (issue.current_department || '').trim().toLowerCase();
     const policies = (policiesBySpace.get(issue.spaceId) || []).filter((p) => {
       const pDept = (p.dept_name || '').trim().toLowerCase();
-      return !pDept || pDept === dept.trim().toLowerCase();
+      return !pDept || pDept === dept;
     });
     if (!policies.length) { skippedNoPolicy++; continue; }
 
-    const startedAt = new Date(entry.started_at).getTime();
-    const priorElapsed = entry.elapsed_ms || 0;
+    const createdAt = new Date(issue.createdAt).getTime();
     const priority = (issue.priority || 'medium').toLowerCase();
 
     let computedDue = null;
     for (const policy of policies) {
       const durationMs = computeSlaGoalDurationMs(policy, priority);
-      const remainingMs = Math.max(0, durationMs - priorElapsed);
-      const candidate = new Date(startedAt + remainingMs);
+      const candidate = new Date(createdAt + durationMs);
       if (!computedDue || candidate < computedDue) computedDue = candidate;
     }
     if (!computedDue) { skippedNoPolicy++; continue; }
@@ -106,15 +83,14 @@ async function main() {
     const diffMs = storedDue ? Math.abs(computedDue.getTime() - storedDue.getTime()) : Infinity;
     if (diffMs > MISMATCH_TOLERANCE_MS) {
       mismatches.push({
-        id: issue.id, key: issue.cf_key || issue.key, dept, priority,
+        id: issue.id, key: issue.cf_key || issue.key, dept: issue.current_department, priority,
         stored: storedDue, computed: computedDue,
       });
     }
   }
 
   console.log(`\nFound ${mismatches.length} ticket(s) with a stale/wrong Due Date.`);
-  console.log(`Skipped ${skippedNotRunning} (no running SLA clock for their current department -- not this bug).`);
-  console.log(`Skipped ${skippedNoPolicy} (no applicable active SLA policy found).`);
+  console.log(`Skipped ${skippedNoPolicy} (no applicable active SLA policy found for their current department).`);
 
   console.log(`\nSample (first 25):`);
   for (const m of mismatches.slice(0, 25)) {
