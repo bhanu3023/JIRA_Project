@@ -1189,7 +1189,7 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
   if (!dept) return;
   try {
     const row = await pool.query(
-      `SELECT dept_sla_log, "spaceId", priority, "createdAt" FROM issues WHERE ${issueKey ? 'key=$1' : 'id=$1'}`,
+      `SELECT dept_sla_log, "spaceId", priority FROM issues WHERE ${issueKey ? 'key=$1' : 'id=$1'}`,
       [issueKey || issueId]
     );
     const log: Record<string, any> = row.rows[0]?.dept_sla_log || {};
@@ -1207,20 +1207,17 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
     // priority at all -- it was a purely manual field, so "Due Date" and the
     // SLA panel's own priority-driven due time could show two unrelated
     // things, and the property only ever got a value if someone typed one in
-    // by hand. Compute it the same way the SLA panel does -- goal duration
-    // by priority, measured from the ticket's actual creation time, per
-    // explicit request (matches computeSLAInstancesPure's own createdAt-
-    // anchored due time; see its own comment re: CF-29525, where the old
-    // "now + remaining department budget" formula made a 1-day SLA display
-    // as spanning 25 days). When more than one policy applies, use the
-    // earliest (most urgent) resulting deadline -- the ticket property is a
-    // single value, and "when is this actually due" should mean the soonest
-    // clock that can breach.
+    // by hand. Compute it the same way the SLA panel does (goal duration by
+    // priority, minus whatever budget this department already burned across
+    // earlier visits) every time this department's SLA clock starts/resumes,
+    // so it stays a real, current deadline instead of a stale manual guess.
+    // When more than one policy applies, use the earliest (most urgent)
+    // resulting deadline -- the ticket property is a single value, and "when
+    // is this actually due" should mean the soonest clock that can breach.
     let computedDueDate: Date | null = null;
     try {
       const spaceId = row.rows[0]?.spaceId;
       const priority = (row.rows[0]?.priority || 'medium').toLowerCase();
-      const createdAt: Date = row.rows[0]?.createdAt ? new Date(row.rows[0].createdAt) : nowTs;
       if (spaceId) {
         const polRes = await pool.query(
           `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
@@ -1230,9 +1227,11 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
           const pDept = (p.dept_name || '').trim().toLowerCase();
           return !pDept || pDept === dept.trim().toLowerCase();
         });
+        const priorElapsedMs = log[dept]?.elapsed_ms || 0;
         for (const policy of applicable) {
           const durationMs = computeSlaGoalDurationMs(policy, priority);
-          const candidate = new Date(createdAt.getTime() + durationMs);
+          const remainingMs = Math.max(0, durationMs - priorElapsedMs);
+          const candidate = new Date(nowTs.getTime() + remainingMs);
           if (!computedDueDate || candidate < computedDueDate) computedDueDate = candidate;
         }
       }
@@ -1809,18 +1808,38 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     const isResolved = issue.status?.category === 'done' || deptStatusCategory === 'done';
     const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
 
-    // Per explicit request: due time (and breach status) for every policy
-    // below is now measured from the ticket's actual creation moment --
-    // matching what the ticket detail page's own Start label already shows
-    // (issue.createdAt) -- rather than the current department's own
-    // pause/resume session (dept_sla_started_at / dept_sla_log[dept].
-    // elapsed_ms). Confirmed for real on CF-29525: Start showed Aug 18
-    // (createdAt) while Due showed Sep 12 -- computed from a completely
-    // different baseline (Dev's own dept_sla_started_at, Sep 11) -- making a
-    // "1 day" SLA visually span 25 days. dept_sla_log/dept_sla_started_at
-    // are still maintained elsewhere (per-department elapsed tracking,
-    // "Worked on" SLA-used display, etc.) but no longer decide this
-    // function's own due time or breach status.
+    // dept_sla_started_at is reset to NOW() on every department handoff --
+    // including a RETURN to a dept that already spent some of its SLA
+    // budget before being paused (moved away) earlier. Computing dueTime as
+    // "fresh start + the full goal duration" ignored that prior spend
+    // entirely, handing every dept a brand-new full countdown each time it
+    // got the ticket back -- the opposite of "continue," which is what a
+    // dept's SLA is supposed to do across a pause/resume cycle. Credit
+    // whatever this dept had already burned (dept_sla_log[dept].elapsed_ms,
+    // the same bookkeeping pauseDeptSLA/startDeptSLA already maintain) so
+    // the due time reflects the REMAINING budget, not a fresh one.
+    const deptSlaLog: Record<string, any> = (issue as any).dept_sla_log || {};
+    const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === issueDept);
+    const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
+    // A "same stint" guard was added here on the theory that pauseDeptSLA
+    // copying dept_sla_started_at into the log entry's own started_at (which
+    // it does on every pause/resolve, even the very first one) meant that
+    // value could get double-credited. It can't: pauseDeptSLA's elapsed_ms is
+    // already a running INCREMENTAL total (existingElapsed + time-since-
+    // startedAt, computed once per pause/resolve call), never a value that
+    // also gets added again via startedAt as a separate term -- startedAt is
+    // only ever used to measure the CURRENT stint's own remaining budget
+    // below, not re-added on top of elapsed_ms. Because startDeptSLA ALWAYS
+    // re-syncs the log entry's started_at to the fresh dept_sla_started_at on
+    // every single re-entry (see startDeptSLA), that guard's condition was
+    // true immediately after almost every pause/resolve/reopen regardless of
+    // whether the ticket had ever left -- which zeroed out the correctly
+    // accumulated elapsed_ms in the overwhelmingly common case (a ticket
+    // resolved on its very first, only stint in a department), silently
+    // erasing real breaches on resolve and re-opening the exact carryover
+    // bug (CF-29552) this elapsed_ms bookkeeping exists to fix. Reading
+    // elapsed_ms unconditionally is correct in every case.
+    const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
 
     return dedupedPolicies.map((policy: any) => {
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
@@ -1842,27 +1861,54 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
         }
       }
 
-      // Check if current status is a pause status for this policy -- kept as
-      // a display-only signal (the SLA panel's "Paused" badge); it no longer
-      // suppresses breach determination below now that due time is a fixed
-      // created+goal deadline rather than a running per-department clock a
-      // pause could legitimately stop.
+      // Check if current status is a pause status for this policy
       const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
         ? policy.pauseStatuses.map((s: string) => s.trim().toLowerCase())
         : [];
       const isPaused = !isResolved && pauseStatuses.includes(currentStatusName);
 
-      const startedAt = issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString();
+      const startedAt = (issue as any).dept_sla_started_at
+        ? new Date((issue as any).dept_sla_started_at).toISOString()
+        : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
       const resolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt) : null;
-      const dueTime = new Date(new Date(startedAt).getTime() + durationMs).toISOString();
-      // Breached once "now" (or resolvedAt, for an already-resolved ticket)
-      // passes the fixed created+goal deadline -- a straight comparison, no
-      // department-elapsed bookkeeping involved. jira_sla_breached still
-      // carries breach history imported from Jira for tickets that were
-      // already breached before this app's own SLA tracking started.
+      // Remaining budget = full goal minus whatever this dept already burned
+      // across earlier visits, so resuming here continues the countdown
+      // instead of restarting it at the full duration.
+      const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+      // For a RESOLVED ticket, priorElapsedMs already includes the just-
+      // ended stint's own full duration (pauseDeptSLA folds it in the
+      // moment it resolves) -- measuring the remaining budget from
+      // startedAt (that same stint's start) then collapses the displayed
+      // due time toward (or before) the start itself as elapsed approaches
+      // the goal, e.g. a ticket resolved in 23h41m against a 24h goal
+      // showed a DUE time only 19 minutes after START instead of ~24h
+      // later. Anchoring to resolvedAt instead answers the sensible
+      // question -- "how much budget was left (or exceeded) AS OF
+      // resolving" -- and is allowed to go negative (due time before
+      // resolvedAt) to show a ticket resolved past its deadline. This is
+      // purely the DISPLAYED due time; isBreached below already compares
+      // priorElapsedMs against durationMs directly and doesn't use this.
+      const dueTime = (isResolved && resolvedAt)
+        ? new Date(resolvedAt.getTime() + (durationMs - priorElapsedMs)).toISOString()
+        : new Date(new Date(startedAt).getTime() + remainingBudgetMs).toISOString();
+      // Paused SLAs are never breached — clock stopped. Resolving a ticket
+      // must never ERASE a breach that already happened before it was
+      // resolved -- forcing this to false unconditionally once resolved hid
+      // exactly that history. While still running, dueTime (computed above
+      // from the current period's own start) vs "now" is the right check.
+      // Once resolved/paused, dueTime is no longer reliable for this:
+      // priorElapsedMs at that point already includes the just-ended period
+      // (pauseDeptSLA folds it in), so reusing the running-clock formula
+      // would double-count that period on top of itself across more than
+      // one pause/resume cycle. The total elapsed time actually logged
+      // (priorElapsedMs) compared straight against the goal duration is
+      // correct regardless of how many pause/resume cycles this dept has
+      // been through. jira_sla_breached carries breach history imported
+      // from Jira for tickets that were already breached before this app's
+      // own SLA clock started tracking them.
       const rawIsBreached = isResolved
-        ? (!!(issue as any).jira_sla_breached || (resolvedAt ? resolvedAt.getTime() > new Date(dueTime).getTime() : false))
-        : new Date(dueTime).getTime() < Date.now();
+        ? (!!(issue as any).jira_sla_breached || priorElapsedMs >= durationMs)
+        : !isPaused && new Date(dueTime) < new Date();
 
       // An admin can waive this specific policy's breach on this specific
       // ticket (e.g. it was resolved late for a reason outside anyone's
@@ -8262,28 +8308,31 @@ async function _handleJiraPgApi(
     // the sidebar's Due Date and the SLA panel's own priority-driven
     // countdown could disagree the moment someone just edited Priority.
     // Confirmed for real per the user's own report of a ticket's displayed
-    // due date/time not matching its current priority. Recompute from the
-    // ticket's actual creation time plus the new priority's goal duration --
-    // matching computeSLAInstancesPure's own createdAt-anchored due time
-    // (see its comment re: CF-29525) -- skipped when the ticket is already
+    // due date/time not matching its current priority. Recompute using the
+    // exact same remaining-budget formula startDeptSLA already uses (new
+    // priority's goal duration, minus whatever elapsed budget this
+    // department has already burned) -- skipped when the ticket is already
     // done (nothing left to be "due" for) or when this same request ALSO
     // explicitly set dueDate itself (an explicit manual value wins).
     if (body.priority !== undefined && body.priority !== issue.priority && body.dueDate === undefined) {
       try {
         const currentStatusObj = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId);
         if (currentStatusObj?.category !== 'done') {
-          const priRow = await pool.query(`SELECT current_department, "createdAt" FROM issues WHERE id=$1`, [issue.id]);
+          const priRow = await pool.query(`SELECT current_department, dept_sla_log FROM issues WHERE id=$1`, [issue.id]);
           const dept: string = priRow.rows[0]?.current_department || '';
-          const createdAt: Date = priRow.rows[0]?.createdAt ? new Date(priRow.rows[0].createdAt) : new Date();
+          const slaLog: Record<string, any> = priRow.rows[0]?.dept_sla_log || {};
+          const priorElapsedMs = dept ? (deptMapGet(slaLog, dept)?.elapsed_ms || 0) : 0;
           const polRes = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId"=$1 AND status='active'`, [issue.spaceId]);
           const applicable = polRes.rows.filter((p: any) => {
             const pDept = (p.dept_name || '').trim().toLowerCase();
             return !pDept || pDept === dept.trim().toLowerCase();
           });
           let computedDueDate: Date | null = null;
+          const nowTs = new Date();
           for (const policy of applicable) {
             const durationMs = computeSlaGoalDurationMs(policy, String(body.priority).toLowerCase());
-            const candidate = new Date(createdAt.getTime() + durationMs);
+            const remainingMs = Math.max(0, durationMs - priorElapsedMs);
+            const candidate = new Date(nowTs.getTime() + remainingMs);
             if (!computedDueDate || candidate < computedDueDate) computedDueDate = candidate;
           }
           if (computedDueDate) data.dueDate = computedDueDate;

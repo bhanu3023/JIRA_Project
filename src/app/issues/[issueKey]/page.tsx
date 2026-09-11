@@ -4382,14 +4382,15 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                     <div className="grid grid-cols-2 gap-2 mt-1">
                       <div className="bg-gray-50 rounded-lg px-2.5 py-1.5">
                         <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Start</p>
-                        {/* Display-only: shows the ticket's original creation date,
-                            not the per-department session start `startedAt` holds
-                            for the elapsed/progress-bar/due-time math above --
-                            those must stay anchored to the current department's
-                            own active time, or the goal-duration budget (e.g. a
-                            10h Migration SLA) would silently measure against the
-                            wrong span. */}
-                        <p className="text-[11px] font-semibold text-gray-700">{fmtTime(new Date(issue.createdAt))}</p>
+                        {/* Reverted per explicit request: each department's own
+                            SLA should show when THAT department actually
+                            received the ticket, not the ticket's original
+                            creation date -- e.g. Migration created at 10:07 PM,
+                            routed to Dev at 11:00 PM, Dev's own SLA Start should
+                            read 11:00 PM, not 10:07 PM. `startedAt` already holds
+                            exactly that (dept_sla_started_at), matching the
+                            Due-time math right next to it. */}
+                        <p className="text-[11px] font-semibold text-gray-700">{fmtTime(startedAt)}</p>
                       </div>
                       <div className={`rounded-lg px-2.5 py-1.5 ${showAsBreach ? 'bg-red-100' : 'bg-gray-50'}`}>
                         <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Due</p>
