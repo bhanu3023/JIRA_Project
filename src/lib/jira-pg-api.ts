@@ -4432,7 +4432,24 @@ async function _handleJiraPgApi(
       // is a real done-category status.
       const doneIssues = issues.filter((i: any) => i.status_category === 'done');
 
-      return json({ issues: doneIssues, total: doneIssues.length });
+      // "total" used to be doneIssues.length -- the size of just THIS page
+      // after filtering, not the real total across every page. countRes (the
+      // actual COUNT(DISTINCT issue_id) across the full merged source) was
+      // already being fetched above and simply never used. Combined with the
+      // frontend never requesting page 2+ at all (hardcoded page=1, no "Load
+      // more" control), a person with 50+ more-recent worked-on tickets in a
+      // dept had every older one -- including a large batch of Jira-migrated
+      // tickets sharing a single migration-date timestamp -- permanently
+      // invisible under "Worked on" with no error and no indication more
+      // existed. Confirmed for real on Pragati Pandey: 1125 Dev 'closed'
+      // records dated on/before 27 Aug 2026, none reachable, because her 44
+      // more-recent ones alone didn't even fill page 1. hasMore is a
+      // filter-independent signal (page 1 SQL fetch hit exactly LIMIT rows)
+      // the frontend can use to know whether requesting the next page is
+      // worth doing, since doneIssues' post-filter count doesn't reliably
+      // track page boundaries the way the raw SQL page size does.
+      const rawTotal = parseInt(countRes.rows[0]?.count || '0', 10);
+      return json({ issues: doneIssues, total: rawTotal, page, hasMore: rows.rows.length === limit });
     } catch (e: any) {
       return json({ issues: [], total: 0 });
     }

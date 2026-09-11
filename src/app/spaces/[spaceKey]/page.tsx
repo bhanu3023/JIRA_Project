@@ -187,20 +187,41 @@ function SpaceDetailContent() {
     return () => clearTimeout(t);
   }, [search]);
   const [closedIssues, setClosedIssues] = useState<any[]>([]);
-  const fetchClosedIssues = useCallback(async (sk: string, dept: string, viewUser?: string) => {
+  const [closedIssuesPage, setClosedIssuesPage] = useState(1);
+  const [closedIssuesHasMore, setClosedIssuesHasMore] = useState(false);
+  const [closedIssuesLoadingMore, setClosedIssuesLoadingMore] = useState(false);
+  // page=1 always REPLACES the list (initial load, dept/user switch, the 30s
+  // auto-refresh below); page>1 (see loadMoreClosedIssues) APPENDS instead --
+  // this used to only ever fetch page 1, full stop, with no way to reach
+  // anything older that didn't fit in the first 50 rows. See the backend's
+  // own comment on why that silently hid a large amount of real history
+  // (confirmed on Pragati Pandey: 1125 Dev tickets on/before 27 Aug 2026,
+  // none reachable).
+  const fetchClosedIssues = useCallback(async (sk: string, dept: string, viewUser?: string, page: number = 1) => {
     if (!sk || !dept) return;
     try {
       const token = typeof window !== 'undefined' ? localStorage.getItem('jira_token') : null;
       const res = await fetch(
-        `/api/spaces/${sk}/dept-queue/closed?dept=${encodeURIComponent(dept)}&page=1${viewUser ? `&viewUser=${encodeURIComponent(viewUser)}` : ''}`,
+        `/api/spaces/${sk}/dept-queue/closed?dept=${encodeURIComponent(dept)}&page=${page}${viewUser ? `&viewUser=${encodeURIComponent(viewUser)}` : ''}`,
         { headers: token ? { Authorization: `Bearer ${token}` } : {} }
       );
       if (res.ok) {
         const data = await res.json();
-        setClosedIssues(data.issues || []);
+        setClosedIssues(prev => page === 1 ? (data.issues || []) : [...prev, ...(data.issues || [])]);
+        setClosedIssuesPage(page);
+        setClosedIssuesHasMore(!!data.hasMore);
       }
     } catch { /* non-fatal */ }
   }, []);
+  const loadMoreClosedIssues = useCallback(async () => {
+    if (!spaceKey || !deptParam || closedIssuesLoadingMore) return;
+    setClosedIssuesLoadingMore(true);
+    try {
+      await fetchClosedIssues(spaceKey, deptParam, effectiveViewUserParam, closedIssuesPage + 1);
+    } finally {
+      setClosedIssuesLoadingMore(false);
+    }
+  }, [spaceKey, deptParam, effectiveViewUserParam, closedIssuesPage, closedIssuesLoadingMore, fetchClosedIssues]);
   // Per-queue Summary (admin-only) -- range-aware status/priority/SLA
   // breakdown plus a per-user "tickets worked" table, computed server-side
   // rather than client-side from whatever's in `issues` (which is capped at
@@ -792,14 +813,17 @@ function SpaceDetailContent() {
     return () => clearInterval(id);
   }, [spaceKey, queueFilter, deptParam, currentPage, activeCustomQueue, currentSpace?.type, allCustomQueues.length, prefetchIssues]);
 
-  // Auto-refresh Worked on (dept_closed) every 30s
+  // Auto-refresh Worked on (dept_closed) every 30s. Only while still on page
+  // 1 -- fetchClosedIssues(..., page=1) REPLACES the list, which would
+  // silently discard anything the person pulled in via "Load more" every 30
+  // seconds while they were reading through their older history.
   useEffect(() => {
     if (queueFilter !== 'dept_closed' || !spaceKey || !deptParam) return;
     const id = setInterval(() => {
-      fetchClosedIssues(spaceKey, deptParam, effectiveViewUserParam);
+      if (closedIssuesPage === 1) fetchClosedIssues(spaceKey, deptParam, effectiveViewUserParam);
     }, 30_000);
     return () => clearInterval(id);
-  }, [queueFilter, spaceKey, deptParam, effectiveViewUserParam, fetchClosedIssues]);
+  }, [queueFilter, spaceKey, deptParam, effectiveViewUserParam, closedIssuesPage, fetchClosedIssues]);
 
   // Auto-refresh every 30s for regular (non-dept-queue) spaces — silent background refresh, never clears display
   useEffect(() => {
@@ -2979,6 +3003,17 @@ function SpaceDetailContent() {
               </a>
               );
             })}
+            {!loading && closedIssues.length > 0 && closedIssuesHasMore && (
+              <div className="py-4 flex items-center justify-center border-t border-gray-100">
+                <button
+                  onClick={loadMoreClosedIssues}
+                  disabled={closedIssuesLoadingMore}
+                  className="text-[12.5px] font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 rounded-md hover:bg-blue-50 transition-colors"
+                >
+                  {closedIssuesLoadingMore ? 'Loading…' : 'Load more'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
