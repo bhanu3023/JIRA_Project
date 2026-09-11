@@ -54,7 +54,7 @@ async function main() {
   const statusCategoryById = new Map(statusRows.map((s) => [s.id, s.category]));
 
   const { rows: existingRows } = await pool.query(`SELECT user_id, issue_id, dept FROM user_worked_on_tickets`);
-  const existingSet = new Set(existingRows.map((r) => `${r.user_id}::${r.issue_id}::${r.dept.toLowerCase()}`));
+  const existingSet = new Set(existingRows.map((r) => `${r.user_id}::${r.issue_id}::${(r.dept || '').toLowerCase()}`));
 
   const toInsert = [];
   const deptCounts = {};
