@@ -8826,6 +8826,26 @@ async function _handleJiraPgApi(
           if (refetchedAfterHandoff) updated = refetchedAfterHandoff;
         } catch (handoffErr: any) {
           console.error(`[DeptHandoff ERROR] ${issue.key}:`, handoffErr?.message || handoffErr);
+          // The status change itself already committed via db.issue.update()
+          // a few lines above THIS block even runs -- so a failed handoff
+          // here used to leave the ticket claiming "Routed to Migration" (a
+          // real, successfully-applied global status) while
+          // current_department silently never moved, with nothing telling
+          // the client anything went wrong. Same class of bug already fixed
+          // for the OTHER "Routed to X" path (the custom queue-status one,
+          // see the queueStatusId handler's own handoff-failure handling) --
+          // confirmed for real on CF-23245, which goes through THIS plain
+          // global-status path instead. Revert the status change that was
+          // never actually backed by a real department move, and fail the
+          // request instead of silently lying about what happened; the
+          // frontend's handleStatusChange already reverts its optimistic
+          // patch and alert()s whatever message comes back.
+          try {
+            await pool.query(`UPDATE issues SET "statusId"=$1, "updatedAt"=NOW() WHERE id=$2`, [issue.statusId, issue.id]);
+          } catch (revertErr: any) {
+            console.error(`[DeptHandoff REVERT ERROR] ${issue.key}:`, revertErr?.message || revertErr);
+          }
+          return json({ error: `Could not route this ticket to ${handoffTargetDept} — please try again.` }, 500);
         }
       }
     }
