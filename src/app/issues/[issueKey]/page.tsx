@@ -1281,6 +1281,14 @@ export default function IssueDetailPage() {
             queueStatusName: queueSt.name,
             queueStatusColor: queueSt.color,
             queueStatusCategory: queueSt.category,
+            // The department this status was picked FOR -- the dropdown that
+            // produced statusId/queueSt above was rendered for THIS department's
+            // own queue. Lets the backend detect the ticket having moved to a
+            // different department between dropdown-render and this request
+            // landing (see the queueStatusDept check in jira-pg-api.ts) instead
+            // of silently writing this department's picked status under
+            // whatever department the ticket happens to be in by then.
+            queueStatusDept: dept,
           } as any);
           loadIssue(issueKey);
         } catch (err: any) {
@@ -4428,24 +4436,29 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                       for a reason outside anyone's control) so the ticket stops
                       reading as breached without altering its actual recorded
                       dates/history -- the waiver itself stays visible here for
-                      accountability instead of silently erasing the breach. */}
-                  {s.waived ? (
+                      accountability instead of silently erasing the breach.
+                      Admin-only, same as the waive/remove controls themselves --
+                      the reason text is an internal admin note (e.g. "its a
+                      bug") that any other viewer (agent, non-admin) could
+                      previously see just by opening the ticket, even though
+                      only an admin can act on it. Non-admins still see the
+                      correct RESOLVED/not-breached state above; they just
+                      don't see WHY it was waived. */}
+                  {user?.role === 'admin' && (s.waived ? (
                     <div className="mt-2 pt-2 border-t border-gray-100 flex items-start justify-between gap-2">
                       <p className="text-[10.5px] text-emerald-600">
                         ✓ Breach waived by <span className="font-semibold">{s.waivedByName}</span>
                         {s.waivedReason && <span className="text-gray-400"> — {s.waivedReason}</span>}
                       </p>
-                      {user?.role === 'admin' && (
-                        <button
-                          onClick={() => handleSlaWaiver(s.policyId, false)}
-                          disabled={slaWaiverBusyId === s.policyId}
-                          className="text-[10px] font-semibold text-gray-400 hover:text-red-500 flex-shrink-0 disabled:opacity-50"
-                        >
-                          {slaWaiverBusyId === s.policyId ? 'Removing…' : 'Remove waiver'}
-                        </button>
-                      )}
+                      <button
+                        onClick={() => handleSlaWaiver(s.policyId, false)}
+                        disabled={slaWaiverBusyId === s.policyId}
+                        className="text-[10px] font-semibold text-gray-400 hover:text-red-500 flex-shrink-0 disabled:opacity-50"
+                      >
+                        {slaWaiverBusyId === s.policyId ? 'Removing…' : 'Remove waiver'}
+                      </button>
                     </div>
-                  ) : resolvedLate && user?.role === 'admin' && (
+                  ) : resolvedLate && (
                     <div className="mt-2 pt-2 border-t border-gray-100">
                       <button
                         onClick={() => handleSlaWaiver(s.policyId, true)}
@@ -4455,7 +4468,7 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                         {slaWaiverBusyId === s.policyId ? 'Waiving…' : 'Waive this breach'}
                       </button>
                     </div>
-                  )}
+                  ))}
                 </div>
               );
             })}

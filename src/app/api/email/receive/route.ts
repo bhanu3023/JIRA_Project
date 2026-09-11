@@ -565,10 +565,26 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Verify the ticket actually exists
+  // Verify the ticket actually exists. extractTicketKey (3a) pulls whatever
+  // bracketed key is literally in the subject/headers -- for an inbound
+  // reply that's the customer-facing cf_key (e.g. "CF-20171", what every
+  // notification email and the UI actually show), not the internal `key`
+  // column (e.g. "L2B-20171"). A lookup by `key` alone always misses a
+  // cf_key match, silently falls through to "no existing ticket," and
+  // creates a brand new duplicate instead of threading the reply as a
+  // comment. Confirmed for real: an out-of-office auto-responder replying
+  // to our own "ticket created" notification (subject still carrying the
+  // original "[CF-XXXXX]") produced junk tickets literally titled
+  // "Automatic reply: [CF-20171] ...". Match on either column and, on a
+  // cf_key hit, resolve existingTicketKey to the real internal key -- every
+  // other use of this variable below (comment target, notifications, URLs)
+  // expects the internal key, not the display one.
   if (existingTicketKey) {
-    const existing = await db.issue.findUnique({ where: { key: existingTicketKey }, select: { key: true } });
-    if (!existing) existingTicketKey = null;
+    const existing = await db.issue.findFirst({
+      where: { OR: [{ key: existingTicketKey }, { cf_key: existingTicketKey }] },
+      select: { key: true },
+    });
+    existingTicketKey = existing?.key ?? null;
   }
 
   const outboundMsgId = `<msg_${rid()}.${Date.now()}@cloudfuze.com>`;

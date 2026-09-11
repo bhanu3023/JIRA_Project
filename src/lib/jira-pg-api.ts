@@ -168,8 +168,17 @@ pool.query(`
 // to be "Yes" in real Jira; guarded to only ever SET true (never flips a
 // genuinely-correct false), so it's safe to run again.
 const JIRA_CONFIRMED_BREACHED_ISSUE_IDS: string[] = require('./jira-sla-breach-backfill-ids.json');
+// Guarded to only ever touch a ticket that's ACTUALLY Jira-sourced --
+// confirmed for real that this static list has at least a few stale/wrong
+// entries: ids belonging to genuinely local-only tickets (created directly
+// in the app, no jira_source_key, no L2B/L3B/PSM/SOPS/QA key at all) that
+// this unconditional UPDATE was force-stamping breached on every single
+// boot, with no way for a later correction to stick since it just got
+// reapplied on the next restart.
 pool.query(
-  `UPDATE issues SET jira_sla_breached = true WHERE id = ANY($1::text[]) AND jira_sla_breached IS DISTINCT FROM true`,
+  `UPDATE issues SET jira_sla_breached = true
+   WHERE id = ANY($1::text[]) AND jira_sla_breached IS DISTINCT FROM true
+     AND (jira_source_key IS NOT NULL OR key LIKE 'L2B-%' OR key LIKE 'L3B-%' OR key LIKE 'PSM-%' OR key LIKE 'SOPS-%' OR key LIKE 'QA-%')`,
   [JIRA_CONFIRMED_BREACHED_ISSUE_IDS]
 ).catch(() => {});
 
@@ -1151,11 +1160,36 @@ async function pauseDeptSLA(issueKey: string | null, issueId: string | null, dep
 /**
  * Mark a dept as "running" in dept_sla_log (called after dept_sla_started_at = NOW()).
  */
+// Same priority -> goal-duration resolution used everywhere else in this
+// file (Filters' breach recompute, the dept-queue Summary sidebar, MBR's
+// By-Department tab, computeSLAInstancesPure) -- extracted once here since
+// this is a new call site, not touching the other several inline copies.
+function computeSlaGoalDurationMs(policy: any, priority: string): number {
+  let durationMs = 8 * 60 * 60 * 1000; // default 8h
+  for (const goal of (policy.goals || [])) {
+    if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
+      const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
+      if (row?.timeValue) {
+        const val = parseFloat(row.timeValue);
+        const unit = (row.timeUnit || 'hours').toLowerCase();
+        durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+        break;
+      }
+    } else if (goal.timeValue) {
+      const val = parseFloat(goal.timeValue);
+      const unit = (goal.timeUnit || 'hours').toLowerCase();
+      durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+      break;
+    }
+  }
+  return durationMs;
+}
+
 async function startDeptSLA(issueKey: string | null, issueId: string | null, dept: string): Promise<void> {
   if (!dept) return;
   try {
     const row = await pool.query(
-      `SELECT dept_sla_log FROM issues WHERE ${issueKey ? 'key=$1' : 'id=$1'}`,
+      `SELECT dept_sla_log, "spaceId", priority FROM issues WHERE ${issueKey ? 'key=$1' : 'id=$1'}`,
       [issueKey || issueId]
     );
     const log: Record<string, any> = row.rows[0]?.dept_sla_log || {};
@@ -1168,6 +1202,40 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
       status: 'running',
       paused_at: null,
     };
+    // The ticket's plain "Due Date" property (sidebar/Filters/Overdue-badge/
+    // export) had NO connection to the SLA policies configured per queue by
+    // priority at all -- it was a purely manual field, so "Due Date" and the
+    // SLA panel's own priority-driven due time could show two unrelated
+    // things, and the property only ever got a value if someone typed one in
+    // by hand. Compute it the same way the SLA panel does (goal duration by
+    // priority, minus whatever budget this department already burned across
+    // earlier visits) every time this department's SLA clock starts/resumes,
+    // so it stays a real, current deadline instead of a stale manual guess.
+    // When more than one policy applies, use the earliest (most urgent)
+    // resulting deadline -- the ticket property is a single value, and "when
+    // is this actually due" should mean the soonest clock that can breach.
+    let computedDueDate: Date | null = null;
+    try {
+      const spaceId = row.rows[0]?.spaceId;
+      const priority = (row.rows[0]?.priority || 'medium').toLowerCase();
+      if (spaceId) {
+        const polRes = await pool.query(
+          `SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`,
+          [spaceId]
+        );
+        const applicable = polRes.rows.filter((p: any) => {
+          const pDept = (p.dept_name || '').trim().toLowerCase();
+          return !pDept || pDept === dept.trim().toLowerCase();
+        });
+        const priorElapsedMs = log[dept]?.elapsed_ms || 0;
+        for (const policy of applicable) {
+          const durationMs = computeSlaGoalDurationMs(policy, priority);
+          const remainingMs = Math.max(0, durationMs - priorElapsedMs);
+          const candidate = new Date(nowTs.getTime() + remainingMs);
+          if (!computedDueDate || candidate < computedDueDate) computedDueDate = candidate;
+        }
+      }
+    } catch { /* dueDate computation is best-effort -- never block the SLA start itself */ }
     // dept_sla_started_at (the top-level column, not this dept-scoped log)
     // is what both computeSLAInstancesPure's dueTime calculation AND this
     // function's own counterpart pauseDeptSLA use as "when did the current
@@ -1182,8 +1250,8 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
     // gets a correct resume for free instead of each having to remember to
     // update this column itself.
     await pool.query(
-      `UPDATE issues SET dept_sla_log=$1::jsonb, dept_sla_started_at=NOW() WHERE ${issueKey ? 'key=$2' : 'id=$2'}`,
-      [JSON.stringify(log), issueKey || issueId]
+      `UPDATE issues SET dept_sla_log=$1::jsonb, dept_sla_started_at=NOW()${computedDueDate ? ', "dueDate"=$3' : ''} WHERE ${issueKey ? 'key=$2' : 'id=$2'}`,
+      computedDueDate ? [JSON.stringify(log), issueKey || issueId, computedDueDate.toISOString()] : [JSON.stringify(log), issueKey || issueId]
     );
     await logSlaHistory(issueKey, issueId, `${wasStartedBefore ? 'SLA resumed' : 'SLA started'} — ${dept}`);
   } catch { /* non-fatal */ }
@@ -1616,11 +1684,39 @@ async function enrichSlaWithResolver(
   const resolvedByName = statusHistory.length ? (statusHistory[statusHistory.length - 1].authorName || null) : null;
   const events = statusHistory
     .filter((row) => doneNames.has((row.newValue || '').trim().toLowerCase()))
+    // Drop a "resolved" transition the SAME person reverted within minutes --
+    // e.g. an admin toggling status while investigating a ticket they don't
+    // actually own, not a settled resolution attempt. Without this, Resolution
+    // History showed that person as having "resolved" (and, if late, being
+    // flagged for it) a ticket they never actually worked, purely because they
+    // clicked Resolved and immediately undid it themselves. Confirmed for
+    // real: CF-29697 -- Bhanu Srikakulam resolved it, then reopened his own
+    // change 7 seconds later while debugging an unrelated SLA issue; the
+    // ticket's real, settled resolution came from someone else afterward.
+    .filter((row) => {
+      const rowTime = new Date(row.createdAt).getTime();
+      const selfReverted = statusHistory.some((later) => {
+        if (later === row) return false;
+        const laterTime = new Date(later.createdAt).getTime();
+        if (laterTime <= rowTime || laterTime - rowTime > 5 * 60 * 1000) return false;
+        if ((later.authorName || '') !== (row.authorName || '')) return false;
+        return !doneNames.has((later.newValue || '').trim().toLowerCase());
+      });
+      return !selfReverted;
+    })
     .map((row) => ({ resolvedByName: row.authorName || 'Unknown', resolvedAt: row.createdAt?.toISOString?.() || row.createdAt }));
   return slaInstances.map((s: any) => {
     if (!s.isCompleted) return s;
     const dueMs = new Date(s.dueTime).getTime();
-    const history = events.map((e) => ({ ...e, wasBreached: new Date(e.resolvedAt).getTime() > dueMs }));
+    // If this policy's breach has been waived, no individual resolution
+    // attempt should still read "Late" against that person's name either --
+    // the org has already decided this ticket doesn't count as a real SLA
+    // miss, so the per-event badges must agree with the top-level RESOLVED
+    // state instead of independently re-deriving their own "was it late"
+    // verdict straight from resolvedAt vs dueTime. Confirmed for real:
+    // CF-29697 waived by an admin still showed "Late" against Amulya A in
+    // Resolution History.
+    const history = events.map((e) => ({ ...e, wasBreached: s.waived ? false : new Date(e.resolvedAt).getTime() > dueMs }));
     return { ...s, resolvedByName: resolvedByName || s.resolvedByName, history };
   });
 }
@@ -2365,6 +2461,13 @@ function formatIssue(issue: any) {
     dept_sla_log: (issue as any).dept_sla_log ?? {},
     dept_assignees: (issue as any).dept_assignees ?? {},
     dept_statuses: (issue as any).dept_statuses ?? {},
+    // Carried through so the Filters-page list/export SLA-breach recompute
+    // below can honor an admin's waiver the same way the ticket detail
+    // page's own computeSLAInstancesPure does -- previously dropped here,
+    // so a waived breach (e.g. CF-30920, CF-30911, CF-29386) still showed
+    // "Yes" in the exported CSV even though the detail page correctly
+    // showed it resolved in time.
+    sla_waivers: (issue as any).sla_waivers ?? {},
     createdAt: issue.createdAt?.toISOString() ?? nowIso(),
     updatedAt: issue.updatedAt?.toISOString() ?? nowIso(),
     sla_breached: issue.sla_breached ?? false,
@@ -2560,6 +2663,28 @@ function extractJiraSlaBreach(fields: any): { breached: boolean; dueAt: Date | n
   };
 }
 
+// Flattens an ADF document to plain text (paragraphs separated by a blank
+// line, hardBreak as a single newline) -- used for rich-text custom fields
+// like Root Cause / Fix Description, whose local counterpart is a plain
+// textarea (rendered with whitespace-pre-wrap), not rich HTML like
+// description, so this deliberately doesn't reuse adfNodeToHtml.
+function adfNodeToPlainText(node: any): string {
+  if (!node) return '';
+  if (node.type === 'doc' || node.type === 'blockquote' || node.type === 'expand' || node.type === 'nestedExpand' || node.type === 'panel') {
+    return (node.content || []).map(adfNodeToPlainText).join('\n\n');
+  }
+  if (node.type === 'paragraph' || node.type === 'heading') return (node.content || []).map(adfNodeToPlainText).join('');
+  if (node.type === 'text') return node.text || '';
+  if (node.type === 'hardBreak') return '\n';
+  if (node.type === 'bulletList' || node.type === 'orderedList') return (node.content || []).map(adfNodeToPlainText).join('\n');
+  if (node.type === 'listItem') return `- ${(node.content || []).map(adfNodeToPlainText).join(' ')}`;
+  if (node.type === 'codeBlock') return (node.content || []).map((n: any) => n.text || '').join('');
+  if (node.type === 'mention') return `@${node.attrs?.text?.replace(/^@/, '') || node.attrs?.id || ''}`;
+  if (node.type === 'emoji') return node.attrs?.text || node.attrs?.shortName || '';
+  if (node.type === 'inlineCard' || node.type === 'blockCard') return node.attrs?.url || '';
+  return (node.content || []).map(adfNodeToPlainText).join('');
+}
+
 function extractJiraValue(raw: any): string | null {
   if (!raw) return null;
   if (typeof raw === 'string') return raw.trim() || null;
@@ -2567,6 +2692,19 @@ function extractJiraValue(raw: any): string | null {
   if (Array.isArray(raw)) {
     const vals = raw.map((v: any) => v?.value ?? v?.name ?? v?.displayName ?? String(v)).filter(Boolean);
     return vals.length ? vals.join(', ') : null;
+  }
+  // Rich-text custom fields (Root Cause, Fix Description, etc.) come back as
+  // Atlassian Document Format, not a plain value -- none of the lookups
+  // below (.value/.name/.displayName/.emailAddress) exist on an ADF doc, so
+  // this always silently returned null and any real content typed into one
+  // of these fields in Jira never made it into the matching local field.
+  // Confirmed for real: L2B-15994, L2B-15986, L3B-656, L3B-510 all have
+  // genuine Root Cause / Fix Description text in Jira that read as
+  // completely empty here -- 16,563 L2B/L3B tickets had both fields NULL
+  // locally as a result.
+  if (raw.type === 'doc' && Array.isArray(raw.content)) {
+    const text = adfNodeToPlainText(raw).trim();
+    return text || null;
   }
   return (raw.value ?? raw.name ?? raw.displayName ?? raw.emailAddress ?? null);
 }
@@ -2736,28 +2874,51 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
     let issueId: string;
 
     if (existingIssue) {
-      // Update existing
-      await db.issue.update({
-        where: { key: localKey },
-        data: {
-          summary: f.summary || localKey,
-          type: (f.issuetype?.name || 'task').toLowerCase(),
-          priority: (f.priority?.name || 'medium').toLowerCase(),
-          statusId: localStatus?.id ?? existingIssue.statusId,
-          assigneeId: assigneeId ?? existingIssue.assigneeId,
-          reporterId: reporterId ?? existingIssue.reporterId,
-          parentKey: f.parent?.key ?? existingIssue.parentKey,
-          labels: Array.isArray(f.labels) ? f.labels : existingIssue.labels,
-          customerName:   extractJiraValue(f.customfield_10401) ?? existingIssue.customerName,
-          clientName:     extractJiraValue(f.customfield_10883) ?? existingIssue.clientName,
-          projectManager: extractJiraValue(f.customfield_11380) ?? existingIssue.projectManager,
-          productType:    extractJiraValue(f.customfield_10203) ?? existingIssue.productType,
-          combination:    extractJiraValue(f.customfield_10236) ?? existingIssue.combination,
-          productionTicket: extractJiraValue(f.customfield_10665) ?? existingIssue.productionTicket,
-          rootCause:      extractJiraValue(f.customfield_10059) ?? existingIssue.rootCause,
-          fixDescription: extractJiraValue(f.customfield_10402) ?? existingIssue.fixDescription,
-        },
-      });
+      // Update existing -- raw SQL instead of db.issue.update(), deliberately:
+      // the Prisma schema has updatedAt DateTime @updatedAt, so a plain
+      // db.issue.update() call silently bumps updatedAt to NOW() on EVERY
+      // periodic re-sync poll of every already-imported ticket, whether or
+      // not anything actually changed in Jira. This is the same disease as
+      // the one already fixed further down this file for the on-demand
+      // detail-page refresh path (search "silently bumps updatedAt to NOW()")
+      // -- but this is the recurring full-project sync, which runs against
+      // every L2B/L3B/PSM/SOPS/QA ticket on every pass, so its blast radius
+      // is far bigger. Confirmed for real: comparing live Jira's own
+      // "updated in last 30 days" count against ours showed PSM at 110 vs
+      // 656 locally, SOPS at 2 vs 59 -- almost entirely routine sync polls
+      // masquerading as real updates, corrupting "Updated" date-range
+      // accuracy in Filters/MBR for these projects. Set updatedAt from
+      // Jira's own f.updated (the authoritative last-modified time) instead
+      // of NOW(), so it only advances when Jira itself says the ticket
+      // changed.
+      await pool.query(
+        `UPDATE issues SET
+           summary=$1, type=$2, priority=$3, "statusId"=$4, "assigneeId"=$5, "reporterId"=$6,
+           "parentKey"=$7, labels=$8::text[], "customerName"=$9, "clientName"=$10,
+           "projectManager"=$11, "productType"=$12, combination=$13, "productionTicket"=$14,
+           "rootCause"=$15, "fixDescription"=$16, "updatedAt"=$17
+         WHERE key=$18`,
+        [
+          f.summary || localKey,
+          (f.issuetype?.name || 'task').toLowerCase(),
+          (f.priority?.name || 'medium').toLowerCase(),
+          localStatus?.id ?? existingIssue.statusId,
+          assigneeId ?? existingIssue.assigneeId,
+          reporterId ?? existingIssue.reporterId,
+          f.parent?.key ?? existingIssue.parentKey,
+          Array.isArray(f.labels) ? f.labels : existingIssue.labels,
+          extractJiraValue(f.customfield_10401) ?? existingIssue.customerName,
+          extractJiraValue(f.customfield_10883) ?? existingIssue.clientName,
+          extractJiraValue(f.customfield_11380) ?? existingIssue.projectManager,
+          extractJiraValue(f.customfield_10203) ?? existingIssue.productType,
+          extractJiraValue(f.customfield_10236) ?? existingIssue.combination,
+          extractJiraValue(f.customfield_10665) ?? existingIssue.productionTicket,
+          extractJiraValue(f.customfield_10059) ?? existingIssue.rootCause,
+          extractJiraValue(f.customfield_10402) ?? existingIssue.fixDescription,
+          f.updated ? new Date(f.updated) : existingIssue.updatedAt,
+          localKey,
+        ]
+      );
       issueId = existingIssue.id;
       // resolvedAt isn't in the Prisma schema (added via a raw migration,
       // same as current_department below) -- set with a plain UPDATE. See
@@ -3651,7 +3812,7 @@ async function _handleJiraPgApi(
   // to send -- they authenticate with this per-process secret instead (see
   // internal-job-secret.ts). Scoped to one specific path rather than a
   // blanket bypass, since anything landing here has no session to audit.
-  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach')
+  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach' || path === 'admin/backfill-root-cause-fix-description')
     && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
 
   if (!userId && !isPublicPath && !isInternalJob) {
@@ -4167,7 +4328,7 @@ async function _handleJiraPgApi(
           `WITH merged AS (${mergedSourceSql}),
            dedup AS (SELECT issue_id, MAX(closed_at) AS closed_at, MAX(dept_name) AS dept_name FROM merged GROUP BY issue_id)
            SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary AS title, i.priority, i.type,
-                  i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at, i.jira_sla_breached,
+                  i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at, i.jira_sla_breached, i.sla_waivers,
                   d.closed_at, d.dept_name,
                   s.name AS status_name, s.color AS status_color, s.category AS status_category,
                   i.dept_sla_log, i.dept_assignees, i.dept_statuses,
@@ -4212,8 +4373,27 @@ async function _handleJiraPgApi(
         const deptStatuses: Record<string, any> = r.dept_statuses || {};
         const statusSnapKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
         const statusSnap = statusSnapKey ? deptStatuses[statusSnapKey] : null;
+        // A "Routed to X"/"Waiting for X" snapshot is a record of an
+        // OUTGOING handoff, not this dept's own resolution -- once the
+        // ticket's actual current status (r.status_category, the live
+        // global one, not this frozen snapshot) is done, that routing label
+        // is stale and should give way to the real outcome. Without this, a
+        // dept that routed an open ticket away and never touched it again
+        // kept it stuck showing "Routed to X" here forever, even after it
+        // was genuinely resolved elsewhere -- so it could never surface in
+        // this "Worked on" list (which only includes done-category
+        // entries), staying in "Assigned to me" indefinitely even though
+        // there's nothing left to act on. Same principle as
+        // getEffectiveIssueStatus's own stale-routing-label fallback, just
+        // applied here so list MEMBERSHIP (not just the displayed label)
+        // agrees with it.
+        const isStaleRoutingLabel = statusSnap
+          && typeof statusSnap.id === 'string'
+          && statusSnap.id.startsWith('qst_')
+          && /^(?:waiting\s+for|routed\s+to)\s+/i.test(String(statusSnap.name || ''))
+          && r.status_category === 'done';
         const { dept_assignees, dept_statuses, ...rest } = r;
-        const withStatus = statusSnap
+        const withStatus = statusSnap && !isStaleRoutingLabel
           ? { ...rest, status_name: statusSnap.name, status_color: statusSnap.color, status_category: statusSnap.category }
           : rest;
 
@@ -4278,15 +4458,33 @@ async function _handleJiraPgApi(
       // Status/priority breakdown + total, scoped to this dept and the
       // selected range (by creation date) -- same shape the existing charts
       // already render, just now range-aware instead of always "all time".
-      const deptIssuesRes = await pool.query(
-        `SELECT i.id, i.priority, i."createdAt", i.jira_sla_breached, i."dueDate",
-                s.name AS status_name, s.color AS status_color, s.category AS status_category
-         FROM issues i
-         LEFT JOIN statuses s ON i."statusId" = s.id
-         WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)
-           AND i."createdAt" >= $3 AND i."createdAt" <= $4`,
-        [spaceId, dept, from, to]
-      );
+      // Also fetch this space's active SLA policies once, up front -- every
+      // breach check below (dept total, per-user worked/done, per-user
+      // current) now runs the SAME computeSLAInstancesPure the ticket detail
+      // page and the Filters-page export use, instead of each hand-rolling
+      // its own "imported flag or simple due-date-overdue" approximation.
+      // That approximation never looked at sla_waivers at all and ignored
+      // each policy's own goal duration / dept_sla_log elapsed-time
+      // carryover, so a ticket an admin had waived (correctly "resolved in
+      // time" everywhere else) still counted as a breach against that
+      // person's name here, and a ticket genuinely over its policy goal
+      // but not yet past its raw dueDate didn't count at all. Confirmed for
+      // real: this is the same class of bug already fixed for the Filters
+      // list/export (see the sla_waivers comment on formatIssue above).
+      const [deptIssuesRes, slaPoliciesRes] = await Promise.all([
+        pool.query(
+          `SELECT i.id, i.priority, i."createdAt", i.jira_sla_breached, i."dueDate",
+                  i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i.sla_waivers,
+                  s.name AS status_name, s.color AS status_color, s.category AS status_category
+           FROM issues i
+           LEFT JOIN statuses s ON i."statusId" = s.id
+           WHERE i."spaceId" = $1 AND LOWER(i.current_department) = LOWER($2)
+             AND i."createdAt" >= $3 AND i."createdAt" <= $4`,
+          [spaceId, dept, from, to]
+        ),
+        pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = $1 AND status = 'active'`, [spaceId]),
+      ]);
+      const slaPolicies = slaPoliciesRes.rows;
       const statusMap: Record<string, { count: number; color: string; category: string }> = {};
       const priorityMap: Record<string, number> = { highest: 0, high: 0, medium: 0, low: 0, lowest: 0 };
       let slaBreachedCount = 0;
@@ -4296,15 +4494,12 @@ async function _handleJiraPgApi(
         statusMap[name].count++;
         const p = (row.priority || 'medium').toLowerCase();
         if (p in priorityMap) priorityMap[p]++;
-        // Same "prefer the imported historical flag, else a simple due-date
-        // check" rule as the general issue list -- not the full per-policy
-        // computation (that needs each ticket's own SLA policy/goal duration
-        // and pause state), just a practical approximation for a team-wide
-        // count. Good enough to spot a trend, not a substitute for the
-        // per-ticket SLA panel's exact figure.
-        const isDone = row.status_category === 'done';
-        const dueBreach = !isDone && row.dueDate && new Date(row.dueDate).getTime() < Date.now();
-        if (row.jira_sla_breached || dueBreach) slaBreachedCount++;
+        const instances = computeSLAInstancesPure(
+          { ...row, current_department: dept, status: { name: row.status_name, category: row.status_category } },
+          slaPolicies, false
+        );
+        const breached = instances.length ? instances.some((x: any) => x.isBreached) : !!row.jira_sla_breached;
+        if (breached) slaBreachedCount++;
       }
 
       // Per-user breakdown -- every member of this queue. Two different
@@ -4333,7 +4528,9 @@ async function _handleJiraPgApi(
       let perUserByProduct: Record<string, any[]> = {};
       if (memberIds.length) {
         const workedRes = await pool.query(
-          `SELECT w.user_id, i.id AS issue_id, i.jira_sla_breached, i."dueDate", s.category AS status_category,
+          `SELECT w.user_id, i.id AS issue_id, i.priority, i."createdAt", i.jira_sla_breached, i."dueDate",
+                  i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i.sla_waivers,
+                  s.category AS status_category,
                   u."firstName", u."lastName", u.email, u."avatarUrl"
            FROM user_worked_on_tickets w
            JOIN issues i ON i.id = w.issue_id
@@ -4362,7 +4559,18 @@ async function _handleJiraPgApi(
             };
           }
           byUser[r.user_id].ticketIds.add(r.issue_id);
-          if (r.jira_sla_breached) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
+          // Every row here is already filtered to isDone above, so
+          // computeSLAInstancesPure's own resolved-branch (priorElapsedMs vs
+          // each policy's goal duration, honoring sla_waivers) applies --
+          // not just the imported jira_sla_breached flag, which is false for
+          // nearly every locally-tracked ticket and silently undercounted
+          // real local breaches here.
+          const workedInstances = computeSLAInstancesPure(
+            { ...r, current_department: dept, status: { category: r.status_category } },
+            slaPolicies, false
+          );
+          const workedBreached = workedInstances.length ? workedInstances.some((x: any) => x.isBreached) : !!r.jira_sla_breached;
+          if (workedBreached) byUser[r.user_id].slaBreachedIds.add(r.issue_id);
         }
         // Include every queue member even with zero worked tickets in this
         // range, not just the ones with activity -- otherwise a member who
@@ -4382,6 +4590,7 @@ async function _handleJiraPgApi(
         // is still sitting on always counts.
         const currentRes = await pool.query(
           `SELECT i.department_assignee_id, i."assigneeId", i."dueDate", i.jira_sla_breached, i."productType",
+                  i.priority, i."createdAt", i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i.sla_waivers,
                   s.name AS status_name, s.category AS status_category
            FROM issues i
            LEFT JOIN statuses s ON s.id = i."statusId"
@@ -4408,8 +4617,23 @@ async function _handleJiraPgApi(
           else if (waiting) bucket.waiting++;
           else if (r.status_category === 'in_progress') bucket.inProgress++;
           else bucket.open++;
-          const dueBreach = !isDone && r.dueDate && new Date(r.dueDate).getTime() < Date.now();
-          if (!isDone && (r.jira_sla_breached || dueBreach)) bucket.slaBreached++;
+          // Full per-policy check (goal duration, dept_sla_log elapsed
+          // carryover, pause statuses, sla_waivers) instead of the previous
+          // raw-dueDate-vs-now approximation -- a still-open ticket whose
+          // breach was waived (e.g. legitimately delayed for a reason
+          // outside anyone's control) kept counting against this person
+          // here even though the ticket detail page's own SLA panel already
+          // shows it waived.
+          if (!isDone) {
+            const currentInstances = computeSLAInstancesPure(
+              { ...r, current_department: dept, status: { name: r.status_name, category: r.status_category } },
+              slaPolicies, false
+            );
+            const currentBreached = currentInstances.length
+              ? currentInstances.some((x: any) => x.isBreached)
+              : !!(r.jira_sla_breached || (r.dueDate && new Date(r.dueDate).getTime() < Date.now()));
+            if (currentBreached) bucket.slaBreached++;
+          }
 
           if (r.productType && PRODUCT_TYPES.includes(r.productType)) {
             const ptBucket = ((currentByUserByProduct[r.productType] ??= {})[owner] ??= { total: 0, done: 0 });
@@ -4570,6 +4794,12 @@ async function _handleJiraPgApi(
     // a stale snapshot" rule the dept-scoped branch already applies.
     let generalAssigneeFilterIds: string[] | null = null;
     let generalWorkedByIssue: Record<string, { id: string; firstName: string; lastName: string; email: string; avatarUrl: string | null }> = {};
+    // Populated by the Status filter below when it matches via a
+    // dept_statuses entry (e.g. "Routed to X") rather than the ticket's real
+    // statusId -- consumed after enrichedIssues is built, same spot as
+    // generalWorkedByIssue above, to show the matched department's own
+    // status instead of the ticket's current-department one.
+    let generalRoutedStatusByIssue: Record<string, { dept: string; id: string; name: string; color: string; category: string }> = {};
 
     // Space filter
     if (spaceKey) {
@@ -4616,11 +4846,18 @@ async function _handleJiraPgApi(
       // selected (includeHistory, gated on selQueue in the frontend); the
       // request here is for it to just always apply whenever an Assignee
       // filter is active, Queue selected or not.
+      // reason != 'passed' -- a 'passed' row only means this person routed/
+      // reassigned the ticket onward, not that they did real work on it
+      // (same guard every other user_worked_on_tickets join in this file
+      // applies). Missing it here meant filtering Assignee by someone who
+      // only ever handed a ticket off to someone else still surfaced that
+      // ticket and showed THEIR name as Assignee, same false-positive
+      // already confirmed and fixed elsewhere for Ravi Srivastava/CF-30614.
       const workedRows = userIds.length
         ? await pool.query(
             `SELECT DISTINCT ON (w.issue_id) w.issue_id, u.id, u."firstName", u."lastName", u.email, u."avatarUrl"
              FROM user_worked_on_tickets w JOIN users u ON u.id = w.user_id
-             WHERE w.user_id = ANY($1::text[])
+             WHERE w.user_id = ANY($1::text[]) AND w.reason != 'passed'
              ORDER BY w.issue_id, w.worked_at DESC`,
             [userIds]
           )
@@ -4670,7 +4907,59 @@ async function _handleJiraPgApi(
         statusWhere.spaceId = { in: (where.spaceId as any).in };
       }
       const statuses = await db.status.findMany({ where: statusWhere as any, select: { id: true } });
-      where.statusId = { in: statuses.map((s) => s.id) };
+      // "Routed to X" (and every other custom queue-status-style label) is
+      // confirmed to never actually be used as a ticket's real statusId --
+      // every such row has zero tickets referencing it (it only exists so
+      // the Status filter dropdown has something real to show -- see
+      // ALLOWED_STATUSES on the Filters page). The actual record of a
+      // ticket having this status lives in dept_statuses, a raw/unmapped
+      // JSONB column Prisma's `where` can't reach. Without this, selecting
+      // "Routed to X" here (the no-Queue-selected general view -- the
+      // dept-scoped branch already has its own equivalent fix, keyed to the
+      // one queue being viewed) always returned zero results no matter what
+      // data existed, since where.statusId alone can never match anything.
+      // No single department to scope to here (no deptParam), so this
+      // checks EVERY department's own dept_statuses entry for a match --
+      // "does ANY department's snapshot on this ticket say this" is the
+      // sensible reading for a filter with no queue context.
+      let deptStatusMatchIds: string[] = [];
+      try {
+        const scopedSpaceIds = typeof where.spaceId === 'string' ? [where.spaceId] : ((where.spaceId as any)?.in || []);
+        if (scopedSpaceIds.length) {
+          const lowerNames = names.map((n) => n.toLowerCase());
+          const deptMatchRows = await pool.query(
+            `SELECT i.id, ds.k AS dept, ds.v AS status_obj FROM issues i, jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+             WHERE i."spaceId" = ANY($1::text[]) AND LOWER(ds.v->>'name') = ANY($2::text[])`,
+            [scopedSpaceIds, lowerNames]
+          );
+          // A ticket can match via more than one department's own snapshot
+          // (rare, but possible) -- one is enough to explain why the row is
+          // here, so first-seen wins. Recorded so the Status column can show
+          // THIS (the reason the row matched the filter) instead of the
+          // ticket's current-department status, which is what
+          // getEffectiveIssueStatus falls back to with no Queue selected --
+          // confirmed for real: filtering by "Routed to Dev" with no Queue
+          // active found the right tickets but displayed each one's
+          // unrelated current status ("Open"/"In Progress"), not the
+          // "Routed to Dev" record that's the whole reason it matched.
+          for (const r of deptMatchRows.rows) {
+            if (!generalRoutedStatusByIssue[r.id]) {
+              generalRoutedStatusByIssue[r.id] = {
+                dept: r.dept,
+                id: r.status_obj?.id ?? '',
+                name: r.status_obj?.name ?? '',
+                color: r.status_obj?.color ?? '#F59E0B',
+                category: r.status_obj?.category ?? 'in_progress',
+              };
+            }
+          }
+          deptStatusMatchIds = Array.from(new Set(deptMatchRows.rows.map((r: any) => r.id)));
+        }
+      } catch { /* best-effort -- falls back to the real-statusId match alone */ }
+      addOrGroup([
+        { statusId: { in: statuses.map((s) => s.id) } },
+        ...(deptStatusMatchIds.length ? [{ id: { in: deptStatusMatchIds } }] : []),
+      ]);
     }
 
     // Priority filter
@@ -4740,7 +5029,12 @@ async function _handleJiraPgApi(
     if (projectManagerParam) {
       const vals = projectManagerParam.split('|||').map(v => v.trim()).filter(Boolean);
       if (vals.length) {
-        const pmOr = vals.map((v) => ({ projectManager: { contains: v, mode: 'insensitive' as const } }));
+        const pmOr: any[] = vals.map((v) => ({ projectManager: { contains: v, mode: 'insensitive' as const } }));
+        // "Others" also catches a ticket with no PM set at all -- see the
+        // matching comment on the dept-scoped branch below for why.
+        if (vals.some((v) => v.toLowerCase() === 'others')) {
+          pmOr.push({ projectManager: null }, { projectManager: '' });
+        }
         if (!where.AND) where.AND = [];
         (where.AND as any[]).push({ OR: pmOr });
       }
@@ -4827,7 +5121,7 @@ async function _handleJiraPgApi(
         const issueKeys = issues.map((i: any) => i.key);
         if (issueKeys.length) {
           const deptRows = await pool.query(
-            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_sla_log, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at FROM issues WHERE key = ANY($1::text[])`,
+            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_sla_log, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at, sla_waivers FROM issues WHERE key = ANY($1::text[])`,
             [issueKeys]
           );
           for (const row of deptRows.rows) {
@@ -4837,7 +5131,14 @@ async function _handleJiraPgApi(
             // branch's enriched issues never see any prior elapsed time and the
             // breach check falls back to a fresh full countdown every time,
             // same bug as the dept-scoped branch had before that fix.
-            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_sla_log: row.dept_sla_log, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at };
+            // sla_waivers likewise has to be carried through this map -- Prisma's
+            // own `issues` rows above don't have it (raw ALTER TABLE column, not
+            // in the Prisma schema), so without it here the breach-computation
+            // block below never sees an admin's waiver and recomputes "Breached:
+            // Yes" purely from elapsed time, even for a ticket whose detail page
+            // (which reads sla_waivers directly) already shows it resolved in
+            // time. Confirmed for real: CF-30920, CF-30911, CF-29386.
+            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_sla_log: row.dept_sla_log, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at, sla_waivers: row.sla_waivers };
           }
         }
       } catch { /* ignore */ }
@@ -4964,7 +5265,11 @@ async function _handleJiraPgApi(
           if (projectManagerParam) {
             const pmVals = projectManagerParam.split('|||').map((v) => v.trim()).filter(Boolean);
             if (pmVals.length) {
-              sentExtraClauses.push(`i."projectManager" ILIKE ANY($${sentParamIdx}::text[])`);
+              // "Others" also catches a ticket with no PM set at all -- see the
+              // matching comment on the dept-scoped branch above for why.
+              const hasOthers = pmVals.some((v) => v.toLowerCase() === 'others');
+              const nullClause = hasOthers ? ` OR i."projectManager" IS NULL OR i."projectManager" = ''` : '';
+              sentExtraClauses.push(`(i."projectManager" ILIKE ANY($${sentParamIdx}::text[])${nullClause})`);
               sentExtraParams.push(pmVals.map((v) => `%${v}%`));
               sentParamIdx++;
             }
@@ -5172,6 +5477,25 @@ async function _handleJiraPgApi(
         };
       });
     }
+    // Status filter matched some of these via a dept_statuses entry (e.g.
+    // "Routed to Dev"), not the ticket's real global status -- show that
+    // matched department's own status instead of getEffectiveIssueStatus's
+    // default fallback (the ticket's CURRENT department, which is usually a
+    // different, unrelated status once the ticket has actually moved on).
+    // Confirmed for real: filtering by "Routed to Dev" with no Queue active
+    // found the right tickets but every row displayed its own current
+    // status ("Open"/"In Progress") instead of the "Routed to Dev" record
+    // that's the entire reason it matched the filter.
+    if (Object.keys(generalRoutedStatusByIssue).length) {
+      enrichedIssues = enrichedIssues.map((iss: any) => {
+        const routed = generalRoutedStatusByIssue[iss.id];
+        if (!routed) return iss;
+        return {
+          ...iss,
+          status: { id: routed.id, name: routed.name, color: routed.color, category: routed.category },
+        };
+      });
+    }
     let deptTotal = total;
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
@@ -5217,6 +5541,15 @@ async function _handleJiraPgApi(
       const deptExtraClauses: string[] = [];
       const deptExtraParams: any[] = [];
       let deptParamIdx = deptSearchParam ? 4 : 3;
+      // Populated below (queueMembersOnly branch) with deptParam's own live
+      // queue member ids -- used to restrict every "worked in this dept"
+      // broadening (origin/updated/member-clause) to genuine members of that
+      // dept's queue, not literally anyone who ever touched the ticket while
+      // it happened to be labeled with this dept. See its use further down.
+      let deptQueueMemberIds: string[] = [];
+      // The bound parameter index deptQueueMemberIds was pushed at (null if
+      // it was never pushed, i.e. this dept has no configured queue at all).
+      let deptMemberIdsParamIdx: number | null = null;
       // "Queue" filter on the main /filters page (opt-in via queueMembersOnly) --
       // restricts to tickets whose assignee is an actual configured member of
       // this department's queue, instead of every ticket merely labeled with
@@ -5232,7 +5565,24 @@ async function _handleJiraPgApi(
           const queues: any[] = cq.rows[0]?.queues || [];
           const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === deptParam.toLowerCase());
           const memberIds: string[] = Array.isArray(q?.memberIds) ? q.memberIds : [];
-          const memberClause = memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0';
+          deptQueueMemberIds = memberIds;
+          // Captured here (before deptParamIdx advances below) so originDeptMatchSql/
+          // updatedDeptMatchSql -- built later, against the same params array -- can
+          // reference this exact same bound parameter instead of needing one of
+          // their own.
+          if (memberIds.length) deptMemberIdsParamIdx = deptParamIdx;
+          // OR (assigneeId IS NULL AND currently in this dept): an UNASSIGNED
+          // ticket sitting right now in the exact department being queried has
+          // no "wrong person" to narrow against -- nobody's credited with it at
+          // all, so the configured-member restriction (which exists to keep out
+          // tickets merely LABELED with this dept but held by someone outside
+          // its roster) has nothing to check. Excluding it anyway meant a
+          // ticket could be unambiguously, currently sitting in Migration's own
+          // queue and still never show up under "Queue: Migration" at all.
+          // Confirmed for real: CF-29619 -- current_department = 'Migration',
+          // unassigned, updated inside the selected range -- silently missing
+          // from Queue: Migration + Updated: Aug with zero other explanation.
+          const memberClause = `(${memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0'} OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($2)))`;
           // Same gap as origin/updated matching had, one layer up: this
           // membership check runs unconditionally whenever queueMembersOnly is
           // set, even when Created/Updated has already broadened department
@@ -5257,9 +5607,23 @@ async function _handleJiraPgApi(
           // rosterMatchSql already excludes 'passed' for this exact reason
           // (see its own comment re: Shiva Amuda), this was the one place in
           // Filters that still counted it.
+          //
+          // w4.user_id = ANY(memberIds): a real 'worked'/'closed' record for
+          // this dept used to count regardless of whether the person who did
+          // it is even a configured member of this dept's own queue --
+          // confirmed for real: Queue: Migration showed CF-29568/CF-29902,
+          // both genuinely commented on / reassigned while their department
+          // was Migration, but by Ravi Srivastava and Adari Venkata Jaswanth --
+          // both Dev-team members, not Migration's. Real activity, wrong
+          // department to credit it to for "who worked Migration" purposes.
+          // Restricted to memberIds whenever this dept actually has a
+          // configured queue (falls back to the old unrestricted check for a
+          // dept with no queue config at all, rather than silently excluding
+          // everything for it).
+          const workedByMemberSql = memberIds.length ? ` AND w4.user_id = ANY($${deptParamIdx}::text[])` : '';
           deptExtraClauses.push(
             broadenIt
-              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2) AND w4.reason != 'passed'))`
+              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2) AND w4.reason != 'passed'${workedByMemberSql}))`
               : memberClause
           );
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
@@ -5338,16 +5702,30 @@ async function _handleJiraPgApi(
         // statusId for a non-done category (see the queueStatusId PATCH
         // handler), so LOWER(s.name) alone can never match it; confirmed
         // for real, zero tickets in this space have a global status
-        // literally named "Routed to X". OR in the ticket's CURRENT
-        // department's own dept_statuses snapshot name, case-insensitive
-        // key match same as updatedDeptMatchSql's done-category check
-        // above, so a selected "Routed to X" filter actually finds tickets
-        // instead of silently matching nothing.
+        // literally named "Routed to X". OR in dept_statuses, keyed to the
+        // QUERIED queue ($2, deptParam) -- not i.current_department. A
+        // "Routed to X" label is recorded by the SOURCE department as its
+        // own outgoing record; the moment a ticket is genuinely routed, its
+        // current_department becomes the TARGET, not the source that wrote
+        // the label. Keying this to current_department meant "Status:
+        // Routed to Migration" could only ever match a ticket that was
+        // routed to Migration and is SOMEHOW STILL sitting in Migration's
+        // own current_department with Migration's own snapshot literally
+        // named "Routed to Migration" -- which never happens, since arriving
+        // in Migration immediately overwrites its own snapshot with an
+        // arrival status (Open/In Progress/etc). Confirmed for real:
+        // CF-29611 (Dev's own snapshot says "Routed to Migration", but
+        // current_department is Migration with Migration's own snapshot
+        // saying "Resolved") never matched this filter no matter what.
+        // Keying to deptParam -- "while it sat in the queue I'm actually
+        // viewing" -- is what this filter is supposed to mean; same queue-
+        // scoping principle already applied to the Assignee/Status DISPLAY
+        // columns (see assigneeOverride / getEffectiveIssueStatus's viewDept).
         deptExtraClauses.push(
           `(LOWER(s.name) = ANY($${deptParamIdx}::text[])
              OR EXISTS (
                SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
-               WHERE LOWER(k) = LOWER(i.current_department) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
+               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
              ))`
         );
         deptExtraParams.push(statusParam.split(',').map((s2) => s2.trim().toLowerCase()));
@@ -5358,7 +5736,16 @@ async function _handleJiraPgApi(
         // stored value can be several names joined together.
         const pmVals = projectManagerParam.split('|||').map((v) => v.trim()).filter(Boolean);
         if (pmVals.length) {
-          deptExtraClauses.push(`i."projectManager" ILIKE ANY($${deptParamIdx}::text[])`);
+          // "Others" is meant to catch tickets with no specific PM picked, too --
+          // a ticket whose projectManager was simply never set doesn't literally
+          // contain the text "Others", so it silently never matched this filter
+          // even though it conceptually belongs there. Confirmed for real:
+          // Queue: Migration + Updated: Aug + PM: Others returned only the 1
+          // ticket actually labeled "Others", with every genuinely-unset ticket
+          // invisible to this filter no matter what.
+          const hasOthers = pmVals.some((v) => v.toLowerCase() === 'others');
+          const nullClause = hasOthers ? ` OR i."projectManager" IS NULL OR i."projectManager" = ''` : '';
+          deptExtraClauses.push(`(i."projectManager" ILIKE ANY($${deptParamIdx}::text[])${nullClause})`);
           deptExtraParams.push(pmVals.map((v) => `%${v}%`));
           deptParamIdx++;
         }
@@ -5489,7 +5876,7 @@ async function _handleJiraPgApi(
       // views (All Tickets, Assigned to me, etc., which never send
       // createdRange) on the original current-department behavior.
       const workedDeptMatchSql = workedRange
-        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${workedRangeSql})
+        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${workedRangeSql})
            AND (
              (LOWER(i.current_department) = LOWER($2) AND s.category = 'done')
              OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
@@ -5519,6 +5906,11 @@ async function _handleJiraPgApi(
       // used for Updated, see updatedDeptMatchSql below) surfaces every ticket
       // someone actually worked in this dept and created in the window, not
       // just the ones this dept happened to raise itself.
+      // AND w.user_id = ANY(deptQueueMemberIds): same "genuine member of THIS
+      // dept's own queue" restriction as memberClause's broadenIt above (see
+      // its comment re: CF-29568/CF-29902) -- only applied when this dept
+      // actually has a configured queue to check against.
+      const originWorkedByMemberSql = deptMemberIdsParamIdx !== null ? ` AND w.user_id = ANY($${deptMemberIdsParamIdx}::text[])` : '';
       const originDeptMatchSql = createdRange && queueMembersOnlyParam
         ? `(
              LOWER(COALESCE(
@@ -5527,7 +5919,7 @@ async function _handleJiraPgApi(
              )) = LOWER($2)
              OR EXISTS (
                SELECT 1 FROM user_worked_on_tickets w
-               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
+               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${originWorkedByMemberSql}
              )
            )`
         : null;
@@ -5565,7 +5957,7 @@ async function _handleJiraPgApi(
                )
                OR EXISTS (
                  SELECT 1 FROM user_worked_on_tickets w
-                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
+                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${originWorkedByMemberSql}
                )
              ))
            )`
@@ -5628,7 +6020,7 @@ async function _handleJiraPgApi(
             (i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) AND LOWER(i.current_department) = LOWER($2))
             OR EXISTS (
               SELECT 1 FROM user_worked_on_tickets w
-              WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2)
+              WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
             )
           )`
         : null;
@@ -5737,10 +6129,20 @@ async function _handleJiraPgApi(
         if (historyAssigneeFilterIds && historyAssigneeFilterIds.length && rows.rows.length) {
           try {
             const issueIds = rows.rows.map((r: any) => r.id);
+            // reason != 'passed' -- same guard as every other worked-on check
+            // in this file (see the note above workedByMemberSql): a 'passed'
+            // row only means this person routed/reassigned the ticket, not
+            // that they did real work on it. Without this, a lead who just
+            // assigns tickets to their team (never touching them again) got
+            // credited here as if they'd worked every one of them -- showing
+            // their name as the Assignee for tickets they only ever handed
+            // off. Confirmed for real: Ravi Srivastava's Dev-queue tickets
+            // under an Assignee filter showed his name on tickets he'd
+            // reassigned to someone else and never worked again.
             const workedRows = await pool.query(
               `SELECT DISTINCT ON (w.issue_id) w.issue_id, w.user_id
                FROM user_worked_on_tickets w
-               WHERE w.issue_id = ANY($1::text[]) AND w.user_id = ANY($2::text[]) AND LOWER(w.dept) = LOWER($3)
+               WHERE w.issue_id = ANY($1::text[]) AND w.user_id = ANY($2::text[]) AND LOWER(w.dept) = LOWER($3) AND w.reason != 'passed'
                ORDER BY w.issue_id, w.worked_at DESC`,
               [issueIds, historyAssigneeFilterIds, deptParam]
             );
@@ -5822,7 +6224,28 @@ async function _handleJiraPgApi(
               assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
             }
           }
-          return formatIssue({
+          // Surfaced to the frontend so the Filters table can flag it inline --
+          // the ticket detail page already shows an amber "Showing <dept>'s own
+          // assignee — this ticket has since moved to <dept>" banner for this
+          // exact substitution when opened via ?viewDept=, but this table had
+          // no equivalent at all: a Migration-queue result could show a Dev or
+          // Pre-Sales person's name in the Assignee column with nothing
+          // explaining why, reading as a data bug rather than the intentional
+          // per-department historical view it actually is. Confirmed for real:
+          // CF-29568 (assignee snapshot) and CF-29902 (reporter fallback, no
+          // snapshot existed) under Queue: Migration.
+          const assigneeIsHistorical = !!assigneeOverride;
+          // Surfaced separately from assigneeIsHistorical -- that flag can
+          // also fire purely because a specific Assignee-history filter
+          // matched (historyAssigneeFilterIds), independent of whether the
+          // ticket actually left this queue. The Status column needs the
+          // narrower "did this ticket specifically move away from the
+          // queried queue" signal on its own, so the frontend can show the
+          // queue's own dept_statuses snapshot (same fix already applied to
+          // Assignee) instead of the ticket's current, possibly
+          // different-department status with no indication why it disagrees
+          // with the Assignee column sitting right next to it.
+          return { ...formatIssue({
           // Truncated — see comment above the other formatIssue list call site.
           // This branch's SELECT i.* pulls the full raw description for every
           // row; a single legacy ticket with a base64-embedded image in it can
@@ -5844,13 +6267,14 @@ async function _handleJiraPgApi(
           jira_sla_breached: row.jira_sla_breached,
           jira_sla_due_at: row.jira_sla_due_at,
           jira_sla_start_at: row.jira_sla_start_at,
+          sla_waivers: row.sla_waivers,
           status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
           assignee: assigneeOverride || (row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null),
           reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) } : null,
           jira_assignee_name: row.jira_assignee_name || null,
           jira_reporter_name: row.jira_reporter_name || null,
           space: { key: row.space_key || spaceKey },
-        });
+        }), assigneeIsHistorical, movedAwayFromQueue };
         });
       } catch { /* keep Prisma results as fallback */ }
     }
@@ -5875,7 +6299,19 @@ async function _handleJiraPgApi(
       }
       const nowMs = Date.now();
       enrichedIssues = enrichedIssues.map((i: any) => {
-        const isResolved = i.status?.category === 'done';
+        // Same dept_statuses fallback computeSLAInstancesPure uses (see its
+        // own long comment) -- a ticket can visibly show "Resolved" via its
+        // per-department status snapshot while the real statusId column
+        // never caught up. Checking only i.status?.category here (as this
+        // block did before) let such a ticket keep ticking its live-clock
+        // breach projection forever on the Filters table/export, even
+        // though the ticket detail page's own SLA panel (which already used
+        // this fallback) correctly stopped the clock for it.
+        const issueDeptForStatus = (i.current_department || '').trim().toLowerCase();
+        const deptStatusesForStatus: Record<string, any> = i.dept_statuses || {};
+        const deptStatusKeyForStatus = Object.keys(deptStatusesForStatus).find((k) => k.toLowerCase() === issueDeptForStatus);
+        const deptStatusCategoryForStatus = deptStatusKeyForStatus ? deptStatusesForStatus[deptStatusKeyForStatus]?.category : undefined;
+        const isResolved = i.status?.category === 'done' || deptStatusCategoryForStatus === 'done';
         // Historical breach imported from Jira (L2B/L3B) always counts, even
         // for a ticket that's since been resolved here -- the checks below
         // all force `breached` back to false once resolved, which is right
@@ -5890,7 +6326,20 @@ async function _handleJiraPgApi(
         // against. Track whether any policy actually applies to this
         // ticket's department so the final value below can report "N/A"
         // instead of a misleading "not breached".
-        const dept = (i.current_department || '').trim().toLowerCase();
+        //
+        // Scoped to the QUERIED department (deptParam, e.g. viewing the Dev
+        // queue) when one is active, not always i.current_department -- a
+        // ticket that breached Migration's own SLA after moving on from Dev
+        // was showing "Breached: Yes" (with Migration's name/dept attached)
+        // even inside a Dev-scoped export, when Dev's own time-in-department
+        // never came close to its own SLA goal. Confirmed for real: CF-30766
+        // spent ~19.7h in Migration against its 10h goal (genuinely breached
+        // there) but only ~2h in Dev against Dev's own, much longer goal --
+        // a Dev queue view/export should show "No" for it, only Migration's
+        // own view should show "Yes". Plain (non-dept-scoped) views like "My
+        // Tickets" have no deptParam and keep using current_department, same
+        // as before.
+        const dept = (deptParam || i.current_department || '').trim().toLowerCase();
         const hasApplicablePolicy = (policiesBySpace[i.spaceId] || []).some((p: any) => {
           const pDept = (p.dept_name || '').trim().toLowerCase();
           return !pDept || pDept === dept;
@@ -5912,6 +6361,16 @@ async function _handleJiraPgApi(
               const pDept = (p.dept_name || '').trim().toLowerCase();
               return !pDept || pDept === dept;
             });
+            // An admin can waive a specific policy's breach on a specific
+            // ticket (see the "SLA Breach Waiver" endpoint and
+            // computeSLAInstancesPure's own `waiver ? false : rawIsBreached`
+            // on the ticket detail page). This recompute never looked at
+            // sla_waivers at all, so a ticket waived on the detail page
+            // (correctly showing "resolved in time" there) still elapsed-
+            // computed straight to "Breached: Yes" here, e.g. in the
+            // Filters-page export. Confirmed for real: CF-30920, CF-30911,
+            // CF-29386.
+            const waivers: Record<string, any> = i.sla_waivers || {};
             for (const policy of policies) {
               const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
                 ? policy.pauseStatuses.map((s: string) => s.trim().toLowerCase())
@@ -5957,7 +6416,22 @@ async function _handleJiraPgApi(
               // common one (a ticket resolved on its first and only stint in
               // this department).
               const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
-              if (isResolved) {
+              const waiver = waivers[policy.id] || null;
+              // The "project forward with remaining budget vs now" formula
+              // below is only valid while THIS department's clock is
+              // actually still running -- true when there's no dept scope
+              // at all, or when the queried department (dept, now possibly
+              // deptParam) IS the ticket's current one. When deptParam scopes
+              // to a department the ticket has since moved AWAY from while
+              // still unresolved, that department's clock is paused (same
+              // as the resolved case below) -- its own accumulated
+              // priorElapsedMs is everything there is to compare, not a
+              // live-ticking projection using slaStartedAt, which reflects
+              // whichever OTHER department is currently active, not this one.
+              const deptClockIsLive = isResolved
+                ? false
+                : !deptParam || (i.current_department || '').trim().toLowerCase() === dept;
+              if (isResolved || !deptClockIsLive) {
                 // The clock is frozen -- priorElapsedMs already reflects the
                 // FULL total time logged across every period up to and
                 // including the one that just ended (pauseDeptSLA folds it
@@ -5966,10 +6440,10 @@ async function _handleJiraPgApi(
                 // formula below (slaStartedAt + remaining vs "now") would
                 // double-count that same just-ended period on top of itself
                 // if reused here across more than one pause/resume cycle.
-                if (priorElapsedMs >= durationMs) { breached = true; break; }
+                if (priorElapsedMs >= durationMs && !waiver) { breached = true; break; }
               } else {
                 const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
-                if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs) { breached = true; break; }
+                if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs && !waiver) { breached = true; break; }
               }
             }
           }
@@ -6019,8 +6493,20 @@ async function _handleJiraPgApi(
     // hasn't been "caused" by anyone yet, so attributing it to whoever most
     // recently touched its (still not-done) status would just be noise.
     try {
+      // Same dept_statuses fallback as the isResolved check above -- a
+      // ticket resolved only per its per-department status snapshot (real
+      // statusId column not yet caught up) was silently excluded here,
+      // so it never got an "SLA Breached By" attribution even though
+      // sla_breached was already correctly true for it.
+      const isResolvedForAttribution = (i: any) => {
+        if (i.status?.category === 'done') return true;
+        const dept = (i.current_department || '').trim().toLowerCase();
+        const deptStatuses: Record<string, any> = i.dept_statuses || {};
+        const key = Object.keys(deptStatuses).find((k) => k.toLowerCase() === dept);
+        return key ? deptStatuses[key]?.category === 'done' : false;
+      };
       const breachedIds = enrichedIssues
-        .filter((i: any) => i.sla_breached && i.status?.category === 'done')
+        .filter((i: any) => i.sla_breached && isResolvedForAttribution(i))
         .map((i: any) => i.id);
       if (breachedIds.length) {
         const breachHistRows = await pool.query(
@@ -6036,6 +6522,17 @@ async function _handleJiraPgApi(
         );
       }
     } catch { /* attribution is best-effort — never block the list on it */ }
+
+    // Which department a breach belongs to -- shown right alongside "by
+    // <name>" above, since a plain "SLA Breached: Yes" says nothing about
+    // where. Uses the ticket's CURRENT department, matching the exact same
+    // rule reports/mbr-team just adopted for its own SLA-breach counts (a
+    // breach belongs to whichever department the ticket is in now, not
+    // wherever it originated) -- Filters and MBR need to agree on this, not
+    // run two different definitions of "which dept" side by side.
+    enrichedIssues = enrichedIssues.map((i: any) =>
+      i.sla_breached ? { ...i, sla_breached_dept: i.current_department || null } : i
+    );
 
     if (includeTimeSpentParam && enrichedIssues.length) {
       try {
@@ -6262,7 +6759,17 @@ async function _handleJiraPgApi(
             }
           } catch {}
           const queueOpenStatus = queueStatuses.find((s: any) => s.category === 'todo') || queueStatuses[0];
-          const initStatus = queueOpenStatus || openStatus || sp.statuses[0];
+          // issue.status is whatever the create form actually submitted
+          // (via body.statusId, resolved into `finalStatus` above) -- it must
+          // win over the queue's own default "open" status. Confirmed for
+          // real: picking "Resolved" in Create Issue for a department/queue
+          // ticket still showed "Open" right after creation, because this
+          // snapshot used to always seed itself from queueOpenStatus and
+          // ignore whatever status the ticket was actually created with.
+          // queueOpenStatus/openStatus only matter now as a fallback for the
+          // (effectively unreachable) case where the issue came back with no
+          // status at all.
+          const initStatus = issue.status || queueOpenStatus || openStatus || sp.statuses[0];
           const initDeptStatuses = initStatus
             ? JSON.stringify({ [deptToSet]: { id: initStatus.id, name: initStatus.name, color: initStatus.color, category: initStatus.category } })
             : '{}';
@@ -7193,23 +7700,31 @@ async function _handleJiraPgApi(
                 };
                 slaBreachRefresh = extractJiraSlaBreach(f);
               }
-            } else if (issue.summary) {
-              // Title-based search in CFITS for L1BOAR tickets
-              const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-              const jql = encodeURIComponent(`project=CFITS AND summary ~ "${issue.summary.replace(/"/g, ' ').slice(0, 80)}" ORDER BY updated DESC`);
-              const srRes = await fetch(
-                `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=5&fields=summary,${JIRA_CUSTOM_FIELDS}`,
-                { headers: { Authorization: creds.authHdr, Accept: 'application/json' } }
-              );
-              if (srRes.ok) {
-                const srData = await srRes.json();
-                const localNorm = norm(issue.summary);
-                const match = (srData.issues || []).find((ji: any) => {
-                  const jNorm = norm(ji.fields?.summary || '');
-                  return jNorm === localNorm || (jNorm.length >= 15 && (jNorm.includes(localNorm.slice(0, 60)) || localNorm.includes(jNorm.slice(0, 60))));
-                });
-                if (match) {
-                  const f = match.fields || {};
+            } else {
+              // Direct lookup by the ticket's own jira_source_key -- the
+              // authoritative mapping importCfitsIssue itself sets at import
+              // time -- instead of a fuzzy title search. That search had no
+              // check for whether this L1BOAR ticket was ever actually
+              // CFITS-imported at all: it ran for EVERY L1BOAR ticket,
+              // matching by summary text against real Jira issues it had no
+              // real connection to, and importing THEIR SLA breach status
+              // (and other Jira-sourced fields) onto a purely local ticket.
+              // Confirmed for real: CF-29941, CF-29460, CF-29312 are all
+              // genuinely local-only tickets (created directly in the app,
+              // no jira_source_key, own history starts with "Issue created
+              // by <a real person>") that ended up with jira_sla_breached
+              // stamped true anyway. A ticket with no jira_source_key has
+              // nothing to refresh from Jira -- leave it alone entirely.
+              const sourceRow = await pool.query(`SELECT jira_source_key FROM issues WHERE id = $1`, [issue.id]);
+              const realJiraKey = sourceRow.rows[0]?.jira_source_key;
+              if (realJiraKey) {
+                const cfRes = await fetch(
+                  `${creds.base}/rest/api/3/issue/${realJiraKey}?fields=${JIRA_CUSTOM_FIELDS}`,
+                  { headers: { Authorization: creds.authHdr, Accept: 'application/json' } }
+                );
+                if (cfRes.ok) {
+                  const d = await cfRes.json();
+                  const f = d.fields || {};
                   jiraFields = {
                     customerName:   extractJiraValue(f.customfield_10401),
                     clientName:     extractJiraValue(f.customfield_10883),
@@ -7836,8 +8351,30 @@ async function _handleJiraPgApi(
       try {
         const qRow = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE key=$1 LIMIT 1`, [key]);
         const dept: string = qRow.rows[0]?.current_department;
+        // Guard against a stale-department race. The frontend built
+        // queueStatusId/Name/Color/Category from the queue-status dropdown of
+        // WHATEVER department it had rendered (queueStatusDept, sent alongside
+        // them) -- but current_department can change between that render and
+        // this PATCH actually landing (another handoff, a second rapid click,
+        // etc.). Without this check, a status picked for department X got
+        // written into deptStatuses[freshly-read current department] below
+        // regardless of whether that still matched X, silently mislabeling
+        // whatever department the ticket had already moved to with a status
+        // object that belongs to a different one. Confirmed for real on
+        // CF-29456: dept_statuses["Dev"] ended up holding id
+        // "qst_migration_resolved" -- a Migration-flavored queue status --
+        // because the department changed out from under an in-flight request.
+        // Reject instead of silently corrupting the snapshot; the frontend's
+        // catch block already reverts its optimistic update and surfaces the
+        // message via alert(). Old clients that don't send queueStatusDept
+        // yet skip this check (unchanged, pre-fix behavior) rather than being
+        // blocked outright.
+        if (dept && body.queueStatusDept && String(body.queueStatusDept).trim().toLowerCase() !== dept.trim().toLowerCase()) {
+          return json({ error: `This ticket has moved to ${dept} since you opened it — refresh and try again.` }, 409);
+        }
         if (dept) {
           const deptStatuses: Record<string, any> = qRow.rows[0]?.dept_statuses || {};
+          const oldDeptStatusObjForRollback = deptMapGet(deptStatuses, dept) || null;
           const oldQueueStatusName = deptMapGet(deptStatuses, dept)?.name || 'Unknown';
           const oldQueueStatusCategory = deptMapGet(deptStatuses, dept)?.category || 'todo';
           const queueStatusEntry = {
@@ -7997,6 +8534,31 @@ async function _handleJiraPgApi(
                 console.log(`[DeptHandoff] ${issue.key}: ${queueHandoffOldDept} → ${queueHandoffTargetDept} (via queue status)`);
               } catch (handoffErr: any) {
                 console.error(`[DeptHandoff ERROR - queueStatus] ${issue.key}:`, handoffErr?.message || handoffErr);
+              }
+              if (!queueHandoffDone) {
+                // performDeptHandoff threw -- this used to fall through silently:
+                // dept_statuses[dept] was already committed to the picked "Routed
+                // to X" label a few lines above, so the response still returned
+                // 200 with the label showing, while current_department never
+                // actually moved. That's exactly the confusing half-state
+                // reported for real on CF-29525 -- status pill said "Routed to
+                // Dev" (Migration's own dept_statuses entry, legitimately
+                // recording what Migration just tried to do) while Department
+                // stayed on Migration, because the actual handoff silently died
+                // and nothing ever told the client. Roll dept_statuses[dept]
+                // back to what it was before this action and return a real
+                // error instead -- the frontend's existing catch block already
+                // reverts its optimistic patch and alert()s the message.
+                try {
+                  const rollbackRow = await pool.query(`SELECT dept_statuses FROM issues WHERE key=$1 LIMIT 1`, [key]);
+                  const rollbackDeptStatuses: Record<string, any> = rollbackRow.rows[0]?.dept_statuses || {};
+                  if (oldDeptStatusObjForRollback) deptMapSet(rollbackDeptStatuses, dept, oldDeptStatusObjForRollback);
+                  else deptMapDelete(rollbackDeptStatuses, dept);
+                  await pool.query(`UPDATE issues SET dept_statuses=$1::jsonb, "updatedAt"=NOW() WHERE key=$2`, [JSON.stringify(rollbackDeptStatuses), key]);
+                } catch (rollbackErr: any) {
+                  console.error(`[DeptHandoff ROLLBACK ERROR] ${issue.key}:`, rollbackErr?.message || rollbackErr);
+                }
+                return json({ error: `Could not route this ticket to ${queueHandoffTargetDept} — please try again.` }, 500);
               }
             } else {
               // A queue-scoped status that's neither done, a from-done reopen,
@@ -8688,8 +9250,21 @@ async function _handleJiraPgApi(
       // assignee-change action itself shouldn't ALSO write a 'worked' credit
       // for whoever clicked the dropdown, self-assign included: only a real
       // action (status change) is evidence of actually working the ticket.
+      //
+      // That reasoning had a gap: a status change is only real evidence of
+      // work when the person making it is ALSO the one left holding the
+      // ticket. A lead triaging an unassigned ticket -- routing it to a
+      // specific developer AND bumping its status in the same request --
+      // isn't doing the work themselves, but this still credited them with
+      // 'worked'. Confirmed for real: 36 of Ravi Srivastava's 46 August
+      // 'worked'/'closed' Dev credits landed at the exact same moment he
+      // reassigned the ticket away (mostly null -> a specific developer),
+      // so he'd never actually held it. Skip the credit whenever this same
+      // request is ALSO reassigning the ticket to someone other than the
+      // person making the change -- that's routing, not working it.
+      const reassigningToSomeoneElse = data.assigneeId !== undefined && data.assigneeId !== userId;
       const workedDept: string | null = (updated as any).current_department || null;
-      if (userId && workedDept && statusChangedNow) {
+      if (userId && workedDept && statusChangedNow && !reassigningToSomeoneElse) {
         await pool.query(
           `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
            ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET worked_at=NOW()`,
@@ -9814,9 +10389,28 @@ async function _handleJiraPgApi(
       dateClause = ` AND (${updatedConds.join(' AND ')})`;
     }
     let deptClause = '';
+    let personDeptClause = '';
     if (department) {
       filterParams.push(department);
       const dIdx = filterParams.length;
+      // personRows' hygiene metrics (stale/missing/overdue/no_closure/
+      // screenshots) describe a ticket's LIVE state right now -- a ticket
+      // that's since moved to a different department isn't part of THIS
+      // department's current hygiene picture anymore, no matter how it
+      // originated or who once worked it there. deptClause below
+      // deliberately broadens to include such tickets for the totals/ticket
+      // list (see its own comment), but reusing that same broadened match
+      // for personRows pulled a moved-on ticket into the selected
+      // department's per-person table anyway, credited to whoever CURRENTLY
+      // holds it -- even though personRows groups by i.current_department,
+      // which for that ticket is a DIFFERENT department than the one
+      // selected. Confirmed for real: selecting "Dev" could show a person
+      // with no real Dev involvement, holding a ticket that only ever
+      // touched Dev via a stale worked-on record before moving to
+      // Migration. Scope this one query to the strict current-department
+      // match instead, same restriction Filters already applies to a plain
+      // department-board view.
+      personDeptClause = ` AND LOWER(i.current_department) = LOWER($${dIdx})`;
       // Was a plain current_department match -- narrower than Filters' own
       // "Queue: X" scope (queueMembersOnlyParam/originDeptMatchSql/
       // updatedDeptMatchSql/deptScopeSql above), which also counts a ticket
@@ -9850,17 +10444,53 @@ async function _handleJiraPgApi(
         COUNT(*) FILTER (WHERE s.category != 'done') AS open,
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."assigneeId" IS NULL) AS unassigned,
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."createdAt" <= now() - interval '30 days') AS old30,
-        COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
-        COUNT(*) FILTER (WHERE s.category != 'done' AND (i.jira_sla_breached = true OR i."dueDate" < now())) AS sla_breached
+        COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue
       FROM issues i LEFT JOIN statuses s ON i."statusId" = s.id
       WHERE i.current_department IS NOT NULL AND i.current_department != ''
         ${dateClause}${deptClause}
       GROUP BY i.current_department
       ORDER BY open DESC
     `, filterParams);
+
+    // SLA breach, computed the same way as everywhere else in the app
+    // (computeSLAInstancesPure, honoring sla_waivers and each policy's own
+    // goal duration/dept_sla_log elapsed carryover) instead of the raw
+    // "jira_sla_breached OR dueDate<now(), open tickets only" formula this
+    // used to hand-roll. That formula couldn't see a waived breach (still
+    // showed "Yes" here after an admin waived it everywhere else) AND, by
+    // gating on s.category != 'done', silently excluded every resolved
+    // ticket entirely -- a ticket resolved 3 days late showed "not
+    // breached" here purely because it was done, the same undercount bug
+    // already fixed for the dept-queue Summary sidebar (commit 92b3094).
+    const slaRawRows = await pool.query(`
+      SELECT i.id, i."spaceId", i.current_department AS dept, i.priority, i."createdAt",
+        i.dept_sla_started_at, i.dept_sla_log, i."resolvedAt", i.sla_waivers, i.jira_sla_breached,
+        s.name AS status_name, s.category AS status_category
+      FROM issues i LEFT JOIN statuses s ON i."statusId" = s.id
+      WHERE i.current_department IS NOT NULL AND i.current_department != ''
+        ${dateClause}${deptClause}
+    `, filterParams);
+    const slaSpaceIds = Array.from(new Set(slaRawRows.rows.map((r: any) => r.spaceId).filter(Boolean)));
+    const slaPoliciesBySpace: Record<string, any[]> = {};
+    if (slaSpaceIds.length) {
+      const slaPolRows = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`, [slaSpaceIds]);
+      for (const p of slaPolRows.rows) (slaPoliciesBySpace[p.spaceId] ??= []).push(p);
+    }
+    const slaBreachedByIssue: Record<string, boolean> = {};
+    const slaBreachedByDept: Record<string, number> = {};
+    for (const r of slaRawRows.rows) {
+      const instances = computeSLAInstancesPure(
+        { ...r, current_department: r.dept, status: { name: r.status_name, category: r.status_category } },
+        slaPoliciesBySpace[r.spaceId] || [],
+        false
+      );
+      const breached = instances.length ? instances.some((x: any) => x.isBreached) : !!r.jira_sla_breached;
+      slaBreachedByIssue[r.id] = breached;
+      if (breached) slaBreachedByDept[r.dept] = (slaBreachedByDept[r.dept] || 0) + 1;
+    }
     console.log('[DEBUG mbr-department-tab]', JSON.stringify({
       dateFrom, dateTo, department,
-      rows: deptRows.rows.map((r: any) => ({ dept: r.dept, open: r.open, unassigned: r.unassigned, old30: r.old30, overdue: r.overdue, sla_breached: r.sla_breached })),
+      rows: deptRows.rows.map((r: any) => ({ dept: r.dept, open: r.open, unassigned: r.unassigned, old30: r.old30, overdue: r.overdue, sla_breached: slaBreachedByDept[r.dept] || 0 })),
     }));
 
     const staleParams = [...filterParams, staleDays];
@@ -9881,7 +10511,7 @@ async function _handleJiraPgApi(
       LEFT JOIN statuses s ON i."statusId" = s.id
       LEFT JOIN users u ON u.id = i."assigneeId"
       WHERE i."assigneeId" IS NOT NULL AND i.current_department IS NOT NULL AND i.current_department != ''
-        ${dateClause}${deptClause}
+        ${dateClause}${personDeptClause}
       GROUP BY i.current_department, i."assigneeId", u."firstName", u."lastName", u.email
     `, staleParams);
 
@@ -9893,11 +10523,10 @@ async function _handleJiraPgApi(
     // safety limit -- totalMatched + the "(capped)" UI note stay honest if
     // this is ever actually hit.
     const ticketRows = await pool.query(`
-      SELECT COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name, i.current_department AS dept,
+      SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name, i.current_department AS dept,
         COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
         COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
         s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
-        (i.jira_sla_breached = true OR (s.category != 'done' AND i."dueDate" < now())) AS sla_breached,
         COUNT(*) OVER() AS total_matched
       FROM issues i
       LEFT JOIN statuses s ON i."statusId" = s.id
@@ -9921,7 +10550,7 @@ async function _handleJiraPgApi(
       summary: r.summary || '',
       created: r.createdAt,
       updated: r.updatedAt,
-      slaBreached: !!r.sla_breached,
+      slaBreached: !!slaBreachedByIssue[r.id],
     }));
 
     const departments = deptRows.rows.map((r: any) => ({
@@ -9930,7 +10559,7 @@ async function _handleJiraPgApi(
       unassigned: Number(r.unassigned) || 0,
       old30: Number(r.old30) || 0,
       overdue: Number(r.overdue) || 0,
-      slaBreached: Number(r.sla_breached) || 0,
+      slaBreached: slaBreachedByDept[r.dept] || 0,
     }));
 
     // Selecting a department's per-person list should only show people who
@@ -10283,21 +10912,40 @@ async function _handleJiraPgApi(
     // to someone else from an unassigned state, which is exactly this
     // fallback case writing 'passed' under his name. 'worked'/'closed'/
     // 'returned' all still mean genuine involvement and stay valid evidence.
+    // AND w.user_id IN (roster): a real worked-on-$1 record used to count
+    // regardless of whether the person who did it is even a member of $1's
+    // own team roster -- confirmed for real: Queue: Migration in Filters
+    // showed CF-29568 (real comment/reassignment logged while its department
+    // was Migration) credited to Ravi Srivastava, a Dev-team member, not
+    // Migration's. Real activity, wrong department to credit it to. $2
+    // (roster) is already exactly this team's own member list (live queue
+    // emails for eng/qa/infra, the fixed list for ent/smb), so no extra
+    // lookup is needed to restrict both checks below to it.
     const deptMatchSql = `(
       LOWER(i.current_department) = LOWER($1)
       OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($1) AND LOWER(v->>'category') = 'done')
-      OR EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND w.reason != 'passed')
+      OR EXISTS (
+        SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
+        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND w.reason != 'passed' AND LOWER(wu.email) = ANY($2::text[])
+      )
     )`;
     // Roster/member scope: current assignee is a configured queue member, OR
-    // anyone at all has a genuine worked-on-in-$1 record -- again, no roster
-    // restriction on that worked-on branch (Filters' memberClause OR EXISTS
-    // pattern). A ticket can pass deptMatchSql+rosterMatchSql via a
-    // non-roster worker's history, which is why the ticket table's assignee
-    // display below can legitimately show a name outside the roster list --
-    // that's Filters' own real behavior too, not a bug to hide.
+    // a genuine member of $1's own roster has a worked-on-in-$1 record, OR
+    // (mirrors Filters' own memberClause fix exactly) the ticket is
+    // UNASSIGNED and currently sitting right in dept $1 -- nobody's credited
+    // with it at all, so there's no "wrong person" for the roster check to
+    // exclude; it's unambiguously this dept's own queue work regardless of
+    // team split. For ent/smb specifically this means an unassigned Migration
+    // ticket can show under BOTH tabs (there's no way to know which of the
+    // two it would have gone to), same as a genuinely-worked-by-both-teams
+    // ticket already legitimately can.
     const rosterMatchSql = `(
       EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
-      OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND w4.reason != 'passed')
+      OR EXISTS (
+        SELECT 1 FROM user_worked_on_tickets w4 JOIN users wu4 ON wu4.id = w4.user_id
+        WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND w4.reason != 'passed' AND LOWER(wu4.email) = ANY($2::text[])
+      )
+      OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($1))
     )`;
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
@@ -12195,6 +12843,74 @@ async function _handleJiraPgApi(
       return json({ checked, fixed, breachedFound });
     } catch (e: any) {
       console.error('[backfill-sla-breach] failed:', e?.message || e);
+      return json({ error: 'Backfill failed', details: e?.message }, 500);
+    }
+  }
+
+  // POST /admin/backfill-root-cause-fix-description -- one-time correction
+  // for L2B/L3B (Dev queue): Root Cause and Fix Description are rich-text
+  // ADF fields in Jira (customfield_10059 / customfield_10402), the same
+  // shape as the ticket description, but extractJiraValue only knew how to
+  // read plain values/selects -- it silently returned null for an ADF doc
+  // (see adfNodeToPlainText and its call site above), so every sync of
+  // these two fields wrote nothing, no matter what was actually typed in
+  // Jira. Confirmed for real: L2B-15994, L2B-15986, L3B-656, L3B-510 all
+  // have genuine Root Cause / Fix Description text in Jira that read as
+  // completely empty here -- 16,563 L2B/L3B tickets had both fields NULL
+  // locally. The ongoing sync is fixed for anything touched from now on;
+  // this one-time pass reconciles everything already imported, batched 100
+  // keys per request like the other backfills above. Idempotent via its own
+  // app_settings flag; only overwrites a local field when Jira actually has
+  // real content for it, never clobbers a value someone typed directly here.
+  if (path === 'admin/backfill-root-cause-fix-description' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+      const already = await pool.query(`SELECT 1 FROM app_settings WHERE key = 'root_cause_fix_desc_backfill_v1_done'`);
+      if (already.rows.length > 0 && url.searchParams.get('force') !== 'true') {
+        return json({ checked: 0, fixed: 0, alreadyRan: true });
+      }
+
+      const creds = await getJiraCredentials();
+      const rows = await pool.query(`SELECT id, key FROM issues WHERE key LIKE 'L2B-%' OR key LIKE 'L3B-%'`);
+      const byKey = new Map(rows.rows.map((r: any) => [r.key, r.id]));
+      const keys = rows.rows.map((r: any) => r.key);
+      const batches: string[][] = [];
+      for (let i = 0; i < keys.length; i += 100) batches.push(keys.slice(i, i + 100));
+
+      let checked = 0, fixed = 0;
+      for (const batch of batches) {
+        const jql = encodeURIComponent(`issuekey in (${batch.map((k) => `"${k}"`).join(',')})`);
+        const res = await fetch(`${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=100&fields=customfield_10059,customfield_10402`, {
+          headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+          signal: AbortSignal.timeout(15000),
+        }).catch(() => null);
+        if (!res || !res.ok) continue;
+        const data: any = await res.json().catch(() => null);
+        if (!data || !Array.isArray(data.issues)) continue;
+        for (const jiraIssue of data.issues) {
+          checked++;
+          const localId = byKey.get(jiraIssue.key);
+          if (!localId) continue;
+          const rootCause = extractJiraValue(jiraIssue.fields?.customfield_10059);
+          const fixDescription = extractJiraValue(jiraIssue.fields?.customfield_10402);
+          if (rootCause === null && fixDescription === null) continue; // genuinely nothing in Jira -- leave existing value alone
+          await pool.query(
+            `UPDATE issues SET "rootCause" = COALESCE($1, "rootCause"), "fixDescription" = COALESCE($2, "fixDescription") WHERE id = $3`,
+            [rootCause, fixDescription, localId]
+          );
+          fixed++;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      await pool.query(
+        `INSERT INTO app_settings (key, value) VALUES ('root_cause_fix_desc_backfill_v1_done', 'true')
+         ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW()`
+      );
+      return json({ checked, fixed });
+    } catch (e: any) {
+      console.error('[backfill-root-cause-fix-description] failed:', e?.message || e);
       return json({ error: 'Backfill failed', details: e?.message }, 500);
     }
   }

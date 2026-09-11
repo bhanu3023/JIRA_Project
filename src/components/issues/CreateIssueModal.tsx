@@ -77,6 +77,16 @@ const MIGRATION_SECTION_LABELS = [
 // kind of non-migration board, so it gets the same exemption.
 const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB']);
 
+// IT Administration has no department/queue concept at all -- confirmed for
+// real (IA-25, twice: once via the cross-space initialDept leak fixed above,
+// and again via a ticket created while already scoped to IA with an
+// initialDept carried in from a queue URL, which never goes through that
+// space-switch handler at all since selectedSpaceKey never changes). Any
+// custom_queues row that exists for this space (e.g. auto-recreated by
+// seed-queues.mjs off a stray current_department value) must never surface
+// as a selectable Queue here, or the same leak reproduces indefinitely.
+const NO_DEPARTMENT_SPACE_KEYS = new Set(['IA']);
+
 // Only shown/required for the Infra department -- distinguishes what kind of
 // Infra work a ticket actually needs (DB access vs. a server rebuild vs. a
 // Grafana/Metabase change, etc.), which nothing else on the form captures.
@@ -278,7 +288,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     summary: '',
     description: '',
     type: 'task', priority: 'medium',
-    assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[], department: initialDept || '',
+    assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[],
+    department: NO_DEPARTMENT_SPACE_KEYS.has(spaceKey.toUpperCase()) ? '' : (initialDept || ''),
     productType: [] as string[], projectManager: [] as string[], productionTicket: '',
     projectPool: '', infraIssueType: '',
   });
@@ -515,7 +526,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         productionTicket: form.productionTicket || undefined,
         projectPool: form.projectPool || undefined,
         infraIssueType: form.infraIssueType || undefined,
-        ...(form.department ? { department: form.department } : initialDept ? { department: initialDept } : {}),
+        ...(form.department
+          ? { department: form.department }
+          : initialDept && !NO_DEPARTMENT_SPACE_KEYS.has(selectedSpaceKey.toUpperCase())
+          ? { department: initialDept }
+          : {}),
       });
       // Save custom field values
       if (newIssue?.id) {
@@ -551,7 +566,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // Non-admins only see queues they're a member of (and not suspended from) — same
   // access rule as the Queues overview page, so this list matches what they can open.
   const isAdmin = user?.role === 'admin';
-  const queueOptions = Array.from(new Set(
+  const queueOptions = NO_DEPARTMENT_SPACE_KEYS.has(selectedSpaceKey.toUpperCase()) ? [] : Array.from(new Set(
     spaceQueues
       .filter(q => !!q.dept)
       .filter(q => isAdmin || (

@@ -1024,7 +1024,18 @@ export default function FiltersPage() {
   // first, silently cut off everything before roughly mid-August). The
   // Prev/Next control added alongside this stays as a safety net only for
   // the rare case a filter (or no filter at all) matches more than 1000.
-  const PAGE_SIZE = 1000;
+  // Confirmed for real via DevTools Network tab: an unfiltered view's
+  // issues fetch was taking 11+ seconds and transferring 2.64MB (1000 full
+  // issue objects, each with nested status/assignee/reporter) -- exactly
+  // what the comment at this constant's own use-site already described as
+  // the problem, but the constant itself had drifted back up to 1000 at
+  // some point independent of that comment. The OTHER historical bug this
+  // value's size was once entangled with (the render loop silently only
+  // ever showing the first 100 of whatever was fetched, regardless of
+  // PAGE_SIZE) is a separate, already-fixed issue -- see the comment above
+  // the issues.map() render loop -- so lowering this again does not
+  // reintroduce it.
+  const PAGE_SIZE = 100;
   const [page, setPage] = useState(1);
   const [loadingIssues, setLoadingIssues] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1246,7 +1257,21 @@ export default function FiltersPage() {
   const filteredSpacesForStatus = selSpaces.length > 0
     ? spaces.filter((sp: any) => selSpaces.includes(sp.key))
     : spaces;
-  const ALLOWED_STATUSES = new Set(['open', 'in progress', 'waiting for dev', 'waiting for migration', 'waiting for qa', 'waiting for infra', 'resolved']);
+  // "waiting for X" entries kept for backward compatibility with any space
+  // whose real statuses table still literally has one (distinct from the
+  // dept_statuses virtual routing labels this session renamed to "Routed to
+  // X") -- but this hardcoded list never included the new "routed to X"
+  // names at all, so even a real status genuinely named "Routed to Dev"
+  // would be silently filtered out of the dropdown regardless of any
+  // backend/data fix. Confirmed for real: the Status dropdown kept showing
+  // "Waiting for Dev"/"Waiting for Migration"/"Waiting for Infra" no matter
+  // what got fixed elsewhere, because this allowlist -- not ticket data or
+  // queue config -- is what actually gates this dropdown's options.
+  const ALLOWED_STATUSES = new Set([
+    'open', 'in progress', 'resolved',
+    'waiting for dev', 'waiting for migration', 'waiting for qa', 'waiting for infra',
+    'routed to dev', 'routed to migration', 'routed to qa', 'routed to infra',
+  ]);
   const availableStatuses: { value: string; label: string }[] = Array.from(
     new Map([
       ...filteredSpacesForStatus
@@ -1319,16 +1344,20 @@ export default function FiltersPage() {
 
         if (selAssignees.length) {
           params.assignees = Array.from(new Set(selAssignees.flatMap(expandMember))).join(',');
-          // Queue + Assignee together should mean "did this person work this
-          // dept's tickets", not "is this person the ticket's CURRENT owner
-          // right now" -- without this, a ticket this person genuinely
-          // worked here (e.g. resolved it) but which has since moved to
-          // another department and been reassigned there silently drops out,
-          // even though it's exactly the kind of ticket this combination is
-          // meant to surface. Backend already supports this (includeHistory
-          // folds in user_worked_on_tickets alongside the plain current-
-          // assignee match) -- just never wired up from this page before.
-          if (selQueue) params.includeHistory = 'true';
+          // Queue + Assignee means "who currently holds this ticket in this
+          // dept" -- NOT "who has ever worked it here". includeHistory used
+          // to be forced on for every Queue+Assignee combination (to surface
+          // a ticket someone resolved here but which has since moved on and
+          // been reassigned elsewhere), but that made it the unconditional
+          // default rather than an opt-in view, and confirmed for real: Ravi
+          // Srivastava's Dev queue showed dozens of Migration/QA/Pre-Sales
+          // tickets under his name that he'd genuinely worked once but had
+          // long since been reassigned away from, with nothing to suggest he
+          // wasn't still the current owner. Plain current-assignee matching
+          // (the `assignees` param alone, no includeHistory) is what this
+          // combination should mean by default now -- see workedRange
+          // (the "Worked" date-filter mode) for the still-available
+          // deliberate "who did the work" view.
         }
 
         if (selReporters.length) {
@@ -1373,26 +1402,47 @@ export default function FiltersPage() {
         return params;
   }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
 
-  /* fetch issues — all filtering done server-side for accuracy */
+  /* fetch issues — all filtering done server-side for accuracy.
+     Short (150ms) debounce -- NOT the old flat 400ms, which made every
+     single filter click feel sluggish (already fixed once this session).
+     But removing debouncing entirely turned out to have its own real
+     problem: several of these filters (Assignee, Type, Status, Priority)
+     are multi-select checkboxes that call onChange on every single click,
+     with no "Apply" step -- selecting several values in a row fired one
+     full fetch + up to 1000-row re-render PER CLICK, back to back, which
+     could pile up faster than the browser could keep up and show a "page
+     not responding" prompt. 150ms is short enough that a single deliberate
+     click still feels instant, but long enough to collapse a rapid burst
+     of clicks (multi-select, or fast typing in the search box) into one
+     fetch instead of N. */
   const fetchIssues = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(async () => {
-      setLoadingIssues(true);
-      try {
-        // limit was 1000 — on an unfiltered view that's a ~2.7MB response (1000 full
-        // issue objects with nested status/assignee/reporter), which is what made this
-        // page take multiple seconds to load. 100 keeps a generous browsing window
-        // while cutting the payload by ~90%.
-        const params = { ...buildFilterParams(), page: String(page), limit: String(PAGE_SIZE) };
-        const { issues: list, total: tot } = await api.getIssues(params);
-        setIssues(list as any[]);
-        setTotal(tot);
-      } catch { setIssues([]); setTotal(0); }
-      setLoadingIssues(false);
-    }, 400);
+    let cancelled = false;
+    debounceRef.current = setTimeout(() => {
+      (async () => {
+        setLoadingIssues(true);
+        try {
+          // limit was 1000 — on an unfiltered view that's a ~2.7MB response (1000 full
+          // issue objects with nested status/assignee/reporter), which is what made this
+          // page take multiple seconds to load. 100 keeps a generous browsing window
+          // while cutting the payload by ~90%.
+          const params = { ...buildFilterParams(), page: String(page), limit: String(PAGE_SIZE) };
+          const { issues: list, total: tot } = await api.getIssues(params);
+          if (cancelled) return;
+          setIssues(list as any[]);
+          setTotal(tot);
+        } catch { if (!cancelled) { setIssues([]); setTotal(0); } }
+        if (!cancelled) setLoadingIssues(false);
+      })();
+    }, 150);
+    return () => { cancelled = true; if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [buildFilterParams, page]);
 
-  useEffect(() => { fetchIssues(); }, [fetchIssues]);
+  // fetchIssues returns a cancel function -- without wiring it up as this
+  // effect's own cleanup, firing filter clicks in quick succession could
+  // let an earlier, slower request's response land AFTER a later one's and
+  // overwrite the table with stale results.
+  useEffect(() => fetchIssues(), [fetchIssues]);
 
   // Changing any filter should land back on page 1 -- otherwise narrowing
   // the result set while sitting on, say, page 5 could point at a page
@@ -1472,7 +1522,7 @@ export default function FiltersPage() {
         (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
       );
       const header = [
-        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'Overdue', 'Department',
+        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'SLA Breached Dept', 'Overdue', 'Department',
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
@@ -1484,10 +1534,15 @@ export default function FiltersPage() {
           issue.summary ?? '',
           issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
           issue.reporter ? `${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim() : '',
-          issue.status?.name ?? '',
+          // Same queue-scoped effective status the on-screen table shows --
+          // exporting the raw issue.status?.name here could show a
+          // different value than what the table right above it displays
+          // for the identical row.
+          getEffectiveIssueStatus(issue, selQueue || undefined).name || '',
           issue.priority ?? '',
           issue.sla_breached == null ? 'N/A' : issue.sla_breached ? 'Yes' : 'No',
           issue.sla_breached ? (issue.sla_breached_by ?? '') : '',
+          issue.sla_breached ? (issue.sla_breached_dept ?? '') : '',
           issue.overdue ? 'Yes' : 'No',
           issue.current_department ?? '',
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
@@ -2088,32 +2143,46 @@ export default function FiltersPage() {
                     it size to its natural (sum-of-columns) width and leaving
                     any leftover space as plain page margin reads as a normal
                     right-aligned table, not a stretched column. */}
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[380px]">Work</th>
+                {/* Narrowed from 380px -- at typical laptop/browser widths this
+                    pushed Assignee/Status/Priority/SLA Breached off-screen,
+                    forcing a horizontal scroll just to see them. The cell
+                    below already truncates with an ellipsis, so this only
+                    trades off how much of a long title shows before
+                    truncating, not readability of what does fit. */}
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[220px]">Work</th>
                 {tableExtraCols.map((id) => (
                   <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
                     {TABLE_COLUMN_DEFS[id].label}
                   </th>
                 ))}
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Assignee</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-44">Reported By</th>
+                {/* Assignee/Reported By/Time Spent narrowed further (176px/176px/96px
+                    -> 144px/144px/80px), same reasoning as Work above -- matches the
+                    more compact column sizing the space board view (spaces/[spaceKey]/
+                    page.tsx's STATIC_COLUMNS, ~150px per text column) already uses, so
+                    more of the row fits on screen before needing to scroll. */}
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>
                 <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
-                <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-24">Time Spent</th>
+                <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-20">Time Spent</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {/* Used to hard-cap rendering to the first 100 of whatever was
                   fetched, regardless of how many rows actually came back --
-                  confirmed for real: with PAGE_SIZE now 1000, a filter
+                  confirmed for real: back when PAGE_SIZE was 1000, a filter
                   matching hundreds of tickets (sorted newest first) fetched
                   all of them correctly but only ever SHOWED the newest ~100,
                   silently cutting off everything older mid-range (e.g. a
                   same-day cluster of ~100 tickets on one date made the whole
                   rest of the selected date range invisible, with no visual
-                  sign anything was missing). The fetch itself is already
-                  the real limit (page/limit params); rendering everything
+                  sign anything was missing). PAGE_SIZE is back to 100 now
+                  (see its own declaration -- the 1000 value that caused an
+                  11s/2.64MB unfiltered load turned out to have crept back
+                  in independent of this fix), so fetch and render size
+                  always match again regardless; rendering everything
                   that comes back is the correct behavior now. */}
               {issues.map((issue: any) => {
                 // Carries which queue this row was shown under, same as the
@@ -2168,6 +2237,24 @@ export default function FiltersPage() {
                         <span className="text-[12px] text-gray-600 truncate">
                           {`${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim()}
                         </span>
+                        {/* This queue's OWN historical assignee for this ticket, not
+                            whoever holds it now -- shown whenever the ticket has since
+                            moved to a different department (the same "Queue: X + date
+                            range" broadening that surfaces the ticket at all here in
+                            the first place). Without this, a Migration-queue result
+                            could show a Dev or Pre-Sales person's name with nothing
+                            explaining why, reading as a data bug instead of the
+                            intentional per-department view it is -- the ticket detail
+                            page already has an amber banner saying exactly this when
+                            opened via ?viewDept=, this table had no equivalent at all. */}
+                        {issue.assigneeIsHistorical && (
+                          <span
+                            className="ml-0.5 inline-flex items-center px-1 py-0.5 rounded-full text-[9px] font-medium bg-amber-50 text-amber-700 whitespace-nowrap"
+                            title={`Who this ticket was assigned to while it was in ${selQueue || 'this queue'} -- it has since moved to a different department`}
+                          >
+                            in {selQueue || 'queue'}
+                          </span>
+                        )}
                       </div>
                     ) : (
                       <span className="text-[11.5px] text-gray-300">Unassigned</span>
@@ -2189,7 +2276,13 @@ export default function FiltersPage() {
                   </td>
                   <td className="px-2 py-2.5">
                     {(() => {
-                      const effectiveStatus = getEffectiveIssueStatus(issue);
+                      // Queue-scoped, same as the Assignee column right next
+                      // to it -- a Migration-queue result for a ticket that's
+                      // since moved to Infra should show Migration's own
+                      // status snapshot (what it looked like while it sat
+                      // here), not Infra's current one, which has nothing to
+                      // do with why this row appeared in this queue's export.
+                      const effectiveStatus = getEffectiveIssueStatus(issue, selQueue || undefined);
                       return (
                         <span
                           className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
@@ -2223,6 +2316,17 @@ export default function FiltersPage() {
                         {issue.sla_breached_by && (
                           <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Author of the status change that resolved this ticket">
                             by {issue.sla_breached_by}
+                          </span>
+                        )}
+                        {/* Which department this breach belongs to -- a plain
+                            "Yes" said nothing about where. Matches the same
+                            rule MBR's own SLA-breach counts use (the ticket's
+                            CURRENT department), so Filters and MBR agree on
+                            "which dept" instead of each implying a different
+                            answer. */}
+                        {issue.sla_breached_dept && (
+                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="The department this breach is attributed to (the ticket's current department)">
+                            in {issue.sla_breached_dept}
                           </span>
                         )}
                       </div>
