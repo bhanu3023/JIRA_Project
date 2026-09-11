@@ -1544,18 +1544,17 @@ export default function FiltersPage() {
           issue.sla_breached ? (issue.sla_breached_by ?? '') : '',
           issue.sla_breached ? (issue.sla_breached_dept ?? '') : '',
           issue.overdue ? 'Yes' : 'No',
-          // Same queue-scoped view as the Assignee column right next to it --
-          // a row surfaced here because someone genuinely worked it in the
-          // QUERIED queue (assigneeIsHistorical, see the on-screen table's
-          // "in {selQueue}" badge) but has since moved to a different
-          // department read as contradictory/wrong exporting the ticket's
-          // raw CURRENT department here: Assignee showing the Migration
-          // engineer who did the work, right next to a Department column
-          // saying "Dev", with nothing explaining the mismatch. Confirmed
-          // for real on CF-29525's export row. Show the queue this row was
-          // actually pulled for whenever that's the case, same reasoning
-          // already applied to the Status column above.
-          (issue.assigneeIsHistorical && selQueue) ? selQueue : (issue.current_department ?? ''),
+          // Reverted per explicit follow-up request: Department should always
+          // reflect the ticket's real CURRENT department here, even on a row
+          // surfaced by a past department's worked-on credit (Assignee can
+          // legitimately show that historical person while Department still
+          // says where the ticket actually lives now, e.g. CF-29525 --
+          // Assignee: a Migration engineer's historical credit, Department:
+          // Dev, its real current department). A prior version of this line
+          // showed selQueue instead whenever assigneeIsHistorical was set,
+          // which was itself a fix for the opposite complaint -- confirmed
+          // this is what's wanted now instead.
+          issue.current_department ?? '',
           issue.createdAt ? new Date(issue.createdAt).toLocaleString() : '',
           issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : '',
           ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].getValue(issue)),
