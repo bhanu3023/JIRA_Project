@@ -6130,44 +6130,7 @@ async function _handleJiraPgApi(
             }
           } catch { /* fall through to the existing snapshot/reporter logic below */ }
         }
-        // When a ticket has moved away from the queried dept, more than one
-        // DISTINCT person can have real (non-'passed') worked-on credit for
-        // that dept on the SAME ticket -- e.g. Dathu Kaluvala worked it in
-        // Migration, handed it onward, and later K N V S Raj Kumar also
-        // worked it in Migration on a later visit. The single dept_assignees
-        // snapshot below only ever remembers the MOST RECENT of them, so a
-        // ticket with two genuine Migration workers only ever showed the
-        // later one -- the earlier person's real work was invisible under
-        // Queue: Migration even though they're a real, credited worker of
-        // that ticket in that dept. Confirmed for real on CF-29525 (Dathu +
-        // Raj Kumar, both genuine Migration 'closed' credits). Split such a
-        // ticket into one row per distinct real worker instead of collapsing
-        // to just the latest -- explicit product decision, not a default
-        // behavior change for every ticket (only tickets that actually have
-        // more than one distinct credited worker for the queried dept end up
-        // as more than one row).
-        let allWorkersByIssue: Record<string, { id: string; firstName: string; lastName: string; email: string | null; avatarUrl: string | null }[]> = {};
-        if (queueMembersOnlyParam && rows.rows.length) {
-          try {
-            const movedIssueIds = rows.rows
-              .filter((r: any) => String(r.current_department || '').toLowerCase() !== deptParam.toLowerCase())
-              .map((r: any) => r.id);
-            if (movedIssueIds.length) {
-              const allWorkedRows = await pool.query(
-                `SELECT DISTINCT w.issue_id, w.user_id, u."firstName", u."lastName", u.email, u."avatarUrl"
-                 FROM user_worked_on_tickets w
-                 JOIN users u ON u.id = w.user_id
-                 WHERE w.issue_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'`,
-                [movedIssueIds, deptParam]
-              );
-              for (const wr of allWorkedRows.rows) {
-                if (!allWorkersByIssue[wr.issue_id]) allWorkersByIssue[wr.issue_id] = [];
-                allWorkersByIssue[wr.issue_id].push({ id: wr.user_id, firstName: wr.firstName || '', lastName: wr.lastName || '', email: wr.email || null, avatarUrl: wr.avatarUrl || null });
-              }
-            }
-          } catch { /* fall through to the single-snapshot logic below */ }
-        }
-        enrichedIssues = rows.rows.flatMap((row: any) => {
+        enrichedIssues = rows.rows.map((row: any) => {
           // "Queue: Infra" + a "Worked" date filter is asking "who from Infra
           // worked this while it sat here" -- but the row's assignee_id/name
           // above always came from the ticket's CURRENT global assigneeId,
