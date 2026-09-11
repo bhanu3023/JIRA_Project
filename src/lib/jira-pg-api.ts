@@ -8292,6 +8292,44 @@ async function _handleJiraPgApi(
     if (body.description !== undefined) data.description = body.description === null ? null : String(body.description);
     if (body.type !== undefined) data.type = String(body.type);
     if (body.priority !== undefined) data.priority = String(body.priority);
+    // Due Date is normally only recomputed by startDeptSLA -- a department
+    // handoff or reopen -- using the goal duration for whatever priority was
+    // set AT THAT MOMENT. Changing Priority on an open ticket with no
+    // handoff involved left Due Date frozen at the OLD priority's goal, so
+    // the sidebar's Due Date and the SLA panel's own priority-driven
+    // countdown could disagree the moment someone just edited Priority.
+    // Confirmed for real per the user's own report of a ticket's displayed
+    // due date/time not matching its current priority. Recompute using the
+    // exact same remaining-budget formula startDeptSLA already uses (new
+    // priority's goal duration, minus whatever elapsed budget this
+    // department has already burned) -- skipped when the ticket is already
+    // done (nothing left to be "due" for) or when this same request ALSO
+    // explicitly set dueDate itself (an explicit manual value wins).
+    if (body.priority !== undefined && body.priority !== issue.priority && body.dueDate === undefined) {
+      try {
+        const currentStatusObj = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId);
+        if (currentStatusObj?.category !== 'done') {
+          const priRow = await pool.query(`SELECT current_department, dept_sla_log FROM issues WHERE id=$1`, [issue.id]);
+          const dept: string = priRow.rows[0]?.current_department || '';
+          const slaLog: Record<string, any> = priRow.rows[0]?.dept_sla_log || {};
+          const priorElapsedMs = dept ? (deptMapGet(slaLog, dept)?.elapsed_ms || 0) : 0;
+          const polRes = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId"=$1 AND status='active'`, [issue.spaceId]);
+          const applicable = polRes.rows.filter((p: any) => {
+            const pDept = (p.dept_name || '').trim().toLowerCase();
+            return !pDept || pDept === dept.trim().toLowerCase();
+          });
+          let computedDueDate: Date | null = null;
+          const nowTs = new Date();
+          for (const policy of applicable) {
+            const durationMs = computeSlaGoalDurationMs(policy, String(body.priority).toLowerCase());
+            const remainingMs = Math.max(0, durationMs - priorElapsedMs);
+            const candidate = new Date(nowTs.getTime() + remainingMs);
+            if (!computedDueDate || candidate < computedDueDate) computedDueDate = candidate;
+          }
+          if (computedDueDate) data.dueDate = computedDueDate;
+        }
+      } catch (e: any) { console.error('[Priority-driven dueDate recompute failed]', issue.key, e?.message || e); }
+    }
     if (body.labels !== undefined) data.labels = Array.isArray(body.labels) ? body.labels.map(String) : [];
     if (body.parentKey !== undefined) data.parentKey = body.parentKey === null ? null : String(body.parentKey);
     if (body.productType !== undefined) data.productType = body.productType === null ? null : String(body.productType);
