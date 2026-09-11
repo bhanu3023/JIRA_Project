@@ -172,22 +172,12 @@ export async function getValidAccessToken(email: string): Promise<string | null>
     : refreshGoogleToken(tokens);
 }
 
-async function refreshMicrosoftToken(tokens: OAuthTokens): Promise<string | null> {
+const GRAPH_SCOPE    = 'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile';
+const EXCHANGE_SCOPE = 'https://outlook.office365.com/IMAP.AccessAsUser.All https://outlook.office365.com/SMTP.Send offline_access email openid profile';
+
+async function requestMicrosoftToken(refreshToken: string, scope: string): Promise<{ ok: true; data: any } | { ok: false; status: number; body: string }> {
   const clientId     = process.env.MICROSOFT_CLIENT_ID!;
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET!;
-  if (!clientId || !clientSecret) return null;
-
-  // Detect which scopes to use based on the token's audience.
-  // Exchange/IMAP tokens (aud: https://outlook.office365.com) must be refreshed
-  // with Exchange scopes — requesting Graph scopes will fail if consent not granted.
-  let scope = 'https://outlook.office365.com/IMAP.AccessAsUser.All https://outlook.office365.com/SMTP.Send offline_access email openid profile';
-  try {
-    const payload = JSON.parse(Buffer.from(tokens.accessToken.split('.')[1], 'base64url').toString('utf8'));
-    if (String(payload.aud || '').includes('graph.microsoft.com')) {
-      scope = 'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile';
-    }
-  } catch {}
-
   const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
     method:  'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -195,16 +185,51 @@ async function refreshMicrosoftToken(tokens: OAuthTokens): Promise<string | null
       grant_type:    'refresh_token',
       client_id:     clientId,
       client_secret: clientSecret,
-      refresh_token: tokens.refreshToken,
+      refresh_token: refreshToken,
       scope,
     }),
   });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
-    console.error(`[OAuthService] Microsoft token refresh FAILED for ${tokens.email} (${res.status}):`, err);
+    return { ok: false, status: res.status, body: err };
+  }
+  return { ok: true, data: await res.json() };
+}
+
+async function refreshMicrosoftToken(tokens: OAuthTokens): Promise<string | null> {
+  const clientId     = process.env.MICROSOFT_CLIENT_ID!;
+  const clientSecret = process.env.MICROSOFT_CLIENT_SECRET!;
+  if (!clientId || !clientSecret) return null;
+
+  // Tenant-side consent for this app currently only covers the Graph scopes
+  // (Mail.Read/ReadWrite/Send) -- the Exchange/legacy scopes
+  // (IMAP.AccessAsUser.All/SMTP.Send) show as not-granted in Azure AD (real
+  // admin-portal screenshot confirmed this: 8 of 10 requested permissions
+  // show "Granted", those two don't). A refresh token isn't actually locked
+  // to whichever audience it happened to be issued under -- Microsoft's v2
+  // token endpoint honors whatever scope is requested as long as the app has
+  // consent for it, which is exactly how this same client's own
+  // getGraphScopedToken (email-service.ts) already successfully re-scopes
+  // an Exchange-issued refresh token to Graph and gets real, working tokens
+  // back (confirmed for real: hundreds of successful Graph API calls per
+  // polling cycle once that path is tried). This function used to instead
+  // detect the STORED token's own audience and keep re-requesting that same
+  // (currently ungranted) Exchange scope forever for any user whose token
+  // happened to start there, failing with AADSTS65001 consent_required on
+  // every single refresh with no way to recover short of an Azure admin
+  // action. Try the scope that's actually granted first; only fall back to
+  // the Exchange scope (matching the previous behavior) if that somehow
+  // fails too, e.g. once IMAP.AccessAsUser.All/SMTP.Send eventually do get
+  // consented and a caller specifically needs a raw-IMAP-audience token.
+  let result = await requestMicrosoftToken(tokens.refreshToken, GRAPH_SCOPE);
+  if (!result.ok) {
+    result = await requestMicrosoftToken(tokens.refreshToken, EXCHANGE_SCOPE);
+  }
+  if (!result.ok) {
+    console.error(`[OAuthService] Microsoft token refresh FAILED for ${tokens.email} (${result.status}):`, result.body);
     return null;
   }
-  const data = await res.json();
+  const data = result.data;
   console.log(`[OAuthService] Microsoft token refreshed for ${tokens.email}, expires in ${data.expires_in}s`);
   const updated: OAuthTokens = {
     ...tokens,
