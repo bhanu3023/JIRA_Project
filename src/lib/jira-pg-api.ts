@@ -10007,6 +10007,111 @@ async function _handleJiraPgApi(
   if (path === 'reports/mbr-team' && method === 'GET') {
     if (!isAdmin && !(await userCanViewMbr(userId))) return json({ error: 'Forbidden' }, 403);
 
+    // Migration ENT/SMB "Overall Score" — a 5-factor per-ticket content score
+    // (Summary Quality, Description Quality, SLA Compliance, Closing Comments,
+    // Screenshot Evidence), replacing the deduction-based Hygiene score for
+    // just these two teams. SLA/Closing/Screenshot reuse fields this handler
+    // already computes; Summary/Description Quality need new per-ticket
+    // classifiers that don't exist anywhere else in this app. These are
+    // original heuristics (no reference implementation to port), so thresholds
+    // are named constants below, easy to retune once real ENT/SMB data is seen
+    // against them.
+    const SHORTCUT_SUMMARY_MAX_LEN = 8;
+    const SHORTCUT_SUMMARY_WORDS = new Set([
+      'test', 'testing', 'issue', 'bug', 'fix', 'fixed', 'help', 'urgent', 'na', 'n/a',
+      'untitled', 'no subject', 'query', 'doubt', 'problem', 'error', 'ticket',
+    ]);
+    const SINGLE_TOKEN_SHORTCUT_MAX_LEN = 20;
+    const stripHtml = (s: string): string => String(s || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
+    const isShortcutSummary = (summary: string, ticketKey: string): boolean => {
+      const s = String(summary || '').trim();
+      if (!s) return true;
+      if (s.length <= SHORTCUT_SUMMARY_MAX_LEN) return true;
+      if (SHORTCUT_SUMMARY_WORDS.has(s.toLowerCase())) return true;
+      if (ticketKey && s.toLowerCase() === String(ticketKey).toLowerCase()) return true;
+      if (!/\s/.test(s) && s.length < SINGLE_TOKEN_SHORTCUT_MAX_LEN) return true;
+      return false;
+    };
+    const SECRET_PATTERNS = [
+      /AKIA[0-9A-Z]{16}/, // AWS access key
+      /(api[_-]?key|secret|token|password|pwd)\s*[:=]\s*\S{6,}/i,
+      /-----BEGIN[A-Z ]*PRIVATE KEY-----/,
+    ];
+    const hasLeakedSecret = (descriptionText: string): boolean => SECRET_PATTERNS.some((re) => re.test(descriptionText));
+    const GREETING_RE = /^(hi|hello|hey|dear|greetings|good\s+(morning|afternoon|evening))\b/i;
+    const hasGreeting = (descriptionText: string): boolean => GREETING_RE.test(descriptionText.slice(0, 40).trimStart());
+    const ALIGNMENT_STOPWORDS = new Set([
+      'this', 'that', 'with', 'from', 'have', 'there', 'into', 'your', 'please',
+      'issue', 'ticket', 'regarding', 'about', 'would', 'could', 'should', 'when', 'where',
+    ]);
+    const ALIGNMENT_MIN_OVERLAP = 0.2;
+    const isMisaligned = (summary: string, descriptionText: string): boolean | null => {
+      const words = Array.from(new Set((String(summary || '').toLowerCase().match(/[a-z0-9]{4,}/g) || [])
+        .filter((w) => !ALIGNMENT_STOPWORDS.has(w))));
+      if (!words.length || !descriptionText) return null; // not tracked
+      const descLower = descriptionText.toLowerCase();
+      const matched = words.filter((w) => descLower.includes(w)).length;
+      return (matched / words.length) < ALIGNMENT_MIN_OVERLAP;
+    };
+
+    type WeeklyTextAgg = {
+      totalTickets: number; shortcutCount: number; secretsCount: number;
+      greetingMissingCount: number; greetingTrackedCount: number;
+      misalignedCount: number; alignedTrackedCount: number;
+    };
+    const newTextAgg = (): WeeklyTextAgg => ({
+      totalTickets: 0, shortcutCount: 0, secretsCount: 0,
+      greetingMissingCount: 0, greetingTrackedCount: 0,
+      misalignedCount: 0, alignedTrackedCount: 0,
+    });
+    const toTen = (rate: number | null): number | null => {
+      if (rate === null || rate === undefined || !isFinite(rate)) return null;
+      return Math.max(0, Math.min(10, Math.round(rate * 10)));
+    };
+    // hygieneRow supplies resolved/closing_good/screenshots (same fields
+    // hygieneFrom below reads); textAgg supplies the two new classifiers.
+    // RCA & Fix Description is deliberately never included — that factor only
+    // ever applies to Customer Engineering in the source spec this was ported
+    // from, and ENT/SMB average over at most these 5 factors, never 6.
+    const weeklyScoreFrom = (hygieneRow: any, textAgg: WeeklyTextAgg, rbTracked: number, rbBreached: number) => {
+      const closed = Number(hygieneRow.resolved) || 0;
+      const closingGood = Number(hygieneRow.closing_good) || 0;
+      const screenshots = Number(hygieneRow.screenshots) || 0;
+      const { totalTickets, shortcutCount, secretsCount, greetingMissingCount, greetingTrackedCount, misalignedCount, alignedTrackedCount } = textAgg;
+
+      const summaryRate = totalTickets > 0 ? (totalTickets - shortcutCount) / totalTickets : null;
+      const descRate = totalTickets > 0
+        ? ((1 - secretsCount / totalTickets)
+          + (greetingTrackedCount > 0 ? 1 - greetingMissingCount / greetingTrackedCount : 1)
+          + (alignedTrackedCount > 0 ? 1 - misalignedCount / alignedTrackedCount : 1)) / 3
+        : null;
+      // Reuses the exact same rbTracked/rbBreached this handler already
+      // computes (live SLA breach calc via computeSLAInstancesPure below),
+      // rather than re-deriving breach status from the text-classification
+      // loop -- one source of truth for SLA compliance.
+      const slaRate = rbTracked > 0 ? (rbTracked - rbBreached) / rbTracked : null;
+      const closingRate = closed > 0 ? closingGood / closed : null;
+      const screenshotRate = closed > 0 ? screenshots / closed : null;
+
+      const factors = [
+        { key: 'summary', label: 'Summary Quality', score: toTen(summaryRate) },
+        { key: 'description', label: 'Description Quality', score: toTen(descRate) },
+        { key: 'sla', label: 'SLA Compliance', score: toTen(slaRate) },
+        { key: 'closing', label: 'Closing Comments', score: toTen(closingRate) },
+        { key: 'screenshot', label: 'Screenshot Evidence', score: toTen(screenshotRate) },
+      ];
+      const applicable = factors.filter((f) => f.score !== null);
+      const overallScore100 = applicable.length
+        ? Math.round((applicable.reduce((s, f) => s + (f.score as number), 0) / applicable.length) * 10)
+        : null;
+      const ratingText = overallScore100 === null ? 'N.A.' : overallScore100 >= 85 ? 'Good' : 'Poor';
+      // Deliberately a different threshold than ratingText's 85 cutoff -- see
+      // the spec this was built from: a score of 82 shades green (>=80) while
+      // its own label still reads "Poor" (<85). Not reconciled on purpose.
+      const colorTier = overallScore100 === null ? '' : overallScore100 >= 80 ? 'good' : overallScore100 >= 60 ? 'amber' : 'bad';
+      return { overallScore100, ratingText, colorTier, factors };
+    };
+
     // Migration ENT and SMB are both tagged current_department = 'Migration'
     // on this board -- there's no separate department value for them -- so
     // they're told apart purely by roster.
@@ -10452,10 +10557,15 @@ async function _handleJiraPgApi(
     // legitimately belong to more than one roster member -- current assignee
     // if they're on the roster, plus anyone else on the roster with a
     // genuine worked-on record for this dept on this ticket.
+    // summary/description are only actually used below for ENT/SMB's Overall
+    // Score text classifiers (see weeklyScoreFrom above) -- fetched for every
+    // team unconditionally since it's the same query/rows either way and
+    // keeping one query shape is simpler than branching the SELECT.
     const slaCandidatesRes = await pool.query(`
-      SELECT i.id, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
+      SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
         i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
-        i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category
+        i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category,
+        i.summary, i.description
       FROM issues i
       LEFT JOIN statuses s ON i."statusId" = s.id
       LEFT JOIN users au ON au.id = i."assigneeId"
@@ -10507,6 +10617,14 @@ async function _handleJiraPgApi(
     const peopleRbBreached: Record<string, number> = {};
     const monthlyRbBreached: Record<string, number> = {};
     let summaryRbBreached = 0;
+    // Overall Score text-classification accumulators (ENT/SMB only -- see
+    // weeklyScoreFrom above). Built in the same loop, over the same
+    // dept+roster+date-matched ticket set and the same per-ticket
+    // assignee/worked-on email attribution as the SLA breach counts just
+    // above, so "tracked tickets" lines up 1:1 with rbTracked/total.
+    const isEntSmb = team === 'ent' || team === 'smb';
+    const peopleTextAgg: Record<string, WeeklyTextAgg> = {};
+    const summaryTextAgg = newTextAgg();
     for (const row of slaCandidatesRes.rows) {
       const instances = computeSLAInstancesPure(
         { ...row, status: { name: row.status_name, category: row.status_category } },
@@ -10522,18 +10640,38 @@ async function _handleJiraPgApi(
       const breached = String(row.current_department || '').toLowerCase() === dept.toLowerCase()
         && instances.some((x: any) => x.isBreached);
       slaById.set(row.id, breached);
-      if (!breached) continue;
-
-      const monthLabel = monthLabelFor(row);
-      monthlyRbBreached[monthLabel] = (monthlyRbBreached[monthLabel] || 0) + 1;
 
       const emails = new Set<string>(workedRosterByIssue[row.id] || []);
       if (row.assignee_email && String(row.current_department || '').toLowerCase() === dept.toLowerCase()
         && roster.some((e) => e.toLowerCase() === String(row.assignee_email).toLowerCase())) {
         emails.add(String(row.assignee_email).toLowerCase());
       }
-      for (const email of Array.from(emails)) peopleRbBreached[email] = (peopleRbBreached[email] || 0) + 1;
-      if (!person || emails.has(person)) summaryRbBreached++;
+
+      if (breached) {
+        const monthLabel = monthLabelFor(row);
+        monthlyRbBreached[monthLabel] = (monthlyRbBreached[monthLabel] || 0) + 1;
+        for (const email of Array.from(emails)) peopleRbBreached[email] = (peopleRbBreached[email] || 0) + 1;
+        if (!person || emails.has(person)) summaryRbBreached++;
+      }
+
+      if (isEntSmb) {
+        const descText = stripHtml(row.description);
+        const shortcut = isShortcutSummary(row.summary, row.key);
+        const secret = hasLeakedSecret(descText);
+        const greetingTracked = descText.length > 0;
+        const greetingMissing = greetingTracked && !hasGreeting(descText);
+        const misaligned = isMisaligned(row.summary, descText); // null = not tracked
+
+        const applyTo = (agg: WeeklyTextAgg) => {
+          agg.totalTickets++;
+          if (shortcut) agg.shortcutCount++;
+          if (secret) agg.secretsCount++;
+          if (greetingTracked) { agg.greetingTrackedCount++; if (greetingMissing) agg.greetingMissingCount++; }
+          if (misaligned !== null) { agg.alignedTrackedCount++; if (misaligned) agg.misalignedCount++; }
+        };
+        for (const email of Array.from(emails)) applyTo(peopleTextAgg[email] ??= newTextAgg());
+        if (!person || emails.has(person)) applyTo(summaryTextAgg);
+      }
     }
 
     const toSummary = (r: any, rbBreached: number) => ({
@@ -10549,15 +10687,31 @@ async function _handleJiraPgApi(
     // never selected stale/missing/overdue/no_closure/screenshots/etc, so
     // running hygieneFrom() on a monthly row would silently score every
     // month a fake 100 (Number(undefined) || 0 for every deduction input).
-    const summary = { ...toSummary(summaryRes.rows[0] || {}, summaryRbBreached), ...hygieneFrom(summaryRes.rows[0] || {}) };
+    // For ENT/SMB, the Overall Score (weeklyScoreFrom) fields are layered on
+    // top of -- not instead of -- hygieneFrom's own fields, since stale/
+    // missing/overdue/screenshotPct/closingCommentPct/rcaFixPct still back
+    // their own drill-down columns; only overallScore100/ratingText/
+    // colorTier/factors are new, and only those replace what the frontend
+    // reads for the score badge on these two teams.
+    const summaryRow = summaryRes.rows[0] || {};
+    const summary = {
+      ...toSummary(summaryRow, summaryRbBreached),
+      ...hygieneFrom(summaryRow),
+      ...(isEntSmb ? weeklyScoreFrom(summaryRow, summaryTextAgg, Number(summaryRow.total) || 0, summaryRbBreached) : {}),
+    };
 
-    const people = peopleRes.rows.map((r: any) => ({
-      email: r.email,
-      name: `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email,
-      ...toSummary(r, peopleRbBreached[String(r.email || '').toLowerCase()] || 0),
-      ...hygieneFrom(r),
-      avgResolutionHours: r.avg_resolution_hours === null ? null : Number(r.avg_resolution_hours),
-    }));
+    const people = peopleRes.rows.map((r: any) => {
+      const email = String(r.email || '').toLowerCase();
+      const rbBreached = peopleRbBreached[email] || 0;
+      return {
+        email: r.email,
+        name: `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email,
+        ...toSummary(r, rbBreached),
+        ...hygieneFrom(r),
+        ...(isEntSmb ? weeklyScoreFrom(r, peopleTextAgg[email] || newTextAgg(), Number(r.total) || 0, rbBreached) : {}),
+        avgResolutionHours: r.avg_resolution_hours === null ? null : Number(r.avg_resolution_hours),
+      };
+    });
 
     const monthly = monthlyRes.rows
       .map((r: any) => ({ label: r.label, ...toSummary(r, monthlyRbBreached[r.label] || 0) }))
