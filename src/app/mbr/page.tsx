@@ -24,6 +24,17 @@ const GRADE_STYLE: Record<string, string> = {
 };
 const GRADE_LABEL: Record<string, string> = { great: 'Great', ok: 'Needs attention', poor: 'Poor' };
 
+// Migration ENT/SMB's "Overall Score" replaces the deduction-based Hygiene
+// score for just these two teams (see reports/mbr-team in jira-pg-api.ts).
+// colorTier and ratingText use deliberately different thresholds (80 vs 85) —
+// not reconciled, per the spec this was built from.
+const SCORE_TIER_STYLE: Record<string, string> = {
+  good:  'bg-green-50 text-green-700',
+  amber: 'bg-amber-50 text-amber-700',
+  bad:   'bg-red-50 text-red-700',
+  '':    'bg-gray-50 text-gray-500',
+};
+
 function Card({ label, value, tone, icon, sub }: { label: string; value: React.ReactNode; tone?: 'warn' | 'bad'; icon: React.ReactNode; sub?: string }) {
   const valueColor = tone === 'bad' ? 'text-red-600' : tone === 'warn' ? 'text-amber-600' : 'text-gray-800';
   return (
@@ -58,7 +69,13 @@ function pct(numerator: number, denominator: number): string {
 // always reads 0/0. RCA/Fix Description compliance will read 0% for
 // everyone until those fields actually start getting filled in on tickets —
 // the columns exist but are unpopulated in this data today.
+function factorTooltip(factors: { label: string; score: number | null }[] | undefined): string {
+  if (!factors || !factors.length) return '';
+  return factors.map((f) => `${f.label}: ${f.score === null ? 'N.A.' : `${f.score}/10`}`).join('\n');
+}
+
 function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | 'infra' | 'ent' | 'smb'; dateFrom: string; dateTo: string; staleDays: number }) {
+  const isEntSmb = team === 'ent' || team === 'smb';
   const [person, setPerson] = useState('');
   const [people, setPeople] = useState<any[]>([]);
   const [monthly, setMonthly] = useState<any[]>([]);
@@ -128,6 +145,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
     <div className="space-y-6">
       <p className="text-[12px] text-gray-400 -mt-2">
         Live data, scoped to the date range above. First response SLA breached always reads 0/0 (not tracked in this app). RCA/Fix Description compliance will read 0% until those fields start getting filled in on tickets — the columns exist but are unpopulated today.
+        {isEntSmb && ' Overall Score is an average of Summary Quality, Description Quality, SLA Compliance, Closing Comments, and Screenshot Evidence (0-10 each, /100 total) — hover a score for the breakdown. Its color tier (green ≥80, amber ≥60) and its Good/Poor label (≥85) use different cutoffs on purpose.'}
       </p>
 
       <div className="flex items-center gap-3">
@@ -150,15 +168,24 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
         <Card label="First response SLA breached" value={`${summary.frbBreached} / ${summary.frbTracked}`} icon={<AlertTriangle size={22} />} tone={summary.frbBreached > 0 ? 'bad' : undefined} />
       </div>
 
-      {/* Hygiene / closing-comment / RCA compliance — same formula as the By Department tab */}
+      {/* Hygiene / closing-comment / RCA compliance — same formula as the By Department tab (ENT/SMB show Overall Score instead) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white rounded-xl border border-gray-200 p-5 flex items-start justify-between">
-          <div>
-            <span className={`inline-flex items-center px-3 py-1.5 rounded-full text-[15px] font-bold ${GRADE_STYLE[summary.grade as string]}`}>
-              {summary.hygieneScore} · {GRADE_LABEL[summary.grade as string]}
-            </span>
-            <p className="text-[12px] text-gray-500 mt-2">Hygiene score</p>
-          </div>
+          {isEntSmb ? (
+            <div>
+              <span title={factorTooltip(summary.factors)} className={`inline-flex items-center px-3 py-1.5 rounded-full text-[15px] font-bold ${SCORE_TIER_STYLE[summary.colorTier || '']}`}>
+                {summary.overallScore100 === null ? 'N.A.' : `${summary.overallScore100}/100`} · {summary.ratingText}
+              </span>
+              <p className="text-[12px] text-gray-500 mt-2">Overall Score</p>
+            </div>
+          ) : (
+            <div>
+              <span className={`inline-flex items-center px-3 py-1.5 rounded-full text-[15px] font-bold ${GRADE_STYLE[summary.grade as string]}`}>
+                {summary.hygieneScore} · {GRADE_LABEL[summary.grade as string]}
+              </span>
+              <p className="text-[12px] text-gray-500 mt-2">Hygiene score</p>
+            </div>
+          )}
         </div>
         <Card label="Closing comment quality" value={summary.closingCommentPct === null ? '—' : `${summary.closingCommentPct}%`}
           sub="Closed tickets with a real closing comment" icon={<Users size={22} />}
@@ -232,7 +259,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Screenshot %</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Closing comment %</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">RCA/Fix %</th>
-                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Hygiene score</th>
+                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">{isEntSmb ? 'Overall Score' : 'Hygiene score'}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -289,9 +316,15 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold ${GRADE_STYLE[p.grade]}`}>
-                        {p.hygieneScore} · {GRADE_LABEL[p.grade]}
-                      </span>
+                      {isEntSmb ? (
+                        <span title={factorTooltip(p.factors)} className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold ${SCORE_TIER_STYLE[p.colorTier || '']}`}>
+                          {p.overallScore100 === null ? 'N.A.' : `${p.overallScore100}/100`} · {p.ratingText}
+                        </span>
+                      ) : (
+                        <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-semibold ${GRADE_STYLE[p.grade]}`}>
+                          {p.hygieneScore} · {GRADE_LABEL[p.grade]}
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
