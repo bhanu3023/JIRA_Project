@@ -34,7 +34,7 @@ const APPLY = process.argv.includes('--apply');
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 async function main() {
-  const { rows: queueRows } = await pool.query(`SELECT "spaceId", queues FROM custom_queues`);
+  const { rows: queueRows } = await pool.query(`SELECT queues FROM custom_queues`);
   const deptOwnStatusById = new Map();   // deptNameLower -> Map(id -> statusObj)
   const deptOwnStatusByName = new Map(); // deptNameLower -> Map(nameLower -> statusObj)
   const idOwnerDept = new Map();         // id -> department display name (first queue that defines it)
