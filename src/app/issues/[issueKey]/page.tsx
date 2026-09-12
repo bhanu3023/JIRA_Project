@@ -3864,6 +3864,7 @@ export default function IssueDetailPage() {
               user={user}
               slaWaiverBusyId={slaWaiverBusyId}
               handleSlaWaiver={handleSlaWaiver}
+              viewDept={viewDeptParam}
             />
           )}
 
@@ -4196,13 +4197,14 @@ export default function IssueDetailPage() {
  * which is what made any open dropdown or an in-progress scroll visibly
  * flicker/jump. Owning `slaNow` here instead means that per-second
  * re-render is contained to just this panel. */
-function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, handleSlaWaiver }: {
+function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, handleSlaWaiver, viewDept }: {
   issue: any;
   slaExpanded: boolean;
   setSlaExpanded: React.Dispatch<React.SetStateAction<boolean>>;
   user: any;
   slaWaiverBusyId: string | null;
   handleSlaWaiver: (policyId: string, waive: boolean) => void;
+  viewDept?: string;
 }) {
   const [slaNow, setSlaNow] = useState(() => Date.now());
   useEffect(() => {
@@ -4254,10 +4256,25 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
       seen.add(k);
       return true;
     });
-  // The API already scopes issue.sla to this ticket's department (plus any
-  // space-wide, no-dept SLAs), so every deduped entry is relevant — show them all
-  // instead of collapsing down to a single "best match".
-  const finalEntries = dedupedEntries;
+  // The API now returns a card for the ticket's CURRENT department (plus any
+  // space-wide, no-dept SLAs) AND a frozen "paused" card for every OTHER
+  // department this ticket has visited (see computeSLAInstancesPure). Which
+  // of those someone should actually see depends on which queue's
+  // perspective they're viewing from -- the same ?viewDept= convention this
+  // page already uses for the Status/Assignee fields (see isHistoricalDeptView
+  // above). A Migration engineer who opens a ticket that's since moved to Dev
+  // (via Migration's own queue/"Worked on" list, which carries ?viewDept=Migration)
+  // should see Migration's own (paused) SLA, not Dev's live one -- and vice
+  // versa for whoever opens it plainly, which always reflects the ticket's
+  // live current department.
+  const currentDeptLower = ((issue as any).current_department || '').trim().toLowerCase();
+  const viewDeptLower = (viewDept || '').trim().toLowerCase();
+  const isHistoricalView = !!viewDeptLower && viewDeptLower !== currentDeptLower;
+  const finalEntries = dedupedEntries.filter(s => {
+    const sDeptLower = (s.deptName || '').trim().toLowerCase();
+    if (!sDeptLower) return true; // space-wide SLA — always relevant regardless of perspective
+    return isHistoricalView ? sDeptLower === viewDeptLower : sDeptLower === currentDeptLower;
+  });
 
   // Any SLA breached (live check, or resolved late)? A completed
   // ticket's due time is frozen in the past, which would read as

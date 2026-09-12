@@ -1852,7 +1852,7 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     // elapsed_ms unconditionally is correct in every case.
     const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
 
-    return dedupedPolicies.map((policy: any) => {
+    const currentDeptInstances = dedupedPolicies.map((policy: any) => {
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
       const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
       for (const goal of goals) {
@@ -1951,6 +1951,80 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
         waivedReason: waiver?.reason || null,
       };
     });
+
+    // A department the ticket used to be in, before being routed onward
+    // (e.g. Migration -> Dev), still has its own dept_sla_log entry --
+    // pauseDeptSLA freezes it (status:'paused', elapsed_ms as of that
+    // moment) the instant the handoff moves the ticket away. That entry
+    // used to just be dead data: computeSLAInstancesPure only ever
+    // generated cards for the ticket's CURRENT department, so the instant
+    // a ticket left Migration, Migration's own SLA silently disappeared
+    // from the panel entirely -- no way for anyone to see it was paused
+    // (as opposed to never having existed). Surface each visited
+    // department's own dept-scoped policy as its own frozen card here,
+    // using that department's own log entry, never the live/current one.
+    // Only dept-scoped policies (not space-wide ones, which have no single
+    // department to anchor a historical instance to) get a historical
+    // card, and only for a department currently frozen/paused there --
+    // there's exactly one CURRENT department at a time, already covered
+    // above.
+    const historicalInstances: any[] = [];
+    for (const histDeptKey of Object.keys(deptSlaLog)) {
+      if (histDeptKey.trim().toLowerCase() === issueDept) continue;
+      const histEntry = deptSlaLog[histDeptKey];
+      if (!histEntry) continue;
+      const histPolicies = allPolicies.filter((p: any) => (p.dept_name || '').trim().toLowerCase() === histDeptKey.trim().toLowerCase());
+      const newestByName = new Map<string, any>();
+      for (const p of histPolicies) {
+        const nameKey = (p.name || '').trim().toLowerCase();
+        const existing = newestByName.get(nameKey);
+        if (!existing || new Date(p.updatedAt).getTime() > new Date(existing.updatedAt).getTime()) newestByName.set(nameKey, p);
+      }
+      for (const policy of Array.from(newestByName.values())) {
+        let histDurationMs = 8 * 60 * 60 * 1000;
+        const histGoals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
+        for (const goal of histGoals) {
+          if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
+            const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
+            if (row?.timeValue) {
+              const val = parseFloat(row.timeValue);
+              const unit = (row.timeUnit || 'hours').toLowerCase();
+              histDurationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+              break;
+            }
+          } else if (goal.timeValue) {
+            const val = parseFloat(goal.timeValue);
+            const unit = (goal.timeUnit || 'hours').toLowerCase();
+            histDurationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+            break;
+          }
+        }
+        const histElapsed: number = histEntry.elapsed_ms || 0;
+        const histStartedAt = histEntry.started_at ? new Date(histEntry.started_at).toISOString() : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
+        const histIsDone = histEntry.status === 'done';
+        const histRemainingMs = Math.max(0, histDurationMs - histElapsed);
+        historicalInstances.push({
+          id: `sla_${policy.id}_${issue.key}_${histDeptKey}`,
+          policyId: policy.id,
+          policyName: policy.name || 'SLA',
+          deptName: histDeptKey,
+          dueTime: new Date(new Date(histStartedAt).getTime() + histRemainingMs).toISOString(),
+          isBreached: histElapsed >= histDurationMs,
+          isPaused: !histIsDone,
+          isCompleted: histIsDone,
+          resolvedAt: null,
+          startedAt: histStartedAt,
+          goalDurationMs: histDurationMs,
+          isNotified: false,
+          waived: false,
+          waivedByName: null,
+          waivedAt: null,
+          waivedReason: null,
+        });
+      }
+    }
+
+    return [...currentDeptInstances, ...historicalInstances];
   } catch { return []; }
 }
 
