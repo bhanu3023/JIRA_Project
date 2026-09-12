@@ -489,14 +489,16 @@ export default function IssueDetailPage() {
   useEffect(() => {
     if (currentIssue?.spaceKey) {
       const dept = (currentIssue as any).current_department as string | undefined;
-      // Only the department that actually raised this ticket may resolve it
-      // (enforced server-side on the PATCH handler) -- hide any done-category
-      // status from the dropdown here for every OTHER department it's
-      // currently sitting in, instead of only rejecting the click after the
-      // fact. originDepartment comes straight off the issue response (see
-      // GET /issues/:key), computed from its own department-change history.
-      const originDept = (currentIssue as any).originDepartment as string | undefined;
-      const isOriginDept = !dept || !originDept || dept.trim().toLowerCase() === originDept.trim().toLowerCase();
+      // Only the department that actually raised this ticket -- or one
+      // explicitly authorized via an admin override (resolve_override_depts,
+      // see the backend's own comment) -- may resolve it (enforced
+      // server-side on the PATCH handler too). Hide any done-category status
+      // from the dropdown here for every other department, instead of only
+      // rejecting the click after the fact. canResolveHere comes straight
+      // off the issue response (GET /issues/:key), already combining the
+      // origin-department check and the override list server-side so this
+      // component doesn't need to re-derive either on its own.
+      const isOriginDept = (currentIssue as any).canResolveHere !== false;
       const applyStatuses = (list: any[]) => setSpaceStatuses(isOriginDept ? list : (list || []).filter((s: any) => s.category !== 'done'));
 
       // When a ticket is routed to a department, find the dept_queue space that owns
@@ -606,7 +608,7 @@ export default function IssueDetailPage() {
         loadStatusesForSpace(currentIssue.spaceKey);
       }
     }
-  }, [currentIssue?.spaceKey, currentIssue?.id, spaces, (currentIssue as any)?.current_department, (currentIssue as any)?.originDepartment]);
+  }, [currentIssue?.spaceKey, currentIssue?.id, spaces, (currentIssue as any)?.current_department, (currentIssue as any)?.canResolveHere]);
 
   useEffect(() => {
     // Always load members from the issue's own space (not the workflow space which may differ)

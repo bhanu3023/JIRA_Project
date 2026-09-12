@@ -41,6 +41,17 @@ async function userCanViewMbr(userId: string | null): Promise<boolean> {
 
 // Ensure original_dept column exists
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).catch(() => {});
+// Explicit admin override authorizing a department OTHER than the ticket's
+// real origin (originDepartment, computed from actual issue_history) to
+// resolve it -- for cases where the origin genuinely is what history says
+// (no data error) but the business still wants a different, currently-
+// holding department to be allowed to close it. Deliberately separate from
+// original_dept/issue_history: those stay an honest record of what actually
+// happened, this is a plain authorization list layered on top, so granting
+// an exception never requires rewriting (or fabricating) history to justify
+// it. Stored as a JSON array of department names, case-insensitive compare
+// at read time same as every other dept-name comparison in this file.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS resolve_override_depts JSONB DEFAULT '[]'::jsonb`).catch(() => {});
 // deploy.sh never runs `prisma migrate deploy` (only `prisma generate` in the
 // Docker build), so a column added only via a Prisma migration file never
 // actually lands on the production table -- mirror it here so it reaches
@@ -7828,7 +7839,7 @@ async function _handleJiraPgApi(
       // Raw columns Prisma's schema doesn't know about -- only needs `key`,
       // so it can run alongside everything else instead of after it.
       pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers FROM issues WHERE key = $1 LIMIT 1`,
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts FROM issues WHERE key = $1 LIMIT 1`,
         [key]
       ).catch(() => ({ rows: [] as any[] })),
       // Partner-ticket comment merge lookup -- also only needs `key`.
@@ -8045,9 +8056,22 @@ async function _handleJiraPgApi(
       ? deptHistoryEvents.reduce((a: any, b: any) => (new Date(a.createdAt) < new Date(b.createdAt) ? a : b))
       : null;
     const originDepartment: string | null = earliestDeptEvent?.oldValue || mergedIssue.current_department || null;
+    // Explicit admin exception list (resolve_override_depts) -- lets a
+    // specific OTHER department resolve a ticket without rewriting/
+    // fabricating originDepartment's own history-derived computation above
+    // to justify it. Confirmed for real on CF-32888: origin genuinely is Dev
+    // (its very first history event, "SLA started — Dev", fires at the same
+    // instant as ticket creation -- there's no earlier point a "Migration"
+    // entry could honestly predate), but the business still wants Migration,
+    // which is currently holding it, to be allowed to resolve it too.
+    const resolveOverrideDepts: string[] = Array.isArray(rawDeptData?.resolve_override_depts) ? rawDeptData.resolve_override_depts : [];
+    const currentDeptLower = (mergedIssue.current_department || '').trim().toLowerCase();
+    const canResolveHere = !currentDeptLower
+      || currentDeptLower === (originDepartment || '').trim().toLowerCase()
+      || resolveOverrideDepts.some((d) => String(d).trim().toLowerCase() === currentDeptLower);
     const responsePayload: any = {
       ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {},
-      originDepartment,
+      originDepartment, canResolveHere, resolveOverrideDepts,
     };
     _mark('format-response');
 
@@ -8283,13 +8307,20 @@ async function _handleJiraPgApi(
             `SELECT COALESCE(
                (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
                i.current_department
-             ) AS origin_dept, i.current_department
+             ) AS origin_dept, i.current_department, i.resolve_override_depts
              FROM issues i WHERE i.id = $1`,
             [issue.id]
           );
           const originDept: string | null = originRow.rows[0]?.origin_dept || null;
           const currentDeptForResolve: string | null = originRow.rows[0]?.current_department || null;
-          if (originDept && currentDeptForResolve && originDept.trim().toLowerCase() !== currentDeptForResolve.trim().toLowerCase()) {
+          // Mirrors the same resolve_override_depts exception the frontend's
+          // canResolveHere check already applies to show/hide the option --
+          // without this the dropdown could offer "Resolved" for an
+          // explicitly-authorized department and then the click would still
+          // 403 here, since this is the actual enforcement point.
+          const overrideDeptsForResolve: string[] = Array.isArray(originRow.rows[0]?.resolve_override_depts) ? originRow.rows[0].resolve_override_depts : [];
+          const isOverrideAuthorized = !!currentDeptForResolve && overrideDeptsForResolve.some((d) => String(d).trim().toLowerCase() === currentDeptForResolve.trim().toLowerCase());
+          if (originDept && currentDeptForResolve && originDept.trim().toLowerCase() !== currentDeptForResolve.trim().toLowerCase() && !isOverrideAuthorized) {
             return json({ error: `This ticket was raised by ${originDept} — only ${originDept} can mark it resolved. Route it back there instead.` }, 403);
           }
         }
