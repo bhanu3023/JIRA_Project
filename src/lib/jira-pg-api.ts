@@ -5652,6 +5652,10 @@ async function _handleJiraPgApi(
       // The bound parameter index deptQueueMemberIds was pushed at (null if
       // it was never pushed, i.e. this dept has no configured queue at all).
       let deptMemberIdsParamIdx: number | null = null;
+      // The bound parameter index the selected status names array was pushed
+      // at (null if no status filter is active) -- set below, reused by
+      // deptScopeSql further down instead of duplicating that same array.
+      let statusParamIdx: number | null = null;
       // "Queue" filter on the main /filters page (opt-in via queueMembersOnly) --
       // restricts to tickets whose assignee is an actual configured member of
       // this department's queue, instead of every ticket merely labeled with
@@ -5850,6 +5854,11 @@ async function _handleJiraPgApi(
                WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
              ))`
         );
+        // Captured so deptScopeSql (built further down, after deptExtraParams'
+        // own indices are all finalized) can reuse this exact same bound
+        // parameter -- the array of selected status names -- for its own
+        // broadening, instead of needing a second copy of it.
+        statusParamIdx = deptParamIdx;
         deptExtraParams.push(statusParam.split(',').map((s2) => s2.trim().toLowerCase()));
         deptParamIdx++;
       }
@@ -6084,6 +6093,33 @@ async function _handleJiraPgApi(
              ))
            )`
         : null;
+      // A selected Status filter can name a "Routed to X"/"Waiting for X"
+      // queue label -- by definition something the SOURCE department wrote
+      // about a ticket it has since routed AWAY, so current_department can
+      // never equal $2 for a ticket like that (the statusParam clause built
+      // above already matches it correctly via dept_statuses, keyed to
+      // deptParam rather than current_department, for exactly this reason).
+      // Without broadening the department SCOPE itself here too though, this
+      // whole branch's base WHERE clause -- deptScopeSql's final fallback,
+      // a plain `current_department = $2` -- silently excluded every such
+      // ticket no matter what the status clause matched, since that base
+      // clause is ANDed with everything else, not OR'd. Confirmed for real:
+      // Queue: Migration + Status: Routed to Dev returned 0 results even
+      // though 9 real tickets have exactly that in Migration's own
+      // dept_statuses snapshot -- none of them are CURRENTLY in Migration
+      // anymore, which is the whole point of the filter. Same "moved on, but
+      // this dept's own frozen snapshot still matches" broadening as Updated
+      // above, keyed to the selected status names instead of a done-
+      // category/date check.
+      const statusDeptMatchSql = statusParam && queueMembersOnlyParam && statusParamIdx !== null && !workedDeptMatchSql
+        ? `(
+             (LOWER(i.current_department) = LOWER($2) ${deptDoneClause})
+             OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
+               SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${statusParamIdx}::text[])
+             ))
+           )`
+        : null;
       // originDeptMatchSql/updatedDeptMatchSql/memberClause's broadenIt above
       // all exclude reason = 'passed' now -- a 'passed' row only means someone
       // in this dept routed the ticket onward (or was auto-credited as the
@@ -6117,13 +6153,20 @@ async function _handleJiraPgApi(
       // whichever one of Created/Updated actually let a given ticket in.
       const deptScopeSql = workedDeptMatchSql
         ? workedDeptMatchSql
-        : (originDeptMatchSql && updatedDeptMatchSql)
-        ? `((${originDeptMatchSql} ${deptDoneClause}) OR (${updatedDeptMatchSql}))`
-        : originDeptMatchSql
-        ? `${originDeptMatchSql} ${deptDoneClause}`
-        : updatedDeptMatchSql
-        ? updatedDeptMatchSql
-        : `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
+        : (() => {
+            // Union whichever of origin/updated/status broadening are
+            // actually active -- a ticket only needs to satisfy ONE of
+            // them to count as belonging to this dept, same "never
+            // narrower than any one filter alone would allow" principle
+            // the origin+updated combination already followed.
+            const orParts = [
+              originDeptMatchSql ? `${originDeptMatchSql} ${deptDoneClause}` : null,
+              updatedDeptMatchSql,
+              statusDeptMatchSql,
+            ].filter((p): p is string => !!p);
+            if (!orParts.length) return `LOWER(i.current_department) = LOWER($2) ${deptDoneClause}`;
+            return orParts.length === 1 ? orParts[0] : `(${orParts.join(' OR ')})`;
+          })();
       // The plain "is currently assignee" branch used to have no department
       // condition of its own -- fine on its own, since it was always ANDed
       // with deptScopeSql anyway, but deptScopeSql's own broadening (origin
