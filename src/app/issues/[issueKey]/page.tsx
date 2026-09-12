@@ -4315,6 +4315,13 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                 : slaNow - (startedAt?.getTime() ?? slaNow);
               const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
               const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');
+              // Each department has its own SLA clock (see computeSLAInstancesPure
+              // -- it only returns policies for the ticket's CURRENT department),
+              // so at any moment there's exactly one dept whose SLA is actually
+              // running here. Space-wide policies (deptName null) still apply to
+              // whichever department currently holds the ticket, so fall back to
+              // that instead of showing no queue at all.
+              const slaDept = s.deptName || (issue as any).current_department || null;
 
               const warnMs = 30 * 60 * 1000;
               const isNotified = s.isNotified === true && (remainingMs <= warnMs);
@@ -4341,6 +4348,11 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                       <span className="text-[12px] font-semibold text-gray-800">{baseName}</span>
                       {goalMs > 0 && (
                         <span className="text-[10px] text-gray-400 font-medium">({fmtGoal(goalMs)})</span>
+                      )}
+                      {slaDept && (
+                        <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-1.5 py-0.5">
+                          {slaDept}
+                        </span>
                       )}
                     </div>
                     <div className="flex items-center gap-1.5 flex-shrink-0">
