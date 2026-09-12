@@ -6,7 +6,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
-import { timeAgo, cn, getEffectiveIssueStatus } from '@/lib/utils';
+import { timeAgo, cn, getEffectiveIssueStatus, resolveStatusColor } from '@/lib/utils';
 import Link from 'next/link';
 import { PriorityIcon } from '@/components/ui/PriorityIcon';
 import DotLoader from '@/components/ui/DotLoader';
@@ -2292,7 +2292,31 @@ export default function FiltersPage() {
                       // status snapshot (what it looked like while it sat
                       // here), not Infra's current one, which has nothing to
                       // do with why this row appeared in this queue's export.
-                      const effectiveStatus = getEffectiveIssueStatus(issue, selQueue || undefined);
+                      //
+                      // getEffectiveIssueStatus falls through to the ticket's
+                      // LIVE status once it's genuinely done (a "Routed to X"
+                      // label is stale once the ticket's actually finished --
+                      // right for someone just browsing "Queue: Migration"
+                      // with no status filter, who shouldn't see "Routed to
+                      // Dev" forever on something Dev finished ages ago). But
+                      // that same fallback directly contradicted a row's own
+                      // reason for appearing here at all when Status was the
+                      // active filter: selecting "Routed to Dev" and getting
+                      // back rows whose visible Status said "Resolved" instead
+                      // read as if the filter and the display disagreed about
+                      // what these tickets even are. When the queue's own raw
+                      // snapshot matches one of the explicitly SELECTED
+                      // statuses, show that snapshot directly instead of
+                      // letting the staleness fallback override it -- the
+                      // general no-filter browsing case is untouched.
+                      const rawDeptStatuses = (issue as any).dept_statuses || {};
+                      const rawDeptKey = selQueue ? Object.keys(rawDeptStatuses).find((k) => k.toLowerCase() === selQueue.toLowerCase()) : undefined;
+                      const rawDeptSt = rawDeptKey ? rawDeptStatuses[rawDeptKey] : null;
+                      const matchesSelectedStatus = selStatuses.length > 0 && !!rawDeptSt?.name
+                        && selStatuses.some((s) => s.trim().toLowerCase() === String(rawDeptSt.name).trim().toLowerCase());
+                      const effectiveStatus = matchesSelectedStatus
+                        ? { ...rawDeptSt, color: resolveStatusColor(rawDeptSt) }
+                        : getEffectiveIssueStatus(issue, selQueue || undefined);
                       return (
                         <span
                           className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold text-white whitespace-nowrap"
