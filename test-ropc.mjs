@@ -28,7 +28,7 @@ if (!user || !pass) {
 
 console.log(`Testing ROPC (non-interactive) token request as: ${user}`);
 
-const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+const res = await fetch('https://login.microsoftonline.com/organizations/oauth2/v2.0/token', {
   method: 'POST',
   headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   body: new URLSearchParams({
