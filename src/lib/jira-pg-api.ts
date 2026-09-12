@@ -5697,7 +5697,17 @@ async function _handleJiraPgApi(
           // 178 instead of the true 439. OR in the same worked-on-record check
           // when Created/Updated is active, so a ticket that's moved on still
           // counts here as long as someone actually worked it in this dept.
-          const broadenIt = (createdRange || updatedRange) && queueMembersOnlyParam;
+          // A selected Status filter broadens this too, not just a date range --
+          // "Routed to X"/"Waiting for X" (this branch's other statusParam check,
+          // further down, is what actually matches those against dept_statuses)
+          // describes a ticket that has ALREADY left this department, so it can
+          // never satisfy memberClause's "currently assigned here" requirement no
+          // matter what. Without this, Queue: Migration + Status: Routed to Dev
+          // returned 0 results for every ticket that filter exists to find --
+          // confirmed for real on CF-32901 (Migration -> Dev): Migration's own
+          // dept_statuses snapshot plainly says "Routed to Dev", but its current
+          // assignee is now a Dev team member, so memberClause alone excluded it.
+          const broadenIt = (createdRange || updatedRange || statusParam) && queueMembersOnlyParam;
           // reason != 'passed': a 'passed' row only means someone in this dept
           // routed the ticket onward (or was auto-credited as the assignee at
           // the time of a move with no assignee yet) -- not that they did any
@@ -5723,9 +5733,19 @@ async function _handleJiraPgApi(
           // dept with no queue config at all, rather than silently excluding
           // everything for it).
           const workedByMemberSql = memberIds.length ? ` AND w4.user_id = ANY($${deptParamIdx}::text[])` : '';
+          // A "Routed to X"/"Waiting for X" status selection is SPECIFICALLY
+          // asking for tickets that were routed onward -- exactly what writes
+          // a 'passed' row (see performDeptHandoff/the direct-statusId handoff
+          // above). Excluding 'passed' here as usual would exclude precisely
+          // the tickets this filter exists to find, so only relax the
+          // exclusion when the selected status actually looks like one of
+          // these routing labels; an ordinary status pick (e.g. "In
+          // Progress") keeps the normal real-work-only semantics.
+          const statusLooksLikeRouting = !!statusParam && statusParam.split(',').some((s2) => /^(waiting\s+for|routed\s+to)\s+/i.test(s2.trim()));
+          const reasonClause = statusLooksLikeRouting ? '' : ` AND w4.reason != 'passed'`;
           deptExtraClauses.push(
             broadenIt
-              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2) AND w4.reason != 'passed'${workedByMemberSql}))`
+              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)${reasonClause}${workedByMemberSql}))`
               : memberClause
           );
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
