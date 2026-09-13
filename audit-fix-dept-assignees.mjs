@@ -145,7 +145,14 @@ async function main() {
 
   let written = 0;
   for (const m of mismatches) {
-    await pool.query(`UPDATE issues SET dept_assignees=$1::jsonb, "updatedAt"=NOW() WHERE id=$2`, [JSON.stringify(m.after), m.id]);
+    // NOT touching "updatedAt" here: it's a real, user-visible field that
+    // every "Updated" date filter across the app depends on -- backfilling
+    // a derived snapshot field is not a genuine ticket update and must
+    // never bump it. (An earlier version of this script did set it to
+    // NOW(), which corrupted the real last-touched timestamp on every
+    // corrected ticket -- see recover-corrupted-updatedat.mjs for the
+    // cleanup that was needed as a result.)
+    await pool.query(`UPDATE issues SET dept_assignees=$1::jsonb WHERE id=$2`, [JSON.stringify(m.after), m.id]);
     written++;
     if (written % 500 === 0) console.log(`  ...${written}/${mismatches.length}`);
   }
