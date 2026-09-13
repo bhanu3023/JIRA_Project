@@ -707,6 +707,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'projectPool',    label: 'Project Pool',    group: 'Issue' },
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
+  { id: 'worked',         label: 'Worked',          group: 'Date' },
   { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
 ];
 
@@ -1002,6 +1003,15 @@ export default function FiltersPage() {
   const [selPriorities, setSelPriorities] = useState<string[]>([]);
   const [selCreated, setSelCreated]       = useState('');
   const [selUpdated, setSelUpdated]       = useState('');
+  // "Worked" means something categorically different from Created/Updated:
+  // it changes what Assignee itself means (current owner -> who actually did
+  // the work here), and what Queue means (currently in this dept -> ever
+  // genuinely worked in this dept), not just an additional date bound on top
+  // of the same semantics. No backend union support with created/updated
+  // exists for it (unlike created+updated, which the backend does union) --
+  // kept mutually exclusive with all three date filters below, same as
+  // Due Date already is.
+  const [selWorked, setSelWorked]         = useState('');
   const [selDueDate, setSelDueDate]       = useState('');
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
@@ -1064,10 +1074,14 @@ export default function FiltersPage() {
   // backend support was simply unreachable -- there was no way to ever
   // send both params at once. Due Date has no such union support on the
   // backend, so it stays exclusive with both.
-  const DATE_GROUP_KEYS = ['created', 'updated', 'dueDate'];
+  const DATE_GROUP_KEYS = ['created', 'updated', 'worked', 'dueDate'];
+  // Worked stands apart from created/updated/dueDate: none of those three
+  // may combine with it (same reasoning as dueDate's existing isolation).
+  const EXCLUSIVE_DATE_KEYS = ['worked', 'dueDate'];
   const clearExtraValue = (key: string) => {
     if (key === 'created')        setSelCreated('');
     if (key === 'updated')        setSelUpdated('');
+    if (key === 'worked')         setSelWorked('');
     if (key === 'dueDate')        setSelDueDate('');
     if (key === 'reporter')       setSelReporters([]);
     if (key === 'priority')       setSelPriorities([]);
@@ -1086,15 +1100,20 @@ export default function FiltersPage() {
         return prev.filter((k) => k !== key);
       }
       let next = [...prev, key];
-      if (key === 'dueDate') {
-        // Due Date still exclusive with Created/Updated -- no backend
-        // union support for combining it with either.
-        const others = ['created', 'updated'].filter((k) => prev.includes(k));
+      if (EXCLUSIVE_DATE_KEYS.includes(key)) {
+        // Worked/Due Date exclusive with every other date filter -- no
+        // backend union support for combining either with anything else.
+        const others = DATE_GROUP_KEYS.filter((k) => k !== key && prev.includes(k));
         others.forEach(clearExtraValue);
         next = next.filter((k) => !others.includes(k));
-      } else if (DATE_GROUP_KEYS.includes(key) && prev.includes('dueDate')) {
-        clearExtraValue('dueDate');
-        next = next.filter((k) => k !== 'dueDate');
+      } else if (DATE_GROUP_KEYS.includes(key)) {
+        // Turning on Created/Updated (which DO union with each other) still
+        // needs to kick out any exclusive one (Worked or Due Date) already
+        // active -- scoped to just these two date keys, not every other
+        // unrelated filter (Reporter, Priority, ...) that also reaches here.
+        const exclusiveActive = EXCLUSIVE_DATE_KEYS.filter((k) => prev.includes(k));
+        exclusiveActive.forEach(clearExtraValue);
+        next = next.filter((k) => !exclusiveActive.includes(k));
       }
       return next;
     });
@@ -1155,6 +1174,7 @@ export default function FiltersPage() {
     const rPriorities      = urlParams?.get('rPriorities');
     const rCreated         = urlParams?.get('rCreated');
     const rUpdated         = urlParams?.get('rUpdated');
+    const rWorked          = urlParams?.get('rWorked');
     const rDueDate         = urlParams?.get('rDueDate');
     const rDepartment      = urlParams?.get('rDepartment');
     const rProductType     = urlParams?.get('rProductType');
@@ -1177,6 +1197,7 @@ export default function FiltersPage() {
     if (rPriorities) setSelPriorities(rPriorities.split(','));
     if (rCreated) setSelCreated(rCreated);
     if (rUpdated) setSelUpdated(rUpdated);
+    if (rWorked) setSelWorked(rWorked);
     if (rDueDate) setSelDueDate(rDueDate);
     if (rDepartment) setSelDepartment(rDepartment);
     if (rProductType) setSelProductType(rProductType.split(','));
@@ -1200,7 +1221,7 @@ export default function FiltersPage() {
     const impliedExtras = [
       rProductType && 'productType', rCombination && 'combination', rCustomerName && 'customerName',
       rClientName && 'clientName', rProjectManager && 'projectManager', rProjectPool && 'projectPool',
-      rDueDate && 'dueDate',
+      rWorked && 'worked', rDueDate && 'dueDate',
     ].filter(Boolean) as string[];
     if (rExtras || impliedExtras.length) {
       setActiveExtras(Array.from(new Set([...(rExtras ? rExtras.split(',') : []), ...impliedExtras])));
@@ -1228,6 +1249,7 @@ export default function FiltersPage() {
     if (selPriorities.length) p.rPriorities = selPriorities.join(',');
     if (selCreated) p.rCreated = selCreated;
     if (selUpdated) p.rUpdated = selUpdated;
+    if (selWorked) p.rWorked = selWorked;
     if (selDueDate) p.rDueDate = selDueDate;
     if (selDepartment) p.rDepartment = selDepartment;
     if (selProductType.length) p.rProductType = selProductType.join(',');
@@ -1241,7 +1263,7 @@ export default function FiltersPage() {
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1299,7 +1321,7 @@ export default function FiltersPage() {
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
-    selCreated || selUpdated || selDueDate || selDepartment ||
+    selCreated || selUpdated || selWorked || selDueDate || selDepartment ||
     selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selProjectPool || selBreached || selOverdue,
   );
 
@@ -1376,6 +1398,12 @@ export default function FiltersPage() {
         // Date ranges
         if (selCreated) params.createdRange = selCreated;
         if (selUpdated) params.updatedRange = selUpdated;
+        // "Worked" only has any effect on the backend's dept-scoped (Queue)
+        // query path -- with no Queue selected it falls through to the
+        // general query, which never even reads this param, and with no
+        // Assignee selected there's no one for "who did the work" to
+        // scope by. Sending it in either case would silently do nothing.
+        if (selWorked && selQueue && selAssignees.length) params.workedRange = selWorked;
         if (selDueDate) params.dueDateRange = selDueDate;
 
         // Hours actually spent in an "In Progress"-type status per ticket --
@@ -1400,7 +1428,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy.
      Short (150ms) debounce -- NOT the old flat 400ms, which made every
@@ -1687,7 +1715,7 @@ export default function FiltersPage() {
     if (activeFilterId === id) clearAll();
   };
 
-  const currentCriteria: FilterCriteria & { reporters?: string[]; createdRange?: string; updatedRange?: string } = {
+  const currentCriteria: FilterCriteria & { reporters?: string[]; createdRange?: string; updatedRange?: string; workedRange?: string } = {
     ...(text.trim() ? { text: text.trim() } : {}),
     ...(selSpaces.length ? { spaces: selSpaces } : {}),
     ...(selQueue ? { queue: selQueue } : {}),
@@ -1698,6 +1726,7 @@ export default function FiltersPage() {
     ...(selPriorities.length ? { priorities: selPriorities } : {}),
     ...(selCreated ? { createdRange: selCreated } : {}),
     ...(selUpdated ? { updatedRange: selUpdated } : {}),
+    ...(selWorked && selQueue && selAssignees.length ? { workedRange: selWorked } : {}),
   };
 
   // Helper: member name by ID
@@ -2097,6 +2126,12 @@ export default function FiltersPage() {
               <div className="flex items-center gap-1">
                 <DateDropBtn label="Updated" selected={selUpdated} onChange={setSelUpdated} />
                 <button onClick={() => toggleExtra('updated')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('worked') && (
+              <div className="flex items-center gap-1">
+                <DateDropBtn label="Worked" selected={selWorked} onChange={setSelWorked} />
+                <button onClick={() => toggleExtra('worked')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors" title="Who actually did the work in that queue, not just who currently owns it -- requires a Queue and an Assignee selected."><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('dueDate') && (
