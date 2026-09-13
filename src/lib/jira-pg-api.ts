@@ -5790,7 +5790,15 @@ async function _handleJiraPgApi(
       } else if (workedRange && assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         workedAssigneeIds = await resolveUserIds(ids);
-      } else if (includeHistoryParam && assignees) {
+      } else if ((includeHistoryParam || (updatedRange && queueMembersOnlyParam)) && assignees) {
+        // Explicitly reversing the earlier "Queue + Assignee means current
+        // ownership only" decision for the Updated filter specifically, per
+        // direct request -- confirmed understanding that this reintroduces
+        // the exact confusion that decision existed to prevent (a ticket
+        // someone worked once, then handed off, shows under their name again
+        // with no way to tell current from historical). Same broadening
+        // includeHistoryParam already used: a real (non-'passed') worked-on
+        // record for this dept counts, not just current assigneeId.
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         const resolvedIds = await resolveUserIds(ids);
         if (resolvedIds.length) {
