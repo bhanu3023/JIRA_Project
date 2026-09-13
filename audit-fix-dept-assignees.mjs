@@ -20,9 +20,11 @@
 //   node audit-fix-dept-assignees.mjs --apply   # writes the corrections
 
 import pg from 'pg';
+import { writeFile } from 'fs/promises';
 
 const APPLY = process.argv.includes('--apply');
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const REPORT_PATH = '/app/dept_assignees_report.csv';
 
 function deptMapGet(map, dept) {
   if (!dept) return undefined;
@@ -88,9 +90,16 @@ async function main() {
     }
   }
 
-  console.log(`\nFound ${mismatches.length} ticket(s) with a stale/wrong dept_assignees snapshot.`);
-  console.log(`\nSample (first 25):`);
-  for (const m of mismatches.slice(0, 25)) {
+  // Flatten to one row per (ticket, dept) correction, and split into two
+  // fundamentally different categories a reviewer needs to see separately:
+  // "(none) -> X" is filling in a field that was simply never set (no risk
+  // of overwriting anyone's real, correct data), while "Y -> X" is an actual
+  // disagreement -- the snapshot claimed one specific person and the real
+  // history log says it should be someone else. Lumping them into one
+  // number/sample hides how much of a 24,944-ticket change is genuinely
+  // "was wrong" versus "was simply blank".
+  const rows = [];
+  for (const m of mismatches) {
     const diffs = Object.keys(m.after).filter((k) => {
       const b = deptMapGet(m.before, k);
       const a = m.after[k];
@@ -98,10 +107,35 @@ async function main() {
     });
     for (const dept of diffs) {
       const before = deptMapGet(m.before, dept);
-      console.log(`  ${m.key} [${dept}]: ${before?.displayName || before?.id || '(none)'} -> ${m.after[dept].displayName}`);
+      rows.push({
+        key: m.key, dept,
+        beforeName: before?.displayName || before?.id || '',
+        afterName: m.after[dept].displayName,
+        wasBlank: !before?.id,
+      });
     }
   }
-  if (mismatches.length > 25) console.log(`  ... and ${mismatches.length - 25} more.`);
+  const blankRows = rows.filter((r) => r.wasBlank);
+  const wrongRows = rows.filter((r) => !r.wasBlank);
+
+  console.log(`\nFound ${mismatches.length} ticket(s) with a stale/wrong dept_assignees snapshot (${rows.length} individual dept corrections).`);
+  console.log(`  - ${blankRows.length} were simply BLANK (never set) -- pure backfill, nothing overwritten.`);
+  console.log(`  - ${wrongRows.length} had a DIFFERENT person already recorded -- genuine mismatch, being corrected.`);
+
+  console.log(`\nSample of genuine mismatches (person -> different person), first 25:`);
+  for (const r of wrongRows.slice(0, 25)) {
+    console.log(`  ${r.key} [${r.dept}]: ${r.beforeName} -> ${r.afterName}`);
+  }
+  if (wrongRows.length > 25) console.log(`  ... and ${wrongRows.length - 25} more genuine mismatches.`);
+
+  const csvLines = ['key,dept,before,after,was_blank'];
+  for (const r of rows) {
+    const esc = (s) => `"${String(s).replace(/"/g, '""')}"`;
+    csvLines.push([esc(r.key), esc(r.dept), esc(r.beforeName), esc(r.afterName), r.wasBlank].join(','));
+  }
+  await writeFile(REPORT_PATH, csvLines.join('\n'), 'utf8');
+  console.log(`\nFull list of all ${rows.length} corrections written to ${REPORT_PATH} -- copy it out with:`);
+  console.log(`  docker cp jira_app:${REPORT_PATH} ./dept_assignees_report.csv`);
 
   if (!APPLY) {
     console.log(`\nDry run only -- no changes made. Re-run with --apply to write these ${mismatches.length} correction(s).`);
