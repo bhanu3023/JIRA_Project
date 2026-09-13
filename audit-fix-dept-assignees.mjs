@@ -25,10 +25,12 @@ const APPLY = process.argv.includes('--apply');
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 function deptMapGet(map, dept) {
+  if (!dept) return undefined;
   const key = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
   return key ? map[key] : undefined;
 }
 function deptMapSet(map, dept, value) {
+  if (!dept) return;
   const existingKey = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
   map[existingKey || dept] = value;
 }
@@ -41,6 +43,7 @@ async function main() {
       u."firstName", u."lastName", u.email, u."avatarUrl"
     FROM user_worked_on_tickets w
     JOIN users u ON u.id = w.user_id
+    WHERE w.dept IS NOT NULL AND w.dept <> ''
     ORDER BY w.issue_id, LOWER(w.dept), w.worked_at DESC
   `);
   console.log(`Found ${latestWorkers.length} (issue, dept) pairs with real history.`);
