@@ -2344,8 +2344,19 @@ export default function FiltersPage() {
                       // statuses, show that snapshot directly instead of
                       // letting the staleness fallback override it -- the
                       // general no-filter browsing case is untouched.
+                      // Same fix, but was scoped to only apply when a specific
+                      // Queue filter was active -- with no Queue selected (just
+                      // browsing by Status across every department, e.g. Status:
+                      // "Routed to Dev, In Progress, ..." with no Queue chip),
+                      // rawDeptKey stayed undefined and every row fell straight
+                      // through to the same staleness fallback this was meant to
+                      // fix. getEffectiveIssueStatus's own default (no viewDept
+                      // given) is the ticket's CURRENT department -- check that
+                      // same department's own snapshot here too when no Queue
+                      // filter narrows it to something more specific.
                       const rawDeptStatuses = (issue as any).dept_statuses || {};
-                      const rawDeptKey = selQueue ? Object.keys(rawDeptStatuses).find((k) => k.toLowerCase() === selQueue.toLowerCase()) : undefined;
+                      const rawDeptTarget = selQueue || (issue as any).current_department || '';
+                      const rawDeptKey = rawDeptTarget ? Object.keys(rawDeptStatuses).find((k) => k.toLowerCase() === rawDeptTarget.toLowerCase()) : undefined;
                       const rawDeptSt = rawDeptKey ? rawDeptStatuses[rawDeptKey] : null;
                       const matchesSelectedStatus = selStatuses.length > 0 && !!rawDeptSt?.name
                         && selStatuses.some((s) => s.trim().toLowerCase() === String(rawDeptSt.name).trim().toLowerCase());
