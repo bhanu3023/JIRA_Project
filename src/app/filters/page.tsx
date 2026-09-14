@@ -2355,13 +2355,45 @@ export default function FiltersPage() {
                       // same department's own snapshot here too when no Queue
                       // filter narrows it to something more specific.
                       const rawDeptStatuses = (issue as any).dept_statuses || {};
-                      const rawDeptTarget = selQueue || (issue as any).current_department || '';
-                      const rawDeptKey = rawDeptTarget ? Object.keys(rawDeptStatuses).find((k) => k.toLowerCase() === rawDeptTarget.toLowerCase()) : undefined;
-                      const rawDeptSt = rawDeptKey ? rawDeptStatuses[rawDeptKey] : null;
-                      const matchesSelectedStatus = selStatuses.length > 0 && !!rawDeptSt?.name
-                        && selStatuses.some((s) => s.trim().toLowerCase() === String(rawDeptSt.name).trim().toLowerCase());
-                      const effectiveStatus = matchesSelectedStatus
-                        ? { ...rawDeptSt, color: resolveStatusColor(rawDeptSt) }
+                      // Still not enough with only the current/selected-queue
+                      // department checked: confirmed for real (CF-29947) --
+                      // matched the filter through INFRA's own "In Progress"
+                      // snapshot, but its CURRENT department (Migration) has
+                      // its own genuine "Resolved" snapshot (a real, non-stale
+                      // queue status, not a routing label), which
+                      // getEffectiveIssueStatus returns immediately without
+                      // ever considering why the row actually matched. The
+                      // backend's own general-search match (deptMatchRows)
+                      // already checks EVERY department's snapshot when no
+                      // Queue is selected, not just the current one -- mirror
+                      // that here too: with no Queue picked, check every
+                      // department (current one first, most likely the
+                      // intended match) instead of only the current/selected
+                      // one.
+                      let matchedDeptSt: any = null;
+                      if (selQueue) {
+                        const key = Object.keys(rawDeptStatuses).find((k) => k.toLowerCase() === selQueue.toLowerCase());
+                        const st = key ? rawDeptStatuses[key] : null;
+                        if (st?.name && selStatuses.some((s) => s.trim().toLowerCase() === String(st.name).trim().toLowerCase())) {
+                          matchedDeptSt = st;
+                        }
+                      } else if (selStatuses.length > 0) {
+                        const currentDept = ((issue as any).current_department || '').toLowerCase();
+                        const deptKeys = Object.keys(rawDeptStatuses);
+                        const orderedKeys = [
+                          ...deptKeys.filter((k) => k.toLowerCase() === currentDept),
+                          ...deptKeys.filter((k) => k.toLowerCase() !== currentDept),
+                        ];
+                        for (const k of orderedKeys) {
+                          const st = rawDeptStatuses[k];
+                          if (st?.name && selStatuses.some((s) => s.trim().toLowerCase() === String(st.name).trim().toLowerCase())) {
+                            matchedDeptSt = st;
+                            break;
+                          }
+                        }
+                      }
+                      const effectiveStatus = matchedDeptSt
+                        ? { ...matchedDeptSt, color: resolveStatusColor(matchedDeptSt) }
                         : getEffectiveIssueStatus(issue, selQueue || undefined);
                       return (
                         <span
