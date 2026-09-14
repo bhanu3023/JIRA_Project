@@ -437,14 +437,28 @@ function SpaceDetailContent() {
   // getMissingCoreFields -- duplicated here because this row's inline status
   // dropdown lets a ticket be resolved directly from the list view without
   // ever opening the detail page, which was bypassing that check entirely.
+  // Same exemptions as the ticket detail page's own getMissingCoreFields
+  // (see its comments there) -- this inline version (used by the queue
+  // dashboard's own "resolve from the list" dropdown, e.g. "Assigned to
+  // me") was never updated to match when those exemptions were added,
+  // so an Infra/QA/IA ticket that was correctly created without these
+  // migration-only fields could still get permanently stuck unresolvable
+  // here even though resolving the SAME ticket from its own detail page
+  // worked fine.
   const getMissingCoreFieldsInline = (iss: any): string[] => {
+    // spaceKey is this page's own route param (this whole page is always
+    // scoped to one space), not a per-issue field -- more reliable than
+    // trusting the issue object to carry its own spaceKey.
+    if ((spaceKey || '').toUpperCase() === 'IA') return [];
+    const dept = String(iss.current_department || '').trim().toLowerCase();
+    if (dept === 'qa') return [];
     const missing: string[] = [];
-    const required: { name: string; key: string }[] = [
+    const required: { name: string; key: string }[] = dept === 'infra' ? [] : [
       { name: 'Project Manager', key: 'projectManager' },
       { name: 'Product Type', key: 'productType' },
       { name: 'Combination', key: 'combination' },
     ];
-    if (String(iss.current_department || '').toLowerCase() === 'dev') {
+    if (dept === 'dev') {
       required.push({ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' });
     }
     for (const f of required) {
