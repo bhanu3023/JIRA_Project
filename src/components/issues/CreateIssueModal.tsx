@@ -449,9 +449,20 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // Set default status
   useEffect(() => {
     if (spaceStatuses.length > 0 && !form.statusId) {
+      // The final `spaceStatuses[0]` fallback picks whatever's literally
+      // FIRST in the list, with no regard for whether it's even a sane
+      // starting state -- confirmed for real: a new Infra ticket seeded
+      // with "Waiting for L3" (an unrelated in-progress-category status
+      // from the space's generic, unscoped status list, which has no
+      // meaningful ordering) as if it were the ticket's open/initial
+      // state. Prefer any category:'todo' status over that blind
+      // positional fallback -- still not a perfect match for "Open"
+      // specifically, but never something that's semantically already
+      // in-progress or done.
       const def = spaceStatuses.find(s => s.name.toLowerCase() === 'open')
         || spaceStatuses.find(s => s.name.toLowerCase() === 'to do')
         || spaceStatuses.find(s => s.name.toLowerCase() === 'todo')
+        || spaceStatuses.find(s => s.category === 'todo')
         || spaceStatuses[0];
       setForm(f => ({ ...f, statusId: def.id }));
     }
