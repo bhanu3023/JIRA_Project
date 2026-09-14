@@ -3509,15 +3509,20 @@ function SpaceDetailContent() {
                     // Dept-aware assignee: when dept filter active, show that dept's assignee
                     const deptMap: Record<string, any> = (issue as any).dept_assignees || {};
                     const activeDept = deptFilter || (queueFilter === 'my-dept' ? mySpaceDept : mySpaceDept);
-                    // "Assigned to me" is this viewer's own personal tracking list (how many
-                    // tickets they've been assigned/worked, current or past) — a ticket lands
-                    // here either because it's currently assigned to them, or because they're
-                    // credited with having worked it before it moved on/got reassigned. Showing
-                    // the ticket's real current owner (now someone else) in that second case reads
-                    // as if the page mislabeled whose list this is; show the viewer's own name
-                    // here instead, since by definition every row is "theirs" for this view.
+                    // Previously hardcoded to always show the viewer's OWN name for every row
+                    // in "Assigned to me" (on the theory that every row is "theirs" for this
+                    // view, current or historical) -- but that silently hid the ticket's REAL
+                    // assignee, including the genuinely wrong case: a ticket with no assignee
+                    // at all (assigneeId null, never actually this viewer's) still showed their
+                    // name as if they owned it, with no way to tell from the screen that
+                    // something was off. Confirmed for real: CF-13408, assigneeId and
+                    // dept_assignees both empty, still displayed as a brand-new team member's
+                    // own ticket in her "Assigned to me" list. Show the ticket's real assignee
+                    // (or "Unassigned") like every other view does -- a row belongs in this list
+                    // because the backend query says so; the display shouldn't paper over what
+                    // it actually finds.
                     const displayAssignee = queueFilter === 'dept_assigned'
-                      ? (user ? { firstName: user.firstName, lastName: user.lastName, id: user.id } : issue.assignee)
+                      ? issue.assignee
                       : (activeDept && activeDept in deptMap ? (deptMap[activeDept] ?? issue.assignee) : issue.assignee);
                     return (
                       <div key={id} className="px-2" onClick={e => e.stopPropagation()}>
