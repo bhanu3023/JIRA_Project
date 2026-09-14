@@ -13,6 +13,41 @@
 import nodemailer from 'nodemailer';
 import { ImapFlow } from 'imapflow';
 
+// Every email in a monitored inbox gets turned into a real ticket, no
+// filtering at all -- fine for genuine customer/colleague requests, but a
+// personal mailbox also receives plenty of mail that was never meant to be
+// a support request: Microsoft Teams' own "X is trying to reach you"/"X is
+// calling you" notifications, calendar invite responses, and similar
+// automated system mail. Confirmed for real: CF-31002, "Tanmai Arangi is
+// trying to reach you in Microsoft Teams" -- a Teams notification, not
+// anything anyone actually asked support to look at. These patterns match
+// the fixed subject-line wording Teams/Outlook's own notification system
+// uses (not something a real requester would naturally title their own
+// email), so this is deliberately narrow -- it only skips mail that's
+// unambiguously automated, never a genuine request that merely mentions
+// Teams.
+const AUTOMATED_NOTIFICATION_SUBJECT_PATTERNS: RegExp[] = [
+  /is trying to reach you( in Microsoft Teams)?$/i,
+  /is calling you( in Microsoft Teams)?$/i,
+  /missed a (call|chat) from /i,
+  /^\s*missed call from /i,
+  /^Reminder:.*Microsoft Teams Meeting/i,
+  /has accepted your meeting/i,
+  /has declined your meeting/i,
+  /^Accepted:\s/i,
+  /^Declined:\s/i,
+  /^Tentative:\s/i,
+  /^Canceled:\s/i,
+];
+function isAutomatedNotificationEmail(subject: string, from: string): boolean {
+  const s = (subject || '').trim();
+  if (!s) return false;
+  if (AUTOMATED_NOTIFICATION_SUBJECT_PATTERNS.some((re) => re.test(s))) return true;
+  const f = (from || '').toLowerCase();
+  if (f.includes('noreply@email.teams.microsoft.com') || f.includes('teams-noreply@microsoft.com')) return true;
+  return false;
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 export interface EmailConfig {
   imap: {
@@ -911,6 +946,11 @@ export function startImapPoller(
 
         if (processedIds.has(msgId)) continue;
 
+        if (isAutomatedNotificationEmail(subject, from)) {
+          console.log(`[EmailPoller] EWS: skipping automated notification "${subject}" from ${from}`);
+          processedIds.add(msgId);
+          continue;
+        }
         console.log(`[EmailPoller] EWS email: "${subject}" from ${from}`);
         try {
           await onEmail({ from, to, cc: '', subject, body, messageId: msgId, inReplyTo: '', references: '', attachments: [] });
@@ -968,6 +1008,12 @@ export function startImapPoller(
         const cc      = (gm.ccRecipients || []).map((r: any) => r.emailAddress?.address).filter(Boolean).join(', ');
         const subject = gm.subject || '(no subject)';
         let   body    = gm.body?.content || subject;
+
+        if (isAutomatedNotificationEmail(subject, from)) {
+          console.log(`[EmailPoller] Graph: skipping automated notification "${subject}" from ${from}`);
+          processedIds.add(msgId);
+          continue;
+        }
 
         // ── Fetch inline images and embed as data: URLs ─────────────────────
         // Graph body.content contains <img src="cid:..."> for inline images.
@@ -1129,6 +1175,13 @@ export function startImapPoller(
               if (part.childNodes) part.childNodes.forEach(walkParts);
             };
             walkParts(msg.bodyStructure);
+          }
+
+          if (isAutomatedNotificationEmail(subject, from)) {
+            console.log(`[EmailPoller] IMAP: skipping automated notification "${subject}" from ${from}`);
+            processedIds.add(msgId);
+            await client.messageFlagsAdd({ uid: msg.uid }, ['\\Seen']).catch(() => {});
+            continue;
           }
 
           console.log(`[EmailPoller] Email from ${from}: "${subject}"${inReplyTo ? ` (reply to ${inReplyTo})` : ' (new)'}`);
