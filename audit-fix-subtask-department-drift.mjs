@@ -74,7 +74,7 @@ async function main() {
         OR (
           dept_statuses IS NOT NULL
           AND jsonb_typeof(dept_statuses -> current_department) = 'object'
-          AND (dept_statuses -> current_department ->> 'name') ~* '^(waiting\s+for|routed\s+to)\s+'
+          AND (dept_statuses -> current_department ->> 'name') ~* '^(waiting\\s+for|routed\\s+to)\\s+'
         )
       )
   `);
