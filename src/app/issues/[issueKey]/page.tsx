@@ -1999,6 +1999,20 @@ export default function IssueDetailPage() {
                     <PriorityIcon priority={child.priority || 'medium'} size={13} />
                     <span className="text-sm text-indigo-600 font-semibold shrink-0">{child.cfKey ?? child.key}</span>
                     <span className="text-sm text-gray-700 flex-1 truncate">{child.summary}</span>
+                    {/* A subtask is locked to whichever department created it
+                        (see jira-pg-api.ts's dept-handoff subtask guard) --
+                        show that team here so it stays clear who owns it even
+                        if the parent later moves to a different department. */}
+                    {(child as any).currentDepartment && (
+                      <span
+                        className="text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0 flex items-center gap-1"
+                        style={{ backgroundColor: getDeptColor((child as any).currentDepartment) + '20', color: getDeptColor((child as any).currentDepartment) }}
+                        title={`Created for ${(child as any).currentDepartment}`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: getDeptColor((child as any).currentDepartment) }} />
+                        {(child as any).currentDepartment}
+                      </span>
+                    )}
                     {child.assignee && (
                       <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[9px] font-bold shrink-0">
                         {getInitials(child.assignee.firstName, child.assignee.lastName)}

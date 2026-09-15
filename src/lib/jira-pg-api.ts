@@ -8081,11 +8081,16 @@ async function _handleJiraPgApi(
       // separately so subtasks show their CF-#### key like every other issue,
       // instead of falling back to the raw space-prefixed key.
       childIssues.length
-        ? pool.query<{ id: string; cf_key: string | null }>(
-            `SELECT id, cf_key FROM issues WHERE id = ANY($1::text[])`,
+        // current_department piggybacks on this same raw-column lookup (same
+        // gap as cf_key -- Prisma doesn't know about it either) so a
+        // subtask's row can show which team it actually belongs to, now that
+        // it's locked to its creating department for good rather than
+        // silently following the parent around.
+        ? pool.query<{ id: string; cf_key: string | null; current_department: string | null }>(
+            `SELECT id, cf_key, current_department FROM issues WHERE id = ANY($1::text[])`,
             [childIssues.map(c => c.id)]
           )
-        : Promise.resolve({ rows: [] as { id: string; cf_key: string | null }[] }),
+        : Promise.resolve({ rows: [] as { id: string; cf_key: string | null; current_department: string | null }[] }),
     ]);
     const summaryMap = new Map(linkedIssues.map(i => [i.key, i]));
     const linkedCfKeyMap = new Map(linkedCfKeys.rows.map(r => [r.key, r.cf_key]));
@@ -8107,6 +8112,7 @@ async function _handleJiraPgApi(
       };
     });
     const childCfKeyMap = new Map(childCfKeys.rows.map(r => [r.id, r.cf_key]));
+    const childDeptMap = new Map(childCfKeys.rows.map(r => [r.id, r.current_department]));
 
     // Format children
     const children = childIssues.map(c => ({
@@ -8123,6 +8129,7 @@ async function _handleJiraPgApi(
         ? { id: c.assignee.id, firstName: c.assignee.firstName, lastName: c.assignee.lastName ?? '', avatarUrl: avatarRef(c.assignee.id, c.assignee.avatarUrl) }
         : null,
       parentKey: key,
+      currentDepartment: childDeptMap.get(c.id) ?? null,
     }));
 
     const attachments = dbAttachments.map((a: any) => ({
