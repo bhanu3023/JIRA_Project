@@ -1298,6 +1298,81 @@ function deptMapDelete(map: Record<string, any>, dept: string): void {
   if (existingKey) delete map[existingKey];
 }
 
+// A "Routed to X"/"Waiting for X" queue status is a record of an OUTGOING
+// action, never a legitimate status to carry forward or restore later.
+// Module-level copy of the same predicate performDeptHandoff already keeps
+// locally for its own use -- this one is for cascadeDeptToChildren below,
+// which needs it outside that function's scope.
+function isRoutingLabelStatus(obj: any): boolean {
+  return typeof obj?.id === 'string'
+    && obj.id.startsWith('qst_')
+    && /^(?:waiting\s+for|routed\s+to)\s+/i.test(String(obj.name || ''));
+}
+
+// A parent ticket's own department move carries its subtasks along with it
+// -- a subtask belongs to whichever team currently owns the parent, not a
+// frozen snapshot of whoever owned the parent the moment the subtask was
+// created. Confirmed by explicit request after the opposite behavior (a
+// SUBTASK independently routing itself away via its own status dropdown,
+// completely decoupled from its parent) was fixed in 7800895 -- that fix
+// stays correct and untouched; this is the other half: the parent DOES
+// still get to bring its subtasks along when IT moves.
+//
+// Shared by every department-transfer path: performDeptHandoff (called
+// below, right before it returns) covers the two status-driven handoffs,
+// and the plain "Change Department" dropdown's own separate restore-or-
+// round-robin logic (/issues/:key/department) calls this directly.
+async function cascadeDeptToChildren(parentIssueKey: string, targetDept: string): Promise<void> {
+  try {
+    const { rows: children } = await pool.query(
+      `SELECT id, current_department, dept_statuses FROM issues WHERE "parentKey"=$1`,
+      [parentIssueKey]
+    );
+    if (!children.length) return;
+    let allQueueRows: { rows: any[] } = { rows: [] };
+    try { allQueueRows = await pool.query(`SELECT queues FROM custom_queues`); } catch {}
+    const queueStatusesFor = (deptName: string): any[] => {
+      for (const row of allQueueRows.rows) {
+        const queues: any[] = row.queues || [];
+        const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === deptName.toLowerCase());
+        if (matchedQ?.queueStatuses?.length) return matchedQ.queueStatuses;
+      }
+      return [];
+    };
+    for (const child of children) {
+      const childOldDept: string = child.current_department || '';
+      if (childOldDept.toLowerCase() === targetDept.toLowerCase()) continue;
+      // Carry the child's own current work status across to its new
+      // department key -- only WHO owns it moves with the parent, not what
+      // stage of work it's actually in. Skip a stale routing label rather
+      // than carrying that forward too.
+      const childDeptStatuses = { ...(child.dept_statuses || {}) };
+      const childOwnStatus = childOldDept ? deptMapGet(childDeptStatuses, childOldDept) : null;
+      if (childOwnStatus && !isRoutingLabelStatus(childOwnStatus)) {
+        deptMapSet(childDeptStatuses, targetDept, childOwnStatus);
+      } else if (!deptMapGet(childDeptStatuses, targetDept)) {
+        const childQueueStatuses = queueStatusesFor(targetDept);
+        const fallbackSt = childQueueStatuses.find((s: any) => s.category === 'in_progress')
+          || childQueueStatuses.find((s: any) => s.category === 'todo')
+          || childQueueStatuses[0];
+        if (fallbackSt) {
+          deptMapSet(childDeptStatuses, targetDept, { id: fallbackSt.id, name: fallbackSt.name, category: fallbackSt.category, color: fallbackSt.color });
+        }
+      }
+      await pool.query(
+        `UPDATE issues SET current_department=$1, original_dept=$1, dept_statuses=$2::jsonb, dept_sla_started_at=NOW(), "updatedAt"=NOW() WHERE id=$3`,
+        [targetDept, JSON.stringify(childDeptStatuses), child.id]
+      );
+      if (childOldDept) await pauseDeptSLA(null, child.id, childOldDept).catch(() => {});
+      await startDeptSLA(null, child.id, targetDept).catch(() => {});
+      pool.query(
+        `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        [rid(), child.id, 'department', childOldDept, `Followed parent to ${targetDept}`, 'System', null]
+      ).catch(() => {});
+    }
+  } catch { /* best-effort -- a cascade failure shouldn't fail the parent's own handoff */ }
+}
+
 /**
  * Moves an issue to targetDept, exactly like the "Change Department" dropdown
  * does: saves the current assignee under the old dept, restores (or
@@ -1329,8 +1404,9 @@ async function performDeptHandoff(
   userId: string | null,
 ): Promise<string> {
   const existingMap = await pool.query(
-    `SELECT dept_assignees, "assigneeId", current_department, dept_statuses FROM issues WHERE id=$1`, [issueId]
+    `SELECT key, dept_assignees, "assigneeId", current_department, dept_statuses FROM issues WHERE id=$1`, [issueId]
   );
+  const ownIssueKey: string | undefined = existingMap.rows[0]?.key;
   const oldDept: string = existingMap.rows[0]?.current_department || '';
   const deptAssignees: Record<string, any> = existingMap.rows[0]?.dept_assignees || {};
   const deptStatuses: Record<string, any>  = existingMap.rows[0]?.dept_statuses  || {};
@@ -1563,6 +1639,8 @@ async function performDeptHandoff(
       [userId, issueId, oldDept]
     ).catch(() => {});
   }
+  // Bring any subtasks along -- see cascadeDeptToChildren's own comment for why.
+  if (ownIssueKey) await cascadeDeptToChildren(ownIssueKey, targetDept);
   return oldDept;
 }
 
@@ -7396,6 +7474,8 @@ async function _handleJiraPgApi(
         [newDept, rrAssigneeId, newStatusId, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), key, oldDept || null]
       );
       await startDeptSLA(key, null, newDept);
+      // Bring any subtasks along -- see cascadeDeptToChildren's own comment for why.
+      await cascadeDeptToChildren(key, newDept);
 
       // Track ticket in closed list for old dept and log transition for Sent/Watching
       try {
