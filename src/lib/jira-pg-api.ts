@@ -6911,10 +6911,21 @@ async function _handleJiraPgApi(
         }
       } catch { /* best-effort -- falls through to the default below */ }
     }
-    // Final fallback (no explicit/resolvable status at all): prefer a real
-    // todo-category status over an arbitrary first-in-the-list pick, same
-    // improvement already made to CreateIssueModal's own client-side default.
-    if (!st) st = sp.statuses.find((x) => x.category === 'todo') || sp.statuses[0];
+    // Final fallback (no explicit/resolvable status at all -- confirmed for
+    // real: CF-33015 landed here with body.statusId blank). A space's own
+    // list can have MORE THAN ONE real row categorized 'todo' (e.g. both
+    // "Open" and "Reopened" here) -- .find(category==='todo') alone just
+    // grabs whichever one Postgres happens to return first for a tie, with
+    // no guarantee that's "Open". Prefer an exact name match first, same
+    // three-tier preference CreateIssueModal's own client-side default
+    // already uses, before falling back to the first same-category row.
+    if (!st) {
+      st = sp.statuses.find((x) => x.name.toLowerCase() === 'open')
+        || sp.statuses.find((x) => x.name.toLowerCase() === 'to do')
+        || sp.statuses.find((x) => x.name.toLowerCase() === 'todo')
+        || sp.statuses.find((x) => x.category === 'todo')
+        || sp.statuses[0];
+    }
 
     // Resolve reporter and assignee from email in parallel
     const [reporterByEmail, assigneeByEmail] = await Promise.all([
@@ -6982,8 +6993,13 @@ async function _handleJiraPgApi(
       }
     }
 
-    // For subtasks: always use the first (Open) status regardless of what parent has
-    const openStatus = sp.statuses.find(s => s.category === 'todo') || sp.statuses[0];
+    // For subtasks: always use the first (Open) status regardless of what
+    // parent has -- same exact-name-first preference as the fallback above.
+    const openStatus = sp.statuses.find(s => s.name.toLowerCase() === 'open')
+      || sp.statuses.find(s => s.name.toLowerCase() === 'to do')
+      || sp.statuses.find(s => s.name.toLowerCase() === 'todo')
+      || sp.statuses.find(s => s.category === 'todo')
+      || sp.statuses[0];
     const finalStatus = body.parentKey ? openStatus : st;
 
     // Retry loop: handles race condition where two concurrent creates pick the same key number.
@@ -7055,7 +7071,9 @@ async function _handleJiraPgApi(
               if (matchedQ?.queueStatuses?.length) { queueStatuses = matchedQ.queueStatuses; break; }
             }
           } catch {}
-          const queueOpenStatus = queueStatuses.find((s: any) => s.category === 'todo') || queueStatuses[0];
+          const queueOpenStatus = queueStatuses.find((s: any) => (s.name || '').toLowerCase() === 'open')
+            || queueStatuses.find((s: any) => s.category === 'todo')
+            || queueStatuses[0];
           // issue.status is whatever the create form actually submitted
           // (via body.statusId, resolved into `finalStatus` above) -- it must
           // win over the queue's own default "open" status. Confirmed for
