@@ -11,14 +11,28 @@
 // which team a subtask was actually created for, regardless of how many
 // times current_department has since moved.
 //
+// Confirmed for real (CF-32993): the lock fix stops the DEPARTMENT from
+// moving, but a "Waiting for X"/"Routed to X" pick made just before that
+// fix deployed already wrote its literal text into dept_statuses -- the
+// ticket was left frozen showing "ROUTED TO QA" forever while Department
+// stayed on "Dev", since nothing ever un-routes a status label once it's
+// written. This script cleans that up too, not just the department.
+//
 // For each drifted subtask:
 //   - current_department is restored to original_dept
 //   - if a saved dept_assignees[original_dept] entry exists (and that user
 //     still exists), the assignee is restored to match -- same safety
 //     check performDeptHandoff itself applies on restore. Otherwise the
 //     assignee is left alone (no guessing/round-robin here).
-//   - dept_sla_started_at is reset to NOW() for the restored department,
-//     since its SLA clock was running against the wrong department.
+//   - dept_sla_started_at is reset to NOW() for the restored department.
+//   - if the ticket's status (real or any dept_statuses entry) is a
+//     "Waiting for X"/"Routed to X" routing label -- a transitional state
+//     that was never supposed to be permanent -- it's replaced with the
+//     restored department's own queue default (its "In Progress" entry if
+//     the ticket had already been worked on per its category, else its
+//     "Open"/todo entry), and dept_statuses is collapsed down to just that
+//     one department (subtasks don't keep multi-department history going
+//     forward, since they never really leave their department now).
 //
 // Usage:
 //   node audit-fix-subtask-department-drift.mjs           # dry run, full report
@@ -29,6 +43,8 @@ import pg from 'pg';
 const APPLY = process.argv.includes('--apply');
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
+const ROUTING_LABEL = /^(?:waiting\s+for|routed\s+to)\s+/i;
+
 function deptMapGet(map, dept) {
   if (!dept) return undefined;
   const key = Object.keys(map || {}).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
@@ -38,7 +54,8 @@ function deptMapGet(map, dept) {
 async function main() {
   console.log('Scanning subtasks whose current_department has drifted from original_dept...');
   const { rows: drifted } = await pool.query(`
-    SELECT id, cf_key, key, "parentKey", current_department, original_dept, "assigneeId", dept_assignees
+    SELECT id, cf_key, key, "parentKey", current_department, original_dept,
+           "assigneeId", dept_assignees, dept_statuses, "statusId", "spaceId"
     FROM issues
     WHERE "parentKey" IS NOT NULL
       AND original_dept IS NOT NULL AND original_dept <> ''
@@ -55,15 +72,62 @@ async function main() {
   );
   const parentMap = new Map(parents.map((p) => [p.key, p]));
 
+  const { rows: statusRows } = await pool.query(`SELECT id, name, color, category, "spaceId" FROM statuses`);
+  const { rows: queueRows } = await pool.query(`SELECT space_key, queues FROM custom_queues`);
+
   const plan = drifted.map((d) => {
     const saved = deptMapGet(d.dept_assignees || {}, d.original_dept);
     const parent = parentMap.get(d.parentKey);
+
+    // Figure out whether the ticket is currently stuck on a routing label --
+    // either its real status name, or the wrong department's own dept_statuses
+    // entry (whichever exists) -- and if so, what to replace it with.
+    const realSt = statusRows.find((s) => s.id === d.statusId);
+    const wrongDeptSt = deptMapGet(d.dept_statuses || {}, d.current_department);
+    const currentLabel = wrongDeptSt?.name || realSt?.name || '';
+    const isStuckOnRoutingLabel = ROUTING_LABEL.test((currentLabel || '').trim());
+
+    let newDeptStatuses = d.dept_statuses;
+    let newStatusId = d.statusId;
+    let newStatusName = null;
+    if (isStuckOnRoutingLabel) {
+      // Find the restored department's own queue statuses.
+      let queueStatuses = [];
+      for (const row of queueRows) {
+        const queues = row.queues || [];
+        const q = queues.find((qq) => (qq.name || '').toLowerCase() === d.original_dept.toLowerCase());
+        if (q?.queueStatuses?.length) { queueStatuses = q.queueStatuses; break; }
+      }
+      // Prefer an in_progress-category entry (the subtask had presumably
+      // already been worked on, given it accumulated enough history to
+      // drift departments at all) -- fall back to todo/open.
+      const replacement =
+        queueStatuses.find((s) => s.category === 'in_progress') ||
+        queueStatuses.find((s) => s.category === 'todo') ||
+        queueStatuses[0] || null;
+      if (replacement) {
+        newStatusName = replacement.name;
+        const realMatch =
+          statusRows.find((s) => s.spaceId === d.spaceId && s.name.toLowerCase() === replacement.name.toLowerCase()) ||
+          statusRows.find((s) => s.spaceId === d.spaceId && s.category === replacement.category) ||
+          statusRows.find((s) => s.spaceId === d.spaceId && s.category === 'todo');
+        if (realMatch) newStatusId = realMatch.id;
+        newDeptStatuses = {
+          [d.original_dept]: {
+            id: replacement.id, name: replacement.name,
+            color: replacement.color || '#64748B', category: replacement.category || 'in_progress',
+          },
+        };
+      }
+    }
+
     return {
       id: d.id, key: d.cf_key || d.key,
       parentKey: parent?.cf_key || d.parentKey, parentSummary: parent?.summary || '',
       wrongDept: d.current_department, correctDept: d.original_dept,
       currentAssigneeId: d.assigneeId,
       restoreAssigneeId: saved?.id || null, restoreAssigneeName: saved?.displayName || saved?.id || null,
+      currentLabel, isStuckOnRoutingLabel, newStatusName, newDeptStatuses, newStatusId,
     };
   });
 
@@ -78,7 +142,10 @@ async function main() {
     const assigneeNote = p.restoreAssigneeId
       ? (existingIdSet.has(p.restoreAssigneeId) ? ` | assignee -> ${p.restoreAssigneeName}` : ` | assignee restore skipped (saved user no longer exists)`)
       : '';
-    console.log(`  ${p.key} (under ${p.parentKey} "${p.parentSummary}"): ${p.wrongDept} -> ${p.correctDept}${assigneeNote}`);
+    const statusNote = p.isStuckOnRoutingLabel
+      ? (p.newStatusName ? ` | status "${p.currentLabel}" -> "${p.newStatusName}"` : ` | status "${p.currentLabel}" stuck on a routing label but no replacement found -- left as-is`)
+      : '';
+    console.log(`  ${p.key} (under ${p.parentKey} "${p.parentSummary}"): ${p.wrongDept} -> ${p.correctDept}${assigneeNote}${statusNote}`);
   }
 
   if (!APPLY) {
@@ -90,17 +157,23 @@ async function main() {
   let written = 0;
   for (const p of plan) {
     const restoreId = p.restoreAssigneeId && existingIdSet.has(p.restoreAssigneeId) ? p.restoreAssigneeId : null;
-    if (restoreId) {
-      await pool.query(
-        `UPDATE issues SET current_department=$1, "assigneeId"=$2, dept_sla_started_at=NOW() WHERE id=$3`,
-        [p.correctDept, restoreId, p.id]
-      );
-    } else {
-      await pool.query(
-        `UPDATE issues SET current_department=$1, dept_sla_started_at=NOW() WHERE id=$2`,
-        [p.correctDept, p.id]
-      );
-    }
+    const fixStatus = p.isStuckOnRoutingLabel && p.newStatusName;
+    await pool.query(
+      `UPDATE issues SET
+         current_department=$1,
+         "assigneeId"=COALESCE($2, "assigneeId"),
+         dept_sla_started_at=NOW(),
+         dept_statuses=COALESCE($3::jsonb, dept_statuses),
+         "statusId"=COALESCE($4, "statusId")
+       WHERE id=$5`,
+      [
+        p.correctDept,
+        restoreId,
+        fixStatus ? JSON.stringify(p.newDeptStatuses) : null,
+        fixStatus ? p.newStatusId : null,
+        p.id,
+      ]
+    );
     written++;
   }
   console.log(`\nRestored ${written} subtask(s) to their creating department.`);
