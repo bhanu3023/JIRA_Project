@@ -271,17 +271,34 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
           <h3 className="text-[14px] font-semibold text-gray-700">Per-person SLA summary</h3>
           {people.length > 0 && (
             <DownloadButton
-              label="Download total tickets"
-              onClick={() => downloadCsv(
-                `mbr-${team}-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
-                ['Name', 'Email', 'Total tickets', 'Resolved tickets', 'Resolution SLA breached', 'Resolution SLA tracked', 'Avg. resolution (hrs)', 'Stale', 'Missing details', 'Overdue', 'Screenshot %', 'Closing comment %', 'RCA/Fix %', isEntSmb ? 'Overall Score' : 'Hygiene score'],
-                people.map((p) => [
-                  p.name, p.email, p.total, p.resolved, p.rbBreached, p.rbTracked, p.avgResolutionHours ?? '',
-                  p.stale, p.missing, p.overdue,
-                  p.screenshotPct ?? '', p.closingCommentPct ?? '', p.rcaFixPct ?? '',
-                  isEntSmb ? (p.overallScore100 ?? '') : p.hygieneScore,
-                ]),
-              )}
+              label="Download tickets"
+              onClick={() => {
+                // Ticket-level detail, not just the per-person totals above — one
+                // row per ticket so a person's count (e.g. 50) can be traced back
+                // to exactly which 50 tickets make it up. `tickets` is the same
+                // set already shown in the Tickets table below (respects the
+                // Person dropdown and date range), just re-shaped per row.
+                const emailByName = new Map(people.map((p) => [p.name.toLowerCase(), p.email] as const));
+                const rows = [...tickets]
+                  .sort((a, b) => (a.assignee || '').localeCompare(b.assignee || '') || new Date(b.created).getTime() - new Date(a.created).getTime())
+                  .map((t) => [
+                    t.assignee || 'Unassigned',
+                    emailByName.get((t.assignee || '').toLowerCase()) || '',
+                    t.key, t.project, t.status, t.summary, t.reporter,
+                    t.created ? new Date(t.created).toLocaleString() : '',
+                    t.updated ? new Date(t.updated).toLocaleString() : '',
+                    t.rb === true ? 'Yes' : t.rb === false ? 'No' : 'N/A',
+                    t.assigneeOutsideRoster ? 'Yes' : 'No',
+                  ]);
+                downloadCsv(
+                  `mbr-${team}-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
+                  ['Assignee', 'Assignee Email', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'Resolution SLA Breached', 'Outside Roster'],
+                  rows,
+                );
+                if (totalMatched > tickets.length) {
+                  alert(`Exported the ${tickets.length.toLocaleString()} tickets currently loaded, out of ${totalMatched.toLocaleString()} total matching this range. Narrow the date range or pick a person to export everything.`);
+                }
+              }}
             />
           )}
         </div>
@@ -747,16 +764,33 @@ export default function MbrPage() {
                 </div>
                 {sortedPeople.length > 0 && (
                   <DownloadButton
-                    label="Download total tickets"
-                    onClick={() => downloadCsv(
-                      `mbr-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
-                      ['Name', 'Email', 'Department', 'Total tickets', 'Open', 'Stale', 'Missing details', 'Overdue', 'Closed', 'Resolved w/o closure', 'Screenshot %', 'Hygiene score'],
-                      sortedPeople.map((p) => [
-                        p.name, p.email, p.dept, p.openCount + p.closed, p.openCount,
-                        p.stale, p.missing, p.overdue, p.closed, p.noClosure,
-                        p.screenshotPct ?? '', p.hygieneScore,
-                      ]),
-                    )}
+                    label="Download tickets"
+                    onClick={() => {
+                      // Ticket-level detail, not just the per-person totals — one row
+                      // per ticket so a person's count can be traced back to exactly
+                      // which tickets make it up. `tickets` is the same set already
+                      // shown in the Tickets table below (respects the Department
+                      // filter and date range), just re-shaped per row.
+                      const emailByName = new Map(people.map((p) => [p.name.toLowerCase(), p.email] as const));
+                      const rows = [...tickets]
+                        .sort((a, b) => (a.assignee || '').localeCompare(b.assignee || '') || new Date(b.created).getTime() - new Date(a.created).getTime())
+                        .map((t) => [
+                          t.assignee || 'Unassigned',
+                          emailByName.get((t.assignee || '').toLowerCase()) || '',
+                          t.dept, t.key, t.project, t.status, t.summary, t.reporter,
+                          t.created ? new Date(t.created).toLocaleString() : '',
+                          t.updated ? new Date(t.updated).toLocaleString() : '',
+                          t.slaBreached ? 'Yes' : 'No',
+                        ]);
+                      downloadCsv(
+                        `mbr-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
+                        ['Assignee', 'Assignee Email', 'Department', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'SLA Breached'],
+                        rows,
+                      );
+                      if (totalMatched > tickets.length) {
+                        alert(`Exported the ${tickets.length.toLocaleString()} tickets currently loaded, out of ${totalMatched.toLocaleString()} total matching this range. Narrow the date range or a department to export everything.`);
+                      }
+                    }}
                   />
                 )}
               </div>
