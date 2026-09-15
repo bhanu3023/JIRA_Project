@@ -6799,22 +6799,37 @@ async function _handleJiraPgApi(
     // column is meaningless, every row is 0) -- regardless of what the user
     // actually selected. Confirmed for real: CF-32995 -- "Open" was
     // correctly shown as the Create modal's selection, but the created
-    // ticket still landed on "Waiting for L3". Resolve a queue-scoped id
-    // against that department's own queueStatuses by id, then find the
-    // equivalent REAL status by name for the actual statusId FK column --
-    // same resolution pattern the department-transfer code already uses.
+    // ticket still landed on "Waiting for L3". This picked up the queue's
+    // own status object by id.
+    let matchedQueueStatus: any = null;
     if (!st && stId && body.department) {
       try {
         const queueRowsForCreate = await pool.query(`SELECT queues FROM custom_queues`);
-        let matchedQueueStatus: any = null;
         for (const row of queueRowsForCreate.rows) {
           const queues: any[] = row.queues || [];
           const q = queues.find((qq: any) => (qq.name || '').toLowerCase() === String(body.department).toLowerCase());
           const qs = (q?.queueStatuses || []).find((s: any) => s.id === stId);
           if (qs) { matchedQueueStatus = qs; break; }
         }
-        if (matchedQueueStatus?.name) {
-          st = sp.statuses.find((x) => x.name.toLowerCase() === String(matchedQueueStatus.name).toLowerCase()) || null;
+        // The real `statuses` table row backing issues.statusId is only used
+        // as a FALLBACK display source and to satisfy the FK -- once a
+        // department is set, dept_statuses[dept] (seeded from
+        // matchedQueueStatus directly below, not from this row) is what
+        // actually gets displayed, per getEffectiveIssueStatus's own
+        // priority order. Matching by exact NAME here was too strict: a
+        // queue's own "In Progress" entry doesn't necessarily have an
+        // identically-named row in the space's generic list (case/wording
+        // can differ, or the space simply never had one). Confirmed for
+        // real: picking "In Progress" for a new QA ticket still landed on
+        // an unrelated status because the name lookup came up empty and
+        // silently fell through to the same arbitrary sp.statuses[0]. Match
+        // by CATEGORY instead (todo/in_progress/done) -- any real row in the
+        // same workflow stage is a fine FK target since it's not what's
+        // actually shown.
+        if (matchedQueueStatus) {
+          st = sp.statuses.find((x) => x.name.toLowerCase() === String(matchedQueueStatus.name || '').toLowerCase())
+            || sp.statuses.find((x) => x.category === matchedQueueStatus.category)
+            || null;
         }
       } catch { /* best-effort -- falls through to the default below */ }
     }
@@ -6973,7 +6988,16 @@ async function _handleJiraPgApi(
           // queueOpenStatus/openStatus only matter now as a fallback for the
           // (effectively unreachable) case where the issue came back with no
           // status at all.
-          const initStatus = issue.status || queueOpenStatus || openStatus || sp.statuses[0];
+          // matchedQueueStatus (the literal queue-scoped status object the
+          // create form actually submitted, e.g. qst_qa_inprogress "In
+          // Progress") wins over issue.status when it exists -- issue.status
+          // is the REAL statuses-table row `st` got resolved to for the FK
+          // column, which is only a same-CATEGORY match, not necessarily the
+          // exact same status (see the resolution block above). Confirmed
+          // for real: picking "In Progress" for a new QA ticket still showed
+          // an unrelated status, because this snapshot was built from that
+          // approximate real-row match instead of the exact thing selected.
+          const initStatus = matchedQueueStatus || issue.status || queueOpenStatus || openStatus || sp.statuses[0];
           const initDeptStatuses = initStatus
             ? JSON.stringify({ [deptToSet]: { id: initStatus.id, name: initStatus.name, color: initStatus.color, category: initStatus.category } })
             : '{}';
