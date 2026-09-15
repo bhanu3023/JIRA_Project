@@ -3042,20 +3042,15 @@ export default function IssueDetailPage() {
                 // id happens to be attached to the snapshot right now.
                 const issueStatNameLower = (issueStat.name || '').trim().toLowerCase();
                 const isCurrentStatus = (s: any) => s.id === issueStat.id || (s.name || '').trim().toLowerCase() === issueStatNameLower;
-                // A subtask stays with whichever department created it for its
-                // whole lifetime -- it never gets its own department handoff.
-                // Picking a "Waiting for X"/"Routed to X" status is exactly
-                // what triggers that handoff (see performDeptHandoff and its
-                // two callers), so those options are hidden here entirely for
-                // a subtask rather than offered and then silently no-op'd by
-                // the backend's own lock. Confirmed for real: CF-32993 (a
-                // subtask under CF-32984, created by QA) ended up independently
-                // routed Infra -> QA -> Dev with no corresponding change on the
-                // parent, orphaning it from the QA team that actually owns it.
-                const isRoutingStatus = (s: any) => /^(?:waiting\s+for|routed\s+to)\s+/i.test((s.name || '').trim());
-                const isSubtaskTicket = !!(issue as any)?.parentKey;
+                // A subtask can be independently routed via "Waiting for
+                // X"/"Routed to X" here just like any regular ticket -- the
+                // backend runs the same performDeptHandoff for it (restore-or-
+                // round-robin assignee, SLA pause/resume). A subtask that
+                // isn't manually routed still follows its parent automatically
+                // whenever the PARENT moves (see cascadeDeptToChildren), so
+                // this is only for the explicit manual override case.
                 const options: { status: any; transitionName: string }[] =
-                  (validToIds.length > 0
+                  validToIds.length > 0
                     ? (validToIds
                         .map((toId: string) => {
                           const status = spaceStatuses.find((s: any) => s.id === toId);
@@ -3066,8 +3061,7 @@ export default function IssueDetailPage() {
                         .filter(o => !isCurrentStatus(o.status))
                     : spaceStatuses
                         .filter((s: any) => !isCurrentStatus(s))
-                        .map((s: any) => ({ status: s, transitionName: '' })))
-                    .filter(o => !isSubtaskTicket || !isRoutingStatus(o.status));
+                        .map((s: any) => ({ status: s, transitionName: '' }));
 
                 return (
                   <Dropdown onClose={() => setShowStatusDropdown(false)} width="w-60" align="left-0">

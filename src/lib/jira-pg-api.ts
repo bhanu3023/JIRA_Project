@@ -8920,21 +8920,13 @@ async function _handleJiraPgApi(
               // the issue detail page). Treat "already in this department" as a
               // no-op success instead of re-running the whole handoff.
               const currentDeptForQueueHandoff = ((issue as any).current_department || '').trim();
-              // Subtasks stay locked to whichever department created them for
-              // their whole lifetime -- they don't get their own life in the
-              // department routing system. Confirmed for real: CF-32993 (a
-              // subtask created by QA under CF-32984) racked up independent
-              // "Waiting for X" picks of its own -- Infra -> QA -> Dev -- with
-              // no corresponding change on the parent at all, orphaning it
-              // from the QA team that actually owns it. The frontend now
-              // hides routing-style options from a subtask's status dropdown
-              // (see the issue detail page's status-options filter), but this
-              // still guards direct/stale API calls.
-              if ((issue as any).parentKey) {
-                queueHandoffOldDept = currentDeptForQueueHandoff;
-                queueHandoffDone = true;
-                console.log(`[DeptHandoff] ${issue.key}: subtask — locked to ${currentDeptForQueueHandoff || '(none)'}, skipping handoff to ${queueHandoffTargetDept}`);
-              } else if (currentDeptForQueueHandoff.toLowerCase() === queueHandoffTargetDept.toLowerCase()) {
+              // Subtasks can be independently routed just like any regular
+              // ticket (explicit product decision -- a subtask that isn't
+              // manually routed still follows its parent automatically via
+              // cascadeDeptToChildren whenever the PARENT itself moves). This
+              // used to unconditionally lock a subtask out of ever calling
+              // performDeptHandoff for itself; that guard is gone.
+              if (currentDeptForQueueHandoff.toLowerCase() === queueHandoffTargetDept.toLowerCase()) {
                 queueHandoffOldDept = currentDeptForQueueHandoff;
                 queueHandoffDone = true;
                 console.log(`[DeptHandoff] ${issue.key}: already in ${queueHandoffTargetDept} — skipping redundant handoff`);
@@ -9176,14 +9168,9 @@ async function _handleJiraPgApi(
         // entry further below from firing on a same-dept no-op, which would
         // otherwise misleadingly read as a real transfer.
         const currentDeptForHandoff = ((issue as any).current_department || '').trim();
-        // Same subtask lock as the queueStatusId handler's own handoff (see
-        // its comment re: CF-32993) -- a subtask stays with the department
-        // that created it for its whole lifetime, regardless of which
-        // "Waiting for X" status (global or queue-scoped) gets picked on it.
-        if ((issue as any).parentKey) {
-          deptHandoffDone = true;
-          console.log(`[DeptHandoff] ${issue.key}: subtask — locked to ${currentDeptForHandoff || '(none)'}, skipping handoff to ${handoffTargetDept}`);
-        } else if (currentDeptForHandoff.toLowerCase() === handoffTargetDept.toLowerCase()) {
+        // Same as the queueStatusId handler's own handoff -- subtasks can be
+        // independently routed just like any regular ticket now, no lock.
+        if (currentDeptForHandoff.toLowerCase() === handoffTargetDept.toLowerCase()) {
           deptHandoffDone = true;
           console.log(`[DeptHandoff] ${issue.key}: already in ${handoffTargetDept} — skipping redundant handoff`);
         } else {
