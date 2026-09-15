@@ -8764,16 +8764,36 @@ async function _handleJiraPgApi(
             const waitMatchQueue = String(body.queueStatusName || '').match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
             if (waitMatchQueue) {
               queueHandoffTargetDept = waitMatchQueue[1].trim();
-              try {
-                const priorStatusForQueueHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
-                queueHandoffOldDept = await performDeptHandoff(
-                  issue.id, issue.spaceId, (issue as any).productType || null,
-                  queueHandoffTargetDept, priorStatusForQueueHandoff, null, userId,
-                );
+              // Confirmed for real (CF-29693): the "Change Department" dropdown
+              // moves the ticket to Infra (its own correct restore-or-round-robin
+              // runs), and moments later a "Waiting for Infra" queue status --
+              // naming that SAME department the ticket is already in -- gets
+              // picked too, unconditionally re-running performDeptHandoff for a
+              // dept the ticket never actually left. That clobbers the assignee
+              // that was just correctly restored/round-robined with a brand new
+              // independent round-robin result (or blank, if none found), and
+              // separately double-runs the SLA pause/resume cycle -- the exact
+              // same class of bug the "Change Department" dropdown's own
+              // duplicate-call issue was already fixed for (see its comment in
+              // the issue detail page). Treat "already in this department" as a
+              // no-op success instead of re-running the whole handoff.
+              const currentDeptForQueueHandoff = ((issue as any).current_department || '').trim();
+              if (currentDeptForQueueHandoff.toLowerCase() === queueHandoffTargetDept.toLowerCase()) {
+                queueHandoffOldDept = currentDeptForQueueHandoff;
                 queueHandoffDone = true;
-                console.log(`[DeptHandoff] ${issue.key}: ${queueHandoffOldDept} → ${queueHandoffTargetDept} (via queue status)`);
-              } catch (handoffErr: any) {
-                console.error(`[DeptHandoff ERROR - queueStatus] ${issue.key}:`, handoffErr?.message || handoffErr);
+                console.log(`[DeptHandoff] ${issue.key}: already in ${queueHandoffTargetDept} — skipping redundant handoff`);
+              } else {
+                try {
+                  const priorStatusForQueueHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
+                  queueHandoffOldDept = await performDeptHandoff(
+                    issue.id, issue.spaceId, (issue as any).productType || null,
+                    queueHandoffTargetDept, priorStatusForQueueHandoff, null, userId,
+                  );
+                  queueHandoffDone = true;
+                  console.log(`[DeptHandoff] ${issue.key}: ${queueHandoffOldDept} → ${queueHandoffTargetDept} (via queue status)`);
+                } catch (handoffErr: any) {
+                  console.error(`[DeptHandoff ERROR - queueStatus] ${issue.key}:`, handoffErr?.message || handoffErr);
+                }
               }
               if (!queueHandoffDone) {
                 // performDeptHandoff threw -- this used to fall through silently:
@@ -8989,6 +9009,21 @@ async function _handleJiraPgApi(
       const waitMatchHandoff = newStatusNameForHandoff.match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
       if (waitMatchHandoff) {
         handoffTargetDept = waitMatchHandoff[1].trim();
+        // Same fix as the queueStatusId handler's own handoff (see its
+        // comment re: CF-29693) -- a "Waiting for X"/"Routed to X" global
+        // status naming the department the ticket is ALREADY in (e.g. right
+        // after "Change Department" just moved it there) would otherwise
+        // re-run the whole restore-or-round-robin/SLA pause-resume cycle for
+        // a dept it never actually left, clobbering the assignee that was
+        // just correctly set. Leaving handoffOldDept empty (rather than the
+        // current dept) also keeps the "Handed to X — SLA started" history
+        // entry further below from firing on a same-dept no-op, which would
+        // otherwise misleadingly read as a real transfer.
+        const currentDeptForHandoff = ((issue as any).current_department || '').trim();
+        if (currentDeptForHandoff.toLowerCase() === handoffTargetDept.toLowerCase()) {
+          deptHandoffDone = true;
+          console.log(`[DeptHandoff] ${issue.key}: already in ${handoffTargetDept} — skipping redundant handoff`);
+        } else {
         try {
           const priorStatusForHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
           handoffOldDept = await performDeptHandoff(
@@ -9031,6 +9066,7 @@ async function _handleJiraPgApi(
             console.error(`[DeptHandoff REVERT ERROR] ${issue.key}:`, revertErr?.message || revertErr);
           }
           return json({ error: `Could not route this ticket to ${handoffTargetDept} — please try again.` }, 500);
+        }
         }
       }
     }
