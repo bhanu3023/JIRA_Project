@@ -6788,9 +6788,40 @@ async function _handleJiraPgApi(
 
     // Resolve status
     const stId = String(body.statusId || '');
-    const st = stId
-      ? sp.statuses.find((x) => x.id === stId) || sp.statuses[0]
-      : sp.statuses[0];
+    let st: any = stId ? sp.statuses.find((x) => x.id === stId) : null;
+    // stId can be a QUEUE-SCOPED synthetic id (qst_...) -- Create Issue shows
+    // the SELECTED department's own queueStatuses list, not the space-wide
+    // generic one, whenever a department/queue is picked (see
+    // CreateIssueModal's own "Set default status" logic), but sp.statuses
+    // never contains those rows at all. The lookup above always missed for
+    // a queue-scoped create, silently falling through to sp.statuses[0] --
+    // an arbitrary first-in-the-generic-list pick (that list's own "order"
+    // column is meaningless, every row is 0) -- regardless of what the user
+    // actually selected. Confirmed for real: CF-32995 -- "Open" was
+    // correctly shown as the Create modal's selection, but the created
+    // ticket still landed on "Waiting for L3". Resolve a queue-scoped id
+    // against that department's own queueStatuses by id, then find the
+    // equivalent REAL status by name for the actual statusId FK column --
+    // same resolution pattern the department-transfer code already uses.
+    if (!st && stId && body.department) {
+      try {
+        const queueRowsForCreate = await pool.query(`SELECT queues FROM custom_queues`);
+        let matchedQueueStatus: any = null;
+        for (const row of queueRowsForCreate.rows) {
+          const queues: any[] = row.queues || [];
+          const q = queues.find((qq: any) => (qq.name || '').toLowerCase() === String(body.department).toLowerCase());
+          const qs = (q?.queueStatuses || []).find((s: any) => s.id === stId);
+          if (qs) { matchedQueueStatus = qs; break; }
+        }
+        if (matchedQueueStatus?.name) {
+          st = sp.statuses.find((x) => x.name.toLowerCase() === String(matchedQueueStatus.name).toLowerCase()) || null;
+        }
+      } catch { /* best-effort -- falls through to the default below */ }
+    }
+    // Final fallback (no explicit/resolvable status at all): prefer a real
+    // todo-category status over an arbitrary first-in-the-list pick, same
+    // improvement already made to CreateIssueModal's own client-side default.
+    if (!st) st = sp.statuses.find((x) => x.category === 'todo') || sp.statuses[0];
 
     // Resolve reporter and assignee from email in parallel
     const [reporterByEmail, assigneeByEmail] = await Promise.all([
