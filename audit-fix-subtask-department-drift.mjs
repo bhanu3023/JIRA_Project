@@ -60,9 +60,25 @@ async function main() {
     WHERE "parentKey" IS NOT NULL
       AND original_dept IS NOT NULL AND original_dept <> ''
       AND current_department IS NOT NULL AND current_department <> ''
-      AND LOWER(current_department) <> LOWER(original_dept)
+      AND (
+        -- Department itself still drifted.
+        LOWER(current_department) <> LOWER(original_dept)
+        -- Or department is already correct (e.g. a previous --apply run
+        -- already fixed it) but a stale "Waiting for X"/"Routed to X" label
+        -- is still parked under that department's own dept_statuses entry
+        -- from before the lock fix existed -- confirmed for real: CF-32993
+        -- had one such leftover under EVERY department it ever visited,
+        -- including the correct one (Infra), so restoring current_department
+        -- alone surfaced a different stale label than the one it started
+        -- with instead of a clean status.
+        OR (
+          dept_statuses IS NOT NULL
+          AND jsonb_typeof(dept_statuses -> current_department) = 'object'
+          AND (dept_statuses -> current_department ->> 'name') ~* '^(waiting\s+for|routed\s+to)\s+'
+        )
+      )
   `);
-  console.log(`Found ${drifted.length} drifted subtask(s).\n`);
+  console.log(`Found ${drifted.length} affected subtask(s).\n`);
   if (!drifted.length) { await pool.end(); return; }
 
   const parentKeys = [...new Set(drifted.map((d) => d.parentKey))];
@@ -79,12 +95,23 @@ async function main() {
     const saved = deptMapGet(d.dept_assignees || {}, d.original_dept);
     const parent = parentMap.get(d.parentKey);
 
-    // Figure out whether the ticket is currently stuck on a routing label --
-    // either its real status name, or the wrong department's own dept_statuses
-    // entry (whichever exists) -- and if so, what to replace it with.
+    // Figure out whether the ticket is currently stuck on a routing label.
+    // This has to check the TARGET department's own dept_statuses entry
+    // (original_dept, what current_department is about to become) rather
+    // than the wrong/current one -- a subtask that hopped through several
+    // departments before the lock fix existed typically has a separate
+    // stale "Routed to X"/"Waiting for X" leftover parked under EACH
+    // department key it ever visited (confirmed for real: CF-32993 had
+    // three, one per department -- QA, Dev, AND Infra). Once
+    // current_department is corrected to original_dept, that department's
+    // OWN entry is what actually gets displayed going forward -- checking
+    // only the old wrong department's entry (as this used to) missed that
+    // entirely, restoring the department but leaving the display still
+    // frozen on a different stale label than before.
     const realSt = statusRows.find((s) => s.id === d.statusId);
+    const targetDeptSt = deptMapGet(d.dept_statuses || {}, d.original_dept);
     const wrongDeptSt = deptMapGet(d.dept_statuses || {}, d.current_department);
-    const currentLabel = wrongDeptSt?.name || realSt?.name || '';
+    const currentLabel = targetDeptSt?.name || wrongDeptSt?.name || realSt?.name || '';
     const isStuckOnRoutingLabel = ROUTING_LABEL.test((currentLabel || '').trim());
 
     let newDeptStatuses = d.dept_statuses;
