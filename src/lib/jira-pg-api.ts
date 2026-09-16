@@ -6131,6 +6131,7 @@ async function _handleJiraPgApi(
       const originDeptMatchSql = createdRange && queueMembersOnlyParam
         ? `(
              LOWER(COALESCE(
+               i.original_dept,
                (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
                i.current_department
              )) = LOWER($2)
@@ -8137,7 +8138,7 @@ async function _handleJiraPgApi(
       // Raw columns Prisma's schema doesn't know about -- only needs `key`,
       // so it can run alongside everything else instead of after it.
       pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts FROM issues WHERE key = $1 LIMIT 1`,
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts, original_dept FROM issues WHERE key = $1 LIMIT 1`,
         [key]
       ).catch(() => ({ rows: [] as any[] })),
       // Partner-ticket comment merge lookup -- also only needs `key`.
@@ -8356,11 +8357,24 @@ async function _handleJiraPgApi(
     // if it's never moved. Lets the status dropdown hide "Resolved" for a
     // department this ticket was merely routed to, instead of only ever
     // rejecting the click after the fact.
+    // original_dept is set once at creation and never overwritten afterward
+    // (every write to it elsewhere in this file uses COALESCE(original_dept,
+    // ...)) -- it's a more reliable record of where a ticket actually
+    // started than reconstructing it from the EARLIEST department history
+    // event, which silently breaks for a ticket whose first-ever recorded
+    // department change wasn't its creation at all. Confirmed for real on
+    // CF-32998 (a subtask): original_dept correctly says "QA" (where it was
+    // created), but its earliest history entry's oldValue says "Dev" --
+    // fallout from drifting there via the old subtask-handoff bug before
+    // this cascade-history-writing code even existed, so the very first
+    // department history row it ever got was already mid-drift, not its
+    // true origin. The history-derived fallback stays for the rare legacy
+    // ticket that predates the original_dept column entirely.
     const deptHistoryEvents = dbHistory.filter((h: any) => h.field === 'department');
     const earliestDeptEvent = deptHistoryEvents.length
       ? deptHistoryEvents.reduce((a: any, b: any) => (new Date(a.createdAt) < new Date(b.createdAt) ? a : b))
       : null;
-    const originDepartment: string | null = earliestDeptEvent?.oldValue || mergedIssue.current_department || null;
+    const originDepartment: string | null = rawDeptData?.original_dept || earliestDeptEvent?.oldValue || mergedIssue.current_department || null;
     // Explicit admin exception list (resolve_override_depts) -- lets a
     // specific OTHER department resolve a ticket without rewriting/
     // fabricating originDepartment's own history-derived computation above
@@ -8608,8 +8622,18 @@ async function _handleJiraPgApi(
           targetIsDone = true;
         }
         if (targetIsDone) {
+          // original_dept (set once at creation, never overwritten) wins over
+          // the earliest department history event -- same fix as the GET
+          // handler's own originDepartment computation, and for the same
+          // reason: a ticket's first-ever recorded department history row
+          // isn't reliably its creation. Both must agree, or the dropdown
+          // could show "Resolved" (GET-driven) while this exact enforcement
+          // point still 403s it (confirmed for real on CF-32998, a subtask
+          // whose earliest history row was a later drift, not its true QA
+          // origin).
           const originRow = await pool.query(
             `SELECT COALESCE(
+               original_dept,
                (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
                i.current_department
              ) AS origin_dept, i.current_department, i.resolve_override_depts
@@ -10898,6 +10922,7 @@ async function _handleJiraPgApi(
       deptClause = ` AND (
         LOWER(i.current_department) = LOWER($${dIdx})
         OR LOWER(COALESCE(
+             i.original_dept,
              (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
              i.current_department
            )) = LOWER($${dIdx})
@@ -11405,6 +11430,7 @@ async function _handleJiraPgApi(
     const deptMatchSql = `(
       LOWER(i.current_department) = LOWER($1)
       OR LOWER(COALESCE(
+           i.original_dept,
            (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
            i.current_department
          )) = LOWER($1)
