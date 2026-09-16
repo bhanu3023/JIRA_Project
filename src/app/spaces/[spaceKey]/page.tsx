@@ -999,9 +999,16 @@ function SpaceDetailContent() {
       clearIssuesCache();
       bumpIssuesVersion();
     }
-    catch (err) {
+    catch (err: any) {
       console.error(err);
       useStore.setState({ issues: prevIssues });
+      // Without this, a rejected update (e.g. "only QA can mark it resolved"
+      // -- the same origin-department rule the issue detail page enforces)
+      // just silently reverted the row with zero explanation, reading as
+      // "resolving from this list doesn't work" rather than the real,
+      // specific reason. api.request already throws the server's own
+      // message (see its `throw new Error(data.error ...)`), so surface it.
+      alert(err?.message || 'Failed to update the ticket.');
     }
     finally { setUpdating(null); }
   }, [clearIssuesCache, bumpIssuesVersion]);
@@ -1027,9 +1034,12 @@ function SpaceDetailContent() {
       } as any);
       clearIssuesCache();
       bumpIssuesVersion();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
       useStore.setState({ issues: prevIssues });
+      // Same silent-revert gap as handleInlineUpdate above, for the
+      // queue-scoped (qst_...) status path -- surface the real reason.
+      alert(err?.message || 'Failed to update the ticket.');
     }
     finally { setUpdating(null); }
   }, [clearIssuesCache, bumpIssuesVersion]);
