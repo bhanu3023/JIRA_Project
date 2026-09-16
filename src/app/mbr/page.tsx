@@ -84,13 +84,14 @@ function downloadCsv(filename: string, header: string[], rows: unknown[][]) {
   URL.revokeObjectURL(url);
 }
 
-function DownloadButton({ onClick, label = 'Download' }: { onClick: () => void; label?: string }) {
+function DownloadButton({ onClick, label = 'Download', busy }: { onClick: () => void; label?: string; busy?: boolean }) {
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+      disabled={busy}
+      className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
     >
-      <Download size={13} /> {label}
+      <Download size={13} /> {busy ? 'Downloading…' : label}
     </button>
   );
 }
@@ -116,6 +117,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   const [totalMatched, setTotalMatched] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   type DrillFilter = 'all' | 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix' | 'hasResolutionTime';
   const [drillDown, setDrillDown] = useState<{ person?: string; month?: string; filter: DrillFilter; label: string } | null>(null);
@@ -272,31 +274,42 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
           {people.length > 0 && (
             <DownloadButton
               label="Download tickets"
-              onClick={() => {
+              busy={downloading}
+              onClick={async () => {
                 // Ticket-level detail, not just the per-person totals above — one
                 // row per ticket so a person's count (e.g. 50) can be traced back
-                // to exactly which 50 tickets make it up. `tickets` is the same
-                // set already shown in the Tickets table below (respects the
-                // Person dropdown and date range), just re-shaped per row.
-                const emailByName = new Map(people.map((p) => [p.name.toLowerCase(), p.email] as const));
-                const rows = [...tickets]
-                  .sort((a, b) => (a.assignee || '').localeCompare(b.assignee || '') || new Date(b.created).getTime() - new Date(a.created).getTime())
-                  .map((t) => [
-                    t.assignee || 'Unassigned',
-                    emailByName.get((t.assignee || '').toLowerCase()) || '',
-                    t.key, t.project, t.status, t.summary, t.reporter,
-                    t.created ? new Date(t.created).toLocaleString() : '',
-                    t.updated ? new Date(t.updated).toLocaleString() : '',
-                    t.rb === true ? 'Yes' : t.rb === false ? 'No' : 'N/A',
-                    t.assigneeOutsideRoster ? 'Yes' : 'No',
-                  ]);
-                downloadCsv(
-                  `mbr-${team}-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
-                  ['Assignee', 'Assignee Email', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'Resolution SLA Breached', 'Outside Roster'],
-                  rows,
-                );
-                if (totalMatched > tickets.length) {
-                  alert(`Exported the ${tickets.length.toLocaleString()} tickets currently loaded, out of ${totalMatched.toLocaleString()} total matching this range. Narrow the date range or pick a person to export everything.`);
+                // to exactly which 50 tickets make it up. The on-screen `tickets`
+                // state is capped (DISPLAY_CAP=5000 server-side) for rendering
+                // performance, so a person whose tickets sort past that cap would
+                // silently be missing from an export built off it — this fetches
+                // its own copy with export=1, which lifts that cap instead.
+                setDownloading(true);
+                try {
+                  const d = await api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined, undefined, staleDays, undefined, undefined, true);
+                  const emailByName = new Map(people.map((p) => [p.name.toLowerCase(), p.email] as const));
+                  const rows = [...d.tickets]
+                    .sort((a, b) => (a.assignee || '').localeCompare(b.assignee || '') || new Date(b.created).getTime() - new Date(a.created).getTime())
+                    .map((t) => [
+                      t.assignee || 'Unassigned',
+                      emailByName.get((t.assignee || '').toLowerCase()) || '',
+                      t.key, t.project, t.status, t.summary, t.reporter,
+                      t.created ? new Date(t.created).toLocaleString() : '',
+                      t.updated ? new Date(t.updated).toLocaleString() : '',
+                      t.rb === true ? 'Yes' : t.rb === false ? 'No' : 'N/A',
+                      t.assigneeOutsideRoster ? 'Yes' : 'No',
+                    ]);
+                  downloadCsv(
+                    `mbr-${team}-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
+                    ['Assignee', 'Assignee Email', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'Resolution SLA Breached', 'Outside Roster'],
+                    rows,
+                  );
+                  if (d.totalMatched > d.tickets.length) {
+                    alert(`Exported ${d.tickets.length.toLocaleString()} of ${d.totalMatched.toLocaleString()} matching tickets. Narrow the date range or pick a person to export everything.`);
+                  }
+                } catch (err: any) {
+                  alert(err?.message || 'Download failed. Please try again.');
+                } finally {
+                  setDownloading(false);
                 }
               }}
             />
@@ -566,6 +579,7 @@ export default function MbrPage() {
   const [totalMatched, setTotalMatched] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
   const [sortKey, setSortKey] = useState<keyof PersonRow>('hygieneScore');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
@@ -765,30 +779,41 @@ export default function MbrPage() {
                 {sortedPeople.length > 0 && (
                   <DownloadButton
                     label="Download tickets"
-                    onClick={() => {
+                    busy={downloading}
+                    onClick={async () => {
                       // Ticket-level detail, not just the per-person totals — one row
                       // per ticket so a person's count can be traced back to exactly
-                      // which tickets make it up. `tickets` is the same set already
-                      // shown in the Tickets table below (respects the Department
-                      // filter and date range), just re-shaped per row.
-                      const emailByName = new Map(people.map((p) => [p.name.toLowerCase(), p.email] as const));
-                      const rows = [...tickets]
-                        .sort((a, b) => (a.assignee || '').localeCompare(b.assignee || '') || new Date(b.created).getTime() - new Date(a.created).getTime())
-                        .map((t) => [
-                          t.assignee || 'Unassigned',
-                          emailByName.get((t.assignee || '').toLowerCase()) || '',
-                          t.dept, t.key, t.project, t.status, t.summary, t.reporter,
-                          t.created ? new Date(t.created).toLocaleString() : '',
-                          t.updated ? new Date(t.updated).toLocaleString() : '',
-                          t.slaBreached ? 'Yes' : 'No',
-                        ]);
-                      downloadCsv(
-                        `mbr-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
-                        ['Assignee', 'Assignee Email', 'Department', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'SLA Breached'],
-                        rows,
-                      );
-                      if (totalMatched > tickets.length) {
-                        alert(`Exported the ${tickets.length.toLocaleString()} tickets currently loaded, out of ${totalMatched.toLocaleString()} total matching this range. Narrow the date range or a department to export everything.`);
+                      // which tickets make it up. The on-screen `tickets` state is
+                      // capped (5000 server-side) for rendering performance, so a
+                      // person whose tickets sort past that cap would silently be
+                      // missing from an export built off it — this fetches its own
+                      // copy with export=1, which lifts that cap instead.
+                      setDownloading(true);
+                      try {
+                        const d = await api.getMbrData(department || undefined, dateFrom || undefined, dateTo || undefined, staleDays, true);
+                        const emailByName = new Map(people.map((p) => [p.name.toLowerCase(), p.email] as const));
+                        const rows = [...d.tickets]
+                          .sort((a, b) => (a.assignee || '').localeCompare(b.assignee || '') || new Date(b.created).getTime() - new Date(a.created).getTime())
+                          .map((t) => [
+                            t.assignee || 'Unassigned',
+                            emailByName.get((t.assignee || '').toLowerCase()) || '',
+                            t.dept, t.key, t.project, t.status, t.summary, t.reporter,
+                            t.created ? new Date(t.created).toLocaleString() : '',
+                            t.updated ? new Date(t.updated).toLocaleString() : '',
+                            t.slaBreached ? 'Yes' : 'No',
+                          ]);
+                        downloadCsv(
+                          `mbr-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
+                          ['Assignee', 'Assignee Email', 'Department', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'SLA Breached'],
+                          rows,
+                        );
+                        if (d.totalMatched > d.tickets.length) {
+                          alert(`Exported ${d.tickets.length.toLocaleString()} of ${d.totalMatched.toLocaleString()} matching tickets. Narrow the date range or pick a department to export everything.`);
+                        }
+                      } catch (err: any) {
+                        alert(err?.message || 'Download failed. Please try again.');
+                      } finally {
+                        setDownloading(false);
                       }
                     }}
                   />

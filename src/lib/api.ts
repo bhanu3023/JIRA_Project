@@ -322,16 +322,17 @@ class ApiClient {
     const qs = p.toString();
     return this.request<any>(`/reports/team-analytics/${sub}${qs ? `?${qs}` : ''}`);
   }
-  getMbrData(department?: string, dateFrom?: string, dateTo?: string, staleDays?: number) {
+  getMbrData(department?: string, dateFrom?: string, dateTo?: string, staleDays?: number, exportAll?: boolean) {
     const params = new URLSearchParams();
     if (department) params.set('department', department);
     if (dateFrom)    params.set('dateFrom',   dateFrom);
     if (dateTo)      params.set('dateTo',     dateTo);
     if (staleDays)   params.set('staleDays',  String(staleDays));
+    if (exportAll)   params.set('export',     '1');
     const qs = params.toString();
     return this.request<{ departments: any[]; people: any[]; tickets: any[]; totalMatched: number }>(`/reports/mbr${qs ? `?${qs}` : ''}`);
   }
-  getMbrTeamData(team: 'eng' | 'qa' | 'infra' | 'ent' | 'smb', dateFrom?: string, dateTo?: string, person?: string, ticketFilter?: 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix' | 'hasResolutionTime', staleDays?: number, segment?: 'internal' | 'external', month?: string) {
+  getMbrTeamData(team: 'eng' | 'qa' | 'infra' | 'ent' | 'smb', dateFrom?: string, dateTo?: string, person?: string, ticketFilter?: 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix' | 'hasResolutionTime', staleDays?: number, segment?: 'internal' | 'external', month?: string, exportAll?: boolean) {
     const params = new URLSearchParams({ team });
     if (dateFrom)     params.set('dateFrom',     dateFrom);
     if (dateTo)       params.set('dateTo',       dateTo);
@@ -340,6 +341,7 @@ class ApiClient {
     if (staleDays)    params.set('staleDays',    String(staleDays));
     if (segment)      params.set('segment',      segment);
     if (month)        params.set('month',        month);
+    if (exportAll)    params.set('export',       '1');
     return this.request<{ people: any[]; monthly: any[]; summary: any; tickets: any[]; totalMatched: number }>(`/reports/mbr-team?${params}`);
   }
   getFileHealth() {
