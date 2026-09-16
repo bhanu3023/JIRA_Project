@@ -2370,8 +2370,28 @@ export default function FiltersPage() {
                       // department (current one first, most likely the
                       // intended match) instead of only the current/selected
                       // one.
+                      // A ticket that's genuinely, currently Resolved/Closed
+                      // (its real live status, not any department's frozen
+                      // snapshot) must never display as anything else --
+                      // confirmed for real: CF-29947/CF-29923/CF-29885 are
+                      // all live-Resolved in their current department
+                      // (Migration), but matched this exact Status filter
+                      // (Resolved unchecked, In Progress checked) only
+                      // because an OLDER department they'd already left
+                      // (Dev/Infra) still has its own stale "In Progress"
+                      // snapshot from before the handoff -- correct as a
+                      // record of what happened there, but showing it as
+                      // this row's CURRENT status read as "these are stuck
+                      // in progress" when they're actually done. Once a
+                      // ticket is really done, that wins over any
+                      // department-snapshot match, regardless of which
+                      // department's old status is why the row matched the
+                      // filter at all.
+                      const liveIsDone = issue.status?.category === 'done';
                       let matchedDeptSt: any = null;
-                      if (selQueue) {
+                      if (liveIsDone) {
+                        matchedDeptSt = null;
+                      } else if (selQueue) {
                         const key = Object.keys(rawDeptStatuses).find((k) => k.toLowerCase() === selQueue.toLowerCase());
                         const st = key ? rawDeptStatuses[key] : null;
                         if (st?.name && selStatuses.some((s) => s.trim().toLowerCase() === String(st.name).trim().toLowerCase())) {
