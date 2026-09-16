@@ -10988,7 +10988,13 @@ async function _handleJiraPgApi(
     // reports/mbr-team's DISPLAY_CAP): 300 was showing well under a tenth of
     // a real department's tickets for a normal date range, not a genuine
     // safety limit -- totalMatched + the "(capped)" UI note stay honest if
-    // this is ever actually hit.
+    // this is ever actually hit. The frontend's CSV download passes
+    // export=1 to lift this to a much higher ceiling for that one request --
+    // the on-screen table only ever needs a few thousand rows to render, but
+    // a "download everything" click means everything, not just what the
+    // table itself was willing to show.
+    const isExport = url.searchParams.get('export') === '1';
+    const ticketsCap = isExport ? 100000 : 5000;
     const ticketRows = await pool.query(`
       SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name, i.current_department AS dept,
         COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
@@ -11003,7 +11009,7 @@ async function _handleJiraPgApi(
       WHERE i.current_department IS NOT NULL AND i.current_department != ''
         ${dateClause}${deptClause}
       ORDER BY i."createdAt" DESC
-      LIMIT 5000
+      LIMIT ${ticketsCap}
     `, filterParams);
 
     const totalMatched = ticketRows.rows.length > 0 ? Number(ticketRows.rows[0].total_matched) || 0 : 0;
@@ -11589,7 +11595,11 @@ async function _handleJiraPgApi(
     // before that JS filter runs -- several times DISPLAY_CAP, since most
     // candidates in a large date range won't turn out to be breached.
     const DISPLAY_CAP = 5000;
-    const ticketsLimit = ticketFilter === 'rb' ? 20000 : DISPLAY_CAP;
+    // The frontend's CSV download passes export=1 to lift this to a much
+    // higher ceiling for that one request -- see the matching comment on
+    // reports/mbr's own ticketsCap above.
+    const isExport = url.searchParams.get('export') === '1';
+    const ticketsLimit = isExport ? 100000 : (ticketFilter === 'rb' ? 20000 : DISPLAY_CAP);
 
     const summaryParams = [...scopedParams, staleDays];
     const summaryStaleIdx = summaryParams.length;
@@ -11855,7 +11865,13 @@ async function _handleJiraPgApi(
       ticketRows = ticketRows.filter((r: any) => slaById.get(r.id));
       totalMatched = ticketRows.length;
     }
-    const tickets = ticketRows.slice(0, DISPLAY_CAP).map((r: any) => ({
+    // Non-export requests keep the original DISPLAY_CAP even for ticketFilter
+    // 'rb' (whose SQL candidate fetch is wider at 20000, but the on-screen
+    // drill-down table itself was never meant to show more than DISPLAY_CAP
+    // rows) -- only an export click, which already asked for everything via
+    // ticketsLimit above, should return more than that.
+    const sliceCap = isExport ? ticketsLimit : DISPLAY_CAP;
+    const tickets = ticketRows.slice(0, sliceCap).map((r: any) => ({
       key: r.key,
       project: r.project_name || '',
       assignee: r.assignee_name || '',
