@@ -7,21 +7,24 @@
 // sync on assignee change" code in the plain PATCH handler) -- a ticket
 // whose most recent assignee change predates that sync code, or that somehow
 // bypassed it, is left with a snapshot frozen at an old assignee while the
-// live assigneeId has since moved on. Any view that ever reads that
-// department's snapshot (a "Worked" date filter, or a future return visit to
-// this same department after leaving and coming back) would show the wrong,
-// stale person.
+// live assigneeId has since moved on.
 //
-// The live assigneeId is always the authoritative "who's actually on it
-// right now" for the department a ticket CURRENTLY sits in -- this brings
-// dept_assignees[current_department] back in sync with it wherever they've
-// drifted apart, for tickets currently in a department (not tickets that
-// have since moved on, which is a separate, already-correct "historical
-// snapshot" case this script doesn't touch).
+// IMPORTANT -- this script only auto-fixes the PROVEN subset. Checked
+// against real data (CF-23967): plenty of "snapshot says X, live says
+// unassigned" tickets have ZERO issue_history row showing X being
+// unassigned -- meaning there's no direct evidence the live "(unassigned)"
+// state is even correct; it could itself be a different, untracked bug (a
+// silent clear that never logged history) rather than the snapshot being
+// stale. Blindly syncing those would risk erasing a genuinely correct saved
+// name. "Proof" here means the most recent 'assignee' issue_history row for
+// this ticket matches the live value (its newValue is the live assignee's
+// name, or blank/empty if live is unassigned) -- the same kind of direct
+// evidence CF-12035 had (a real, later, recorded reassignment). Anything
+// without that proof is reported separately and left untouched.
 //
 // Usage:
 //   node audit-fix-dept-assignees-drift.mjs           # dry run, full report
-//   node audit-fix-dept-assignees-drift.mjs --apply   # writes the corrections
+//   node audit-fix-dept-assignees-drift.mjs --apply   # writes the PROVEN corrections only
 
 import pg from 'pg';
 
@@ -32,6 +35,10 @@ function deptMapGet(map, dept) {
   if (!dept) return undefined;
   const key = Object.keys(map || {}).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
   return key ? map[key] : undefined;
+}
+
+function norm(s) {
+  return (s || '').trim().toLowerCase();
 }
 
 async function main() {
@@ -46,13 +53,13 @@ async function main() {
   `);
   console.log(`Scanning ${issues.length} candidate issue(s)...`);
 
-  const plan = [];
+  const disagreeing = [];
   for (const issue of issues) {
     const saved = deptMapGet(issue.dept_assignees || {}, issue.current_department);
     const liveId = issue.assigneeId || null;
     const savedId = saved?.id || null;
-    if (savedId === liveId) continue; // already in sync (including both-null: unassigned, no snapshot needed)
-    plan.push({
+    if (savedId === liveId) continue;
+    disagreeing.push({
       id: issue.id, key: issue.cf_key || issue.key, dept: issue.current_department,
       savedName: saved?.displayName || savedId || '(none)',
       liveName: liveId ? `${issue.live_first || ''} ${issue.live_last || ''}`.trim() || liveId : '(unassigned)',
@@ -60,24 +67,46 @@ async function main() {
       deptAssignees: issue.dept_assignees || {},
     });
   }
+  console.log(`Found ${disagreeing.length} ticket(s) whose department snapshot disagrees with the live assignee. Checking each for proof...`);
 
-  console.log(`\nFound ${plan.length} ticket(s) whose department snapshot disagrees with the live assignee.\n`);
-  if (!plan.length) { await pool.end(); return; }
+  const proven = [];
+  const unproven = [];
+  for (const p of disagreeing) {
+    const { rows: lastAssigneeRows } = await pool.query(
+      `SELECT "newValue" FROM issue_history WHERE "issueId"=$1 AND field='assignee' ORDER BY "createdAt" DESC LIMIT 1`,
+      [p.id]
+    );
+    const lastRecorded = lastAssigneeRows[0]?.newValue ?? null;
+    const liveNameNorm = p.liveId ? norm(p.liveName) : '';
+    const hasProof = p.liveId
+      ? norm(lastRecorded) === liveNameNorm && liveNameNorm !== ''
+      : (lastRecorded === '' || lastRecorded === null);
+    (hasProof ? proven : unproven).push(p);
+  }
 
-  console.log('Sample (first 30):');
-  for (const p of plan.slice(0, 30)) {
+  console.log(`\n${proven.length} PROVEN (a real, later issue_history row confirms the live value) -- safe to auto-fix.`);
+  console.log(`${unproven.length} UNPROVEN (no history row confirms the live value -- left untouched, needs manual review).\n`);
+
+  console.log('Proven sample (first 20):');
+  for (const p of proven.slice(0, 20)) {
     console.log(`  ${p.key} [${p.dept}]: snapshot says "${p.savedName}" -> syncing to live "${p.liveName}"`);
   }
-  if (plan.length > 30) console.log(`  ... and ${plan.length - 30} more.`);
+  if (proven.length > 20) console.log(`  ... and ${proven.length - 20} more.`);
+
+  console.log('\nUnproven sample (first 20) -- NOT touched by --apply:');
+  for (const p of unproven.slice(0, 20)) {
+    console.log(`  ${p.key} [${p.dept}]: snapshot says "${p.savedName}", live says "${p.liveName}" -- no confirming history row`);
+  }
+  if (unproven.length > 20) console.log(`  ... and ${unproven.length - 20} more.`);
 
   if (!APPLY) {
-    console.log(`\nDry run only -- no changes made. Re-run with --apply to write these ${plan.length} correction(s).`);
+    console.log(`\nDry run only -- no changes made. Re-run with --apply to write the ${proven.length} PROVEN correction(s) (unproven ones are never auto-applied).`);
     await pool.end();
     return;
   }
 
   let written = 0;
-  for (const p of plan) {
+  for (const p of proven) {
     const deptAssignees = { ...p.deptAssignees };
     const existingKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === p.dept.trim().toLowerCase());
     const mapKey = existingKey || p.dept;
@@ -92,9 +121,10 @@ async function main() {
     }
     await pool.query(`UPDATE issues SET dept_assignees=$1::jsonb WHERE id=$2`, [JSON.stringify(deptAssignees), p.id]);
     written++;
-    if (written % 500 === 0) console.log(`  ...${written}/${plan.length}`);
+    if (written % 500 === 0) console.log(`  ...${written}/${proven.length}`);
   }
-  console.log(`\nSynced ${written} ticket(s)' department assignee snapshot to match their live assignee.`);
+  console.log(`\nSynced ${written} PROVEN ticket(s)' department assignee snapshot to match their live assignee.`);
+  console.log(`${unproven.length} unproven ticket(s) were left untouched -- see the sample above for manual review.`);
   await pool.end();
 }
 
