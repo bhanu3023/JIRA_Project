@@ -180,10 +180,21 @@ function buildEmailHtml(opts: {
 
     ${commentHtml}
 
-    <!-- CTA button -->
+    <!-- CTA link -- deliberately a plain link, not a styled button. Confirmed
+         for real: sending 3 otherwise-identical test HTML emails from this
+         same (brand-new, low-reputation) sender, only the one with a styled
+         background/padding/border-radius button never reached the mailbox
+         at all (not even Junk) -- Defender for Office 365 quarantined it
+         outright, the classic "click here" CTA-button shape being exactly
+         the kind of thing anti-phishing scoring weighs heavily for an
+         unproven sender. A plain underlined link with the same href got
+         through fine. Not a guaranteed permanent fix (sender reputation
+         scoring shifts over time, and this was a small sample), but the
+         best evidence-based mitigation available without tenant admin
+         access to allow-list the sender. Revert to a styled button once
+         that's done and this sender has an established reputation. -->
     <div style="padding:16px 24px 24px">
-      <a href="${opts.actionUrl}"
-         style="display:inline-block;background:#0052CC;color:white;padding:10px 20px;border-radius:4px;text-decoration:none;font-size:14px;font-weight:600">
+      <a href="${opts.actionUrl}" style="color:#0052CC;font-size:14px;font-weight:600;text-decoration:underline">
         View Issue →
       </a>
     </div>
