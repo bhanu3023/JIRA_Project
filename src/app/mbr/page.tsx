@@ -276,35 +276,50 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
               label="Download tickets"
               busy={downloading}
               onClick={async () => {
-                // Ticket-level detail, not just the per-person totals above — one
-                // row per ticket so a person's count (e.g. 50) can be traced back
-                // to exactly which 50 tickets make it up. The on-screen `tickets`
-                // state is capped (DISPLAY_CAP=5000 server-side) for rendering
-                // performance, so a person whose tickets sort past that cap would
-                // silently be missing from an export built off it — this fetches
-                // its own copy with export=1, which lifts that cap instead.
+                // One row per ticket, fetched per PERSON rather than sliced out of
+                // one bulk team-wide list. That bulk list only carries a ticket's
+                // CURRENT assignee, but a person's Total tickets count (p.total,
+                // above) also credits them for tickets they only have a historical
+                // "worked on" record for (matchedViaPersonHistory) which are now
+                // assigned to someone else -- grouping by current-assignee name
+                // silently dropped exactly those rows, which is why a person
+                // showing 50 total only ever produced ~25-30 rows in the CSV.
+                // Fetching each person with their own `person=email` scope (the
+                // same query the UI's own drill-down modal uses) picks up both
+                // categories, so the export always matches their real total. A
+                // ticket can legitimately appear under more than one person here
+                // (current owner + whoever historically worked it) -- that's the
+                // same intentional double-credit the Total tickets column itself
+                // already reflects, not a duplicate bug.
                 setDownloading(true);
                 try {
-                  const d = await api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined, undefined, staleDays, undefined, undefined, true);
-                  const emailByName = new Map(people.map((p) => [p.name.toLowerCase(), p.email] as const));
-                  const rows = [...d.tickets]
-                    .sort((a, b) => (a.assignee || '').localeCompare(b.assignee || '') || new Date(b.created).getTime() - new Date(a.created).getTime())
-                    .map((t) => [
-                      t.assignee || 'Unassigned',
-                      emailByName.get((t.assignee || '').toLowerCase()) || '',
-                      t.key, t.project, t.status, t.summary, t.reporter,
-                      t.created ? new Date(t.created).toLocaleString() : '',
-                      t.updated ? new Date(t.updated).toLocaleString() : '',
-                      t.rb === true ? 'Yes' : t.rb === false ? 'No' : 'N/A',
-                      t.assigneeOutsideRoster ? 'Yes' : 'No',
-                    ]);
+                  const targets = person ? people.filter((p) => p.email === person) : people;
+                  const perPerson = await Promise.all(targets.map((p) =>
+                    api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, p.email, undefined, staleDays, undefined, undefined, true)
+                      .then((d) => ({ p, tickets: d.tickets as any[], totalMatched: d.totalMatched as number })),
+                  ));
+                  const rows: unknown[][] = [];
+                  const truncated: string[] = [];
+                  for (const { p, tickets: ts, totalMatched: tm } of perPerson) {
+                    if (tm > ts.length) truncated.push(p.name);
+                    for (const t of ts) {
+                      rows.push([
+                        p.name, p.email,
+                        t.key, t.project, t.assignee, t.status, t.summary, t.reporter,
+                        t.created ? new Date(t.created).toLocaleString() : '',
+                        t.updated ? new Date(t.updated).toLocaleString() : '',
+                        t.rb === true ? 'Yes' : t.rb === false ? 'No' : 'N/A',
+                        t.matchedViaPersonHistory ? 'Yes' : 'No',
+                      ]);
+                    }
+                  }
                   downloadCsv(
                     `mbr-${team}-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
-                    ['Assignee', 'Assignee Email', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'Resolution SLA Breached', 'Outside Roster'],
+                    ['Person', 'Person Email', 'Ticket', 'Board', 'Current Assignee', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'Resolution SLA Breached', 'Historical Credit Only'],
                     rows,
                   );
-                  if (d.totalMatched > d.tickets.length) {
-                    alert(`Exported ${d.tickets.length.toLocaleString()} of ${d.totalMatched.toLocaleString()} matching tickets. Narrow the date range or pick a person to export everything.`);
+                  if (truncated.length) {
+                    alert(`Some people had more tickets than could be exported in one go: ${truncated.join(', ')}. Narrow the date range and retry for those.`);
                   }
                 } catch (err: any) {
                   alert(err?.message || 'Download failed. Please try again.');
