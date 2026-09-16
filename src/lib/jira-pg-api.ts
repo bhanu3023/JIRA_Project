@@ -760,13 +760,18 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
           issueKey: key,
         });
         try {
-          const emailRecipients = row.assigneeId
-            ? await db.user.findMany({ where: { id: row.assigneeId }, select: { email: true } })
+          const emailRecipientIds = [row.assigneeId, row.reporterId].filter(Boolean);
+          const emailRecipients = emailRecipientIds.length
+            ? await db.user.findMany({ where: { id: { in: emailRecipientIds } }, select: { email: true } })
             : [];
           // Admins now always get the SLA breach email even when the ticket
           // has no assignee at all -- previously the whole email was skipped
           // in that case (assigneeEmails.length gated it), so an unassigned
           // breaching ticket silently never emailed anyone, admin included.
+          // Reporter is included too -- the in-app notification above already
+          // did (notifyUsers includes row.reporterId), but the email only
+          // ever fetched the assignee's address, so the reporter never got
+          // the SLA warning/breach email at all.
           const assigneeEmails = Array.from(new Set([...emailRecipients.map((u: any) => u.email).filter(Boolean), ...slaAdminEmails]));
           const spaceRow = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
           if (assigneeEmails.length && spaceRow) {
