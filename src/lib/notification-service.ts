@@ -902,6 +902,15 @@ export async function notifyMentioned(opts: {
   spaceKey: string;
   spaceName: string;
   commentPreview: string;
+  // By explicit request: admins should see every mention, not just
+  // ticket-lifecycle events (create/assign/status-change/comment already
+  // include them everywhere else -- this was the one deliberate exception,
+  // since "You were mentioned" is personally addressed to the one person
+  // and wouldn't make sense verbatim for someone else). Sent as its own,
+  // separately-worded ("X mentioned Y", third person) email rather than
+  // just adding admins to the same recipient list, so an admin never gets
+  // an email claiming they were personally mentioned when they weren't.
+  adminEmails?: string[];
 }) {
   if (!opts.mentionedEmail) return;
   const html = buildEmailHtml({
@@ -925,6 +934,34 @@ export async function notifyMentioned(opts: {
     html,
     `${opts.mentionedBy} mentioned you in ${opts.issueKey}:\n\n${opts.commentPreview}\n\nView: ${issueUrl(opts.issueKey)}`,
   );
+
+  const adminTo = (opts.adminEmails || []).filter(
+    (e) => e && e.toLowerCase() !== opts.mentionedEmail.toLowerCase()
+  );
+  if (adminTo.length) {
+    const adminHtml = buildEmailHtml({
+      title:        'Mention',
+      issueKey:     opts.issueKey,
+      issueSummary: opts.issueSummary,
+      spaceKey:     opts.spaceKey,
+      spaceName:    opts.spaceName,
+      eventLabel:   'Mentioned',
+      eventColor:   '#8B5CF6',
+      fields: [
+        { label: 'Mentioned by',   value: opts.mentionedBy },
+        { label: 'Mentioned',      value: opts.mentionedName },
+        { label: 'Board',          value: opts.spaceName },
+      ],
+      comment:   makeImageSrcsAbsolute(opts.commentPreview),
+      actionUrl: issueUrl(opts.issueKey),
+    });
+    await sendNotification(
+      adminTo,
+      `[${opts.issueKey}] ${opts.mentionedBy} mentioned ${opts.mentionedName} - ${opts.issueSummary}`,
+      adminHtml,
+      `${opts.mentionedBy} mentioned ${opts.mentionedName} in ${opts.issueKey}:\n\n${opts.commentPreview}\n\nView: ${issueUrl(opts.issueKey)}`,
+    ).catch(() => {});
+  }
 }
 
 export async function notifySLABreach(opts: {

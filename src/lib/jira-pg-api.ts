@@ -530,6 +530,10 @@ async function notifyCommentMentions(commentBody: string, opts: {
 }) {
   const mentionedUserIds = await extractMentionedUserIds(commentBody);
   if (mentionedUserIds.size === 0) return;
+  // By explicit request: admins see every mention too, not just
+  // ticket-lifecycle events -- fetched once outside the loop rather than
+  // per-mention, since it's the same list regardless of who got mentioned.
+  const { emails: mentionAdminEmails } = await getAdminRecipients();
   const mentionPreview = commentBody
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
@@ -560,6 +564,7 @@ async function notifyCommentMentions(commentBody: string, opts: {
         spaceKey: opts.issue.space?.key ?? '',
         spaceName: opts.issue.space?.name ?? '',
         commentPreview: `${opts.actorName}: ${mentionPreview}`,
+        adminEmails: mentionAdminEmails,
       }).catch((err: any) => console.error('[Mention Email] Failed:', err?.message));
     }
   }
