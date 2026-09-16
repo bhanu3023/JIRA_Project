@@ -870,11 +870,19 @@ declare global {
 // through up to ~4200 issues, competing for the same shared DB connection pool as every
 // other request. That's a major contributor to "everything feels slow" across the whole
 // app. Runs exactly once per server process now, regardless of how many tabs are open.
+// Was every 5 minutes -- shortened to 30s by explicit request so an SLA
+// warning/breach email lands closer to the moment a ticket actually crosses
+// the threshold, instead of up to 5 minutes late. Still a single
+// once-per-server-process scan (the fix described above), so this is a 10x
+// increase in query frequency, not 10x the number of concurrent scans --
+// deliberately NOT dropped all the way to 5s, which would have been 60x and
+// risked reintroducing the exact "everything feels slow" problem this same
+// singleton fix exists to avoid.
 if (!globalThis.__monitorAgentInterval) {
   runMonitorAgentScan().catch((e) => console.error('[MonitorAgent] initial run failed:', e?.message));
   globalThis.__monitorAgentInterval = setInterval(() => {
     runMonitorAgentScan().catch((e) => console.error('[MonitorAgent] scheduled run failed:', e?.message));
-  }, 5 * 60 * 1000);
+  }, 30 * 1000);
 }
 
 // Notify all watchers of an issue (excluding actor)
