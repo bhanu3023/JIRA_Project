@@ -4249,6 +4249,26 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
     return `${s}s remaining`;
   };
 
+  // How long a department actually took to resolve a ticket, in plain
+  // words -- the SLA card already computed this exact number (elapsedMs,
+  // frozen at the real resolution moment) for the progress bar's fill
+  // percentage, but never showed it as readable text anywhere. Start/Due
+  // were the only visible times, so seeing "how long did this actually
+  // take" meant manually subtracting two timestamps yourself. Unlike
+  // fmtRemaining/fmtOverdue (a live countdown, never more than a few
+  // hours in practice) this can span many days for a slow resolution, so
+  // it rolls up into days once past 24h instead of showing "100h 30m".
+  const fmtDuration = (ms: number) => {
+    const totalMins = Math.max(0, Math.round(ms / 60000));
+    const m = totalMins % 60;
+    const totalHours = Math.floor(totalMins / 60);
+    const h = totalHours % 24;
+    const d = Math.floor(totalHours / 24);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  };
+
   const fmtOverdue = (ms: number) => {
     const totalSecs = Math.floor(Math.abs(ms) / 1000);
     const totalMins = Math.floor(totalSecs / 60);
@@ -4449,6 +4469,19 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                         <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
                       </div>
                     </div>
+                  )}
+
+                  {/* How long it actually took, in plain words -- Start/Due
+                      alone meant working this out by hand from two separate
+                      timestamps. elapsedMs is already frozen at the real
+                      resolution moment above, not still counting up against
+                      "now" the way a still-open ticket's would be. */}
+                  {isCompleted && resolvedAt && startedAt && (
+                    <p className={`text-[10.5px] mt-1.5 ${resolvedLate ? 'text-red-500' : 'text-emerald-600'}`}>
+                      Resolved in <span className="font-semibold">{fmtDuration(elapsedMs)}</span>
+                      {goalMs > 0 && !resolvedLate && ' — within the SLA goal'}
+                      {resolvedLate && ' — past the SLA goal'}
+                    </p>
                   )}
 
                   {/* Who actually resolved it -- otherwise the only name visible
