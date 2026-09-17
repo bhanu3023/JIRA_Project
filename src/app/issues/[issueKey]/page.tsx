@@ -1636,7 +1636,14 @@ export default function IssueDetailPage() {
   // exists, show THAT queue's own frozen status here too instead of the live one.
   const viewDeptParam = searchParams?.get('viewDept') || '';
   const currentDeptForView = ((issue as any)?.current_department || '').trim();
-  const isHistoricalDeptView = !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
+  // Disabled per explicit request: always show the ticket's live current
+  // status/assignee here, regardless of which queue's link was clicked --
+  // the frozen-snapshot view (see the comment above this block for why it
+  // existed) was confusing users who expected this page to always reflect
+  // reality. The Department field alone now shows where a ticket has moved
+  // to; the queue list itself (dept_closed) still shows its own frozen
+  // per-department snapshot, unaffected by this.
+  const isHistoricalDeptView = false && !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
   // Admins can still edit the live ticket while viewing another queue's frozen
   // snapshot -- the read-only lock below exists so a regular user can't mistake
   // a historical snapshot for the live ticket and edit it by accident, not to
