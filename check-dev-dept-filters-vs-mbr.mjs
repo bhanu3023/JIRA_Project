@@ -44,7 +44,9 @@ async function main() {
   const mbrParams = new URLSearchParams({ department: DEPT, dateFrom: '2026-08-01', dateTo: '2026-08-31' });
   const mbrRes = await fetch(`${APP_URL}/api/reports/mbr?${mbrParams}`, { headers: authHeader });
   const mbrData = await mbrRes.json();
-  const deptRow = (mbrData.departments || []).find(d => (d.name || d.department || '').toLowerCase() === DEPT.toLowerCase());
+  // The endpoint's real field is `dept`, not `name`/`department` -- confirmed
+  // by reading the handler's own `departments = deptRows.rows.map(r => ({dept: r.dept, ...}))`.
+  const deptRow = (mbrData.departments || []).find(d => (d.dept || '').toLowerCase() === DEPT.toLowerCase());
   console.log(`MBR By Department (department=${DEPT}, same range): ${mbrRes.ok ? JSON.stringify(deptRow) : `ERR ${mbrRes.status}`}`);
 
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
