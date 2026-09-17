@@ -44,10 +44,14 @@ async function main() {
   const mbrParams = new URLSearchParams({ department: DEPT, dateFrom: '2026-08-01', dateTo: '2026-08-31' });
   const mbrRes = await fetch(`${APP_URL}/api/reports/mbr?${mbrParams}`, { headers: authHeader });
   const mbrData = await mbrRes.json();
-  // The endpoint's real field is `dept`, not `name`/`department` -- confirmed
-  // by reading the handler's own `departments = deptRows.rows.map(r => ({dept: r.dept, ...}))`.
+  // The `departments` array is an open/unassigned/old30/overdue/slaBreached
+  // BREAKDOWN, keyed by `dept` -- it has no per-department ticket total at
+  // all. The real comparable total to Filters' own count is the endpoint's
+  // top-level `totalMatched` (confirmed by reading the handler's own
+  // `return json({ departments, people, tickets, totalMatched })` and the
+  // ticketRows query's `COUNT(*) OVER() AS total_matched` it's built from).
   const deptRow = (mbrData.departments || []).find(d => (d.dept || '').toLowerCase() === DEPT.toLowerCase());
-  console.log(`MBR By Department (department=${DEPT}, same range): ${mbrRes.ok ? JSON.stringify(deptRow) : `ERR ${mbrRes.status}`}`);
+  console.log(`MBR By Department (department=${DEPT}, same range): total=${mbrRes.ok ? mbrData.totalMatched : `ERR ${mbrRes.status}`}  (breakdown: ${JSON.stringify(deptRow)})`);
 
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
   await pool.query(`UPDATE user_sessions SET is_revoked = TRUE WHERE token_hash = $1`, [tokenHash]);
