@@ -461,14 +461,22 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     </td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">
-                      {t.assignee}
-                      {t.assigneeOutsideRoster && (
-                        <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
-                      )}
-                      {t.matchedViaPersonHistory && person && (
-                        <span title={`Currently assigned to ${t.assignee} — counted here because ${people.find((p) => p.email === person)?.name || 'the selected person'} worked this ticket in this department before it moved`} className="ml-1.5 text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
-                          worked by {people.find((p) => p.email === person)?.name || 'selected person'}
-                        </span>
+                      {t.matchedViaPersonHistory && person ? (
+                        <>
+                          {people.find((p) => p.email === person)?.name || 'selected person'}
+                          {t.assignee && (
+                            <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${people.find((p) => p.email === person)?.name || 'the selected person'} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                              (now: {t.assignee})
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {t.assignee}
+                          {t.assigneeOutsideRoster && (
+                            <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
+                          )}
+                        </>
                       )}
                     </td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.reporter}</td>
@@ -550,14 +558,22 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     </td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">
-                          {t.assignee}
-                          {t.assigneeOutsideRoster && (
-                            <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
-                          )}
-                          {t.matchedViaPersonHistory && drillDown?.person && (
-                            <span title={`Currently assigned to ${t.assignee} — counted here because ${people.find((p) => p.email === drillDown.person)?.name || 'the selected person'} worked this ticket in this department before it moved`} className="ml-1.5 text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
-                              worked by {people.find((p) => p.email === drillDown.person)?.name || 'selected person'}
-                            </span>
+                          {t.matchedViaPersonHistory && drillDown?.person ? (
+                            <>
+                              {people.find((p) => p.email === drillDown.person)?.name || 'selected person'}
+                              {t.assignee && (
+                                <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${people.find((p) => p.email === drillDown.person)?.name || 'the selected person'} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                                  (now: {t.assignee})
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              {t.assignee}
+                              {t.assigneeOutsideRoster && (
+                                <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
+                              )}
+                            </>
                           )}
                         </td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
