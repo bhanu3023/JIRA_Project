@@ -35,11 +35,24 @@ import pg from 'pg';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const APPLY = process.argv.includes('--apply');
-const args = process.argv.slice(2).filter((a) => a !== '--apply');
+const args = process.argv.slice(2).filter((a) => a !== '--apply' && !a.startsWith('--keys='));
 const DEPT = args[0] || 'Dev';
 const RANGE_START = args[1] || '2026-08-01';
 const RANGE_END = args[2] || '2026-09-01';
 const SIMULTANEOUS_WINDOW_MS = 5000;
+// Restricts writes to an explicit, already-verified set of ticket keys --
+// e.g. --keys=CF-29908,CF-29906. The dry-run scan across a whole
+// department+month found 245 candidate rows spanning many different
+// people (not just Naveed), which is real signal that this bug had wide
+// reach -- but the department-tracking here is a heuristic (parsing free-
+// text history strings like "Handed to X — SLA started"), not yet
+// rigorously checked beyond the 5 tickets manually cross-verified against
+// real screenshots. Without --keys, this still SCANS everything (so the
+// dry-run reporting stays useful for review), but only ever WRITES
+// (--apply) to keys in this list, so a wider apply never happens by
+// accident.
+const KEYS_ARG = process.argv.find((a) => a.startsWith('--keys='));
+const RESTRICT_KEYS = KEYS_ARG ? new Set(KEYS_ARG.slice('--keys='.length).split(',').map((k) => k.trim().toUpperCase())) : null;
 
 async function main() {
   console.log(`Scanning ${DEPT} tickets touched between ${RANGE_START} and ${RANGE_END} (createdAt or updatedAt in range)...`);
@@ -119,9 +132,10 @@ async function main() {
       const row = existing[0];
       if (row && (row.reason === 'worked' || row.reason === 'closed')) continue; // already correct
 
-      console.log(`${issue.key}  ${ev.dept}  ${user.email}: ${row ? `currently reason=${row.reason}` : 'no row at all'} -- real status change at ${ev.at.toISOString()}`);
+      const restricted = RESTRICT_KEYS && !RESTRICT_KEYS.has(issue.key.toUpperCase());
+      console.log(`${issue.key}  ${ev.dept}  ${user.email}: ${row ? `currently reason=${row.reason}` : 'no row at all'} -- real status change at ${ev.at.toISOString()}${restricted ? '  [outside --keys, not writing]' : ''}`);
       fixedCount++;
-      if (APPLY) {
+      if (APPLY && !restricted) {
         await pool.query(
           `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason, worked_at)
            VALUES ($1, $2, $3, 'worked', $4)
