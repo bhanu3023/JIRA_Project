@@ -11381,8 +11381,13 @@ async function _handleJiraPgApi(
     const baseParams: any[] = [dept, roster];
     let fromIdx: number | null = null;
     let toIdx: number | null = null;
-    if (dateFrom) { baseParams.push(dateFrom); fromIdx = baseParams.length; }
-    if (dateTo)   { baseParams.push(dateTo);   toIdx = baseParams.length; }
+    // IST-anchored, matching parseDateRange's own "between:" handling
+    // exactly (see the dateClause comment below for why) -- dateFrom/dateTo
+    // are plain YYYY-MM-DD strings from the date picker, not "between:"
+    // prefixed, so built the same way here rather than through that
+    // function.
+    if (dateFrom) { baseParams.push(new Date(`${dateFrom}T00:00:00+05:30`)); fromIdx = baseParams.length; }
+    if (dateTo)   { baseParams.push(new Date(`${dateTo}T23:59:59.999+05:30`)); toIdx = baseParams.length; }
     // Matches createdAt OR updatedAt -- "touched" -- same as Filters' own
     // "Queue: X" scope with BOTH its Created and Updated filters active at
     // once (see queueMembersOnlyParam's dateClause union and deptScopeSql's
@@ -11398,8 +11403,21 @@ async function _handleJiraPgApi(
     const createdConds: string[] = [];
     const updatedConds: string[] = [];
     if (fromIdx || toIdx) {
-      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
-      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
+      // Plain timestamp comparison against explicit IST-anchored boundaries
+      // (dateFrom/dateTo above are already Date objects, not strings -- see
+      // where baseParams gets them pushed) -- NOT a ::date cast. ::date
+      // casts a timestamptz to a calendar date using the POSTGRES SESSION's
+      // timezone, which defaults to UTC with no TZ configured on this
+      // container. Confirmed for real: CF-31128 updated at
+      // 2026-07-31T21:05:10Z (= Aug 1, 2:35 AM IST -- genuinely "August" to
+      // every actual user, all of whom operate in IST) matched Filters'
+      // Aug-2026 range (parseDateRange explicitly anchors to IST for
+      // exactly this reason) but was silently excluded here, because
+      // '...T21:05Z'::date is still '...-07-31' in UTC. Same IST-anchoring
+      // fix already applied to Filters' own parseDateRange, applied here so
+      // the two pages agree on where a calendar day starts and ends.
+      if (fromIdx) { createdConds.push(`i."createdAt" >= $${fromIdx}`); updatedConds.push(`i."updatedAt" >= $${fromIdx}`); }
+      if (toIdx)   { createdConds.push(`i."createdAt" <= $${toIdx}`);   updatedConds.push(`i."updatedAt" <= $${toIdx}`); }
       dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
     // Bucket by whichever field actually put this ticket in range, preferring
