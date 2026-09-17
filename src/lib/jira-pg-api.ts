@@ -138,6 +138,21 @@ pool.query(`
   WHERE i.key = n."issueKey" AND i.cf_key IS NOT NULL AND i.cf_key <> '' AND n."issueKey" IS DISTINCT FROM i.cf_key
 `).catch(() => {});
 
+// Backfill: every path that CREATES a ticket (manual create, email-created,
+// Jira sync, the L1BOAR/CFITS import, cross-board handoff) already assigns
+// a cf_key immediately -- but that was fixed at different times for
+// different paths, so tickets created before each fix (mostly the original
+// bulk CFITS/L1BOAR migration batch) still have cf_key IS NULL. Every place
+// that's supposed to show the clean CF-#### key falls back to the raw
+// internal project key for these (e.g. "L1BOAR-5648"), which is also why
+// they matched a roster/email check as if their assignee had no email --
+// unrelated symptom, same root cause: this row was never touched by any of
+// the per-path fixes above. Runs every startup but is a no-op once caught
+// up (only ever touches a row still missing cf_key).
+ensureCfKeySequence()
+  .then(() => pool.query(`UPDATE issues SET cf_key = 'CF-' || nextval('cf_key_seq') WHERE cf_key IS NULL`))
+  .catch(() => {});
+
 // One-time correction for the "Time to resolution" SLA policy: it was
 // created pointing at a spaceId that doesn't match any real space in this
 // database, so it silently never applied to a single real ticket. The user
