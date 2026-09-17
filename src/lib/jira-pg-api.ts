@@ -1661,14 +1661,28 @@ async function performDeptHandoff(
   // Only fall back to crediting whoever performed the handoff when there's no
   // real assignee to credit instead, so this list stays personal and doesn't
   // fill up with tickets someone merely routed through the status dropdown.
+  // Guarded so a mere pass-through/hand-off never erases a real 'worked' or
+  // 'closed' credit this same person already earned for this ticket+dept --
+  // this upsert used to fire unconditionally on every department transfer,
+  // even long after the fact. Confirmed for real on CF-29690: Naveed
+  // genuinely resolved it in Dev on Aug 23 (his own 'worked'/'closed' row
+  // already existed for that), but a later, unrelated transfer on Sept 2
+  // stomped it to reason='passed' with worked_at bumped to Sept -- erasing
+  // both the credit AND its correct month, purely because he still
+  // happened to be the assigneeId of record at the moment that later
+  // transfer fired, not because he "passed" anything in September at all.
   if (oldDept && curAssigneeId) {
     pool.query(
-      `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+      `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed')
+       ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()
+       WHERE user_worked_on_tickets.reason NOT IN ('worked','closed')`,
       [curAssigneeId, issueId, oldDept]
     ).catch(() => {});
   } else if (oldDept && userId) {
     pool.query(
-      `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+      `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'passed')
+       ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()
+       WHERE user_worked_on_tickets.reason NOT IN ('worked','closed')`,
       [userId, issueId, oldDept]
     ).catch(() => {});
   }
@@ -7711,14 +7725,25 @@ async function _handleJiraPgApi(
         // theirs, got it added to their own personal "Worked on" list next
         // to tickets they had nothing to do with. Only fall back to
         // crediting the mover when there's no assignee to credit instead.
+        // Guarded so a mere pass-through/hand-off never erases a real
+        // 'worked' or 'closed' credit this same person already earned for
+        // this ticket+dept -- see the matching comment on this same guard
+        // in pauseDeptSLA above (CF-29690's confirmed real example: a
+        // Sept transfer stomped Naveed's genuine Aug 23 Dev resolution
+        // credit to reason='passed', dated Sept, purely because he still
+        // happened to be assigneeId of record when the later transfer fired).
         if (oldDept && issue.assigneeId) {
           pool.query(
-            `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+            `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed')
+             ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()
+             WHERE user_worked_on_tickets.reason NOT IN ('worked','closed')`,
             [issue.assigneeId, issue.id, oldDept]
           ).catch(() => {});
         } else if (oldDept && userId) {
           pool.query(
-            `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()`,
+            `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'passed')
+             ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='passed', worked_at=NOW()
+             WHERE user_worked_on_tickets.reason NOT IN ('worked','closed')`,
             [userId, issue.id, oldDept]
           ).catch(() => {});
         }
@@ -7726,7 +7751,9 @@ async function _handleJiraPgApi(
         const devAssignee = deptMapGet(deptAssignees, newDept);
         if (devAssignee?.id) {
           pool.query(
-            `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'returned') ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='returned', worked_at=NOW()`,
+            `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1, $2, $3, 'returned')
+             ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET reason='returned', worked_at=NOW()
+             WHERE user_worked_on_tickets.reason NOT IN ('worked','closed')`,
             [devAssignee.id, issue.id, newDept]
           ).catch(() => {});
         }
