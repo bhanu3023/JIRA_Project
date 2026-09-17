@@ -1554,10 +1554,25 @@ export default function FiltersPage() {
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
+      // Excel (and Google Sheets, when the CSV is imported) evaluates a cell
+      // starting with "=" as a formula regardless of CSV quoting, so
+      // =HYPERLINK(url,label) makes the Key column clickable in the
+      // exported file, opening the same ticket detail page the in-app Key
+      // link goes to -- same href construction (viewDept when a queue is
+      // selected, so the opened ticket shows this queue's own historical
+      // assignee/status snapshot, not just whoever holds it live).
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      const keyLink = (issue: any) => {
+        const key = issue.cfKey ?? issue.key;
+        const href = selQueue
+          ? `${origin}/issues/${key}?ref=filters&viewDept=${encodeURIComponent(selQueue)}`
+          : `${origin}/issues/${key}?ref=filters`;
+        return `=HYPERLINK("${href.replace(/"/g, '""')}","${String(key).replace(/"/g, '""')}")`;
+      };
       const lines = [header.map(csvCell).join(',')];
       for (const issue of list) {
         lines.push([
-          issue.cfKey ?? issue.key,
+          keyLink(issue),
           issue.type ?? '',
           issue.summary ?? '',
           issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
