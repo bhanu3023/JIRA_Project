@@ -11767,6 +11767,27 @@ async function _handleJiraPgApi(
       (workedRosterByIssue[wr.issue_id] ??= new Set()).add(String(wr.email).toLowerCase());
     }
 
+    // Per explicit request: Avg. Resolution (hrs) should reflect actual
+    // active work time per ticket (e.g. 10min+12min+30min+15min+15min / 5),
+    // not full elapsed time from creation to resolution -- a ticket that
+    // sat untouched in a queue for days before 15 real minutes of work
+    // was showing as "days", not "15 minutes". computeInProgressHours
+    // already exists and is proven (Team Analytics' Time Spent view, GET
+    // /issues) for exactly this: hours actually spent in an "In Progress"-
+    // named status, walking the real status-history timeline. Batch-fetch
+    // once here rather than per-ticket, same shape as workedRosterRes above.
+    const statusHistRes = slaCandidateIds.length
+      ? await pool.query(
+          `SELECT "issueId", "oldValue", "newValue", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'status' ORDER BY "issueId", "createdAt" ASC`,
+          [slaCandidateIds]
+        )
+      : { rows: [] as any[] };
+    const statusHistByIssue: Record<string, Array<{ oldValue: string | null; newValue: string; createdAt: Date }>> = {};
+    for (const h of statusHistRes.rows) {
+      (statusHistByIssue[h.issueId] ??= []).push(h);
+    }
+    const peopleInProgress: Record<string, { sum: number; count: number }> = {};
+
     const slaSpaceIds = Array.from(new Set(slaCandidatesRes.rows.map((r: any) => r.spaceId).filter(Boolean)));
     const slaPoliciesBySpace: Record<string, any[]> = {};
     if (slaSpaceIds.length) {
@@ -11835,6 +11856,20 @@ async function _handleJiraPgApi(
         if (!person || emails.has(person)) summaryRbBreached++;
       }
 
+      // Same "no evidence, don't guess" rule as the resolvedAt backfill:
+      // only tickets that are actually done AND have a real resolvedAt
+      // contribute a resolution time at all.
+      if (row.status_category === 'done' && row.resolvedAt) {
+        const { inProgressHrs } = computeInProgressHours(
+          statusHistByIssue[row.id] || [], row.createdAt, true, row.resolvedAt, row.status_name
+        );
+        for (const email of Array.from(emails)) {
+          const acc = (peopleInProgress[email] ??= { sum: 0, count: 0 });
+          acc.sum += inProgressHrs;
+          acc.count++;
+        }
+      }
+
       if (isEntSmb) {
         const descText = stripHtml(row.description);
         const shortcut = isShortcutSummary(row.summary, row.key);
@@ -11884,13 +11919,17 @@ async function _handleJiraPgApi(
     const people = peopleRes.rows.map((r: any) => {
       const email = String(r.email || '').toLowerCase();
       const rbBreached = peopleRbBreached[email] || 0;
+      const ip = peopleInProgress[email];
       return {
         email: r.email,
         name: `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email,
         ...toSummary(r, rbBreached),
         ...hygieneFrom(r),
         ...(isEntSmb ? weeklyScoreFrom(r, peopleTextAgg[email] || newTextAgg(), Number(r.total) || 0, rbBreached) : {}),
-        avgResolutionHours: r.avg_resolution_hours === null ? null : Number(r.avg_resolution_hours),
+        // Active work time per ticket (time actually spent In Progress),
+        // not full elapsed creation-to-resolution time -- see
+        // peopleInProgress construction above for why.
+        avgResolutionHours: ip && ip.count > 0 ? Math.round((ip.sum / ip.count) * 10) / 10 : null,
       };
     });
 
