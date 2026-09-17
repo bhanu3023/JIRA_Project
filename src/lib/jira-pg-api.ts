@@ -11385,9 +11385,13 @@ async function _handleJiraPgApi(
     // exactly (see the dateClause comment below for why) -- dateFrom/dateTo
     // are plain YYYY-MM-DD strings from the date picker, not "between:"
     // prefixed, so built the same way here rather than through that
-    // function.
-    if (dateFrom) { baseParams.push(new Date(`${dateFrom}T00:00:00+05:30`)); fromIdx = baseParams.length; }
-    if (dateTo)   { baseParams.push(new Date(`${dateTo}T23:59:59.999+05:30`)); toIdx = baseParams.length; }
+    // function. Named so monthLabelFor below can reuse the exact same
+    // boundaries instead of its own separate (and, until now, inconsistent)
+    // UTC-string comparison -- see that function's own comment.
+    const istFrom = dateFrom ? new Date(`${dateFrom}T00:00:00+05:30`) : null;
+    const istTo   = dateTo   ? new Date(`${dateTo}T23:59:59.999+05:30`) : null;
+    if (istFrom) { baseParams.push(istFrom); fromIdx = baseParams.length; }
+    if (istTo)   { baseParams.push(istTo);   toIdx = baseParams.length; }
     // Matches createdAt OR updatedAt -- "touched" -- same as Filters' own
     // "Queue: X" scope with BOTH its Created and Updated filters active at
     // once (see queueMembersOnlyParam's dateClause union and deptScopeSql's
@@ -11851,12 +11855,30 @@ async function _handleJiraPgApi(
     const dateStrUTC = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
     const monthLabelFor = (row: any): string => {
       let d = new Date(row.createdAt);
-      if (dateFrom || dateTo) {
-        const createdDateStr = dateStrUTC(d);
-        const createdInRange = (!dateFrom || createdDateStr >= dateFrom) && (!dateTo || createdDateStr <= dateTo);
+      if (istFrom || istTo) {
+        // Same IST-anchored boundaries the WHERE clause above matched this
+        // row against (istFrom/istTo) -- was comparing dateStrUTC(d) (a pure
+        // UTC calendar-date string) against the raw dateFrom/dateTo strings
+        // instead, which is a DIFFERENT, UTC-only boundary than what
+        // actually decided whether this row matched the date range at all.
+        // Confirmed for real: a ticket whose createdAt only counted as
+        // "August" via IST anchoring (e.g. 2026-07-31T21:05Z = Aug 1, 2:35
+        // AM IST) still read as "2026-07-31" by dateStrUTC, so this treated
+        // it as createdAt-out-of-range and bucketed it by updatedAt instead
+        // -- landing genuinely-August tickets under "Jul 2026" in the
+        // Monthly summary even though the date filter was set to August
+        // only and the ticket correctly appears in the August-scoped total.
+        const createdInRange = (!istFrom || d.getTime() >= istFrom.getTime()) && (!istTo || d.getTime() <= istTo.getTime());
         if (!createdInRange) d = new Date(row.updatedAt);
       }
-      return `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+      // The label itself also needs IST's calendar month, not UTC's -- the
+      // same 2026-07-31T21:05Z example is "Aug 2026" to every actual user
+      // (all in IST) but getUTCMonth() alone would still print "Jul 2026".
+      // Shifting by the IST offset before reading UTC components is the
+      // standard zero-dependency way to read a UTC Date's IST calendar
+      // fields in plain JS.
+      const istD = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
+      return `${MONTH_ABBR[istD.getUTCMonth()]} ${istD.getUTCFullYear()}`;
     };
     const slaById = new Map<string, boolean>();
     const peopleRbBreached: Record<string, number> = {};
