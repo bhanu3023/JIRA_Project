@@ -31,7 +31,7 @@ async function main() {
   const ids = people.map(p => p.id);
 
   const { rows: issues } = await pool.query(
-    `SELECT i.id, i.key, i."cfKey", i.summary, i."assigneeId", i."reporterId", i."resolvedAt",
+    `SELECT i.id, i.key, i.cf_key, i.summary, i."assigneeId", i."reporterId", i."resolvedAt",
             i.current_department, i.dept_assignees, s.name AS status_name, s.category AS status_category
      FROM issues i
      LEFT JOIN statuses s ON s.id = i."statusId"
@@ -46,7 +46,7 @@ async function main() {
 
   for (const row of issues) {
     const flags = [];
-    const key = row.cfKey || row.key;
+    const key = row.cf_key || row.key;
 
     // 1. status/resolvedAt consistency
     const isDone = row.status_category === 'done';
