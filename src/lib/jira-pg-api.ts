@@ -2526,6 +2526,188 @@ function taGroupByCount(rows: any[], getKey: (r: any) => string | null | undefin
   return Object.entries(counts).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
 }
 
+// Extracted from the Filters issue-list SLA-breach enrichment (GET
+// /issues, dept-scoped branch) so a lightweight prefilter pass can decide
+// which candidates actually match an active SLA Breached/Overdue filter
+// WITHOUT first fetching every candidate's full row (`SELECT i.*` pulls
+// every column including `description`, which can balloon into tens of MB
+// for a single legacy ticket with a base64-embedded image) -- confirmed via
+// check-api-response-times.mjs that fetching + JS-processing every
+// Dev-department ticket's full row just to filter it down to the 50 shown
+// was the dominant cost behind Queue: Dev + SLA Breached: Yes taking 6.7s
+// in practice (Migration: 4s). Both the lightweight prefilter pass and the
+// final per-row enrichment call this exact same function on the same input
+// shape, so the two can never disagree about whether a given ticket is
+// breached/overdue.
+//
+// `i` must carry: spaceId, current_department, dept_statuses, status
+// ({name, category} or null), jira_sla_breached, dueDate, dept_sla_started_at,
+// createdAt, priority, dept_sla_log, sla_waivers.
+function computeSlaBreachedAndOverdue(
+  i: any, deptParam: string | null | undefined, policiesBySpace: Record<string, any[]>, nowMs: number
+): { slaBreached: boolean | null; overdue: boolean } {
+  // Same dept_statuses fallback computeSLAInstancesPure uses (see its own
+  // long comment) -- a ticket can visibly show "Resolved" via its
+  // per-department status snapshot while the real statusId column never
+  // caught up. Checking only i.status?.category here let such a ticket keep
+  // ticking its live-clock breach projection forever on the Filters
+  // table/export, even though the ticket detail page's own SLA panel
+  // (which already used this fallback) correctly stopped the clock for it.
+  const issueDeptForStatus = (i.current_department || '').trim().toLowerCase();
+  const deptStatusesForStatus: Record<string, any> = i.dept_statuses || {};
+  const deptStatusKeyForStatus = Object.keys(deptStatusesForStatus).find((k) => k.toLowerCase() === issueDeptForStatus);
+  const deptStatusCategoryForStatus = deptStatusKeyForStatus ? deptStatusesForStatus[deptStatusKeyForStatus]?.category : undefined;
+  const isResolved = i.status?.category === 'done' || deptStatusCategoryForStatus === 'done';
+  // Historical breach imported from Jira (L2B/L3B) always counts, even for
+  // a ticket that's since been resolved here -- the checks below all force
+  // `breached` back to false once resolved, which is right for this app's
+  // OWN SLA clock (no point alarming on a stopped clock), but would erase
+  // the fact that Jira already recorded a real breach before the ticket
+  // ever got resolved.
+  let breached = !!i.jira_sla_breached;
+  // A department nobody has configured an SLA policy for (e.g. Infra, which
+  // never had one set up) previously still showed a hard "No" in the SLA
+  // Breached column -- indistinguishable from "there IS an SLA and it's
+  // fine", when the truth is there's no SLA to even measure against. Track
+  // whether any policy actually applies to this ticket's department so the
+  // final value below can report "N/A" instead of a misleading "not
+  // breached".
+  //
+  // Scoped to the QUERIED department (deptParam, e.g. viewing the Dev
+  // queue) when one is active, not always i.current_department -- a ticket
+  // that breached Migration's own SLA after moving on from Dev was showing
+  // "Breached: Yes" (with Migration's name/dept attached) even inside a
+  // Dev-scoped export, when Dev's own time-in-department never came close
+  // to its own SLA goal. Confirmed for real: CF-30766 spent ~19.7h in
+  // Migration against its 10h goal (genuinely breached there) but only ~2h
+  // in Dev against Dev's own, much longer goal -- a Dev queue view/export
+  // should show "No" for it, only Migration's own view should show "Yes".
+  // Plain (non-dept-scoped) views like "My Tickets" have no deptParam and
+  // keep using current_department, same as before.
+  const dept = (deptParam || i.current_department || '').trim().toLowerCase();
+  const hasApplicablePolicy = (policiesBySpace[i.spaceId] || []).some((p: any) => {
+    const pDept = (p.dept_name || '').trim().toLowerCase();
+    return !pDept || pDept === dept;
+  });
+  // Resolving a ticket must never ERASE a breach that already happened
+  // before it was resolved -- gating this whole block on `!isResolved` did
+  // exactly that, since jira_sla_breached only covers tickets imported
+  // already-breached from Jira, not ones that breached live in this app
+  // before getting resolved here.
+  if (!breached) {
+    if (!isResolved && i.dueDate && new Date(i.dueDate).getTime() < nowMs) breached = true;
+    // Same fallback as computeIssueSLAsFromDb: tickets never routed through
+    // a department transfer have no dept_sla_started_at, so measure from
+    // creation.
+    const slaStartedAt = i.dept_sla_started_at || i.createdAt;
+    if (!breached && slaStartedAt) {
+      const priority = (i.priority || 'medium').toLowerCase();
+      const currentStatusName = (i.status?.name || '').trim().toLowerCase();
+      const policies = (policiesBySpace[i.spaceId] || []).filter((p: any) => {
+        const pDept = (p.dept_name || '').trim().toLowerCase();
+        return !pDept || pDept === dept;
+      });
+      // An admin can waive a specific policy's breach on a specific ticket
+      // (see the "SLA Breach Waiver" endpoint and computeSLAInstancesPure's
+      // own `waiver ? false : rawIsBreached` on the ticket detail page).
+      // This recompute never looked at sla_waivers at all, so a ticket
+      // waived on the detail page (correctly showing "resolved in time"
+      // there) still elapsed-computed straight to "Breached: Yes" here,
+      // e.g. in the Filters-page export. Confirmed for real: CF-30920,
+      // CF-30911, CF-29386.
+      const waivers: Record<string, any> = i.sla_waivers || {};
+      for (const policy of policies) {
+        const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
+          ? policy.pauseStatuses.map((s: string) => s.trim().toLowerCase())
+          : [];
+        if (pauseStatuses.includes(currentStatusName)) continue; // paused — clock stopped
+        let durationMs = 8 * 60 * 60 * 1000; // default 8h, same fallback as computeIssueSLAsFromDb
+        for (const goal of (policy.goals || [])) {
+          if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
+            const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
+            if (row?.timeValue) {
+              const val = parseFloat(row.timeValue);
+              const unit = (row.timeUnit || 'hours').toLowerCase();
+              durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+              break;
+            }
+          } else if (goal.timeValue) {
+            const val = parseFloat(goal.timeValue);
+            const unit = (goal.timeUnit || 'hours').toLowerCase();
+            durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
+            break;
+          }
+        }
+        // dept_sla_started_at resets to NOW() on every department handoff,
+        // including a RETURN to a dept that already burned part of its SLA
+        // budget on an earlier visit (dept_sla_log[dept].elapsed_ms -- the
+        // same bookkeeping computeSLAInstancesPure uses for the ticket
+        // detail page's own SLA panel). Adding the FULL goal duration to
+        // slaStartedAt here ignored that prior spend entirely, handing a
+        // returning dept a brand-new full countdown instead of continuing
+        // from where it left off -- which is exactly how CF-29552 (already
+        // over its 10h Migration budget the moment it landed back there,
+        // carrying ~20h burned from an earlier Dev visit) came out "not yet
+        // due" here while its own detail page correctly showed it breached.
+        // Same remaining-budget subtraction, so the two agree.
+        const deptSlaLog: Record<string, any> = i.dept_sla_log || {};
+        const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
+        const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
+        // No "same stint" guard here -- see the matching comment in
+        // computeSLAInstancesPure. pauseDeptSLA's elapsed_ms is already a
+        // running incremental total; it is never double-counted by also
+        // reading startedAt as a separate term, so crediting it
+        // unconditionally is correct in every case, including the most
+        // common one (a ticket resolved on its first and only stint in this
+        // department).
+        const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
+        const waiver = waivers[policy.id] || null;
+        // The "project forward with remaining budget vs now" formula below
+        // is only valid while THIS department's clock is actually still
+        // running -- true when there's no dept scope at all, or when the
+        // queried department (dept, now possibly deptParam) IS the
+        // ticket's current one. When deptParam scopes to a department the
+        // ticket has since moved AWAY from while still unresolved, that
+        // department's clock is paused (same as the resolved case below)
+        // -- its own accumulated priorElapsedMs is everything there is to
+        // compare, not a live-ticking projection using slaStartedAt, which
+        // reflects whichever OTHER department is currently active, not
+        // this one.
+        const deptClockIsLive = isResolved
+          ? false
+          : !deptParam || (i.current_department || '').trim().toLowerCase() === dept;
+        if (isResolved || !deptClockIsLive) {
+          // The clock is frozen -- priorElapsedMs already reflects the FULL
+          // total time logged across every period up to and including the
+          // one that just ended (pauseDeptSLA folds it in), so it alone
+          // tells us whether the goal was exceeded by the time this ticket
+          // was resolved. The running-clock formula below (slaStartedAt +
+          // remaining vs "now") would double-count that same just-ended
+          // period on top of itself if reused here across more than one
+          // pause/resume cycle.
+          if (priorElapsedMs >= durationMs && !waiver) { breached = true; break; }
+        } else {
+          const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+          if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs && !waiver) { breached = true; break; }
+        }
+      }
+    }
+  }
+  // No policy configured for this department, and nothing else (a real
+  // imported Jira breach) already forced a true -- there's genuinely no SLA
+  // to have breached or not, so report that honestly (frontend renders this
+  // as "-") instead of the misleading "No" a department like Infra (no SLA
+  // ever set up for it) showed before.
+  const slaBreached = hasApplicablePolicy || i.jira_sla_breached ? breached : null;
+  // Overdue: the ticket's own dueDate field, unrelated to any SLA policy's
+  // clock -- a ticket can be overdue with no SLA configured at all, or have
+  // an active SLA but no dueDate set. Only meaningful while still open; a
+  // resolved ticket isn't "overdue" regardless of whether it was resolved
+  // late (that's what SLA Breached captures).
+  const isOverdue = !isResolved && !!i.dueDate && new Date(i.dueDate).getTime() < nowMs;
+  return { slaBreached, overdue: isOverdue };
+}
+
 function formatIssue(issue: any) {
   const statusObj = issue.status
     ? {
@@ -5710,6 +5892,14 @@ async function _handleJiraPgApi(
       });
     }
     let deptTotal = total;
+    // Set by the dept-scoped branch's own lightweight SLA prefilter pass
+    // (see needsSlaPrefilter below) when it already knows the true matching
+    // count from a small-column candidate query, instead of the full-row
+    // one -- lets the shared post-processing block below use it instead of
+    // re-deriving the total from enrichedIssues.length, which only works
+    // when enrichedIssues still holds the FULL (thousands-of-rows)
+    // candidate set, not just the final page.
+    let prefilteredTotal: number | null = null;
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
       let allSpaceIds: string[] = [];
@@ -6359,18 +6549,103 @@ async function _handleJiraPgApi(
       deptTotal = needsSlaPrefilter ? 0 : deptCandidateCount;
 
       try {
+        let rows: { rows: any[] };
+        if (needsSlaPrefilter) {
+          // Lightweight prefilter: fetch only the columns needed to decide
+          // whether each candidate matches the active SLA Breached/Overdue
+          // filter, never the full row -- the full-row query below
+          // (`SELECT i.*`) pulls every column including `description`,
+          // which can balloon into tens of MB for a single legacy ticket
+          // with a base64-embedded image (see the truncation comment on
+          // formatIssue's own call site further below). Fetching +
+          // JS-processing that for EVERY candidate in the department, only
+          // to discard all but the current page's 50 rows a moment later,
+          // is what made Queue: Dev + SLA Breached: Yes take 6.7s in
+          // practice and Queue: Migration + SLA Breached: Yes take 4s
+          // (confirmed via check-api-response-times.mjs) -- a COUNT(*) over
+          // the identical WHERE clause alone timed at ~400ms. Same
+          // deptDeptMatchSql/deptSearchClause/deptExtraSql filter and
+          // ORDER BY as the full-row query, so the candidate set and its
+          // ordering are identical; only the SELECT list and what happens
+          // with the result differ.
+          const lightParams: any[] = [allSpaceIds, deptParam];
+          if (deptSearchParam) lightParams.push(deptSearchParam);
+          lightParams.push(...deptExtraParams);
+          const lightCapIdx = lightParams.length + 1;
+          lightParams.push(Math.min(deptCandidateCount, SLA_PREFILTER_CAP));
+          const lightRows = await pool.query(
+            `SELECT i.id, i.priority, i."createdAt", i."dueDate", i."spaceId", i.current_department,
+                    i.dept_statuses, i.jira_sla_breached, i.dept_sla_started_at, i.dept_sla_log, i.sla_waivers,
+                    s.name AS status_name, s.category AS status_category
+             FROM issues i
+             LEFT JOIN statuses s ON i."statusId" = s.id
+             WHERE i."spaceId" = ANY($1::text[])
+               AND ${deptDeptMatchSql}
+             ${deptSearchClause}
+             ${deptExtraSql}
+             ORDER BY i."createdAt" DESC
+             LIMIT $${lightCapIdx}`,
+            lightParams
+          );
+
+          const distinctSpaceIdsLight = Array.from(new Set(lightRows.rows.map((r: any) => r.spaceId).filter(Boolean)));
+          const policiesBySpaceLight: Record<string, any[]> = {};
+          if (distinctSpaceIdsLight.length) {
+            const polRows = await pool.query(
+              `SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`,
+              [distinctSpaceIdsLight]
+            );
+            for (const p of polRows.rows) (policiesBySpaceLight[p.spaceId] ??= []).push(p);
+          }
+          const nowMsLight = Date.now();
+          const matchingIds: string[] = [];
+          for (const r of lightRows.rows) {
+            const shaped = { ...r, status: r.status_name ? { name: r.status_name, category: r.status_category } : null };
+            const { slaBreached, overdue } = computeSlaBreachedAndOverdue(shaped, deptParam, policiesBySpaceLight, nowMsLight);
+            const matchesSla = !(slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no')
+              || (slaBreachedParamEarly === 'yes' ? !!slaBreached : !slaBreached);
+            const matchesOverdue = !(overdueParamEarly === 'yes' || overdueParamEarly === 'no')
+              || (overdueParamEarly === 'yes' ? overdue : !overdue);
+            if (matchesSla && matchesOverdue) matchingIds.push(r.id);
+          }
+          // TRUE total across the full (up to SLA_PREFILTER_CAP) candidate
+          // set, not just this page -- the shared post-processing block
+          // further below uses this instead of re-deriving it from
+          // enrichedIssues.length, which from this point on only ever holds
+          // the current page (see prefilteredTotal's own declaration).
+          prefilteredTotal = matchingIds.length;
+          const sliceStart = (page - 1) * limit;
+          const pageIds = matchingIds.slice(sliceStart, sliceStart + limit);
+
+          // Second pass: the existing full-row query, unchanged, but scoped
+          // to just this page's ids instead of the whole department -- every
+          // downstream field (assigneeOverride, dept_assignees, description
+          // truncation, etc.) keeps working exactly as before, just fed a
+          // couple dozen rows instead of thousands.
+          rows = pageIds.length
+            ? await pool.query(
+                `SELECT i.*, sp.key AS space_key,
+                        s.name AS status_name, s.category AS status_category, s.color AS status_color,
+                        a.id AS assignee_id, CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a.email AS assignee_email, a."avatarUrl" AS assignee_avatar,
+                        r.id AS reporter_id, CONCAT(r."firstName",' ',r."lastName") AS reporter_name, r.email AS reporter_email, r."avatarUrl" AS reporter_avatar,
+                        i.jira_assignee_name, i.jira_reporter_name
+                 FROM issues i
+                 LEFT JOIN spaces sp ON sp.id = i."spaceId"
+                 LEFT JOIN statuses s ON i."statusId" = s.id
+                 LEFT JOIN users a ON i."assigneeId" = a.id
+                 LEFT JOIN users r ON i."reporterId" = r.id
+                 WHERE i.id = ANY($1::text[])
+                 ORDER BY i."createdAt" DESC`,
+                [pageIds]
+              )
+            : { rows: [] };
+        } else {
         const rowParams: any[] = [allSpaceIds, deptParam];
         if (deptSearchParam) rowParams.push(deptSearchParam);
         rowParams.push(...deptExtraParams);
         const limitIdx = rowParams.length + 1;
         const offsetIdx = rowParams.length + 2;
-        // Same "can't paginate a non-SQL field" reasoning as the non-dept
-        // branch above -- fetch a bounded candidate set instead of the real
-        // page when an SLA-breach filter is active, and let the shared
-        // filtering block further below paginate the actually-filtered result.
-        // Sized to the real matching-row count (deptCandidateCount, bounded by
-        // SLA_PREFILTER_CAP) rather than always assuming the cap is enough.
-        rowParams.push(needsSlaPrefilter ? Math.min(deptCandidateCount, SLA_PREFILTER_CAP) : limit, needsSlaPrefilter ? 0 : (page - 1) * limit);
+        rowParams.push(limit, (page - 1) * limit);
         // Sorting by updatedAt made an old ticket jump to page 1 the moment anyone
         // so much as commented on it, potentially bumping a genuinely new ticket
         // off the page -- pagination should be a stable "50 newest by creation
@@ -6378,7 +6653,7 @@ async function _handleJiraPgApi(
         // (non-dept) branch above already orders by createdAt only; this dept-
         // scoped branch (used by every department queue view: All Tickets,
         // Unassigned, Assigned to me) was the one still sorting by updatedAt first.
-        const rows = await pool.query(
+        rows = await pool.query(
           `SELECT i.*, sp.key AS space_key,
                   s.name AS status_name, s.category AS status_category, s.color AS status_color,
                   a.id AS assignee_id, CONCAT(a."firstName",' ',a."lastName") AS assignee_name, a.email AS assignee_email, a."avatarUrl" AS assignee_avatar,
@@ -6397,6 +6672,7 @@ async function _handleJiraPgApi(
            LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
           rowParams
         );
+        }
         // When a specific person is selected in the Assignee filter (the
         // includeHistory/historyAssigneeFilterIds case), a row can match
         // because THAT person worked this ticket in this dept, while the
@@ -6617,169 +6893,14 @@ async function _handleJiraPgApi(
         }
       }
       const nowMs = Date.now();
+      // See computeSlaBreachedAndOverdue's own long comment for the full
+      // breach/overdue logic -- extracted so the lightweight SLA prefilter
+      // pass in the dept-scoped branch above (see needsSlaPrefilter) can
+      // call the exact same computation on a small-column candidate row,
+      // instead of duplicating it and risking the two drifting apart.
       enrichedIssues = enrichedIssues.map((i: any) => {
-        // Same dept_statuses fallback computeSLAInstancesPure uses (see its
-        // own long comment) -- a ticket can visibly show "Resolved" via its
-        // per-department status snapshot while the real statusId column
-        // never caught up. Checking only i.status?.category here (as this
-        // block did before) let such a ticket keep ticking its live-clock
-        // breach projection forever on the Filters table/export, even
-        // though the ticket detail page's own SLA panel (which already used
-        // this fallback) correctly stopped the clock for it.
-        const issueDeptForStatus = (i.current_department || '').trim().toLowerCase();
-        const deptStatusesForStatus: Record<string, any> = i.dept_statuses || {};
-        const deptStatusKeyForStatus = Object.keys(deptStatusesForStatus).find((k) => k.toLowerCase() === issueDeptForStatus);
-        const deptStatusCategoryForStatus = deptStatusKeyForStatus ? deptStatusesForStatus[deptStatusKeyForStatus]?.category : undefined;
-        const isResolved = i.status?.category === 'done' || deptStatusCategoryForStatus === 'done';
-        // Historical breach imported from Jira (L2B/L3B) always counts, even
-        // for a ticket that's since been resolved here -- the checks below
-        // all force `breached` back to false once resolved, which is right
-        // for this app's OWN SLA clock (no point alarming on a stopped
-        // clock), but would erase the fact that Jira already recorded a
-        // real breach before the ticket ever got resolved.
-        let breached = !!i.jira_sla_breached;
-        // A department nobody has configured an SLA policy for (e.g. Infra,
-        // which never had one set up) previously still showed a hard "No" in
-        // the SLA Breached column -- indistinguishable from "there IS an SLA
-        // and it's fine", when the truth is there's no SLA to even measure
-        // against. Track whether any policy actually applies to this
-        // ticket's department so the final value below can report "N/A"
-        // instead of a misleading "not breached".
-        //
-        // Scoped to the QUERIED department (deptParam, e.g. viewing the Dev
-        // queue) when one is active, not always i.current_department -- a
-        // ticket that breached Migration's own SLA after moving on from Dev
-        // was showing "Breached: Yes" (with Migration's name/dept attached)
-        // even inside a Dev-scoped export, when Dev's own time-in-department
-        // never came close to its own SLA goal. Confirmed for real: CF-30766
-        // spent ~19.7h in Migration against its 10h goal (genuinely breached
-        // there) but only ~2h in Dev against Dev's own, much longer goal --
-        // a Dev queue view/export should show "No" for it, only Migration's
-        // own view should show "Yes". Plain (non-dept-scoped) views like "My
-        // Tickets" have no deptParam and keep using current_department, same
-        // as before.
-        const dept = (deptParam || i.current_department || '').trim().toLowerCase();
-        const hasApplicablePolicy = (policiesBySpace[i.spaceId] || []).some((p: any) => {
-          const pDept = (p.dept_name || '').trim().toLowerCase();
-          return !pDept || pDept === dept;
-        });
-        // Resolving a ticket must never ERASE a breach that already
-        // happened before it was resolved -- gating this whole block on
-        // `!isResolved` did exactly that, since jira_sla_breached only
-        // covers tickets imported already-breached from Jira, not ones
-        // that breached live in this app before getting resolved here.
-        if (!breached) {
-          if (!isResolved && i.dueDate && new Date(i.dueDate).getTime() < nowMs) breached = true;
-          // Same fallback as computeIssueSLAsFromDb: tickets never routed through a
-          // department transfer have no dept_sla_started_at, so measure from creation.
-          const slaStartedAt = i.dept_sla_started_at || i.createdAt;
-          if (!breached && slaStartedAt) {
-            const priority = (i.priority || 'medium').toLowerCase();
-            const currentStatusName = (i.status?.name || '').trim().toLowerCase();
-            const policies = (policiesBySpace[i.spaceId] || []).filter((p: any) => {
-              const pDept = (p.dept_name || '').trim().toLowerCase();
-              return !pDept || pDept === dept;
-            });
-            // An admin can waive a specific policy's breach on a specific
-            // ticket (see the "SLA Breach Waiver" endpoint and
-            // computeSLAInstancesPure's own `waiver ? false : rawIsBreached`
-            // on the ticket detail page). This recompute never looked at
-            // sla_waivers at all, so a ticket waived on the detail page
-            // (correctly showing "resolved in time" there) still elapsed-
-            // computed straight to "Breached: Yes" here, e.g. in the
-            // Filters-page export. Confirmed for real: CF-30920, CF-30911,
-            // CF-29386.
-            const waivers: Record<string, any> = i.sla_waivers || {};
-            for (const policy of policies) {
-              const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
-                ? policy.pauseStatuses.map((s: string) => s.trim().toLowerCase())
-                : [];
-              if (pauseStatuses.includes(currentStatusName)) continue; // paused — clock stopped
-              let durationMs = 8 * 60 * 60 * 1000; // default 8h, same fallback as computeIssueSLAsFromDb
-              for (const goal of (policy.goals || [])) {
-                if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
-                  const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
-                  if (row?.timeValue) {
-                    const val = parseFloat(row.timeValue);
-                    const unit = (row.timeUnit || 'hours').toLowerCase();
-                    durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
-                    break;
-                  }
-                } else if (goal.timeValue) {
-                  const val = parseFloat(goal.timeValue);
-                  const unit = (goal.timeUnit || 'hours').toLowerCase();
-                  durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
-                  break;
-                }
-              }
-              // dept_sla_started_at resets to NOW() on every department handoff,
-              // including a RETURN to a dept that already burned part of its SLA
-              // budget on an earlier visit (dept_sla_log[dept].elapsed_ms -- the
-              // same bookkeeping computeSLAInstancesPure uses for the ticket
-              // detail page's own SLA panel). Adding the FULL goal duration to
-              // slaStartedAt here ignored that prior spend entirely, handing a
-              // returning dept a brand-new full countdown instead of continuing
-              // from where it left off -- which is exactly how CF-29552 (already
-              // over its 10h Migration budget the moment it landed back there,
-              // carrying ~20h burned from an earlier Dev visit) came out
-              // "not yet due" here while its own detail page correctly showed it
-              // breached. Same remaining-budget subtraction, so the two agree.
-              const deptSlaLog: Record<string, any> = i.dept_sla_log || {};
-              const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
-              const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
-              // No "same stint" guard here -- see the matching comment in
-              // computeSLAInstancesPure. pauseDeptSLA's elapsed_ms is already
-              // a running incremental total; it is never double-counted by
-              // also reading startedAt as a separate term, so crediting it
-              // unconditionally is correct in every case, including the most
-              // common one (a ticket resolved on its first and only stint in
-              // this department).
-              const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
-              const waiver = waivers[policy.id] || null;
-              // The "project forward with remaining budget vs now" formula
-              // below is only valid while THIS department's clock is
-              // actually still running -- true when there's no dept scope
-              // at all, or when the queried department (dept, now possibly
-              // deptParam) IS the ticket's current one. When deptParam scopes
-              // to a department the ticket has since moved AWAY from while
-              // still unresolved, that department's clock is paused (same
-              // as the resolved case below) -- its own accumulated
-              // priorElapsedMs is everything there is to compare, not a
-              // live-ticking projection using slaStartedAt, which reflects
-              // whichever OTHER department is currently active, not this one.
-              const deptClockIsLive = isResolved
-                ? false
-                : !deptParam || (i.current_department || '').trim().toLowerCase() === dept;
-              if (isResolved || !deptClockIsLive) {
-                // The clock is frozen -- priorElapsedMs already reflects the
-                // FULL total time logged across every period up to and
-                // including the one that just ended (pauseDeptSLA folds it
-                // in), so it alone tells us whether the goal was exceeded by
-                // the time this ticket was resolved. The running-clock
-                // formula below (slaStartedAt + remaining vs "now") would
-                // double-count that same just-ended period on top of itself
-                // if reused here across more than one pause/resume cycle.
-                if (priorElapsedMs >= durationMs && !waiver) { breached = true; break; }
-              } else {
-                const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
-                if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs && !waiver) { breached = true; break; }
-              }
-            }
-          }
-        }
-        // No policy configured for this department, and nothing else (a real
-        // imported Jira breach) already forced a true -- there's genuinely no
-        // SLA to have breached or not, so report that honestly (frontend
-        // renders this as "-") instead of the misleading "No" a department
-        // like Infra (no SLA ever set up for it) showed before.
-        const slaBreached = hasApplicablePolicy || i.jira_sla_breached ? breached : null;
-        // Overdue: the ticket's own dueDate field, unrelated to any SLA
-        // policy's clock -- a ticket can be overdue with no SLA configured
-        // at all, or have an active SLA but no dueDate set. Only meaningful
-        // while still open; a resolved ticket isn't "overdue" regardless of
-        // whether it was resolved late (that's what SLA Breached captures).
-        const isOverdue = !isResolved && !!i.dueDate && new Date(i.dueDate).getTime() < nowMs;
-        return { ...i, sla_breached: slaBreached, overdue: isOverdue };
+        const { slaBreached, overdue } = computeSlaBreachedAndOverdue(i, deptParam, policiesBySpace, nowMs);
+        return { ...i, sla_breached: slaBreached, overdue };
       });
       if (slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no') {
         enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParamEarly === 'yes' ? i.sla_breached : !i.sla_breached);
@@ -6788,14 +6909,21 @@ async function _handleJiraPgApi(
         enrichedIssues = enrichedIssues.filter((i: any) => overdueParamEarly === 'yes' ? i.overdue : !i.overdue);
       }
       if (needsSlaPrefilter) {
-        // Now the TRUE total across the full (up to SLA_PREFILTER_CAP)
-        // candidate set fetched above, not just whatever page would have
-        // been fetched under normal DB-level pagination. Slice to the
-        // requested page here, since pagination couldn't happen at the DB
-        // level on a field that isn't a real column.
-        deptTotal = enrichedIssues.length;
-        const sliceStart = (page - 1) * limit;
-        enrichedIssues = enrichedIssues.slice(sliceStart, sliceStart + limit);
+        // The dept-scoped branch's own lightweight prefilter pass (see
+        // needsSlaPrefilter below) already knows the TRUE matching count
+        // and already fetched only the requested page's full rows -- use
+        // its count instead of enrichedIssues.length, which would now just
+        // be the page size, not the total. The non-dept branch doesn't run
+        // that pass, so prefilteredTotal stays null there and this falls
+        // back to the old "full candidate set fetched, take its length,
+        // then slice to the page" behavior, unchanged.
+        if (prefilteredTotal != null) {
+          deptTotal = prefilteredTotal;
+        } else {
+          deptTotal = enrichedIssues.length;
+          const sliceStart = (page - 1) * limit;
+          enrichedIssues = enrichedIssues.slice(sliceStart, sliceStart + limit);
+        }
       }
     } catch { /* sla breach is best-effort */ }
 
@@ -11815,14 +11943,20 @@ async function _handleJiraPgApi(
     // if they're on the roster, plus anyone else on the roster with a
     // genuine worked-on record for this dept on this ticket.
     // summary/description are only actually used below for ENT/SMB's Overall
-    // Score text classifiers (see weeklyScoreFrom above) -- fetched for every
-    // team unconditionally since it's the same query/rows either way and
-    // keeping one query shape is simpler than branching the SELECT.
+    // Score text classifiers (see weeklyScoreFrom above) -- eng/qa/infra
+    // never read them at all, so pulling full description text (which can
+    // run to tens of MB for a single legacy ticket with a base64-embedded
+    // image, per the same issue Filters' own SLA prefilter just got fixed
+    // for) for every one of potentially thousands of candidate tickets was
+    // pure waste on those three teams. Confirmed via
+    // check-api-response-times.mjs: MBR eng took 4.5s, ent 3.2s, for the
+    // same date range.
+    const isEntSmbTeam = team === 'ent' || team === 'smb';
     const slaCandidatesRes = await pool.query(`
       SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
         i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
         i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category,
-        i.summary, i.description
+        ${isEntSmbTeam ? 'i.summary, i.description' : 'NULL AS summary, NULL AS description'}
       FROM issues i
       LEFT JOIN statuses s ON i."statusId" = s.id
       LEFT JOIN users au ON au.id = i."assigneeId"
