@@ -1260,7 +1260,7 @@ export default function QueueSettingsPage() {
       <div className="flex-1 overflow-y-auto">
         {/* ── PEOPLE & ACCESS ── */}
         {tab === 'people' && (
-          <div className="max-w-3xl mx-auto px-8 py-8">
+          <div className="max-w-6xl mx-auto px-8 py-8">
             <div className="mb-6">
               <h1 className="text-[20px] font-bold text-gray-900">People &amp; Access</h1>
               <p className="text-[13px] text-gray-500 mt-1">Manage who has access to the <strong>{queue.name}</strong> queue.</p>
