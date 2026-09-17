@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import {
@@ -1049,6 +1049,14 @@ export default function QueueSettingsPage() {
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [memberSearch, setMemberSearch] = useState('');
   const [showAddMember, setShowAddMember] = useState(false);
+  const addMemberInputRef = useRef<HTMLInputElement>(null);
+  // plain autoFocus makes the browser scroll the whole page to bring the
+  // input into view the instant it mounts -- confirmed for real: opening
+  // this panel visibly moved the "People & Access" header out of the
+  // viewport. preventScroll keeps the focus convenience without that jump.
+  useEffect(() => {
+    if (showAddMember) addMemberInputRef.current?.focus({ preventScroll: true });
+  }, [showAddMember]);
   const [spaceName, setSpaceName] = useState('');
   const [savedMsg, setSavedMsg] = useState('');
   const [policies, setPolicies] = useState<SLAPolicy[]>([]);
@@ -1283,7 +1291,7 @@ export default function QueueSettingsPage() {
                   <div className="absolute right-6 top-full mt-2 w-96 z-20 rounded-xl border border-gray-200 bg-white shadow-lg p-3">
                     <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 focus-within:border-blue-500">
                       <Search size={14} className="text-gray-400" />
-                      <input autoFocus value={memberSearch} onChange={e => setMemberSearch(e.target.value)}
+                      <input ref={addMemberInputRef} value={memberSearch} onChange={e => setMemberSearch(e.target.value)}
                         placeholder="Search by name or email…"
                         className="flex-1 text-[13px] outline-none text-gray-700 placeholder:text-gray-400" />
                       <button onClick={() => { setShowAddMember(false); setMemberSearch(''); }}><X size={13} className="text-gray-400 hover:text-gray-600" /></button>
