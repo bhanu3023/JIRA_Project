@@ -6458,6 +6458,16 @@ async function _handleJiraPgApi(
           // those still mean "whoever holds it right now".
           let assigneeOverride: { id: string; firstName: string; lastName: string; email: string | null; avatarUrl: string | null } | null = null;
           const movedAwayFromQueue = queueMembersOnlyParam && String(row.current_department || '').toLowerCase() !== deptParam.toLowerCase();
+          // Per explicit request: the live, current assignee always wins
+          // whenever one exists -- the per-dept historical snapshot (and the
+          // history-filter/reporter fallbacks below) now only ever fill in
+          // for a ticket that's genuinely unassigned right now. This trades
+          // away the "show who actually worked THIS queue" view the
+          // override below was built for (see CF-29845/CF-29568/CF-29902 in
+          // the comments below for why it existed), in favor of always
+          // reflecting reality -- same principle just applied to the issue
+          // detail page's ?viewDept= historical view.
+          if (!row.assignee_id) {
           // A specific Assignee filter takes priority over the generic
           // per-dept snapshot below -- the snapshot only ever holds ONE
           // person, whoever's handoff last touched it, which isn't
@@ -6494,6 +6504,7 @@ async function _handleJiraPgApi(
               assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
             }
           }
+          } // end: only override when genuinely unassigned live (see comment above)
           // Surfaced to the frontend so the Filters table can flag it inline --
           // the ticket detail page already shows an amber "Showing <dept>'s own
           // assignee — this ticket has since moved to <dept>" banner for this
