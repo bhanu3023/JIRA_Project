@@ -14,6 +14,17 @@
 //   no evidence to backfill from, and guessing (e.g. using updatedAt) would
 //   just create a different kind of wrong data.
 //
+//   IMPORTANT: this DB also has several bulk status-cleanup artifacts (e.g.
+//   ~4,500 tickets flipped "Closed -> Resolved" in batches of exactly 500,
+//   all at the identical millisecond, across events on 2026-02-06, 2026-01-21
+//   and 2025-11-26 -- confirmed via investigate-resolved-timestamp-clusters.mjs,
+//   not organic individual resolutions). 330 of those tickets have that fake
+//   timestamp as their ONLY "done" row, so "earliest done row" alone would
+//   pick up the artifact for them. Any timestamp shared by more than 5
+//   different tickets' status-done rows at the same instant is excluded from
+//   being used as evidence here, system-wide, not just for these known dates
+//   -- the same fingerprint would catch any future bulk artifact too.
+//
 // Case B: status is NOT done-category but resolvedAt IS set (a resolved
 //   ticket got reopened/routed back, and resolvedAt was never cleared).
 //   Fix: clear it to NULL -- this exactly mirrors the live PATCH handler's
@@ -32,6 +43,16 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const DONE_STATUS_NAMES = ['resolved', 'closed', 'done'];
 
 async function main() {
+  console.log('Finding bulk-artifact timestamps to exclude as evidence...');
+  const { rows: badTimestamps } = await pool.query(`
+    SELECT "createdAt" FROM issue_history
+    WHERE field = 'status' AND LOWER("newValue") = ANY($1::text[])
+    GROUP BY "createdAt"
+    HAVING COUNT(*) > 5
+  `, [DONE_STATUS_NAMES]);
+  const excluded = new Set(badTimestamps.map(r => r.createdAt.toISOString()));
+  console.log(`Excluding ${excluded.size} timestamp(s) shared by >5 tickets' "done" rows at the same instant (bulk-artifact fingerprint).`);
+
   const { rows: issues } = await pool.query(`
     SELECT i.id, i.cf_key, i.key, i."resolvedAt", s.name AS status_name, s.category AS status_category
     FROM issues i
@@ -51,11 +72,14 @@ async function main() {
       const { rows: doneRows } = await pool.query(
         `SELECT "createdAt", "newValue" FROM issue_history
          WHERE "issueId"=$1 AND field='status' AND LOWER("newValue") = ANY($2::text[])
-         ORDER BY "createdAt" ASC LIMIT 1`,
+         ORDER BY "createdAt" ASC`,
         [row.id, DONE_STATUS_NAMES]
       );
-      if (doneRows.length) {
-        caseA_fix.push({ id: row.id, key, resolvedAt: doneRows[0].createdAt, statusName: doneRows[0].newValue });
+      const realRow = doneRows.find(r => !excluded.has(r.createdAt.toISOString()));
+      if (realRow) {
+        caseA_fix.push({ id: row.id, key, resolvedAt: realRow.createdAt, statusName: realRow.newValue });
+      } else if (doneRows.length) {
+        caseA_skip.push({ key, reason: `only bulk-artifact timestamp(s) found (${doneRows.length} row(s), all excluded) -- no genuine evidence to backfill from` });
       } else {
         caseA_skip.push({ key, reason: 'no issue_history row shows this ticket ever becoming done -- likely imported already-resolved, no evidence to backfill from' });
       }
