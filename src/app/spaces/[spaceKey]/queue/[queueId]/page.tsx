@@ -1269,12 +1269,16 @@ export default function QueueSettingsPage() {
         {/* ── PEOPLE & ACCESS ── */}
         {tab === 'people' && (
           <div className="max-w-6xl mx-auto px-8 py-8">
-            <div className="mb-6">
-              <h1 className="text-[20px] font-bold text-gray-900">People &amp; Access</h1>
-              <p className="text-[13px] text-gray-500 mt-1">Manage who has access to the <strong>{queue.name}</strong> queue.</p>
-            </div>
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-6">
-              <div className="relative flex items-center justify-between px-6 py-4 border-b border-gray-100">
+            {/* Sticky: title + the Members/Add member bar stay pinned at the
+                top of the scroll area while only the row list below scrolls
+                -- confirmed for real from a screenshot showing this header
+                scrolled fully out of view while browsing a 30-person list. */}
+            <div className="sticky top-0 z-10 bg-gray-50 pb-4">
+              <div className="mb-6">
+                <h1 className="text-[20px] font-bold text-gray-900">People &amp; Access</h1>
+                <p className="text-[13px] text-gray-500 mt-1">Manage who has access to the <strong>{queue.name}</strong> queue.</p>
+              </div>
+              <div className="relative flex items-center justify-between bg-white rounded-t-2xl border border-b-0 border-gray-200 px-6 py-4">
                 <div className="flex items-center gap-2">
                   <h2 className="text-[14px] font-semibold text-gray-800">Members</h2>
                   <span className="text-[11.5px] font-medium text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">{members.length}</span>
@@ -1315,6 +1319,8 @@ export default function QueueSettingsPage() {
                   </div>
                 )}
               </div>
+            </div>
+            <div className="bg-white rounded-b-2xl border border-t-0 border-gray-200 overflow-hidden mb-6">
               {members.length === 0 ? (
                 <div className="flex flex-col items-center py-14 text-center">
                   <Users size={28} className="text-gray-200 mb-3" />
