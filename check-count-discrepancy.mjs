@@ -17,17 +17,25 @@ async function main() {
   const userId = userRows[0]?.id;
   if (!userId) { console.log('User not found'); await pool.end(); return; }
 
-  // Tickets currently assigned to srinu, in Dev, created or updated in Aug 2026.
+  // Tickets belonging to Dev (current OR origin), assigned to or worked by
+  // srinu (current OR historical), created or updated in Aug 2026.
   const { rows: direct } = await pool.query(`
-    SELECT COALESCE(i.cf_key, i.key) AS key, i.priority, i."assigneeId"
+    SELECT COALESCE(i.cf_key, i.key) AS key, i.priority, i."assigneeId", i.current_department
     FROM issues i
-    WHERE i.current_department = 'Dev'
+    WHERE (
+      LOWER(i.current_department) = 'dev'
+      OR LOWER(COALESCE(
+           i.original_dept,
+           (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+           i.current_department
+         )) = 'dev'
+    )
       AND (
         (i."createdAt"::date >= '2026-08-01' AND i."createdAt"::date <= '2026-08-31')
         OR (i."updatedAt"::date >= '2026-08-01' AND i."updatedAt"::date <= '2026-08-31')
       )
       AND (i."assigneeId" = $1 OR EXISTS (
-        SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND w.user_id = $1 AND LOWER(w.dept) = 'dev' AND w.reason != 'passed'
+        SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND w.user_id = $1 AND w.reason != 'passed'
       ))
     ORDER BY i.priority NULLS FIRST
   `, [userId]);
