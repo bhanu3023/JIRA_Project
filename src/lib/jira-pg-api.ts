@@ -11347,6 +11347,11 @@ async function _handleJiraPgApi(
         'abhishek.sakala@cloudfuze.com', 'arun@cloudfuze.com', 'chaitanya.gupta@cloudfuze.com', 'chandra.mouli@cloudfuze.com',
         'davidraj.dumpala@cloudfuze.com', 'ganesh.kondameedi@cloudfuze.com', 'harshith.kaduluri@cloudfuze.com', 'lakshmareddy@cloudfuze.com',
         'lakshmi.prasanna@cloudfuze.com', 'manoj.bathula@cloudfuze.com', 'pallavi.kosuvaripalli@cloudfuze.com', 'pranavi@cloudfuze.com',
+        // Confirmed real, active migration_engineer account (created
+        // 2026-08-28, 16 assigned tickets, 22 worked-on rows) that was
+        // missing from this hand-maintained list entirely -- her tickets
+        // were invisible in MBR's Migration ENT tab until this was added.
+        'tanmai.arangi@cloudfuze.com',
       ],
       smb: [
         'abhishikth.yenugula@cloudfuze.com', 'ajay.singh@cloudfuze.com', 'ramana.reddy@cloudfuze.com', 'amulya.anapuram@cloudfuze.com',

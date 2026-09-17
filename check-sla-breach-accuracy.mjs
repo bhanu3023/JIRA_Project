@@ -38,6 +38,7 @@ const MIGRATION_ROSTER = [
   'abhishek.sakala@cloudfuze.com', 'arun@cloudfuze.com', 'chaitanya.gupta@cloudfuze.com', 'chandra.mouli@cloudfuze.com',
   'davidraj.dumpala@cloudfuze.com', 'ganesh.kondameedi@cloudfuze.com', 'harshith.kaduluri@cloudfuze.com', 'lakshmareddy@cloudfuze.com',
   'lakshmi.prasanna@cloudfuze.com', 'manoj.bathula@cloudfuze.com', 'pallavi.kosuvaripalli@cloudfuze.com', 'pranavi@cloudfuze.com',
+  'tanmai.arangi@cloudfuze.com',
   'abhishikth.yenugula@cloudfuze.com', 'ajay.singh@cloudfuze.com', 'ramana.reddy@cloudfuze.com', 'amulya.anapuram@cloudfuze.com',
   'dathu.kaluvala@cloudfuze.com', 'habeebunnisa.begum@cloudfuze.com', 'harika.velidi@cloudfuze.com', 'meena.lakshmi@cloudfuze.com',
   'neelima.krotta@cloudfuze.com', 'raghu.yellani@cloudfuze.com', 'ranadeep.muddam@cloudfuze.com', 'ravi.hemanth@cloudfuze.com',
