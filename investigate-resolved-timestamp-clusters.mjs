@@ -78,6 +78,37 @@ async function main() {
     }
   }
 
+  // Is "Sujana Manapuram" a real, currently-active user, or does this look
+  // like a bulk-migration script's default/system author rather than a
+  // person actually clicking "Resolve" 500+ times in seconds?
+  console.log(`\nChecking whether "Sujana Manapuram" is a real active user...`);
+  const { rows: sujana } = await pool.query(
+    `SELECT id, email, role, "isActive" FROM users WHERE "firstName" ILIKE 'Sujana%'`
+  );
+  console.log(sujana.length ? sujana : '  No user found with that name at all.');
+
+  // Across EVERY cluster found above (not just the biggest one), does any
+  // ticket have the cluster timestamp as its ONLY "done" row -- meaning a
+  // resolvedAt-backfill script relying on "earliest done row" would land on
+  // the fake bulk timestamp instead of skipping it, because there's nothing
+  // earlier to fall back to.
+  console.log(`\nChecking ALL clustered timestamps for tickets with NO earlier real "done" row...`);
+  let onlyArtifactCount = 0;
+  for (const c of clusters) {
+    const { rows: ids } = await pool.query(
+      `SELECT "issueId" FROM issue_history WHERE field='status' AND "createdAt" = $1`,
+      [c.createdAt]
+    );
+    for (const { issueId } of ids) {
+      const { rows: earlier } = await pool.query(
+        `SELECT 1 FROM issue_history WHERE "issueId"=$1 AND field='status' AND LOWER("newValue") = ANY(ARRAY['resolved','closed','done']) AND "createdAt" < $2 LIMIT 1`,
+        [issueId, c.createdAt]
+      );
+      if (!earlier.length) onlyArtifactCount++;
+    }
+  }
+  console.log(`  ${onlyArtifactCount} ticket(s) across all clusters have the bulk timestamp as their ONLY "done" record (no earlier real resolution to fall back to).`);
+
   await pool.end();
 }
 
