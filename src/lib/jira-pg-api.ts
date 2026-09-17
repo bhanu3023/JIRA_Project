@@ -11718,7 +11718,7 @@ async function _handleJiraPgApi(
       `, baseParams),
 
       pool.query(`
-        SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name,
+        SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name, i.dept_assignees, i.current_department,
           -- Always the TRUE current assignee -- never substituted with a
           -- roster member's historical name. That substitution used to make
           -- a ticket currently held by someone completely unrelated (e.g.
@@ -11772,15 +11772,24 @@ async function _handleJiraPgApi(
     const slaCandidateIds = slaCandidatesRes.rows.map((r: any) => r.id);
     const workedRosterRes = slaCandidateIds.length
       ? await pool.query(
-          `SELECT w.issue_id, wu.email
+          `SELECT w.issue_id, wu.id AS user_id, wu.email, wu."firstName", wu."lastName", wu."avatarUrl"
            FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
            WHERE w.issue_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed' AND LOWER(wu.email) = ANY($3::text[])`,
           [slaCandidateIds, dept, roster]
         )
       : { rows: [] as any[] };
     const workedRosterByIssue: Record<string, Set<string>> = {};
+    // Same rows as workedRosterByIssue above, but keyed for display (name,
+    // not just email) -- used below to show a real team-roster worker's name
+    // as the primary Assignee for tickets that moved to another team,
+    // without needing a specific Person filter selected (see "not only
+    // srinu" -- this should apply to every roster member automatically).
+    const workedRosterInfoByIssue: Record<string, { id: string; firstName: string; lastName: string; email: string; avatarUrl: string | null }> = {};
     for (const wr of workedRosterRes.rows) {
       (workedRosterByIssue[wr.issue_id] ??= new Set()).add(String(wr.email).toLowerCase());
+      if (!workedRosterInfoByIssue[wr.issue_id]) {
+        workedRosterInfoByIssue[wr.issue_id] = { id: wr.user_id, firstName: wr.firstName || '', lastName: wr.lastName || '', email: wr.email, avatarUrl: wr.avatarUrl || null };
+      }
     }
 
     // Per explicit request: Avg. Resolution (hrs) should reflect actual
@@ -11970,19 +11979,40 @@ async function _handleJiraPgApi(
     // rows) -- only an export click, which already asked for everything via
     // ticketsLimit above, should return more than that.
     const sliceCap = isExport ? ticketsLimit : DISPLAY_CAP;
-    const tickets = ticketRows.slice(0, sliceCap).map((r: any) => ({
+    // Per explicit request, generalized beyond a single selected Person: any
+    // ticket whose live assignee isn't on this team's roster (assignee_
+    // outside_roster) should show a REAL team-roster member's name as the
+    // primary Assignee whenever one is known -- first choice the per-dept
+    // snapshot (dept_assignees[dept], has full display info already),
+    // falling back to whoever from this roster has a genuine worked-on
+    // record for this ticket (workedRosterInfoByIssue). Only ever used for
+    // display alongside the true current holder (see teamWorkerName usage
+    // in the map below) -- never hides who actually has it now.
+    const teamWorkerFor = (r: any): { id: string; firstName: string; lastName: string; email: string; avatarUrl: string | null } | null => {
+      if (!r.assignee_outside_roster) return null;
+      const deptAssignees: Record<string, any> = r.dept_assignees || {};
+      const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === dept.toLowerCase());
+      const snap = snapKey ? deptAssignees[snapKey] : null;
+      if (snap?.id) return { id: snap.id, firstName: snap.firstName || '', lastName: snap.lastName || '', email: snap.email || '', avatarUrl: snap.avatarUrl || null };
+      return workedRosterInfoByIssue[r.id] || null;
+    };
+    const tickets = ticketRows.slice(0, sliceCap).map((r: any) => {
+      const teamWorker = teamWorkerFor(r);
+      return {
       key: r.key,
       project: r.project_name || '',
       assignee: r.assignee_name || '',
       assigneeOutsideRoster: !!r.assignee_outside_roster,
       matchedViaPersonHistory: !!r.matched_via_person_history,
+      teamWorkerName: teamWorker ? (`${teamWorker.firstName} ${teamWorker.lastName}`.trim() || teamWorker.email) : null,
       reporter: r.reporter_name || '',
       status: r.status_name || '',
       summary: r.summary || '',
       created: r.createdAt,
       updated: r.updatedAt,
       rb: !!slaById.get(r.id),
-    }));
+      };
+    });
 
     console.log('[DEBUG mbr-team-tab]', JSON.stringify({ team, dept, dateFrom, dateTo, person, ticketFilter, totalMatched, summary }));
     return json({ people, monthly, summary, tickets, totalMatched });
