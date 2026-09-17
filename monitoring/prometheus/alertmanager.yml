@@ -11,10 +11,14 @@ route:
 receivers:
   - name: "devops-incident-agent"
     webhook_configs:
-      # Points at the app's own webhook route. This route doesn't exist yet
-      # (Phase 4) -- Alertmanager will just log failed-delivery retries until
-      # it's built. That's expected and harmless; nothing else depends on
-      # this succeeding yet. "app" resolves via Docker Compose's built-in
-      # service-name DNS, same network as postgres already uses.
-      - url: "http://app:8080/api/webhooks/alertmanager"
+      # Points at the app's own webhook route (now built, Phase 4). "app"
+      # resolves via Docker Compose's built-in service-name DNS, same
+      # network as postgres already uses.
+      #
+      # REPLACE_ME_ON_SERVER: this placeholder secret must be changed to a
+      # real random value directly on the server (this file is committed to
+      # git, so never put a real secret in it here) -- it must exactly match
+      # ALERTMANAGER_WEBHOOK_SECRET in .env.local. Generate one with:
+      #   openssl rand -hex 32
+      - url: "http://app:8080/api/webhooks/alertmanager?secret=REPLACE_ME_ON_SERVER"
         send_resolved: true
