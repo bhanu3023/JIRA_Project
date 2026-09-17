@@ -18,11 +18,7 @@ if (!SPACE_KEY || !QUEUE_ID) {
 }
 
 async function main() {
-  const { rows: spaceRows } = await pool.query(`SELECT id FROM spaces WHERE key = $1`, [SPACE_KEY]);
-  if (!spaceRows.length) { console.log('Space not found'); await pool.end(); return; }
-  const spaceId = spaceRows[0].id;
-
-  const { rows: cqRows } = await pool.query(`SELECT queues FROM custom_queues WHERE "spaceId" = $1`, [spaceId]);
+  const { rows: cqRows } = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [SPACE_KEY.toUpperCase()]);
   if (!cqRows.length) { console.log('No custom_queues row for this space'); await pool.end(); return; }
   const queues = cqRows[0].queues || [];
   const queue = queues.find((q) => q.id === QUEUE_ID);
