@@ -6321,7 +6321,7 @@ async function _handleJiraPgApi(
           countParams
         );
         deptCandidateCount = countRow.rows[0]?.cnt ?? 0;
-        if (createdRange && updatedRange && !historyAssigneeIdx) {
+        if (createdRange && updatedRange) {
           const keysRow = await pool.query(
             `SELECT COALESCE(i.cf_key, i.key) AS key
              FROM issues i
