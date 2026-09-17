@@ -33,16 +33,15 @@ async function main() {
     const top = clusters[0];
     console.log(`\nInspecting the biggest cluster (${top.createdAt.toISOString()}, ${top.cnt} rows):`);
     const { rows: sample } = await pool.query(
-      `SELECT ih."issueId", COALESCE(i.cf_key, i.key) AS key, ih."oldValue", ih."newValue", ih."authorId", u."firstName", u."lastName"
+      `SELECT ih."issueId", COALESCE(i.cf_key, i.key) AS key, ih."oldValue", ih."newValue", ih."authorName", ih."authorEmail"
        FROM issue_history ih
        JOIN issues i ON i.id = ih."issueId"
-       LEFT JOIN users u ON u.id = ih."authorId"
        WHERE ih.field = 'status' AND ih."createdAt" = $1
        LIMIT 15`,
       [top.createdAt]
     );
     for (const s of sample) {
-      console.log(`  ${s.key}: "${s.oldValue}" -> "${s.newValue}"  by ${s.firstName ? `${s.firstName} ${s.lastName}` : (s.authorId || '(no author)')}`);
+      console.log(`  ${s.key}: "${s.oldValue}" -> "${s.newValue}"  by ${s.authorName || s.authorEmail || '(no author)'}`);
     }
 
     // Does this cluster's timestamp also coincide with OTHER history fields
@@ -54,6 +53,29 @@ async function main() {
     );
     console.log(`\nAll history fields touched at that exact same timestamp:`);
     for (const f of otherFields) console.log(`  ${f.field}: ${f.cnt}`);
+
+    // Critical question: for tickets caught in this cluster, is the cluster
+    // row their ONLY "became resolved" record, or is there an earlier,
+    // organic one that predates it (same shape as the Sept-14 case, where a
+    // real resolution existed before a later artifact overwrote it)? This
+    // determines whether the resolvedAt-gap script's "earliest done row"
+    // logic would pick up a real event or the artifact itself.
+    console.log(`\nFor tickets in this cluster, checking whether an EARLIER real "became done" row exists...`);
+    const { rows: clusterIssueIds } = await pool.query(
+      `SELECT DISTINCT "issueId" FROM issue_history WHERE field='status' AND "createdAt" = $1 LIMIT 10`,
+      [top.createdAt]
+    );
+    for (const { issueId } of clusterIssueIds) {
+      const { rows: allDone } = await pool.query(
+        `SELECT "createdAt", "oldValue", "newValue" FROM issue_history
+         WHERE "issueId"=$1 AND field='status' AND LOWER("newValue") = ANY(ARRAY['resolved','closed','done'])
+         ORDER BY "createdAt" ASC`,
+        [issueId]
+      );
+      const { rows: keyRow } = await pool.query(`SELECT COALESCE(cf_key, key) AS key FROM issues WHERE id=$1`, [issueId]);
+      const key = keyRow[0]?.key || issueId;
+      console.log(`  ${key}: ${allDone.length} "done" row(s) total -- ${allDone.map(r => r.createdAt.toISOString()).join(', ')}`);
+    }
   }
 
   await pool.end();
