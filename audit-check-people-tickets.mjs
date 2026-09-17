@@ -42,50 +42,60 @@ async function main() {
   console.log(`\n${issues.length} ticket(s) where one of these people is assignee or reporter.\n`);
 
   const byId = Object.fromEntries(people.map(p => [p.id, `${p.firstName} ${p.lastName}`]));
-  let flagCount = 0;
+
+  const resolvedAtMismatches = [];
+  const orphanedRefs = [];
+  const staleAssignees = [];
 
   for (const row of issues) {
-    const flags = [];
     const key = row.cf_key || row.key;
 
     // 1. status/resolvedAt consistency
     const isDone = row.status_category === 'done';
-    if (isDone && !row.resolvedAt) flags.push(`status is "${row.status_name}" (done) but resolvedAt is NULL`);
-    if (!isDone && row.resolvedAt) flags.push(`status is "${row.status_name}" (not done) but resolvedAt is SET (${row.resolvedAt.toISOString()})`);
+    if (isDone && !row.resolvedAt) resolvedAtMismatches.push(`${key}  status="${row.status_name}" but resolvedAt=NULL`);
+    if (!isDone && row.resolvedAt) resolvedAtMismatches.push(`${key}  status="${row.status_name}" (not done) but resolvedAt=${row.resolvedAt.toISOString()}`);
 
     // 2. orphaned assignee/reporter
-    if (row.assigneeId && !byId[row.assigneeId] ) {
-      const { rows: u } = await pool.query(`SELECT "firstName","lastName" FROM users WHERE id=$1`, [row.assigneeId]);
-      if (!u.length) flags.push(`assigneeId ${row.assigneeId} does not resolve to any user`);
+    if (row.assigneeId && !byId[row.assigneeId]) {
+      const { rows: u } = await pool.query(`SELECT 1 FROM users WHERE id=$1`, [row.assigneeId]);
+      if (!u.length) orphanedRefs.push(`${key}  assigneeId ${row.assigneeId} does not resolve to any user`);
     }
     if (row.reporterId && !byId[row.reporterId]) {
-      const { rows: u } = await pool.query(`SELECT "firstName","lastName" FROM users WHERE id=$1`, [row.reporterId]);
-      if (!u.length) flags.push(`reporterId ${row.reporterId} does not resolve to any user`);
+      const { rows: u } = await pool.query(`SELECT 1 FROM users WHERE id=$1`, [row.reporterId]);
+      if (!u.length) orphanedRefs.push(`${key}  reporterId ${row.reporterId} does not resolve to any user`);
     }
 
-    // 3. dept_assignees staleness vs live assigneeId, for the current department
+    // 3. dept_assignees staleness vs live assigneeId, for the current department.
+    // Snapshot values are objects ({id, displayName, ...}), not plain ids --
+    // comparing the object to a string id directly (as an earlier version of
+    // this script did) always mismatches, which is a false positive, not a
+    // real finding.
     if (row.current_department && row.dept_assignees) {
-      try {
-        const deptMap = typeof row.dept_assignees === 'string' ? JSON.parse(row.dept_assignees) : row.dept_assignees;
-        const snapshot = deptMap?.[row.current_department];
-        if (snapshot && snapshot !== row.assigneeId) {
-          const snapName = byId[snapshot] || snapshot;
-          const liveName = byId[row.assigneeId] || row.assigneeId || '(unassigned)';
-          flags.push(`dept_assignees snapshot for "${row.current_department}" says ${snapName}, but live assignee is ${liveName}`);
-        }
-      } catch { /* malformed JSON, not this audit's concern */ }
-    }
-
-    if (flags.length) {
-      flagCount++;
-      console.log(`[${key}] ${row.summary}`);
-      console.log(`  assignee=${byId[row.assigneeId] || row.assigneeId || '(none)'}  reporter=${byId[row.reporterId] || row.reporterId || '(none)'}  status=${row.status_name}`);
-      for (const f of flags) console.log(`  ⚠ ${f}`);
-      console.log('');
+      const deptMap = typeof row.dept_assignees === 'string' ? JSON.parse(row.dept_assignees) : row.dept_assignees;
+      const key2 = Object.keys(deptMap || {}).find(k => k.toLowerCase() === row.current_department.trim().toLowerCase());
+      const snapshot = key2 ? deptMap[key2] : undefined;
+      const snapId = snapshot?.id;
+      if (snapId && snapId !== row.assigneeId) {
+        const snapName = byId[snapId] || snapshot.displayName || snapId;
+        const liveName = byId[row.assigneeId] || row.assigneeId || '(unassigned)';
+        staleAssignees.push(`${key}  dept_assignees["${row.current_department}"]=${snapName}  but live assignee=${liveName}`);
+      }
     }
   }
 
-  console.log(`\nDone. ${flagCount} of ${issues.length} ticket(s) flagged.`);
+  console.log(`\n=== status="done" but resolvedAt is NULL (or vice versa): ${resolvedAtMismatches.length} ===`);
+  for (const l of resolvedAtMismatches.slice(0, 25)) console.log('  ' + l);
+  if (resolvedAtMismatches.length > 25) console.log(`  ...and ${resolvedAtMismatches.length - 25} more`);
+
+  console.log(`\n=== orphaned assignee/reporter references: ${orphanedRefs.length} ===`);
+  for (const l of orphanedRefs.slice(0, 25)) console.log('  ' + l);
+  if (orphanedRefs.length > 25) console.log(`  ...and ${orphanedRefs.length - 25} more`);
+
+  console.log(`\n=== dept_assignees snapshot genuinely stale vs live assignee: ${staleAssignees.length} ===`);
+  for (const l of staleAssignees.slice(0, 25)) console.log('  ' + l);
+  if (staleAssignees.length > 25) console.log(`  ...and ${staleAssignees.length - 25} more`);
+
+  console.log(`\nTotal tickets checked: ${issues.length}`);
   await pool.end();
 }
 
