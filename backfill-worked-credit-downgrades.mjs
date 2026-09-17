@@ -99,11 +99,17 @@ async function main() {
         if (nd) currentDept = nd;
       } else if (h.field === 'status') {
         if (!h.authorEmail || !currentAssigneeName || !currentDept) continue;
-        // Does the current assignee's display name plausibly match the
-        // author? Compare by email domain-independent first-name heuristic
-        // isn't reliable -- instead just require the author actually holds
-        // SOME real user account, and cross-check via a simultaneous
-        // reassignment-away guard the same way the app itself does.
+        // Confirmed real bug via CF-29643: without requiring the status
+        // change's AUTHOR to actually be the current assignee, an admin
+        // (or anyone else) touching a ticket's status while someone ELSE
+        // holds it got counted as "real work" too -- bhanu.srikakulam
+        // moved this ticket's status at 19:20:46 while vamsi malla was
+        // the actual assignee of record, and would have wrongly earned a
+        // 'worked' credit for it. Same normalized-name comparison the
+        // hand-verified per-person scripts (check-naveed-16-verdict-v2.mjs
+        // etc.) already used correctly.
+        const norm = (s) => String(s || '').trim().toLowerCase();
+        if (norm(h.authorName) !== norm(currentAssigneeName)) continue;
         const simultaneousReassign = hist.some((h2) =>
           h2.field === 'assignee' &&
           h2.authorEmail === h.authorEmail &&
