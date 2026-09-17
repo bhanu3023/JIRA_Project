@@ -1266,7 +1266,7 @@ export default function QueueSettingsPage() {
               <p className="text-[13px] text-gray-500 mt-1">Manage who has access to the <strong>{queue.name}</strong> queue.</p>
             </div>
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-6">
-              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div className="relative flex items-center justify-between px-6 py-4 border-b border-gray-100">
                 <div className="flex items-center gap-2">
                   <h2 className="text-[14px] font-semibold text-gray-800">Members</h2>
                   <span className="text-[11.5px] font-medium text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">{members.length}</span>
@@ -1275,34 +1275,38 @@ export default function QueueSettingsPage() {
                   className="flex items-center gap-1.5 px-4 py-2 text-[12.5px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors">
                   <Plus size={13} /> Add member
                 </button>
-              </div>
-              {showAddMember && (
-                <div className="px-6 py-4 border-b border-gray-100 bg-blue-50">
-                  <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 focus-within:border-blue-500">
-                    <Search size={14} className="text-gray-400" />
-                    <input autoFocus value={memberSearch} onChange={e => setMemberSearch(e.target.value)}
-                      placeholder="Search by name or email…"
-                      className="flex-1 text-[13px] outline-none text-gray-700 placeholder:text-gray-400" />
-                    <button onClick={() => { setShowAddMember(false); setMemberSearch(''); }}><X size={13} className="text-gray-400 hover:text-gray-600" /></button>
-                  </div>
-                  <div className="mt-3 space-y-1.5 max-h-48 overflow-y-auto">
-                    {nonMembers
-                      .filter(m => { const mb = m.user||m; const s = memberSearch.toLowerCase(); return !s || `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(s) || (mb.email||'').toLowerCase().includes(s); })
-                      .map(m => { const mb = m.user||m; return (
-                        <div key={mb.id} onClick={() => addMember(mb.id)}
-                          className="flex items-center gap-3 px-4 py-2.5 bg-white rounded-xl border border-gray-100 hover:border-blue-300 hover:bg-blue-50 cursor-pointer transition-colors">
-                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white ${avatarColor(mb.firstName||'')}`}>{mkInitials(mb.firstName||'',mb.lastName||'')}</div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-[13px] font-medium text-gray-800">{mb.firstName} {mb.lastName}</p>
-                            <p data-hj-suppress className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                {/* Floats over the page instead of pushing the member table
+                    down -- previously rendered inline here, so opening it
+                    shifted everything below (including the table) further
+                    down the page on every open/close. */}
+                {showAddMember && (
+                  <div className="absolute right-6 top-full mt-2 w-96 z-20 rounded-xl border border-gray-200 bg-white shadow-lg p-3">
+                    <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 focus-within:border-blue-500">
+                      <Search size={14} className="text-gray-400" />
+                      <input autoFocus value={memberSearch} onChange={e => setMemberSearch(e.target.value)}
+                        placeholder="Search by name or email…"
+                        className="flex-1 text-[13px] outline-none text-gray-700 placeholder:text-gray-400" />
+                      <button onClick={() => { setShowAddMember(false); setMemberSearch(''); }}><X size={13} className="text-gray-400 hover:text-gray-600" /></button>
+                    </div>
+                    <div className="mt-3 space-y-1.5 max-h-64 overflow-y-auto">
+                      {nonMembers
+                        .filter(m => { const mb = m.user||m; const s = memberSearch.toLowerCase(); return !s || `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(s) || (mb.email||'').toLowerCase().includes(s); })
+                        .map(m => { const mb = m.user||m; return (
+                          <div key={mb.id} onClick={() => addMember(mb.id)}
+                            className="flex items-center gap-3 px-4 py-2.5 bg-white rounded-xl border border-gray-100 hover:border-blue-300 hover:bg-blue-50 cursor-pointer transition-colors">
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white ${avatarColor(mb.firstName||'')}`}>{mkInitials(mb.firstName||'',mb.lastName||'')}</div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[13px] font-medium text-gray-800">{mb.firstName} {mb.lastName}</p>
+                              <p data-hj-suppress className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                            </div>
+                            <span className="text-[12px] text-blue-600 font-medium">+ Add</span>
                           </div>
-                          <span className="text-[12px] text-blue-600 font-medium">+ Add</span>
-                        </div>
-                      );})}
-                    {nonMembers.length === 0 && <p className="text-center text-[12.5px] text-gray-400 py-3">All space members are already added</p>}
+                        );})}
+                      {nonMembers.length === 0 && <p className="text-center text-[12.5px] text-gray-400 py-3">All space members are already added</p>}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
               {members.length === 0 ? (
                 <div className="flex flex-col items-center py-14 text-center">
                   <Users size={28} className="text-gray-200 mb-3" />
