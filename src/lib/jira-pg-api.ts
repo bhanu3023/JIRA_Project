@@ -6458,24 +6458,20 @@ async function _handleJiraPgApi(
           // those still mean "whoever holds it right now".
           let assigneeOverride: { id: string; firstName: string; lastName: string; email: string | null; avatarUrl: string | null } | null = null;
           const movedAwayFromQueue = queueMembersOnlyParam && String(row.current_department || '').toLowerCase() !== deptParam.toLowerCase();
-          // Per explicit request: the live, current assignee always wins
-          // whenever one exists -- the per-dept historical snapshot (and the
-          // history-filter/reporter fallbacks below) now only ever fill in
-          // for a ticket that's genuinely unassigned right now. This trades
-          // away the "show who actually worked THIS queue" view the
-          // override below was built for (see CF-29845/CF-29568/CF-29902 in
-          // the comments below for why it existed), in favor of always
-          // reflecting reality -- same principle just applied to the issue
-          // detail page's ?viewDept= historical view.
-          if (!row.assignee_id) {
           // A specific Assignee filter takes priority over the generic
-          // per-dept snapshot below -- the snapshot only ever holds ONE
-          // person, whoever's handoff last touched it, which isn't
-          // necessarily the specific person this row matched the filter
-          // through. If the ticket's current assignee already IS one of the
-          // filtered people, that's already correct and needs no override;
-          // otherwise, if the filter matched via one of them having worked
-          // this dept on this ticket, show that specific person.
+          // per-dept snapshot below, and runs regardless of whether the
+          // ticket currently has a live assignee -- confirmed for real: a
+          // user filtering "Assignee: srinu" expects to see srinu's name on
+          // the matching rows, not whoever holds the ticket now, even though
+          // the general "always show live" rule below (added per a separate
+          // explicit request) applies when there's no specific person being
+          // filtered for. The snapshot only ever holds ONE person, whoever's
+          // handoff last touched it, which isn't necessarily the specific
+          // person this row matched the filter through. If the ticket's
+          // current assignee already IS one of the filtered people, that's
+          // already correct and needs no override; otherwise, if the filter
+          // matched via one of them having worked this dept on this ticket,
+          // show that specific person.
           if (historyAssigneeFilterIds && historyAssigneeFilterIds.length && !historyAssigneeFilterIds.includes(row.assignee_id)) {
             const matchedUserId = filteredWorkerByIssue[row.id];
             const info = matchedUserId ? filteredUserInfo[matchedUserId] : null;
@@ -6483,7 +6479,17 @@ async function _handleJiraPgApi(
               assigneeOverride = { id: info.id, firstName: info.firstName, lastName: info.lastName, email: info.email, avatarUrl: info.avatarUrl || avatarRef(info.id, null) };
             }
           }
-          if (!assigneeOverride && (workedRange || movedAwayFromQueue)) {
+          // Per explicit request: outside of a specific Assignee-history
+          // filter match (handled above), the live, current assignee always
+          // wins whenever one exists -- the per-dept historical snapshot
+          // (and the reporter fallback) below now only ever fill in for a
+          // ticket that's genuinely unassigned right now. This trades away
+          // the "show who actually worked THIS queue" view the snapshot
+          // below was built for (see CF-29845/CF-29902 for why it existed),
+          // in favor of always reflecting reality for the general
+          // queue-browsing case -- same principle applied to the issue
+          // detail page's ?viewDept= historical view.
+          if (!assigneeOverride && !row.assignee_id && (workedRange || movedAwayFromQueue)) {
             const deptAssignees: Record<string, any> = row.dept_assignees || {};
             const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
             const snap = snapKey ? deptAssignees[snapKey] : null;
@@ -6504,7 +6510,6 @@ async function _handleJiraPgApi(
               assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
             }
           }
-          } // end: only override when genuinely unassigned live (see comment above)
           // Surfaced to the frontend so the Filters table can flag it inline --
           // the ticket detail page already shows an amber "Showing <dept>'s own
           // assignee — this ticket has since moved to <dept>" banner for this
