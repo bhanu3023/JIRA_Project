@@ -1186,9 +1186,14 @@ export default function QueueSettingsPage() {
         method: 'POST',
         body: JSON.stringify({ userId: id, role: 'member' }),
       }).catch(() => {});
-      // Refresh space members
-      const sp = await api.getSpace(spaceKey).catch(() => null);
-      if (sp) setSpaceMembers(sp.members || []);
+      // Update local state directly instead of a full api.getSpace()
+      // refetch -- that round-trip (on top of the POST above and the
+      // persistQueue PATCH below) was the main source of the ~3s delay
+      // reported when adding someone not yet in this space. Everything
+      // needed is already in userPool (built from allUsers/spaceMembers
+      // above), so there's no new data a refetch would actually provide.
+      const added = userPool.find(m => (m.user || m).id === id);
+      if (added) setSpaceMembers(prev => [...prev, added.user ? added : { user: added, role: 'member' }]);
     }
     persistQueue({ ...queue, memberIds: [...queue.memberIds, id] });
     setMemberSearch(''); setShowAddMember(false);
