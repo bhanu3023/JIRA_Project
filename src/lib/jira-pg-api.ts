@@ -6504,7 +6504,25 @@ async function _handleJiraPgApi(
           // per-dept snapshot (whoever from THIS queue actually worked it)
           // whenever the ticket has since moved to another department,
           // regardless of whether it currently has a live assignee.
-          if (!assigneeOverride && (workedRange || movedAwayFromQueue)) {
+          //
+          // Also fires for a ticket that's STILL in this queue's own
+          // department but has no live assigneeId at all -- without this,
+          // such a row fell all the way through to formatIssue's
+          // jira_assignee_name fallback: a raw, never-updated text field
+          // frozen at whatever the CFITS/Jira import saw at import time.
+          // Confirmed for real on Queue: Migration, SLA Breached: Yes (no
+          // other filter, so neither workedRange nor movedAwayFromQueue
+          // applied): L1BOAR-5648 (CF-29191) showed "Devarapu Kota siva" --
+          // not even a real user account in this app -- while its own
+          // dept_assignees.Migration snapshot correctly names Harika Velidi,
+          // a real Migration/SMB roster member; CF-28238 showed "Pallavi K"
+          // while its snapshot says Vineetha Yenti, a completely different
+          // person. Scoped to queueMembersOnlyParam (a real "Queue: X" view)
+          // only, same as movedAwayFromQueue -- a plain department board
+          // view like "Unassigned" still means exactly that, and must not
+          // start showing a fabricated historical name in its Assignee
+          // column just because this ticket also happens to have a snapshot.
+          if (!assigneeOverride && (workedRange || movedAwayFromQueue || (queueMembersOnlyParam && !row.assignee_id))) {
             const deptAssignees: Record<string, any> = row.dept_assignees || {};
             const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
             const snap = snapKey ? deptAssignees[snapKey] : null;
