@@ -1,0 +1,13 @@
+groups:
+  - name: server-health
+    rules:
+      - alert: HighCPUUsage
+        # 100 - idle% averaged over 5m, per instance. ">80 for 5m" matches the
+        # spec exactly: sustained, not a single momentary spike.
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage has been above 80% for more than 5 minutes on {{ $labels.instance }} (current value: {{ $value | printf \"%.1f\" }}%)."

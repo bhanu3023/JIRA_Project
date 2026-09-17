@@ -1,0 +1,20 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "devops-incident-agent"
+  group_by: ["alertname", "instance"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: "devops-incident-agent"
+    webhook_configs:
+      # Points at the app's own webhook route. This route doesn't exist yet
+      # (Phase 4) -- Alertmanager will just log failed-delivery retries until
+      # it's built. That's expected and harmless; nothing else depends on
+      # this succeeding yet. "app" resolves via Docker Compose's built-in
+      # service-name DNS, same network as postgres already uses.
+      - url: "http://app:8080/api/webhooks/alertmanager"
+        send_resolved: true
