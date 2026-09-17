@@ -6479,17 +6479,17 @@ async function _handleJiraPgApi(
               assigneeOverride = { id: info.id, firstName: info.firstName, lastName: info.lastName, email: info.email, avatarUrl: info.avatarUrl || avatarRef(info.id, null) };
             }
           }
-          // Per explicit request: outside of a specific Assignee-history
-          // filter match (handled above), the live, current assignee always
-          // wins whenever one exists -- the per-dept historical snapshot
-          // (and the reporter fallback) below now only ever fill in for a
-          // ticket that's genuinely unassigned right now. This trades away
-          // the "show who actually worked THIS queue" view the snapshot
-          // below was built for (see CF-29845/CF-29902 for why it existed),
-          // in favor of always reflecting reality for the general
-          // queue-browsing case -- same principle applied to the issue
-          // detail page's ?viewDept= historical view.
-          if (!assigneeOverride && !row.assignee_id && (workedRange || movedAwayFromQueue)) {
+          // Reverted per explicit request: the "always show live assignee"
+          // default (previously here) was itself confirmed wrong for the
+          // general Queue-browsing case -- viewing Queue: Dev with no
+          // specific Assignee filter still showed Migration/other-team
+          // names for tickets a Dev person genuinely worked before they
+          // moved on. Restored to the original behavior this override was
+          // built for (CF-29845/CF-29568/CF-29902): show the queue's own
+          // per-dept snapshot (whoever from THIS queue actually worked it)
+          // whenever the ticket has since moved to another department,
+          // regardless of whether it currently has a live assignee.
+          if (!assigneeOverride && (workedRange || movedAwayFromQueue)) {
             const deptAssignees: Record<string, any> = row.dept_assignees || {};
             const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
             const snap = snapKey ? deptAssignees[snapKey] : null;
