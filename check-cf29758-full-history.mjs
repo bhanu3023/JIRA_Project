@@ -16,14 +16,16 @@ async function main() {
   const { rows } = await pool.query(`SELECT id FROM issues WHERE cf_key = 'CF-29758' OR key = 'CF-29758'`);
   const issueId = rows[0].id;
 
-  console.log('=== Full history for CF-29758 ===');
+  console.log('=== Status/assignee/department history for CF-29758 (noisy fields filtered out) ===');
   const { rows: hist } = await pool.query(
     `SELECT field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt"
-     FROM issue_history WHERE "issueId" = $1 ORDER BY "createdAt" ASC`,
+     FROM issue_history WHERE "issueId" = $1 AND field IN ('status','assignee','department') ORDER BY "createdAt" ASC`,
     [issueId]
   );
   for (const h of hist) {
-    console.log(`  [${h.createdAt.toISOString()}] ${h.field}: "${h.oldValue}" -> "${h.newValue}"  (by "${h.authorName}" <${h.authorEmail}>)`);
+    const ov = String(h.oldValue || '').slice(0, 60);
+    const nv = String(h.newValue || '').slice(0, 60);
+    console.log(`  [${h.createdAt.toISOString()}] ${h.field}: "${ov}" -> "${nv}"  (by "${h.authorName}" <${h.authorEmail}>)`);
   }
 
   console.log('\n=== Current worked-on rows ===');
