@@ -11600,9 +11600,26 @@ async function _handleJiraPgApi(
     // entirely (or off the Monthly summary's visible range altogether). No
     // range selected has no "in range" date to prefer, so it falls back to
     // plain createdAt (original behavior).
+    // + interval '5 hours 30 minutes' before to_char(...'Mon YYYY') everywhere
+    // this expression is used: these are naive `timestamp without time zone`
+    // columns storing literal UTC-equivalent digits (see the dateClause
+    // comment above), and to_char on a naive timestamp just prints those
+    // stored digits verbatim -- no timezone conversion happens on its own.
+    // dateClause's own WHERE-clause matching already got the IST-anchoring
+    // fix (istFrom/istTo), but this SEPARATE SQL-side month bucketing never
+    // did, even though the JS-side monthLabelFor (used only for the breach
+    // counts) got the equivalent fix already. Confirmed for real: the same
+    // CF-31128-style ticket (updatedAt 2026-07-31T21:05Z = Aug 1, 2:35 AM
+    // IST) correctly counts toward the Aug total (dateClause matches it)
+    // and correctly shows 0 breaches under "Jul 2026" (monthLabelFor is
+    // IST-shifted), but the Monthly Summary's own Total/Resolved columns
+    // still put it under "Jul 2026" -- this bucketing expression alone
+    // wasn't shifted. Shifting the raw digits by the IST offset before
+    // to_char reads the calendar month is the same zero-dependency trick
+    // monthLabelFor already uses in JS.
     const monthlyBucketExpr = (fromIdx || toIdx)
-      ? `CASE WHEN (${createdConds.join(' AND ')}) THEN i."createdAt" ELSE i."updatedAt" END`
-      : `i."createdAt"`;
+      ? `(CASE WHEN (${createdConds.join(' AND ')}) THEN i."createdAt" ELSE i."updatedAt" END + interval '5 hours 30 minutes')`
+      : `(i."createdAt" + interval '5 hours 30 minutes')`;
 
     // Deliberately mirrors the Filters page's own "Queue: <dept>" matching
     // with BOTH Created and Updated active (see queueMembersOnlyParam /
