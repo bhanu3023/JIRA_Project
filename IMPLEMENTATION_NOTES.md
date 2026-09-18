@@ -1,5 +1,5 @@
 # Jira Clone — Implementation Notes
-> Last updated: 2026-05-28
+> Last updated: 2026-09-19
 
 ---
 
@@ -137,3 +137,19 @@ Always use `localStorage.getItem('jira_token')` — NOT `'token'`
 - DB name: `neutara_db`
 - Connection: `postgresql://postgres:neutara123@localhost:5432/neutara_db`
 - ORM: Prisma (for most queries) + raw `pg` Pool (for complex queries)
+
+---
+
+## 8. Department-Keyed Map Lookups (`dept_statuses` / `dept_assignees`)
+
+**File:** `src/lib/dept-map.ts` — used by `src/lib/jira-pg-api.ts` and `src/lib/utils.ts`
+
+- `dept_statuses`, `dept_assignees` and the per-department SLA log are JSONB maps keyed by department **name**, not id.
+- Key casing is whatever wrote the entry. The Change Department dropdown writes the canonical name; a `Waiting for X` / `Routed to X` queue status is free text an admin typed, and the target department is regex-parsed back out of that label. So the same department can arrive as `Pre-Sales` or `Pre-sales`.
+- **Always use `deptMapGet` / `deptMapSet` / `deptMapDelete`.** Never `map[deptName]`.
+  - `deptMapGet(map, dept)` — case-insensitive read; returns `undefined` for a null/blank dept or map
+  - `deptMapSet(map, dept, value)` — reuses the casing already present, so one ticket never accumulates both `Dev` and `dev`
+  - `deptMapDelete(map, dept)` — removes under any casing
+- **Asymmetry, deliberate:** the looked-up name is trimmed, the stored key is not. This reproduces the original private implementation exactly. A key stored with surrounding whitespace is still missed — a known latent bug, left for its own change rather than folded into a casing fix.
+- These helpers were private to `jira-pg-api.ts` until the display layer was found using a plain case-sensitive `map[dept]`. The two rules disagreed: CF-29995 rendered a leftover QA status while sitting in Pre-Sales, and its status dropdown's `fromStatusId` filter then matched no transition at all. Shared now so they cannot drift apart again.
+- Tests: `src/lib/dept-map.test.ts` (17) and `src/lib/utils.test.ts` (8). Run with `npm test`.

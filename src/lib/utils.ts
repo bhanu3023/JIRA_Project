@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from 'clsx';
+import { deptMapGet } from '@/lib/dept-map';
 
 export function cn(...inputs: ClassValue[]) {
   return clsx(inputs);
@@ -157,7 +158,15 @@ export function getEffectiveIssueStatus(issue: {
   // different departments with no indication why they disagree. Defaults
   // to current_department, so every other caller's behavior is unchanged.
   const currentDept = viewDept || issue.current_department;
-  const deptQueueSt = currentDept ? rawDeptStatuses[currentDept] : null;
+  // Case-insensitive, via the same helper the API handler uses for every
+  // other department-keyed map access. This was a plain rawDeptStatuses[
+  // currentDept] -- a case-sensitive object-key read -- so a ticket whose
+  // current_department casing differed from its own dept_statuses key
+  // silently missed, fell through to the stale global statusId below, and
+  // displayed a status from a department it had long since left (CF-29995
+  // showed a leftover QA status while sitting in Pre-Sales, and its status
+  // dropdown's fromStatusId filter then matched no transition at all).
+  const deptQueueSt = deptMapGet(rawDeptStatuses, currentDept);
   // A "Routed to X"/"Waiting for X" queue status is a record of an OUTGOING
   // handoff -- valid while the ticket is still actively out being worked
   // elsewhere, but stale once it's reached a genuinely final resolution.

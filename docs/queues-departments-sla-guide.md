@@ -46,6 +46,7 @@ This is triggered by `PATCH /issues/:key/department`, which the ticket page's De
 
 ### Best practice
 - Don't rely on department names being unique across boards — `dept_assignees`/`dept_statuses` are keyed by the literal department name string, so "Migration" on Board A and "Migration" on Board B are two independent histories.
+- Never read these maps with a plain `map[deptName]`. Keys are stored with whatever casing wrote them (the Change Department dropdown writes canonical casing; a "Waiting for X" queue label is free text an admin typed), so lookups are **case-insensitive** and must go through the helpers in `src/lib/dept-map.ts` — `deptMapGet` / `deptMapSet` / `deptMapDelete`, used by both the API handler and the UI. A case-sensitive read is what made CF-29995 display a leftover QA status while it sat in Pre-Sales. Note the deliberate asymmetry: the name you look up is trimmed, the stored key is not, so a key saved with surrounding whitespace is still missed.
 - The assignee-memory only works within the *same board*. If your workflow regularly passes tickets to another board and back, know that it currently resets to round robin there.
 
 ---

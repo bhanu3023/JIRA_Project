@@ -13,6 +13,7 @@ import { getNextAgent, getDefaultDepartment, getRrConfig, saveRrConfig } from '@
 import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs } from '@/lib/connector-service';
 import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
+import { deptMapGet, deptMapSet, deptMapDelete } from '@/lib/dept-map';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 
 // 60-second in-memory cache for user role lookups so every API request
@@ -1318,18 +1319,12 @@ async function startDeptSLA(issueKey: string | null, issueId: string | null, dep
 // has never been recorded here at all), so a ticket's history stays
 // internally consistent regardless of which of the two casings triggered
 // the write.
-function deptMapGet(map: Record<string, any>, dept: string): any {
-  const key = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
-  return key ? map[key] : undefined;
-}
-function deptMapSet(map: Record<string, any>, dept: string, value: any): void {
-  const existingKey = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
-  map[existingKey || dept] = value;
-}
-function deptMapDelete(map: Record<string, any>, dept: string): void {
-  const existingKey = Object.keys(map).find((k) => k.toLowerCase() === dept.trim().toLowerCase());
-  if (existingKey) delete map[existingKey];
-}
+// These three now live in src/lib/dept-map.ts and are imported at the top of
+// this file. They were private here, so the display layer could not reach
+// them and used a plain case-sensitive map[dept] instead -- the two rules
+// disagreed, and a ticket whose current_department casing differed from its
+// own dept_statuses key rendered a status from a department it had already
+// left. Shared rather than duplicated so they cannot drift apart again.
 
 // Reverted per explicit request: the parent carrying its subtasks along
 // (added after the opposite behavior -- a subtask independently routing
