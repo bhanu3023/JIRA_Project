@@ -37,7 +37,7 @@ async function main() {
 
   console.log('\n=== QA queue status list (does it have a real Resolved/done-category status?) ===');
   const { rows: cq } = await pool.query(`SELECT queues FROM custom_queues`);
-  for (const row of cq.rows) {
+  for (const row of cq) {
     const queues = Array.isArray(row.queues) ? row.queues : [];
     for (const q of queues) {
       if (String(q?.name || '').toLowerCase() === 'qa') {
