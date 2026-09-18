@@ -116,7 +116,28 @@ async function main() {
           h2.newValue !== currentAssigneeName &&
           Math.abs(h2.createdAt.getTime() - h.createdAt.getTime()) <= SIMULTANEOUS_WINDOW_MS
         );
-        if (!simultaneousReassign) {
+        // Confirmed real bug via CF-29589 and CF-29399 (both bala.raviteja):
+        // a department-ARRIVAL event automatically resets the ticket's
+        // status as a side effect within the same transaction -- that
+        // reset status-change row was getting counted as "real work in
+        // the new department" even though the person never actually did
+        // anything there, they just happened to be the one who triggered
+        // the transfer moments earlier. The distinguishing signal: in
+        // every confirmed FALSE positive, the department change comes
+        // FIRST and the status reset follows within the window; in every
+        // confirmed GENUINE case (e.g. CF-29906: resolve, then hand off
+        // 1.3s later), the person's real status change comes first and
+        // any department change is a consequence that follows it. Only
+        // exclude when a same-author department change precedes (or is
+        // simultaneous with) this status change -- a department change
+        // that comes AFTER is fine and not checked here.
+        const arrivalReset = hist.some((h2) =>
+          h2.field === 'department' &&
+          h2.authorEmail === h.authorEmail &&
+          h2.createdAt.getTime() <= h.createdAt.getTime() &&
+          (h.createdAt.getTime() - h2.createdAt.getTime()) <= SIMULTANEOUS_WINDOW_MS
+        );
+        if (!simultaneousReassign && !arrivalReset) {
           realWorkEvents.push({ authorEmail: h.authorEmail, dept: currentDept, at: h.createdAt });
         }
       }
