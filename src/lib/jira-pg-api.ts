@@ -2343,6 +2343,38 @@ function computeInProgressHours(
   return { inProgressHrs, noHistory: statusHist.length === 0 };
 }
 
+// "Response time" per explicit request, generalized across every
+// department/queue (Dev, Migration, QA, Infra, ...): how long it took
+// someone to actually START working a ticket after it arrived in their
+// department, not how long the whole resolution took (that's
+// avgResolutionHours/computeInProgressHours above, a different metric).
+// Walks the same sorted status-history list, looking for the FIRST
+// transition INTO an IN_PROGRESS_STATUS_NAMES status -- same name-
+// allowlist reasoning as computeInProgressHours (this app has many
+// differently-cased/duplicated "In Progress" status rows across queues,
+// so matching by literal name is more reliable than category). Measured
+// from deptStartedAt (dept_sla_started_at -- when the ticket arrived in
+// THIS department), the same anchor the rest of this department's SLA
+// math already uses, not the ticket's overall createdAt: a ticket that
+// sat untouched in a PRIOR department for days shouldn't inflate this
+// department's own response time. A transition timestamped before the
+// department even started (a stale in-progress event carried over from
+// an earlier stint) is skipped rather than producing a negative number.
+function computeResponseTimeHours(
+  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+  deptStartedAt: Date | string | null,
+): number | null {
+  if (!deptStartedAt) return null;
+  const startMs = new Date(deptStartedAt).getTime();
+  for (const h of statusHist) {
+    if (!IN_PROGRESS_STATUS_NAMES.has(String(h.newValue || '').trim().toLowerCase())) continue;
+    const t = new Date(h.createdAt).getTime();
+    if (t < startMs) continue;
+    return Math.round(((t - startMs) / 3_600_000) * 10) / 10;
+  }
+  return null; // hasn't actually started work in this department yet
+}
+
 function buildTeamAnalyticsOverview(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
   const { issues } = scope;
   const byStatus = taGroupByCount(issues, (r) => r.status_name);
@@ -11891,7 +11923,7 @@ async function _handleJiraPgApi(
           NOT (au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])) AS assignee_outside_roster,
           ${personHistoryFlagSql} AS matched_via_person_history,
           COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
-          s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
+          s.name AS status_name, i.summary, i."createdAt", i."updatedAt", i.dept_sla_started_at,
           COUNT(*) OVER() AS total_matched
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
@@ -11975,6 +12007,7 @@ async function _handleJiraPgApi(
       (statusHistByIssue[h.issueId] ??= []).push(h);
     }
     const peopleInProgress: Record<string, { sum: number; count: number }> = {};
+    const peopleResponseTime: Record<string, { sum: number; count: number }> = {};
 
     const slaSpaceIds = Array.from(new Set(slaCandidatesRes.rows.map((r: any) => r.spaceId).filter(Boolean)));
     const slaPoliciesBySpace: Record<string, any[]> = {};
@@ -12076,6 +12109,22 @@ async function _handleJiraPgApi(
         }
       }
 
+      // Response time: how long it took to move this ticket from arrival
+      // in THIS department into actual work -- doesn't require the ticket
+      // to be done, unlike resolution hours above, since "how fast did you
+      // pick this up" is meaningful for open tickets too. Only counted once
+      // work has genuinely started (computeResponseTimeHours returns null
+      // otherwise), so a still-untouched ticket doesn't drag the average
+      // down with a misleading "0".
+      const responseHrs = computeResponseTimeHours(statusHistByIssue[row.id] || [], row.dept_sla_started_at);
+      if (responseHrs != null) {
+        for (const email of Array.from(emails)) {
+          const acc = (peopleResponseTime[email] ??= { sum: 0, count: 0 });
+          acc.sum += responseHrs;
+          acc.count++;
+        }
+      }
+
       if (isEntSmb) {
         const descText = stripHtml(row.description);
         const shortcut = isShortcutSummary(row.summary, row.key);
@@ -12126,6 +12175,7 @@ async function _handleJiraPgApi(
       const email = String(r.email || '').toLowerCase();
       const rbBreached = peopleRbBreached[email] || 0;
       const ip = peopleInProgress[email];
+      const rt = peopleResponseTime[email];
       return {
         email: r.email,
         name: `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email,
@@ -12136,6 +12186,12 @@ async function _handleJiraPgApi(
         // not full elapsed creation-to-resolution time -- see
         // peopleInProgress construction above for why.
         avgResolutionHours: ip && ip.count > 0 ? Math.round((ip.sum / ip.count) * 10) / 10 : null,
+        // How fast this person actually picks up a ticket once it lands in
+        // their department -- see computeResponseTimeHours/peopleResponseTime
+        // construction above. Averaged across only the tickets they've
+        // actually started (null tickets don't count, same "don't drag the
+        // average down with a fake 0" reasoning as avgResolutionHours).
+        avgResponseTimeHours: rt && rt.count > 0 ? Math.round((rt.sum / rt.count) * 10) / 10 : null,
       };
     });
 
@@ -12192,6 +12248,13 @@ async function _handleJiraPgApi(
       created: r.createdAt,
       updated: r.updatedAt,
       rb: !!slaById.get(r.id),
+      // Same per-ticket computeResponseTimeHours the per-person average
+      // above is built from -- shown per row in the drill-down table so
+      // "why is my average X" is answerable without leaving the page.
+      // statusHistByIssue already covers every id here: ticketRows is
+      // always a subset of slaCandidatesRes.rows (same base dept+roster+
+      // date WHERE clause, this query only narrows it further).
+      responseTimeHours: computeResponseTimeHours(statusHistByIssue[r.id] || [], r.dept_sla_started_at),
       };
     });
 
