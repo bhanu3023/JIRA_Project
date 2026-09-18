@@ -1,0 +1,4 @@
+# Commit-gate approval artifacts are per-run, machine-local and short-lived.
+# They record a human decision in one session; committing them would let a
+# stale approval authorise someone else's commit on another machine.
+commit-approval.json
