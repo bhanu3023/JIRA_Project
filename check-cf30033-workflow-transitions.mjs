@@ -48,6 +48,22 @@ async function main() {
   for (const t of transitions) console.log(`  ${JSON.stringify(t)}`);
   if (!transitions.length) console.log('  (none found -- this status has NO configured transitions out at all, or the table/column name differs)');
 
+  // The dropdown DID show 4 constrained options (Open, Routed to Dev/
+  // Infra/Migration), not the full unconstrained space-status list -- so
+  // SOME transitions do exist somewhere. dept_statuses.QA uses a
+  // DIFFERENT id (qst_qa_inprogress) for what looks like the same
+  // conceptual "In Progress" status as the real statusId column
+  // (status_qa_inprogress) -- checking whether the workflow was actually
+  // configured against that other id instead.
+  console.log(`\n=== Workflow transitions FROM the OTHER "In Progress" id (qst_qa_inprogress) ===`);
+  const { rows: transitions2 } = await pool.query(
+    `SELECT wt.*, s2.name AS to_name FROM workflow_transitions wt
+     LEFT JOIN statuses s2 ON s2.id = wt."toStatusId"
+     WHERE wt."fromStatusId" = 'qst_qa_inprogress'`
+  );
+  for (const t of transitions2) console.log(`  ${JSON.stringify(t)}`);
+  if (!transitions2.length) console.log('  (none found here either)');
+
   await pool.end();
 }
 

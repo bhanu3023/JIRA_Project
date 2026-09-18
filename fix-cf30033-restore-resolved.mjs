@@ -37,12 +37,17 @@ async function main() {
   console.log(`Will set: assigneeId=${akhila.id} dept=Dev statusId=status_resolved resolvedAt=updatedAt=${NEW_DATE.toISOString()}`);
 
   if (APPLY) {
+    // resolvedAt and updatedAt are different underlying column types
+    // (timestamptz vs naive timestamp) -- reusing one placeholder ($2) for
+    // both made Postgres fail with "inconsistent types deduced for
+    // parameter $2". Passing the same value as two separate placeholders
+    // lets each one resolve against its own column's real type.
     await pool.query(
       `UPDATE issues
        SET "assigneeId" = $1, current_department = 'Dev', "statusId" = 'status_resolved',
-           "resolvedAt" = $2, "updatedAt" = $2
-       WHERE id = $3`,
-      [akhila.id, NEW_DATE, issue.id]
+           "resolvedAt" = $2, "updatedAt" = $3
+       WHERE id = $4`,
+      [akhila.id, NEW_DATE, NEW_DATE, issue.id]
     );
     await pool.query(
       `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt")
