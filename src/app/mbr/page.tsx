@@ -354,7 +354,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Total tickets</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Resolved tickets</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Resolution SLA breached</th>
-                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Avg. resolution (hrs)</th>
+                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Avg. resolution (min)</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200" title="How long it took to move a ticket from arrival in this department into actual work (Open → In Progress)">Avg. response time (hrs)</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Stale</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Missing details</th>
@@ -391,7 +391,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
                       {p.avgResolutionHours === null ? '—' : (
-                        <button onClick={(e) => { e.stopPropagation(); openDrill('hasResolutionTime', p.email, `Tickets with a recorded resolution time — ${p.name}`); }} className="hover:underline">{p.avgResolutionHours}</button>
+                        <button onClick={(e) => { e.stopPropagation(); openDrill('hasResolutionTime', p.email, `Tickets with a recorded resolution time — ${p.name}`); }} className="hover:underline">{Math.round(p.avgResolutionHours * 60)}</button>
                       )}
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
