@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store';
@@ -118,6 +118,17 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  // Guards against an earlier, slower fetch (e.g. the empty-date-range
+  // request every MBR page load fires first, which can pull 15,000+ tickets
+  // and take far longer than a subsequent narrower one) resolving AFTER a
+  // later, correctly-scoped fetch already rendered its data -- without this,
+  // that stale response's error/empty result silently overwrites the good
+  // one already on screen. Confirmed for real: the date-range filter shown
+  // in the UI matched a fast, successful request in the server logs, but the
+  // error banner was actually from an earlier unbounded request that was
+  // still in flight when the scoped one finished first.
+  const mainFetchIdRef = useRef(0);
+  const drillFetchIdRef = useRef(0);
 
   type DrillFilter = 'all' | 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix' | 'hasResolutionTime';
   const [drillDown, setDrillDown] = useState<{ person?: string; month?: string; filter: DrillFilter; label: string } | null>(null);
@@ -136,23 +147,37 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   };
 
   useEffect(() => {
+    const requestId = ++mainFetchIdRef.current;
     setLoading(true);
     setError(null);
     api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined, undefined, staleDays)
-      .then((d) => { setPeople(d.people); setMonthly(d.monthly); setSummary(d.summary); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
-      .catch((err) => { setPeople([]); setMonthly([]); setTickets([]); setError(err?.message || 'Failed to load MBR data'); })
-      .finally(() => setLoading(false));
+      .then((d) => {
+        if (requestId !== mainFetchIdRef.current) return; // a newer fetch already superseded this one
+        setPeople(d.people); setMonthly(d.monthly); setSummary(d.summary); setTickets(d.tickets); setTotalMatched(d.totalMatched);
+      })
+      .catch((err) => {
+        if (requestId !== mainFetchIdRef.current) return;
+        setPeople([]); setMonthly([]); setTickets([]); setError(err?.message || 'Failed to load MBR data');
+      })
+      .finally(() => { if (requestId === mainFetchIdRef.current) setLoading(false); });
   }, [team, dateFrom, dateTo, person, staleDays]);
 
   useEffect(() => {
     if (!drillDown) return;
+    const requestId = ++drillFetchIdRef.current;
     setDrillLoading(true);
     setDrillError(null);
     const segmentable = drillDown.filter === 'all' || drillDown.filter === 'resolved';
     api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, drillDown.person, drillDown.filter === 'all' ? undefined : drillDown.filter, undefined, segmentable ? drillSegment : undefined, drillDown.month)
-      .then((d) => { setDrillTickets(d.tickets); setDrillTotal(d.totalMatched); })
-      .catch((err) => { setDrillTickets([]); setDrillTotal(0); setDrillError(err?.message || 'Failed to load tickets'); })
-      .finally(() => setDrillLoading(false));
+      .then((d) => {
+        if (requestId !== drillFetchIdRef.current) return;
+        setDrillTickets(d.tickets); setDrillTotal(d.totalMatched);
+      })
+      .catch((err) => {
+        if (requestId !== drillFetchIdRef.current) return;
+        setDrillTickets([]); setDrillTotal(0); setDrillError(err?.message || 'Failed to load tickets');
+      })
+      .finally(() => { if (requestId === drillFetchIdRef.current) setDrillLoading(false); });
   }, [drillDown, team, dateFrom, dateTo, drillSegment]);
 
   if (loading) {
@@ -649,6 +674,8 @@ export default function MbrPage() {
   const [downloading, setDownloading] = useState(false);
   const [sortKey, setSortKey] = useState<keyof PersonRow>('hygieneScore');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  // Same stale-response guard as TeamTab's mainFetchIdRef -- see its comment.
+  const deptFetchIdRef = useRef(0);
 
   // Redirect non-admins away
   useEffect(() => {
@@ -663,12 +690,19 @@ export default function MbrPage() {
 
   useEffect(() => {
     if (!isPrivileged || topTab !== 'department') return;
+    const requestId = ++deptFetchIdRef.current;
     setLoading(true);
     setError(null);
     api.getMbrData(department || undefined, dateFrom || undefined, dateTo || undefined, staleDays)
-      .then((d) => { setDepartments(d.departments); setPeople(d.people); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
-      .catch((err) => { setDepartments([]); setPeople([]); setTickets([]); setTotalMatched(0); setError(err?.message || 'Failed to load MBR data'); })
-      .finally(() => setLoading(false));
+      .then((d) => {
+        if (requestId !== deptFetchIdRef.current) return;
+        setDepartments(d.departments); setPeople(d.people); setTickets(d.tickets); setTotalMatched(d.totalMatched);
+      })
+      .catch((err) => {
+        if (requestId !== deptFetchIdRef.current) return;
+        setDepartments([]); setPeople([]); setTickets([]); setTotalMatched(0); setError(err?.message || 'Failed to load MBR data');
+      })
+      .finally(() => { if (requestId === deptFetchIdRef.current) setLoading(false); });
   }, [isPrivileged, topTab, department, dateFrom, dateTo, staleDays]);
 
   const toggleSort = useCallback((key: keyof PersonRow) => {
