@@ -16,8 +16,8 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 async function main() {
   console.log('=== CF-29982 ===');
   const { rows: r1 } = await pool.query(
-    `SELECT id, current_department, "spaceId", "assigneeId", dept_sla_started_at, dept_sla_log,
-            jira_sla_breached, sla_waivers, "resolvedAt", "updatedAt", "statusId",
+    `SELECT i.id, i.current_department, i."spaceId", i."assigneeId", i.dept_sla_started_at, i.dept_sla_log,
+            i.jira_sla_breached, i.sla_waivers, i."resolvedAt", i."updatedAt", i."statusId",
             s.name AS status_name, s.category AS status_category
      FROM issues i LEFT JOIN statuses s ON i."statusId" = s.id
      WHERE i.cf_key = 'CF-29982' OR i.key = 'CF-29982'`
