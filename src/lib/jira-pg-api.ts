@@ -9069,6 +9069,7 @@ async function _handleJiraPgApi(
                 `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
                 [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), reopenChanger ? `${reopenChanger.firstName} ${reopenChanger.lastName}`.trim() : 'Unknown', reopenChanger?.email || null]
               ).catch(() => {});
+              const { ids: reopenAdminIds, emails: reopenAdminEmails } = await getAdminRecipients();
               notifyStatusChanged({
                 key: issue.key, cfKey: issueCfKey, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
@@ -9076,8 +9077,18 @@ async function _handleJiraPgApi(
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
                 assignee: issue.assignee, reporter: issue.reporter,
                 changedBy: reopenChanger,
-                adminEmails: (await getAdminRecipients()).emails,
+                adminEmails: reopenAdminEmails,
               }).catch(() => {});
+              // This branch had NO in-app bell notification at all (only the
+              // email above) -- admins/assignee/reporter got nothing in the
+              // bell for a queue-status reopen, unlike every other status-change
+              // path in this handler.
+              const reopenDisplayKey = issueCfKey || issue.key;
+              notifyUsers(
+                [issue.assigneeId, issue.reporterId, ...reopenAdminIds],
+                userId,
+                { type: 'STATUS_CHANGED', title: `${reopenDisplayKey} status → ${String(body.queueStatusName || '')}`, message: issue.summary, issueKey: reopenDisplayKey }
+              ).catch(() => {});
             } catch (e: any) { console.error('[SLA resume on reopen failed]', issue.key, e?.message || e); }
           }
 
@@ -9147,6 +9158,7 @@ async function _handleJiraPgApi(
               // status left the assignee/reporter with zero notification of either
               // kind, even though a plain (non-queue) status change to Resolved does
               // notify them via the generic path further down in this handler.
+              const { ids: doneAdminIds, emails: doneAdminEmails } = await getAdminRecipients();
               notifyStatusChanged({
                 key: issue.key, cfKey: issueCfKey, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
@@ -9154,11 +9166,15 @@ async function _handleJiraPgApi(
                 newStatus: { name: String(body.queueStatusName || ''), category: 'done' },
                 assignee: issue.assignee, reporter: issue.reporter,
                 changedBy: doneChanger,
-                adminEmails: (await getAdminRecipients()).emails,
+                adminEmails: doneAdminEmails,
               }).catch(() => {});
               const doneDisplayKey = issueCfKey || issue.key;
+              // Admins got the email (adminEmails above) but not the in-app
+              // bell -- this list only had assignee/reporter, unlike the
+              // generic (non-queue) status-change path further down, which
+              // already includes admin ids in its own notifyUsers call.
               notifyUsers(
-                [issue.assigneeId, issue.reporterId],
+                [issue.assigneeId, issue.reporterId, ...doneAdminIds],
                 userId,
                 { type: 'STATUS_CHANGED', title: `${doneDisplayKey} status → ${String(body.queueStatusName || '')}`, message: issue.summary, issueKey: doneDisplayKey }
               ).catch(() => {});
@@ -9304,6 +9320,7 @@ async function _handleJiraPgApi(
                 ).catch(() => {});
               }
               const refreshedDisplayKey = issueCfKey || refreshed.key;
+              const { ids: refreshedAdminIds, emails: refreshedAdminEmails } = await getAdminRecipients();
               notifyStatusChanged({
                 key: refreshed.key, cfKey: issueCfKey, summary: refreshed.summary, priority: refreshed.priority,
                 spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
@@ -9311,16 +9328,18 @@ async function _handleJiraPgApi(
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
                 assignee: refreshed.assignee, reporter: refreshed.reporter,
                 changedBy: changer,
-                adminEmails: (await getAdminRecipients()).emails,
+                adminEmails: refreshedAdminEmails,
               }).catch(() => {});
               // This branch returns early right below, so it never reached the
               // generic "Status changed?" block further down that normally
               // sends the in-app bell notification -- a queue-scoped status
               // change (e.g. picking "Waiting for Dev" from a queue's own
               // dropdown) updated the email but left the bell silent for both
-              // reporter and assignee.
+              // reporter and assignee. Admin ids were also missing from this
+              // list -- admins got the email above but not the bell, unlike
+              // the generic (non-queue) status-change path.
               notifyUsers(
-                [refreshed.assigneeId, refreshed.reporterId],
+                [refreshed.assigneeId, refreshed.reporterId, ...refreshedAdminIds],
                 userId,
                 { type: 'STATUS_CHANGED', title: `${refreshedDisplayKey} status → ${String(body.queueStatusName || '')}`, message: refreshed.summary, issueKey: refreshedDisplayKey }
               ).catch(() => {});
