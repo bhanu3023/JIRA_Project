@@ -234,6 +234,16 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100">
             <h3 className="text-[14px] font-semibold text-gray-700">Monthly summary</h3>
+            {/* Makes the active scope explicit right on the table itself --
+                confirmed for real that "no filter set" (showing the last 12
+                months, the fallback when dateFrom/dateTo are both empty) got
+                mistaken for a bug, since nothing on screen said whether a
+                range was actually applied. */}
+            <p className="text-[11.5px] text-gray-400 mt-0.5">
+              {dateFrom || dateTo
+                ? `Showing ${dateFrom ? new Date(dateFrom + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'the beginning'} to ${dateTo ? new Date(dateTo + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'now'}`
+                : 'No date range selected — showing the most recent 12 months'}
+            </p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">
