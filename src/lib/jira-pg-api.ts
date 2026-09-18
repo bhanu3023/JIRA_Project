@@ -9139,6 +9139,29 @@ async function _handleJiraPgApi(
                 `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
                 [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), doneChanger ? `${doneChanger.firstName} ${doneChanger.lastName}`.trim() : 'Unknown', doneChanger?.email || null]
               ).catch(() => {});
+              // The reopen branch above sends notifyStatusChanged (email) +
+              // notifyUsers (in-app bell) after its history write; this done/resolve
+              // branch never did, despite being -- per the comment above -- the most
+              // common way tickets actually get closed. Confirmed for real: someone
+              // else resolving a Migration ticket via its queue's own "Resolved"
+              // status left the assignee/reporter with zero notification of either
+              // kind, even though a plain (non-queue) status change to Resolved does
+              // notify them via the generic path further down in this handler.
+              notifyStatusChanged({
+                key: issue.key, cfKey: issueCfKey, summary: issue.summary, priority: issue.priority,
+                spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
+                oldStatus: { name: oldQueueStatusName, category: oldQueueStatusCategory },
+                newStatus: { name: String(body.queueStatusName || ''), category: 'done' },
+                assignee: issue.assignee, reporter: issue.reporter,
+                changedBy: doneChanger,
+                adminEmails: (await getAdminRecipients()).emails,
+              }).catch(() => {});
+              const doneDisplayKey = issueCfKey || issue.key;
+              notifyUsers(
+                [issue.assigneeId, issue.reporterId],
+                userId,
+                { type: 'STATUS_CHANGED', title: `${doneDisplayKey} status → ${String(body.queueStatusName || '')}`, message: issue.summary, issueKey: doneDisplayKey }
+              ).catch(() => {});
             }
           }
 
