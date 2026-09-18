@@ -8333,8 +8333,19 @@ async function _handleJiraPgApi(
       }),
       // Raw columns Prisma's schema doesn't know about -- only needs `key`,
       // so it can run alongside everything else instead of after it.
+      //
+      // jira_sla_breached/jira_sla_due_at/jira_sla_start_at were missing
+      // here entirely -- confirmed for real on CF-29982 (L2B-15990): the DB
+      // column is genuinely true (reconciled against live Jira Cloud data
+      // earlier), Filters correctly shows "SLA Breached: Yes" from its own
+      // separate query, but this page's own SLA panel showed "not
+      // breached" because mergedIssue.jira_sla_breached was silently
+      // undefined here, and computeSLAInstancesPure's `!!(issue as
+      // any).jira_sla_breached` fallback treats undefined as false. Same
+      // gap for a ticket with genuinely empty dept_sla_log (nothing else
+      // for that fallback to catch it with).
       pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts, original_dept FROM issues WHERE key = $1 LIMIT 1`,
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts, original_dept, jira_sla_breached, jira_sla_due_at, jira_sla_start_at FROM issues WHERE key = $1 LIMIT 1`,
         [key]
       ).catch(() => ({ rows: [] as any[] })),
       // Partner-ticket comment merge lookup -- also only needs `key`.
