@@ -23,6 +23,14 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
+  // Patch console.error/warn for this process so application errors reach any
+  // connector subscribed to system.error (Settings -> Connectors). Safe to
+  // call here despite the deadlock warning above: it is synchronous, awaits
+  // nothing, and log-monitor.ts has no static imports of its own -- the
+  // connector/pg chain is imported lazily inside its send path, not now.
+  const { installLogMonitor } = await import('@/lib/log-monitor');
+  installLogMonitor();
+
   const internalPort = process.env.INTERNAL_PORT || process.env.PORT || '3000';
   const internalUrl  = `http://localhost:${internalPort}`;
 

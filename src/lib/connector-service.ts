@@ -331,4 +331,179 @@ export async function getConnectorLogs(connectorId: string, limit = 20): Promise
   return rows.rows;
 }
 
+// ── System alerts (log monitor) ───────────────────────────────────────────────
+//
+// A log error is not an issue event: it has no key, no space and no assignee,
+// so it cannot travel through fireConnectorEvent -- that function's space
+// filter reads payload.issue.spaceKey and would have nothing to match on.
+// This is a parallel selection + card path over the SAME connector rows, the
+// same connector_logs audit table and the same webhook transport.
+//
+// SYSTEM_ERROR_EVENT is deliberately NOT a member of the ConnectorEvent union:
+// adding it there would force a member into the two exhaustive
+// Record<ConnectorEvent, string> label maps above, which describe issue events
+// and would have nothing sensible to say about this one.
+
+export const SYSTEM_ERROR_EVENT = 'system.error';
+
+export interface SystemAlertError {
+  level: string;
+  tag: string | null;
+  message: string;
+  /** Occurrences collapsed into this entry during the batch window. */
+  count: number;
+  firstAt: string;
+  lastAt: string;
+}
+
+export interface SystemAlertPayload {
+  event: typeof SYSTEM_ERROR_EVENT;
+  timestamp: string;
+  host: string;
+  errors: SystemAlertError[];
+  /** Distinct errors dropped from this batch because it hit maxPerFlush. */
+  suppressed: number;
+}
+
+/** Teams rejects oversized cards; the monitor's own cap is per message, this
+ *  one is per card body so ten long stacks cannot add up past the limit. */
+const SYSTEM_ALERT_CARD_CHARS = 1000;
+
+export async function fireSystemAlert(payload: SystemAlertPayload): Promise<void> {
+  try {
+    const rows = await pool.query<ConnectorConfig>(
+      `SELECT * FROM connector_configs WHERE enabled = true AND $1 = ANY(events)`,
+      [SYSTEM_ERROR_EVENT]
+    );
+    if (!rows.rows.length) return;
+    // No space filter here, unlike fireConnectorEvent: a system error does not
+    // belong to a space, so space_ids is not consulted.
+    for (const connector of rows.rows) {
+      fireSystem(connector, payload).catch(() => {});
+    }
+  } catch { /* non-critical */ }
+}
+
+async function fireSystem(connector: ConnectorConfig, payload: SystemAlertPayload): Promise<void> {
+  let status = 'success';
+  let responseCode: number | null = null;
+  let error: string | null = null;
+
+  try {
+    if (connector.type === 'teams') {
+      await fireTeamsSystemAlert(connector, payload);
+    } else if (connector.type === 'webhook') {
+      await fireWebhookSystemAlert(connector, payload);
+    } else {
+      // Slack system-alert cards are not built yet. Recorded rather than
+      // dropped, so a connector subscribed to an event it cannot deliver is
+      // visible in the connector log instead of silently doing nothing.
+      status = 'skipped';
+      error = `Connector type '${connector.type}' does not support ${SYSTEM_ERROR_EVENT} yet`;
+    }
+  } catch (e: any) {
+    status = 'error';
+    error = e?.message || String(e);
+    responseCode = e?.status || null;
+  }
+
+  // issue_key is NULL: the column is nullable and a system alert has no issue.
+  pool.query(
+    `INSERT INTO connector_logs (connector_id, event, issue_key, status, response_code, error) VALUES ($1,$2,$3,$4,$5,$6)`,
+    [connector.id, SYSTEM_ERROR_EVENT, null, status, responseCode, error]
+  ).catch(() => {});
+}
+
+async function fireTeamsSystemAlert(connector: ConnectorConfig, payload: SystemAlertPayload): Promise<void> {
+  const { webhookUrl } = connector.config;
+  if (!webhookUrl) return;
+
+  const plural = payload.errors.length === 1 ? 'error' : 'errors';
+  const body: any[] = [
+    {
+      type: 'TextBlock',
+      text: `🔴 ${payload.errors.length} application ${plural} on ${payload.host}`,
+      weight: 'bolder',
+      size: 'medium',
+      wrap: true,
+    },
+  ];
+
+  for (const err of payload.errors) {
+    body.push({
+      type: 'TextBlock',
+      text: `**${err.tag || err.level}**${err.count > 1 ? ` · ×${err.count}` : ''}`,
+      wrap: true,
+      spacing: 'medium',
+    });
+    body.push({
+      type: 'TextBlock',
+      text: err.message.slice(0, SYSTEM_ALERT_CARD_CHARS),
+      wrap: true,
+      fontType: 'monospace',
+      size: 'small',
+      spacing: 'none',
+    });
+  }
+
+  if (payload.suppressed > 0) {
+    body.push({
+      type: 'TextBlock',
+      text: `_+${payload.suppressed} more distinct error(s) suppressed in this batch._`,
+      wrap: true,
+      size: 'small',
+      isSubtle: true,
+    });
+  }
+
+  const teamsBody = {
+    type: 'message',
+    attachments: [{
+      contentType: 'application/vnd.microsoft.card.adaptive',
+      content: {
+        type: 'AdaptiveCard',
+        version: '1.4',
+        body,
+      },
+    }],
+  };
+
+  const res = await fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(teamsBody),
+  });
+  // Power Automate Workflows (the replacement for retiring O365 connectors)
+  // answers 202 here, which res.ok already covers.
+  if (!res.ok) {
+    const err = new Error(`Teams returned ${res.status}`) as any;
+    err.status = res.status;
+    throw err;
+  }
+}
+
+async function fireWebhookSystemAlert(connector: ConnectorConfig, payload: SystemAlertPayload): Promise<void> {
+  const { url, secret, headers: extraHeaders = {} } = connector.config;
+  if (!url) return;
+
+  const body = JSON.stringify(payload);
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'Neutara-Ticketing/1.0',
+    ...extraHeaders,
+  };
+
+  if (secret) {
+    const sig = crypto.createHmac('sha256', secret).update(body).digest('hex');
+    headers['X-Neutara-Signature'] = `sha256=${sig}`;
+  }
+
+  const res = await fetch(url, { method: 'POST', headers, body });
+  if (!res.ok) {
+    const err = new Error(`Webhook returned ${res.status}`) as any;
+    err.status = res.status;
+    throw err;
+  }
+}
+
 export { pool as connectorPool };

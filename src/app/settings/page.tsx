@@ -3386,6 +3386,9 @@ const CONNECTOR_EVENTS = [
   { id: 'issue.assigned',          label: 'Assignee changed' },
   { id: 'issue.commented',         label: 'Comment added' },
   { id: 'issue.department_changed',label: 'Department changed' },
+  // Not an issue event: fired by the log monitor when the application itself
+  // logs an error. See SYSTEM_ERROR_EVENT in connector-service.ts.
+  { id: 'system.error',            label: 'Application error (log monitor)' },
 ];
 const CONNECTOR_TYPES: { type: ConnectorType; label: string; desc: string; icon: React.ReactNode; color: string }[] = [
   { type: 'webhook', label: 'Webhook',          desc: 'Send JSON payloads to any URL on ticket events', icon: <Webhook size={20} />, color: 'bg-violet-50 text-violet-600 border-violet-200' },

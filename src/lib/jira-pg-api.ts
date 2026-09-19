@@ -10,7 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { handleJiraDevMock } from '@/lib/jira-dev-mock';
 import { getNextAgent, getDefaultDepartment, getRrConfig, saveRrConfig } from '@/lib/rr-service';
-import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs } from '@/lib/connector-service';
+import { fireConnectorEvent, listConnectors, getConnector, createConnector, updateConnector, deleteConnector, getConnectorLogs, fireSystemAlert, SYSTEM_ERROR_EVENT } from '@/lib/connector-service';
 import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
 import { deptMapGet, deptMapSet, deptMapDelete } from '@/lib/dept-map';
@@ -14023,6 +14023,22 @@ async function _handleJiraPgApi(
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Connectors Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // Admin only, all methods. A connector row holds an outgoing webhook URL --
+  // itself a capability, since anyone with it can post into that channel --
+  // and since the log monitor a connector can also subscribe to system.error
+  // and receive the application's error stream. Neither belongs to every
+  // authenticated role; before this gate the blanket session check at the top
+  // of this function was the only thing in front of them, which let a viewer
+  // read every stored webhook URL or point a new connector at a URL of their
+  // own. Registered as SF-8 in .claude/aisdlc/SECURITY-FOLLOWUPS.md.
+  //
+  // isPrivileged rather than the local isAdmin: isAdmin is also true for
+  // x-internal-job-secret callers, and a background job has no reason to
+  // administer connectors.
+  if (path === 'connectors' || path.startsWith('connectors/')) {
+    if (!isPrivileged(currentUser?.role)) return json({ error: 'Forbidden' }, 403);
+  }
+
   if (path === 'connectors' && method === 'GET') {
     const rows = await listConnectors();
     return json(rows);
@@ -14062,6 +14078,31 @@ async function _handleJiraPgApi(
     const connId = connectorTestMatch[1];
     const c = await getConnector(connId);
     if (!c) return json({ error: 'Not found' }, 404);
+    // A connector subscribed to system.error gets a sample system alert
+    // instead of the fake TEST-1 issue below -- testing it with an issue
+    // payload would exercise a card builder it never actually uses.
+    if ((c.events || []).includes(SYSTEM_ERROR_EVENT as any)) {
+      const nowIso = new Date().toISOString();
+      try {
+        await fireSystemAlert({
+          event: SYSTEM_ERROR_EVENT,
+          timestamp: nowIso,
+          host: process.env.HOSTNAME || 'app',
+          suppressed: 0,
+          errors: [{
+            level: 'error',
+            tag: 'LogMonitor',
+            message: '[LogMonitor] Test system alert from Neutara -- this is not a real error.',
+            count: 1,
+            firstAt: nowIso,
+            lastAt: nowIso,
+          }],
+        });
+        return json({ ok: true, message: 'Test system alert sent' });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message }, 500);
+      }
+    }
     const baseUrl = req.headers.get('origin') || 'http://localhost:3000';
     const testPayload = {
       event: 'issue.created' as const,

@@ -110,6 +110,36 @@ if (!user || user.password !== password) { ... }
 
 ---
 
+## SF-8 — HIGH — the connector endpoints carry no role gate
+
+**What.** The connector CRUD branches at [src/lib/jira-pg-api.ts:14026-14095](src/lib/jira-pg-api.ts#L14026) — `GET/POST /connectors`, `GET/PATCH/DELETE /connectors/:id`, `POST /connectors/:id/test`, `GET /connectors/:id/logs` — perform no role check. They are covered by the blanket authentication gate at [src/lib/jira-pg-api.ts:4179](src/lib/jira-pg-api.ts#L4179), so a valid session is required, but **every role passes**, including `viewer`. There is no `isPrivileged()`, `isManager()` or `can()` call on any of them.
+
+**Impact.** Any authenticated user, at any privilege level, can:
+
+1. `GET /api/connectors` and read every stored connector's `config`, which holds the Slack/Teams incoming-webhook URL. Such a URL is itself a capability: anyone holding it can post messages into that channel as the integration.
+2. Create, modify, disable or delete connectors — silently redirecting or switching off a team's integrations.
+3. Point a connector at an arbitrary URL that the server will then POST to (see SF-9).
+
+**Amplified by the log-monitor feature.** Before that change a connector could only carry issue events. It can now subscribe to `system.error` and receive application error text — which is redacted, but is still internal diagnostic detail, stack frames and customer-derived strings. A low-privileged user can therefore route that stream to a URL they control.
+
+**Remediation.** Gate the write paths (`POST`, `PATCH`, `DELETE`, `/test`) and preferably the read paths on `isPrivileged(currentUser?.role)` from [src/lib/permissions.ts:288](src/lib/permissions.ts#L288), returning `json({ error: 'Forbidden' }, 403)`. Roughly four lines. If a non-admin genuinely administers connectors today, use `isManager()` instead, which also covers `lead` and `shift_lead`.
+
+**Status.** Reported during the log-monitor security review. Not fixed at the time of writing.
+
+---
+
+## SF-9 — MEDIUM — connector webhook URLs are fetched without destination validation
+
+**What.** Every connector sender — `fireWebhook`, `fireSlack`, `fireTeams` and the new `fireTeamsSystemAlert` / `fireWebhookSystemAlert` — passes a user-supplied URL straight to `fetch` with no scheme, host or address validation. See [src/lib/connector-service.ts:156](src/lib/connector-service.ts#L156), [:205](src/lib/connector-service.ts#L205), [:269](src/lib/connector-service.ts#L269), [:471](src/lib/connector-service.ts#L471), [:501](src/lib/connector-service.ts#L501).
+
+**Impact.** Server-side request forgery. Combined with SF-8, any authenticated user can make the application POST to hosts only the server can reach — `http://prometheus:9090`, `http://alertmanager:9093`, `http://postgres:5432`, a cloud metadata endpoint — and the HTTP status comes back through `connector_logs.response_code`, giving a response oracle for internal port and host discovery. The request body is attacker-influenced JSON.
+
+**Pre-existing**, for the three original senders; the new senders inherit the same pattern rather than introducing it.
+
+**Remediation.** Require `https:`, and reject hosts that resolve to loopback, link-local or RFC1918 space at send time. Add an `AbortSignal.timeout` while there — its absence also lets a hung endpoint stall the log monitor's re-entrancy guard indefinitely.
+
+---
+
 ## Register
 
 | ID | Severity | Summary | Introduced by Phase 2? | Fixed? |
@@ -121,5 +151,7 @@ if (!user || user.password !== password) { ... }
 | SF-5 | High | dev branch skips session revocation | No | No |
 | SF-6 | Medium | one shared secret across 7 admin endpoints | No | No |
 | SF-7 | Low | 10 GB in-memory upload ceiling | No | No |
+| SF-8 | High | connector endpoints have no role gate | No — pre-existing, amplified by the log monitor | No |
+| SF-9 | Medium | connector webhook URLs fetched without destination validation (SSRF) | No — pre-existing | No |
 
 Phase 2 introduced no application code and therefore no new risk. It reduced the *rate* at which SF-2-class issues accumulate, and it made SF-1's category harder to repeat, but it fixed nothing on this list.
