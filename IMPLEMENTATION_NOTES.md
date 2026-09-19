@@ -153,3 +153,50 @@ Always use `localStorage.getItem('jira_token')` — NOT `'token'`
 - **Asymmetry, deliberate:** the looked-up name is trimmed, the stored key is not. This reproduces the original private implementation exactly. A key stored with surrounding whitespace is still missed — a known latent bug, left for its own change rather than folded into a casing fix.
 - These helpers were private to `jira-pg-api.ts` until the display layer was found using a plain case-sensitive `map[dept]`. The two rules disagreed: CF-29995 rendered a leftover QA status while sitting in Pre-Sales, and its status dropdown's `fromStatusId` filter then matched no transition at all. Shared now so they cannot drift apart again.
 - Tests: `src/lib/dept-map.test.ts` (17) and `src/lib/utils.test.ts` (8). Run with `npm test`.
+
+---
+
+## 9. Application Error Alerts to Teams (`system.error` connector)
+
+**Files:** `src/lib/log-monitor.ts` (capture) · `src/lib/connector-service.ts` (delivery) · `src/instrumentation.ts` (install) · `src/app/settings/page.tsx` (the event checkbox)
+
+### What it does
+
+`console.error` calls made anywhere in this app are forwarded to any connector subscribed to the `system.error` event — in practice a Microsoft Teams channel.
+
+### Setup (admin only)
+
+Settings → Connectors → Microsoft Teams → paste the channel's webhook URL → tick **Application error (log monitor)** → Save → **Test**. Create the URL as a Power Automate **Workflow**; the older O365 connector URLs are being retired. Both post the same Adaptive Card, and Workflows answers `202`, which `res.ok` already accepts.
+
+### Why the capture is in-process, not a log tail
+
+The only log sink is stdout under Docker's default `json-file` driver. Reading it back would need a bind mount in `docker-compose.yml`, which is out of scope for application work. Wrapping `console` instead needs no infrastructure change and picks up every existing call site without editing one of them.
+
+### Three things in `log-monitor.ts` that are load-bearing
+
+- **Write-through first.** The saved original `console.error` runs before any monitor logic, so stdout logging happens even if the monitor throws.
+- **Re-entrancy guard (`inFlush`).** The send path calls an external webhook. If that fails and anything in the failure path calls `console.error`, it would re-enter `capture()` and send again — an unbounded loop against someone else's API. While a send is in flight, `capture()` is a no-op, and the module reports its own failures through the *original* console reference.
+- **Redaction before buffering.** Error text here genuinely carries credentials — a pg connection failure prints the whole `DATABASE_URL`. `redact()` masks connection-string user info, `Bearer` tokens, JWTs, `key=value` secret forms, this app's own `nta_` API tokens, and long hex runs, and it runs before an entry is stored, not merely before it is sent.
+
+### `uncaughtExceptionMonitor`, never `uncaughtException`
+
+Adding a listener to `uncaughtException` **replaces** Node's default crash-and-exit, so the process would keep serving requests in the corrupted state that threw instead of dying and letting `restart: unless-stopped` bring up a clean container. The monitor variant observes and leaves the default intact, and it also fires for unhandled rejections, so no separate `unhandledRejection` listener is needed — adding one would reintroduce the same suppression bug. Crash capture is best-effort regardless: the process exits long before the batch window elapses.
+
+### Noise control
+
+Defaults in `DEFAULT_LOG_MONITOR_CONFIG`: errors only (warnings off), 10s batch window, 15-minute per-signature cooldown, 10 distinct errors per card. `signature()` normalises ticket keys, UUIDs, timestamps and digits so one recurring fault collapses to a single entry with a count rather than posting every occurrence.
+
+**These values are compile-time only.** `installLogMonitor()` is called with no argument and nothing reads `connector_configs.config` for them, so changing levels or muting a subsystem means editing the defaults and redeploying. Making them adjustable needs its own home (`app_settings`), because capture is process-wide while a connector row is per-channel.
+
+### Access
+
+All `connectors` paths are admin-only (`isPrivileged`) as of this change — a connector row holds an outgoing webhook URL and now the error stream. Non-admins receive `403`. The Connectors menu item is still rendered for everyone, so a non-admin sees it and then hits Forbidden; moving it into the admin-only block is an open follow-up.
+
+### Known gaps
+
+- A failed or impossible delivery is silent (`fireSystemAlert` catches everything).
+- The cooldown is recorded before the send, so a failed delivery still suppresses that error for 15 minutes.
+- Webhook destinations are not validated (SSRF) and have no request timeout. See `SF-9` in `.claude/aisdlc/SECURITY-FOLLOWUPS.md`.
+- The end-to-end path — a real error reaching a real Teams channel — has **not** been verified; QA ran without a runtime.
+
+- Tests: `src/lib/log-monitor.test.ts` (36). Run with `npm test`.
