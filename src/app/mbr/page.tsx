@@ -63,6 +63,18 @@ function pct(numerator: number, denominator: number): string {
   return denominator > 0 ? `${Math.round((numerator / denominator) * 100)}%` : '—';
 }
 
+// Renders a decimal-hours duration as H:MM:SS (e.g. 2.9 -> "2:54:00") for
+// the MBR per-person summary's Avg. resolution / Avg. response time columns,
+// per explicit request -- replaces the previous plain-hours / plain-minutes
+// display.
+function formatHms(hoursDecimal: number): string {
+  const totalSeconds = Math.round(hoursDecimal * 3600);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 function csvCell(value: unknown): string {
   const s = value == null ? '' : String(value);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -379,8 +391,8 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Total tickets</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Resolved tickets</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Resolution SLA breached</th>
-                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Avg. resolution (hrs)</th>
-                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200" title="How long it took to move a ticket from arrival in this department into actual work (Open → In Progress)">Avg. response time (min)</th>
+                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Avg. resolution (hr:mm:sec)</th>
+                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200" title="How long it took to move a ticket from arrival in this department into actual work (Open → In Progress)">Avg. response time (hr:mm:sec)</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Stale</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Missing details</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Overdue</th>
@@ -416,11 +428,11 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
                       {p.avgResolutionHours === null ? '—' : (
-                        <button onClick={(e) => { e.stopPropagation(); openDrill('hasResolutionTime', p.email, `Tickets with a recorded resolution time — ${p.name}`); }} className="hover:underline">{p.avgResolutionHours}</button>
+                        <button onClick={(e) => { e.stopPropagation(); openDrill('hasResolutionTime', p.email, `Tickets with a recorded resolution time — ${p.name}`); }} className="hover:underline">{formatHms(p.avgResolutionHours)}</button>
                       )}
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
-                      {p.avgResponseTimeHours === null || p.avgResponseTimeHours === undefined ? '—' : Math.round(p.avgResponseTimeHours * 60)}
+                      {p.avgResponseTimeHours === null || p.avgResponseTimeHours === undefined ? '—' : formatHms(p.avgResponseTimeHours)}
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
                       <button onClick={(e) => { e.stopPropagation(); openDrill('stale', p.email, `Stale tickets — ${p.name}`); }} className="hover:underline">{p.stale}</button>
