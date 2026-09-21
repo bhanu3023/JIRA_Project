@@ -2337,9 +2337,15 @@ function computeInProgressHours(
   const tailEnd = isDone && resolvedAt ? new Date(resolvedAt).getTime() : Date.now();
   const tailHrs = (tailEnd - cursor) / 3_600_000;
   if (tailHrs > 0 && cursorStatus) statusTotals[cursorStatus] = (statusTotals[cursorStatus] || 0) + tailHrs;
+  // Rounded to the nearest second (not the nearest 0.1h/6min this used to
+  // use) -- MBR's per-person table now renders this as H:MM:SS, and a
+  // 6-minute rounding grain silently zeroed out any real duration under 3
+  // minutes (e.g. a genuine 17-second response showed as "0:00:00",
+  // indistinguishable from a real bug). Confirmed for real across 62 Infra
+  // tickets whose actual gap was a few seconds to low tens of seconds.
   const inProgressHrs = Math.round(
-    Object.entries(statusTotals).reduce((sum, [name, hrs]) => sum + (IN_PROGRESS_STATUS_NAMES.has(name.trim().toLowerCase()) ? hrs : 0), 0) * 10
-  ) / 10;
+    Object.entries(statusTotals).reduce((sum, [name, hrs]) => sum + (IN_PROGRESS_STATUS_NAMES.has(name.trim().toLowerCase()) ? hrs : 0), 0) * 3600
+  ) / 3600;
   return { inProgressHrs, noHistory: statusHist.length === 0 };
 }
 
@@ -2370,7 +2376,9 @@ function computeResponseTimeHours(
     if (!IN_PROGRESS_STATUS_NAMES.has(String(h.newValue || '').trim().toLowerCase())) continue;
     const t = new Date(h.createdAt).getTime();
     if (t < startMs) continue;
-    return Math.round(((t - startMs) / 3_600_000) * 10) / 10;
+    // Nearest second, not nearest 0.1h -- see the same fix's comment on
+    // computeInProgressHours above.
+    return Math.round(((t - startMs) / 1000)) / 3600;
   }
   return null; // hasn't actually started work in this department yet
 }
@@ -12255,13 +12263,17 @@ async function _handleJiraPgApi(
         // Active work time per ticket (time actually spent In Progress),
         // not full elapsed creation-to-resolution time -- see
         // peopleInProgress construction above for why.
-        avgResolutionHours: ip && ip.count > 0 ? Math.round((ip.sum / ip.count) * 10) / 10 : null,
+        // Rounded to the nearest second, not the nearest 0.1h -- see the
+        // computeInProgressHours comment above for why: MBR renders this as
+        // H:MM:SS now, and 6-minute rounding zeroed out real sub-3-minute
+        // averages.
+        avgResolutionHours: ip && ip.count > 0 ? Math.round((ip.sum / ip.count) * 3600) / 3600 : null,
         // How fast this person actually picks up a ticket once it lands in
         // their department -- see computeResponseTimeHours/peopleResponseTime
         // construction above. Averaged across only the tickets they've
         // actually started (null tickets don't count, same "don't drag the
         // average down with a fake 0" reasoning as avgResolutionHours).
-        avgResponseTimeHours: rt && rt.count > 0 ? Math.round((rt.sum / rt.count) * 10) / 10 : null,
+        avgResponseTimeHours: rt && rt.count > 0 ? Math.round((rt.sum / rt.count) * 3600) / 3600 : null,
       };
     });
 
