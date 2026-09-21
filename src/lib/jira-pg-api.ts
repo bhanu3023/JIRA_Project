@@ -2392,7 +2392,23 @@ function computeResponseTimeHours(
     // computeInProgressHours above.
     return { hours: Math.round(((t - startMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
   }
-  return null; // hasn't actually started work in this department yet
+  // Fallback: no "In Progress"-named transition exists at all for this
+  // stint -- confirmed for real (srinu gudimitla, checked across his full
+  // ticket history) this is the NORMAL case for most agents, not rare:
+  // plenty of tickets go straight from Open to Resolved, or through a
+  // "Waiting for X"/queue-specific status, without ever passing through a
+  // status literally named "In Progress"/"Work in Progress". Leaving these
+  // as null meant most people showed no response-time data at all, not
+  // just the few genuinely-misattributed cases the author-matching fix
+  // targeted. Per explicit request to show a real number for everyone,
+  // fall back to the FIRST status change of any kind after deptStartedAt
+  // as a looser "when did someone first touch this ticket" proxy.
+  for (const h of statusHist) {
+    const t = new Date(h.createdAt).getTime();
+    if (t < startMs) continue;
+    return { hours: Math.round(((t - startMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
+  }
+  return null; // genuinely untouched since arriving in this department -- nothing to measure yet
 }
 
 function buildTeamAnalyticsOverview(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
