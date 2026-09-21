@@ -12311,7 +12311,21 @@ async function _handleJiraPgApi(
       const responseCreditEmail = response?.authorEmail && emails.has(response.authorEmail)
         ? response.authorEmail
         : (row.assignee_email ? String(row.assignee_email).toLowerCase() : null);
-      if (response != null && responseCreditEmail && emails.has(responseCreditEmail)) {
+      // The strict `emails` set only adds the assignee when
+      // current_department matches this team's own department exactly --
+      // right for every metric that legitimately needs "is this ticket
+      // currently sitting in our queue", but a ticket with a NULL
+      // current_department (confirmed for real: a handful of null-authored,
+      // near-instant bot/test-created tickets) can never pass that check
+      // even though it's already counted in this person's total ticket
+      // count elsewhere in this same loop. Treat a missing department as a
+      // data gap, not a legitimate "belongs to someone else" case -- still
+      // require the credited person to actually be this team's roster
+      // member, just without the department condition.
+      const creditedIsRosterAssignee = responseCreditEmail
+        && String(row.assignee_email || '').toLowerCase() === responseCreditEmail
+        && roster.some((e) => e.toLowerCase() === responseCreditEmail);
+      if (response != null && responseCreditEmail && (emails.has(responseCreditEmail) || (!row.current_department && creditedIsRosterAssignee))) {
         const acc = (peopleResponseTime[responseCreditEmail] ??= { sum: 0, count: 0 });
         acc.sum += response.hours;
         acc.count++;
