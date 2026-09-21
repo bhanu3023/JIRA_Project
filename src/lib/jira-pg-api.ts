@@ -12266,16 +12266,29 @@ async function _handleJiraPgApi(
       // work has genuinely started (computeResponseTimeHours returns null
       // otherwise), so a still-untouched ticket doesn't drag the average
       // down with a misleading "0".
-      // Credits ONLY the person who actually made the transition (its
-      // authorEmail), not every person in this ticket's worked-roster --
-      // see computeResponseTimeHours's own comment for why. A
-      // system-driven transition (authorEmail null, e.g. an automated
-      // department-arrival side effect) isn't attributable to anyone's
-      // personal response speed, so it's skipped entirely rather than
-      // falling back to the whole roster.
+      // Prefers crediting the actual transition author (see
+      // computeResponseTimeHours's own comment for why that's the correct
+      // attribution) -- but confirmed for real (srinu gudimitla, checked
+      // across his full 1048-ticket worked+assigned history): most agents
+      // rarely personally click "Open -> In Progress" themselves at all
+      // (someone else usually already has it moving, or an automated
+      // handoff does), so author-only attribution left the large majority
+      // of people with NO data at all, not just a few misattributed cases
+      // -- a dash for someone with dozens of resolved tickets read as
+      // broken, not "accurately sparse". Per explicit request to show a
+      // real number for everyone: when the transition has no author (or an
+      // author who isn't in this ticket's roster), fall back to crediting
+      // the ticket's CURRENT assignee only (not the full multi-person
+      // worked-roster the original bug used) -- "how responsive is
+      // whoever owns this ticket now", a much narrower and more defensible
+      // fallback than the original bug's fan-out to everyone who ever
+      // touched it.
       const response = computeResponseTimeHours(statusHistByIssue[row.id] || [], row.dept_sla_started_at);
-      if (response != null && response.authorEmail && emails.has(response.authorEmail)) {
-        const acc = (peopleResponseTime[response.authorEmail] ??= { sum: 0, count: 0 });
+      const responseCreditEmail = response?.authorEmail && emails.has(response.authorEmail)
+        ? response.authorEmail
+        : (row.assignee_email ? String(row.assignee_email).toLowerCase() : null);
+      if (response != null && responseCreditEmail && emails.has(responseCreditEmail)) {
+        const acc = (peopleResponseTime[responseCreditEmail] ??= { sum: 0, count: 0 });
         acc.sum += response.hours;
         acc.count++;
       }
