@@ -7194,10 +7194,24 @@ async function _handleJiraPgApi(
       || sp.statuses[0];
     const finalStatus = body.parentKey ? openStatus : st;
 
-    // Retry loop: handles race condition where two concurrent creates pick the same key number.
+    // Per explicit request: new tickets' real `key` column is now the same
+    // CF-XXXXX value as cf_key, generated once from the same global
+    // cf_key_seq sequence -- instead of the old space-prefixed format
+    // (e.g. L1BOAR-31588, inherited from the original Jira import) that
+    // kept leaking into the database/scripts even though the UI has shown
+    // cf_key everywhere for a while. Scoped to new tickets only -- existing
+    // historical tickets keep their current key untouched, since it's
+    // referenced by parentKey, Jira sync checkpoints, and email-thread
+    // matching, and a full retroactive migration wasn't asked for. The old
+    // keyPrefix/maxNum prefix computation above is now unused for the key
+    // itself (left in place -- not worth the risk of deleting on the
+    // now-remote chance something else still reads those query results).
+    // A sequence value can't collide under normal operation, but the retry
+    // loop is kept as a safety net -- each attempt draws a fresh sequence
+    // value rather than retrying the same one.
     let issue: any;
     for (let attempt = 0; attempt < 5; attempt++) {
-      const issueKey = `${keyPrefix}-${maxNum + 1 + attempt}`;
+      const issueKey = await nextCfKey();
       try {
         issue = await db.issue.create({
       data: {
@@ -7300,8 +7314,10 @@ async function _handleJiraPgApi(
             [issue.id]
           );
         }
-        // Assign next sequential CF key
-        const cfKey = await nextCfKey();
+        // key IS the CF-XXXXX value now (see the retry loop above) -- just
+        // mirror it into cf_key instead of drawing a second sequence value,
+        // which would otherwise desync the two columns for no reason.
+        const cfKey = issue.key;
         await pool.query(`UPDATE issues SET cf_key = $1 WHERE id = $2`, [cfKey, issue.id]);
         (issue as any).cf_key = cfKey;
       }
