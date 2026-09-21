@@ -40,10 +40,12 @@ const TYPE_LABELS: Record<string, string> = {
   bug: 'Bug', task: 'Task', subtask: 'Subtask',
 };
 const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
-// Same fixed list the ticket's own Project Manager field picks from (CreateIssueModal.tsx,
-// issues/[issueKey]/page.tsx) — individual people, not the comma-joined combinations a
-// ticket ends up storing once multiple are picked (e.g. "Abhishikth, Abhishek").
-const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan', 'Pranavi', 'Meghana', 'Neelima', 'Others'];
+// Was a hand-maintained hardcoded name list here (and in CreateIssueModal.tsx /
+// issues/[issueKey]/page.tsx) that drifted from reality -- a real
+// migration_manager-role user (Kiran U) was missing from it, while others
+// listed no longer held that role. Now fetched live via
+// api.getProjectManagerOptions() (see PROJECT_MANAGER_OPTIONS state below)
+// from whoever currently has the migration_manager role in User Management.
 // Same fixed list the ticket's own Product Type field picks from (see
 // CreateIssueModal.tsx / issues/[issueKey]/page.tsx) — a free-text box here
 // required typing the value out exactly (case and all) to match anything,
@@ -972,6 +974,9 @@ function YesNoFilterBtn({ value, onChange, label: baseLabel, yesLabel, noLabel }
 export default function FiltersPage() {
   const { user, spaces } = useStore(useShallow((s) => ({ user: s.user, spaces: s.spaces })));
   const router = useRouter();
+
+  const [PROJECT_MANAGER_OPTIONS, setProjectManagerOptions] = useState<string[]>(['Others']);
+  useEffect(() => { api.getProjectManagerOptions().then(setProjectManagerOptions).catch(() => {}); }, []);
 
   /* filter bar state */
   const [text, setText]                   = useState('');

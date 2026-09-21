@@ -184,6 +184,29 @@ class ApiClient {
   createUser(data: any) { return this.request<any>('/users', { method: 'POST', body: JSON.stringify(data) }); }
   updateUser(id: string, data: any) { return this.request<any>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteUser(id: string) { return this.request<any>(`/users/${id}`, { method: 'DELETE' }); }
+  // The "Project Manager" custom field's option list used to be a
+  // hand-maintained hardcoded name array (Harika, Abhishek, ...), which
+  // drifted from reality -- Kiran U held the migration_manager role but was
+  // missing from it, while Sri Ram/Chandra Mouli/Sravan were listed despite
+  // no longer holding that role. Per explicit request, derives the list
+  // live from whoever currently has the migration_manager role in User
+  // Management instead, so it can never go stale again. Shared by Filters,
+  // the ticket detail page's custom-field editor, and Create Issue -- one
+  // fetch+filter instead of three independent copies.
+  async getProjectManagerOptions(): Promise<string[]> {
+    try {
+      const users = await this.getUsers();
+      const names = Array.from(new Set(
+        users
+          .filter((u: any) => u.role === 'migration_manager' && u.isActive)
+          .map((u: any) => String(u.firstName || '').trim())
+          .filter(Boolean)
+      )).sort((a, b) => a.localeCompare(b));
+      return [...names, 'Others'];
+    } catch {
+      return ['Others'];
+    }
+  }
 
   // Spaces
   getSpaces() { return this.request<any[]>('/spaces'); }

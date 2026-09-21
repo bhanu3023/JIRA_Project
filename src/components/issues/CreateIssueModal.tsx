@@ -273,6 +273,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   const [selectedSpaceKey, setSelectedSpaceKey] = useState(spaceKey);
   const [spaceMembers, setSpaceMembers]         = useState<SpaceMember[]>(members);
+  // Project Manager's option list used to be a hand-maintained hardcoded
+  // name array here that drifted from who actually holds the
+  // migration_manager role in User Management. Fetched live instead.
+  const [projectManagerOptions, setProjectManagerOptions] = useState<string[]>(['Others']);
+  useEffect(() => { api.getProjectManagerOptions().then(setProjectManagerOptions).catch(() => {}); }, []);
   // baseStatuses = the space's own full status list (fallback when the
   // selected queue has no restricted list of its own). spaceStatuses = what
   // the Status dropdown actually shows — narrowed to the selected queue's
@@ -820,7 +825,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     <MultiSelectDropdown
                       value={form.projectManager}
                       onChange={v => update('projectManager', v)}
-                      options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Meghana','Neelima','Others']}
+                      options={projectManagerOptions}
                       placeholder="Select project manager..."
                     />
                   </div>
