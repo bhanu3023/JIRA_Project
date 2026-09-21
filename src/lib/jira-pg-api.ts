@@ -2381,9 +2381,17 @@ function computeInProgressHours(
 function computeResponseTimeHours(
   statusHist: Array<{ oldValue: string | null; newValue: string; authorEmail?: string | null; createdAt: Date | string }>,
   deptStartedAt: Date | string | null,
+  issueCreatedAt?: Date | string | null,
 ): { hours: number; authorEmail: string | null } | null {
-  if (!deptStartedAt) return null;
-  const startMs = new Date(deptStartedAt).getTime();
+  // dept_sla_started_at is null for tickets that predate this app's
+  // department-transfer bookkeeping (confirmed for real: Mayank Jain's
+  // tickets, some with rich real status history going back to March 2026)
+  // -- falling back to the ticket's own createdAt keeps those measurable
+  // instead of unconditionally giving up before even trying the
+  // any-status-change fallback below.
+  const anchor = deptStartedAt || issueCreatedAt;
+  if (!anchor) return null;
+  const startMs = new Date(anchor).getTime();
   for (const h of statusHist) {
     if (!IN_PROGRESS_STATUS_NAMES.has(String(h.newValue || '').trim().toLowerCase())) continue;
     const t = new Date(h.createdAt).getTime();
@@ -12299,7 +12307,7 @@ async function _handleJiraPgApi(
       // whoever owns this ticket now", a much narrower and more defensible
       // fallback than the original bug's fan-out to everyone who ever
       // touched it.
-      const response = computeResponseTimeHours(statusHistByIssue[row.id] || [], row.dept_sla_started_at);
+      const response = computeResponseTimeHours(statusHistByIssue[row.id] || [], row.dept_sla_started_at, row.createdAt);
       const responseCreditEmail = response?.authorEmail && emails.has(response.authorEmail)
         ? response.authorEmail
         : (row.assignee_email ? String(row.assignee_email).toLowerCase() : null);
@@ -12442,7 +12450,7 @@ async function _handleJiraPgApi(
       // statusHistByIssue already covers every id here: ticketRows is
       // always a subset of slaCandidatesRes.rows (same base dept+roster+
       // date WHERE clause, this query only narrows it further).
-      responseTimeHours: computeResponseTimeHours(statusHistByIssue[r.id] || [], r.dept_sla_started_at)?.hours ?? null,
+      responseTimeHours: computeResponseTimeHours(statusHistByIssue[r.id] || [], r.dept_sla_started_at, r.createdAt)?.hours ?? null,
       };
     });
 
