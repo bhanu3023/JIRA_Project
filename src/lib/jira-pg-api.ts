@@ -7260,7 +7260,51 @@ async function _handleJiraPgApi(
     try {
       if (issue?.id) {
         // current_department is a raw ALTER TABLE column -- Prisma doesn't know it, so set via raw SQL
-        const deptToSet = body.department ? String(body.department) : (rrDepartment || null);
+        let deptToSet = body.department ? String(body.department) : (rrDepartment || null);
+        // For a subtask, body.department is whatever the parent ticket's
+        // department happened to be at the moment "Create subtask" was
+        // clicked (handleCreateSubtask in issues/[issueKey]/page.tsx) --
+        // but a subtask should belong to whoever actually created it, and
+        // a person can genuinely create one while looking at a parent that
+        // currently sits in a DIFFERENT department than their own (e.g. a
+        // QA engineer commenting/working on a ticket that's momentarily
+        // routed to Infra). Confirmed for real on CF-33269: created by
+        // Sadia Shaik (role qa_engineer, and the ONLY queue she's a member
+        // of anywhere is TESTIN's own QA queue), but the parent genuinely
+        // was sitting in Infra at that exact moment, so the subtask
+        // inherited Infra -- locking QA (the team that actually created
+        // it) out of ever resolving it, since canResolveHere compares
+        // current_department against original_dept.
+        // Prefer the CREATOR's own queue membership instead, whenever
+        // they belong to exactly one queue in this ticket's space --
+        // that's an unambiguous signal of whose subtask this really is.
+        // Falls back to the parent's own current department (freshly
+        // re-read server-side, not the client's possibly-stale value) when
+        // the creator isn't a member of exactly one queue here.
+        if (body.parentKey) {
+          let creatorDept: string | null = null;
+          if (userId) {
+            try {
+              const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [sp.key]);
+              const memberQueues: string[] = [];
+              for (const row of cq.rows) {
+                for (const q of (row.queues || [])) {
+                  if (Array.isArray(q.memberIds) && q.memberIds.includes(userId) && q.name) memberQueues.push(q.name);
+                }
+              }
+              if (memberQueues.length === 1) creatorDept = memberQueues[0];
+            } catch { /* fall through to the parent-department fallback below */ }
+          }
+          if (creatorDept) {
+            deptToSet = creatorDept;
+          } else {
+            try {
+              const liveParent = await pool.query(`SELECT current_department FROM issues WHERE key = $1 LIMIT 1`, [String(body.parentKey).toUpperCase()]);
+              const liveDept = liveParent.rows[0]?.current_department;
+              if (liveDept) deptToSet = liveDept;
+            } catch { /* fall back to the client-supplied value below */ }
+          }
+        }
         if (deptToSet) {
           // Seed dept_statuses with the QUEUE's own configured "open" status (same
           // lookup the department-transfer path uses below) rather than the space's
