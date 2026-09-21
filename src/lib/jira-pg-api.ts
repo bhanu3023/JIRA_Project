@@ -2366,10 +2366,22 @@ function computeInProgressHours(
 // department's own response time. A transition timestamped before the
 // department even started (a stale in-progress event carried over from
 // an earlier stint) is skipped rather than producing a negative number.
+// Also returns WHO made the qualifying transition (authorEmail on that
+// specific history row) -- MBR's per-person average used to credit this
+// single per-ticket value to every person in the ticket's "worked" roster
+// (assignee + anyone else who'd touched it), not just whoever actually made
+// the fast/slow move. Confirmed for real: Naved and Jaswanth (both
+// Dev-roster, both handling a lot of multi-hop Migration<->Dev<->QA<->Infra
+// tickets) showed a flat 0:00:00 average because several of their shared
+// tickets' near-instant "In Progress" transitions were actually made by
+// SOMEONE ELSE (another agent, or a chain of automated department-arrival
+// side effects) -- that person's speed got misattributed to them too, just
+// for being in the same ticket's worked-roster. A personal "how fast did
+// YOU respond" metric should only count the actual author's own actions.
 function computeResponseTimeHours(
-  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+  statusHist: Array<{ oldValue: string | null; newValue: string; authorEmail?: string | null; createdAt: Date | string }>,
   deptStartedAt: Date | string | null,
-): number | null {
+): { hours: number; authorEmail: string | null } | null {
   if (!deptStartedAt) return null;
   const startMs = new Date(deptStartedAt).getTime();
   for (const h of statusHist) {
@@ -2378,7 +2390,7 @@ function computeResponseTimeHours(
     if (t < startMs) continue;
     // Nearest second, not nearest 0.1h -- see the same fix's comment on
     // computeInProgressHours above.
-    return Math.round(((t - startMs) / 1000)) / 3600;
+    return { hours: Math.round(((t - startMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
   }
   return null; // hasn't actually started work in this department yet
 }
@@ -12136,11 +12148,11 @@ async function _handleJiraPgApi(
     // once here rather than per-ticket, same shape as workedRosterRes above.
     const statusHistRes = slaCandidateIds.length
       ? await pool.query(
-          `SELECT "issueId", "oldValue", "newValue", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'status' ORDER BY "issueId", "createdAt" ASC`,
+          `SELECT "issueId", "oldValue", "newValue", "authorEmail", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'status' ORDER BY "issueId", "createdAt" ASC`,
           [slaCandidateIds]
         )
       : { rows: [] as any[] };
-    const statusHistByIssue: Record<string, Array<{ oldValue: string | null; newValue: string; createdAt: Date }>> = {};
+    const statusHistByIssue: Record<string, Array<{ oldValue: string | null; newValue: string; authorEmail: string | null; createdAt: Date }>> = {};
     for (const h of statusHistRes.rows) {
       (statusHistByIssue[h.issueId] ??= []).push(h);
     }
@@ -12254,13 +12266,18 @@ async function _handleJiraPgApi(
       // work has genuinely started (computeResponseTimeHours returns null
       // otherwise), so a still-untouched ticket doesn't drag the average
       // down with a misleading "0".
-      const responseHrs = computeResponseTimeHours(statusHistByIssue[row.id] || [], row.dept_sla_started_at);
-      if (responseHrs != null) {
-        for (const email of Array.from(emails)) {
-          const acc = (peopleResponseTime[email] ??= { sum: 0, count: 0 });
-          acc.sum += responseHrs;
-          acc.count++;
-        }
+      // Credits ONLY the person who actually made the transition (its
+      // authorEmail), not every person in this ticket's worked-roster --
+      // see computeResponseTimeHours's own comment for why. A
+      // system-driven transition (authorEmail null, e.g. an automated
+      // department-arrival side effect) isn't attributable to anyone's
+      // personal response speed, so it's skipped entirely rather than
+      // falling back to the whole roster.
+      const response = computeResponseTimeHours(statusHistByIssue[row.id] || [], row.dept_sla_started_at);
+      if (response != null && response.authorEmail && emails.has(response.authorEmail)) {
+        const acc = (peopleResponseTime[response.authorEmail] ??= { sum: 0, count: 0 });
+        acc.sum += response.hours;
+        acc.count++;
       }
 
       if (isEntSmb) {
@@ -12396,7 +12413,7 @@ async function _handleJiraPgApi(
       // statusHistByIssue already covers every id here: ticketRows is
       // always a subset of slaCandidatesRes.rows (same base dept+roster+
       // date WHERE clause, this query only narrows it further).
-      responseTimeHours: computeResponseTimeHours(statusHistByIssue[r.id] || [], r.dept_sla_started_at),
+      responseTimeHours: computeResponseTimeHours(statusHistByIssue[r.id] || [], r.dept_sla_started_at)?.hours ?? null,
       };
     });
 
