@@ -2416,6 +2416,23 @@ function computeResponseTimeHours(
     if (t < startMs) continue;
     return { hours: Math.round(((t - startMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
   }
+  // Last resort: nothing qualifies AT OR AFTER the anchor at all. Confirmed
+  // for real (CF-29926, Lakshmi Prasanna): she genuinely responded in ~3
+  // minutes (created it, clicked In Progress moments later) -- but the
+  // ticket was already Resolved before a LATER, unrelated administrative
+  // re-transfer/reassignment reset dept_sla_started_at to a time after all
+  // the real activity, leaving nothing measurable after that late anchor.
+  // Falls back to the ticket's own very first status change ever, measured
+  // from its createdAt -- a real, meaningful response time exists, it's
+  // just entirely before whatever reset the anchor moved to.
+  if (statusHist.length && issueCreatedAt) {
+    const h = statusHist[0];
+    const createdMs = new Date(issueCreatedAt).getTime();
+    const t = new Date(h.createdAt).getTime();
+    if (t >= createdMs) {
+      return { hours: Math.round(((t - createdMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
+    }
+  }
   return null; // genuinely untouched since arriving in this department -- nothing to measure yet
 }
 
