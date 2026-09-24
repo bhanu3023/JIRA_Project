@@ -179,6 +179,14 @@ class ApiClient {
     return this.request<any>(`/my-dashboard${qs ? `?${qs}` : ''}`);
   }
 
+  // Live "does a ticket like this already exist?" check for the Create
+  // Issue modal, shown below the Summary field per explicit request.
+  getSimilarIssues(spaceKey: string, summary: string, description?: string) {
+    const params = new URLSearchParams({ spaceKey, summary });
+    if (description) params.set('description', description);
+    return this.request<{ matches: Array<{ key: string; displayKey: string; summary: string; status: string; statusCategory: string; matchPercent: number; isExactMatch: boolean }> }>(`/issues/similar?${params.toString()}`);
+  }
+
   // Users
   getUsers() { return this.request<any[]>('/users'); }
   createUser(data: any) { return this.request<any>('/users', { method: 'POST', body: JSON.stringify(data) }); }

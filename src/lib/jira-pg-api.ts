@@ -7056,6 +7056,100 @@ async function _handleJiraPgApi(
     });
   }
 
+  // Per explicit request: live "does a ticket like this already exist?"
+  // check for the Create Issue modal, surfaced below the Summary field as
+  // the user types -- reuses the same pg_trgm fuzzy-matching approach
+  // findPreviouslyResolvedSimilar already uses for its post-creation
+  // "Recurring issue" notification, but: (1) runs live, before creation,
+  // not after; (2) checks every ticket in the space regardless of status,
+  // not just resolved ones -- an OPEN duplicate is exactly what someone
+  // typing a new ticket needs to see, arguably more than a resolved one;
+  // (3) optionally blends in description similarity too, so a caller can
+  // ask for a stricter "same summary AND same description" match.
+  if (path === 'issues/similar' && method === 'GET') {
+    // stripHtml is defined locally elsewhere in this file inside a
+    // different function's scope, not shared -- redefined here rather than
+    // hoisting it, matching how this file already handles small scoped
+    // utilities in multiple places.
+    const stripHtmlLocal = (s: string): string => String(s || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
+    // Dice-coefficient bigram similarity (0..1) -- a dependency-free JS
+    // equivalent of the pg_trgm similarity() already used for the summary
+    // comparison above, so description matching behaves consistently with
+    // it without a second round-trip per candidate row.
+    const textSimilarity = (a: string, b: string): number => {
+      const bigrams = (s: string): Map<string, number> => {
+        const norm = s.toLowerCase().replace(/\s+/g, ' ').trim();
+        const map = new Map<string, number>();
+        for (let i = 0; i < norm.length - 1; i++) {
+          const bg = norm.slice(i, i + 2);
+          map.set(bg, (map.get(bg) || 0) + 1);
+        }
+        return map;
+      };
+      const aBg = bigrams(a), bBg = bigrams(b);
+      if (aBg.size === 0 || bBg.size === 0) return 0;
+      let overlap = 0;
+      aBg.forEach((countA, bg) => { overlap += Math.min(countA, bBg.get(bg) || 0); });
+      const total = Array.from(aBg.values()).reduce((s, v) => s + v, 0) + Array.from(bBg.values()).reduce((s, v) => s + v, 0);
+      return total === 0 ? 0 : (2 * overlap) / total;
+    };
+
+    const spaceKey = (url.searchParams.get('spaceKey') || '').toUpperCase();
+    const summary = (url.searchParams.get('summary') || '').trim();
+    const description = stripHtmlLocal(url.searchParams.get('description') || '').trim();
+    // Too short to mean anything -- pg_trgm similarity on a couple of
+    // characters matches almost everything, which would just be noise.
+    if (!spaceKey || summary.length < 8) return json({ matches: [] });
+
+    const sp = await db.space.findUnique({ where: { key: spaceKey } });
+    if (!sp) return json({ matches: [] });
+
+    try {
+      const descParam = description.length >= 8 ? description : null;
+      const res = await pool.query(
+        `SELECT i.key, COALESCE(i.cf_key, i.key) AS display_key, i.summary, i.description,
+                s.name AS status_name, s.category AS status_category,
+                similarity(LOWER(i.summary), LOWER($2)) AS summary_sim
+         FROM issues i
+         LEFT JOIN statuses s ON s.id = i."statusId"
+         WHERE i."spaceId" = $1
+           AND similarity(LOWER(i.summary), LOWER($2)) > 0.25
+         ORDER BY summary_sim DESC
+         LIMIT 8`,
+        [sp.id, summary]
+      );
+
+      const matches = res.rows.map((r: any) => {
+        const summarySim = Number(r.summary_sim) || 0;
+        // Plain-text description similarity computed in JS, not SQL --
+        // stripHtml() already exists for exactly this (rich-text
+        // descriptions store HTML), and running it in SQL would mean a
+        // second regexp pass per row for no real benefit at this row
+        // count (top 8 candidates only, already summary-filtered).
+        const descSim = descParam ? textSimilarity(stripHtmlLocal(r.description || ''), descParam) : null;
+        const combined = descSim != null ? (summarySim + descSim) / 2 : summarySim;
+        const isExactMatch = summary.trim().toLowerCase() === String(r.summary || '').trim().toLowerCase()
+          && (descParam == null || descSim! > 0.9);
+        return {
+          key: r.key, displayKey: r.display_key, summary: r.summary,
+          status: r.status_name, statusCategory: r.status_category,
+          matchPercent: Math.round(combined * 100),
+          isExactMatch,
+        };
+      })
+      .filter((m: any) => m.matchPercent >= 30)
+      .sort((a: any, b: any) => b.matchPercent - a.matchPercent)
+      .slice(0, 5);
+
+      return json({ matches });
+    } catch (e: any) {
+      // pg_trgm not available, or any other query failure -- this is a
+      // convenience feature, never worth failing ticket creation over.
+      console.error('[issues/similar]', e?.message);
+      return json({ matches: [] });
+    }
+  }
+
   if (path === 'issues' && method === 'POST') {
     const body = await readJson(req);
     const sk = String(body.spaceKey || '').toUpperCase();

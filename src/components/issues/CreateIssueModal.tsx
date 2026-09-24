@@ -305,6 +305,25 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [migrationSections, setMigrationSections] = useState<string[]>(() => MIGRATION_SECTION_LABELS.map(() => ''));
   const [migrationUploading, setMigrationUploading] = useState<boolean[]>(() => MIGRATION_SECTION_LABELS.map(() => false));
   const isMigrationDept = form.department.toLowerCase() === 'migration';
+  // Live "does a ticket like this already exist?" check, shown below the
+  // Summary field per explicit request -- debounced so it doesn't fire a
+  // request on every keystroke, and cancels a stale in-flight request if
+  // the user keeps typing before it resolves.
+  const [similarIssues, setSimilarIssues] = useState<Array<{ key: string; displayKey: string; summary: string; status: string; statusCategory: string; matchPercent: number; isExactMatch: boolean }>>([]);
+  const [similarLoading, setSimilarLoading] = useState(false);
+  useEffect(() => {
+    if (!selectedSpaceKey || form.summary.trim().length < 8) { setSimilarIssues([]); return; }
+    let cancelled = false;
+    setSimilarLoading(true);
+    const timer = setTimeout(() => {
+      api.getSimilarIssues(selectedSpaceKey, form.summary, form.description)
+        .then((res) => { if (!cancelled) setSimilarIssues(res.matches || []); })
+        .catch(() => { if (!cancelled) setSimilarIssues([]); })
+        .finally(() => { if (!cancelled) setSimilarLoading(false); });
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [selectedSpaceKey, form.summary, form.description]);
+
   const [summaryError, setSummaryError] = useState(false);
   const [queueError, setQueueError]                 = useState(false);
   const [combinationError, setCombinationError]     = useState(false);
@@ -673,6 +692,34 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 <div className="flex items-center gap-1.5 mt-1.5">
                   <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
                   <p className="text-[12px] text-red-600 font-medium">Summary is required</p>
+                </div>
+              )}
+              {similarLoading && (
+                <p className="text-[12px] text-gray-400 mt-1.5">Checking for similar tickets…</p>
+              )}
+              {!similarLoading && similarIssues.length > 0 && (
+                <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 overflow-hidden">
+                  <div className="px-3 py-1.5 text-[11px] font-semibold text-amber-800 uppercase tracking-wide border-b border-amber-200">
+                    Possibly related tickets
+                  </div>
+                  <div className="divide-y divide-amber-100">
+                    {similarIssues.map((m) => (
+                      <a
+                        key={m.key}
+                        href={`/issues/${m.displayKey}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 px-3 py-2 hover:bg-amber-100 transition-colors"
+                      >
+                        <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded ${m.isExactMatch ? 'bg-red-600 text-white' : 'bg-amber-200 text-amber-800'}`}>
+                          {m.isExactMatch ? '100% MATCH' : `${m.matchPercent}% match`}
+                        </span>
+                        <span className="text-[12px] font-semibold text-indigo-600 shrink-0">{m.displayKey}</span>
+                        <span className="text-[12px] text-gray-700 truncate">{m.summary}</span>
+                        <span className="text-[11px] text-gray-400 shrink-0 ml-auto">{m.status}</span>
+                      </a>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
