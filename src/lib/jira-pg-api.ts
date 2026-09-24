@@ -8713,9 +8713,31 @@ async function _handleJiraPgApi(
     // which is currently holding it, to be allowed to resolve it too.
     const resolveOverrideDepts: string[] = Array.isArray(rawDeptData?.resolve_override_depts) ? rawDeptData.resolve_override_depts : [];
     const currentDeptLower = (mergedIssue.current_department || '').trim().toLowerCase();
-    const canResolveHere = !currentDeptLower
+    // Per explicit request, a standing rule now (not another one-off
+    // resolve_override_depts patch): whoever is CURRENTLY ASSIGNED to a
+    // ticket can always resolve it, as long as they're a genuine member of
+    // the department the ticket is currently sitting in -- covers exactly
+    // the pattern repeatedly hand-patched this session (CF-29995, CF-33368,
+    // Ranadeep's Migration tickets, subtask creators): a real team member
+    // is demonstrably doing the actual work, but origin-department
+    // bookkeeping (often NULL or drifted through many historical handoffs)
+    // says otherwise. Still requires genuine queue membership, not just
+    // "any assignee" -- an assignee who ISN'T really on this department's
+    // roster (e.g. still shown as assignee moments into a fresh handoff,
+    // before round-robin reassigns) doesn't get a free pass.
+    const canResolveHereByOriginOrOverride = !currentDeptLower
       || currentDeptLower === (originDepartment || '').trim().toLowerCase()
       || resolveOverrideDepts.some((d) => String(d).trim().toLowerCase() === currentDeptLower);
+    let assigneeIsCurrentDeptMember = false;
+    if (!canResolveHereByOriginOrOverride && mergedIssue.assigneeId && mergedIssue.space?.key) {
+      try {
+        const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [mergedIssue.space.key]);
+        const queues: any[] = cq.rows[0]?.queues || [];
+        const q = queues.find((qq: any) => String(qq.name || '').trim().toLowerCase() === currentDeptLower);
+        if (q && Array.isArray(q.memberIds) && q.memberIds.includes(mergedIssue.assigneeId)) assigneeIsCurrentDeptMember = true;
+      } catch { /* fall through -- assigneeIsCurrentDeptMember stays false */ }
+    }
+    const canResolveHere = canResolveHereByOriginOrOverride || assigneeIsCurrentDeptMember;
     const responsePayload: any = {
       ...formatIssue(mergedIssue as any), attachments, attachmentCount: attachments.length, children, activity, sla: slaInstances, customFieldValues: {},
       originDepartment, canResolveHere, resolveOverrideDepts,
