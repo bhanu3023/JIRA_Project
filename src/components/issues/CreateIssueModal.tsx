@@ -335,6 +335,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [projectManagerError, setProjectManagerError] = useState(false);
   const [projectPoolError, setProjectPoolError]       = useState(false);
   const [infraIssueTypeError, setInfraIssueTypeError] = useState(false);
+  // "Other" lets the reporter type an Infra issue type not in the fixed
+  // list -- tracked separately from form.infraIssueType (which holds
+  // whatever free text they type) so the <select> can stay on the "Other"
+  // option while that text doesn't match any of the real list entries.
+  const [infraIssueTypeOther, setInfraIssueTypeOther] = useState(false);
   // Admin-configured custom fields (e.g. "Project Pool") each carry their own
   // `required` flag from Settings > Custom Fields, but nothing here ever
   // read it -- the field rendered with no asterisk and Create succeeded even
@@ -852,8 +857,16 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     Infra Issue Type {skipsInfraOptionalFields && !isITAdminBoard && <span className="text-red-500">*</span>}
                   </label>
                   <select
-                    value={form.infraIssueType}
-                    onChange={e => update('infraIssueType', e.target.value)}
+                    value={infraIssueTypeOther ? '__other__' : form.infraIssueType}
+                    onChange={e => {
+                      if (e.target.value === '__other__') {
+                        setInfraIssueTypeOther(true);
+                        update('infraIssueType', '');
+                      } else {
+                        setInfraIssueTypeOther(false);
+                        update('infraIssueType', e.target.value);
+                      }
+                    }}
                     className={cn(
                       "w-full rounded-lg border px-3 py-2 text-[13px] focus:outline-none focus:ring-2 bg-white",
                       infraIssueTypeError ? 'border-red-300 ring-2 ring-red-300 focus:ring-red-300' : 'border-gray-300 focus:ring-blue-500',
@@ -861,7 +874,21 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   >
                     <option value="">Select Infra Issue Type</option>
                     {INFRA_ISSUE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    <option value="__other__">Other</option>
                   </select>
+                  {infraIssueTypeOther && (
+                    <input
+                      type="text"
+                      autoFocus
+                      value={form.infraIssueType}
+                      onChange={e => update('infraIssueType', e.target.value)}
+                      placeholder="Type the Infra issue type"
+                      className={cn(
+                        "w-full rounded-lg border px-3 py-2 text-[13px] focus:outline-none focus:ring-2 bg-white mt-2",
+                        infraIssueTypeError ? 'border-red-300 ring-2 ring-red-300 focus:ring-red-300' : 'border-gray-300 focus:ring-blue-500',
+                      )}
+                    />
+                  )}
                   {infraIssueTypeError && (
                     <div className="flex items-center gap-1.5 mt-1.5">
                       <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
@@ -1011,6 +1038,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     setForm(f => (f.department ? { ...f, department: '' } : f));
                     setSelectedQueueId('');
                     setSpaceQueues([]);
+                    setInfraIssueTypeOther(false);
                   }}
                   className="w-full pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
