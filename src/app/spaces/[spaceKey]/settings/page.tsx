@@ -323,7 +323,15 @@ function PeopleSection({
               const firstName = m.firstName || m.user?.firstName || '';
               const lastName  = m.lastName  || m.user?.lastName  || '';
               const email     = m.email     || m.user?.email     || '';
-              const role      = m.role || 'agent';
+              // A native <select>'s value must match one of its <option>s --
+              // when m.role holds anything outside SPACE_ROLES (a legacy
+              // value, or 'agent'), the browser silently selects its FIRST
+              // option ("Admin") instead, and simply opening/closing that
+              // dropdown can then fire onChange with "admin", writing an
+              // unintended promotion back to the DB. Falling back to
+              // 'member' here keeps the displayed value always valid, so
+              // that can't happen.
+              const role      = SPACE_ROLES.includes(m.role) ? m.role : 'member';
               return (
                 <tr key={m.id} className="hover:bg-gray-50 transition-colors group">
                   <td className="px-5 py-3.5">
