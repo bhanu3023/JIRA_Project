@@ -4553,6 +4553,11 @@ async function _handleJiraPgApi(
   }
 
   if (path === 'spaces' && method === 'POST') {
+    // No isAdmin check existed here -- any authenticated user could create a
+    // new space and was auto-inserted as its 'admin' member below,
+    // self-granting themselves admin of that space. The frontend only hides
+    // the "New Space" button for non-admins; nothing enforced it server-side.
+    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
     const body = await readJson(req);
     const key = String(body.key || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (!key) return json({ error: 'Invalid space key' }, 400);
@@ -4660,6 +4665,15 @@ async function _handleJiraPgApi(
 
   if (spaceKeyMatch && method === 'PATCH') {
     const key = spaceKeyMatch[1].toUpperCase();
+    // No gate existed here at all -- not isAdmin, not even space
+    // membership. Any authenticated user could rename/re-describe/
+    // re-icon/re-type any space in the org, including ones they don't
+    // belong to. Matches the same isAdmin-or-space-admin pattern the
+    // sibling members routes already use.
+    const spForPatchAuth = await db.space.findUnique({ where: { key }, include: { members: true } });
+    if (!spForPatchAuth) return json({ error: 'Not found' }, 404);
+    const isSpaceAdminForPatch = spForPatchAuth.members.some(m => m.userId === userId && m.role === 'admin');
+    if (!isAdmin && !isSpaceAdminForPatch) return json({ error: 'Forbidden' }, 403);
     const body = await readJson(req);
     const data: Record<string, unknown> = {};
     if (body.name !== undefined) data.name = String(body.name);
@@ -4773,7 +4787,12 @@ async function _handleJiraPgApi(
     const memberUserId = spaceMemberDelete[2];
     const sp = await db.space.findUnique({ where: { key }, include: { members: true } });
     if (!sp) return json({ error: 'Not found' }, 404);
-    // Any authenticated user can remove members from a space
+    // Was genuinely unguarded -- any authenticated user could remove any
+    // other member (including that space's own admin) from any space,
+    // whether or not they belonged to it themselves. Matches the same
+    // isAdmin-or-space-admin pattern the sibling add/edit-member routes use.
+    const isSpaceAdminForRemove = sp.members.some(m => m.userId === userId && m.role === 'admin');
+    if (!isAdmin && !isSpaceAdminForRemove) return json({ error: 'Forbidden' }, 403);
     try {
       await db.spaceMember.delete({
         where: { spaceId_userId: { spaceId: sp.id, userId: memberUserId } },
@@ -12914,12 +12933,28 @@ async function _handleJiraPgApi(
     return json({ statuses, transitions });
   }
 
-  // POST /workflows/:id/statuses  Ã¢â€ ' add a new status to the space
+  // Shared gate for every workflow write route below (statuses and
+  // transitions, create/edit/delete/reorder) -- none of them checked
+  // isAdmin or space membership at all before this fix. Any authenticated
+  // user could mutate any space's workflow schema, whether or not they
+  // belonged to it. "Manage workflows" is documented (Settings -> Space
+  // permissions) as admin-only, so this matches that.
+  async function requireWorkflowAdmin(wfId: string): Promise<{ ok: true; space: any } | { ok: false; res: any }> {
+    const sk = wfId.replace(/^wf_/, '').toUpperCase();
+    const space = await db.space.findUnique({ where: { key: sk }, include: { members: true } });
+    if (!space) return { ok: false, res: json({ error: 'Not found' }, 404) };
+    if (!isAdmin && !space.members.some((m: any) => m.userId === userId && m.role === 'admin')) {
+      return { ok: false, res: json({ error: 'Forbidden' }, 403) };
+    }
+    return { ok: true, space };
+  }
+
+  // POST /workflows/:id/statuses -- add a new status to the space
   if (wfStatuses && method === 'POST') {
     const wfId = wfStatuses[1];
-    const sk = wfId.replace(/^wf_/, '').toUpperCase();
-    const space = await db.space.findUnique({ where: { key: sk } });
-    if (!space) return json({ error: 'Not found' }, 404);
+    const gate = await requireWorkflowAdmin(wfId);
+    if (!gate.ok) return gate.res;
+    const space = gate.space;
     const body = await readJson(req);
     const maxOrder = await db.status.aggregate({ where: { spaceId: space.id }, _max: { order: true } });
     const st = await db.status.create({
@@ -12937,7 +12972,9 @@ async function _handleJiraPgApi(
   // PATCH /workflows/:wfId/statuses/:statusId
   const wfStatusPatch = path.match(/^workflows\/([^/]+)\/statuses\/([^/]+)$/);
   if (wfStatusPatch && method === 'PATCH') {
-    const [, , statusId] = wfStatusPatch;
+    const [, wfId, statusId] = wfStatusPatch;
+    const gate = await requireWorkflowAdmin(wfId);
+    if (!gate.ok) return gate.res;
     const body = await readJson(req);
     const data: any = {};
     if (body.name !== undefined) data.name = body.name;
@@ -12949,7 +12986,9 @@ async function _handleJiraPgApi(
 
   // DELETE /workflows/:wfId/statuses/:statusId
   if (wfStatusPatch && method === 'DELETE') {
-    const [, , statusId] = wfStatusPatch;
+    const [, wfId, statusId] = wfStatusPatch;
+    const gate = await requireWorkflowAdmin(wfId);
+    if (!gate.ok) return gate.res;
     // Delete transitions first (cascade not guaranteed for status FK)
     await (db as any).workflowTransition.deleteMany({
       where: { OR: [{ fromStatusId: statusId }, { toStatusId: statusId }] },
@@ -12961,6 +13000,8 @@ async function _handleJiraPgApi(
   // PUT /workflows/:id/statuses/reorder
   const wfReorder = path.match(/^workflows\/([^/]+)\/statuses\/reorder$/);
   if (wfReorder && method === 'PUT') {
+    const gate = await requireWorkflowAdmin(wfReorder[1]);
+    if (!gate.ok) return gate.res;
     const body = await readJson(req);
     const statusIds: string[] = Array.isArray(body.statusIds) ? body.statusIds : [];
     for (let i = 0; i < statusIds.length; i++) {
@@ -12973,9 +13014,9 @@ async function _handleJiraPgApi(
   const wfTransPost = path.match(/^workflows\/([^/]+)\/transitions$/);
   if (wfTransPost && method === 'POST') {
     const wfId = wfTransPost[1];
-    const sk = wfId.replace(/^wf_/, '').toUpperCase();
-    const space = await db.space.findUnique({ where: { key: sk } });
-    if (!space) return json({ error: 'Not found' }, 404);
+    const gate = await requireWorkflowAdmin(wfId);
+    if (!gate.ok) return gate.res;
+    const space = gate.space;
     const body = await readJson(req);
     const tr = await (db as any).workflowTransition.upsert({
       where: { spaceId_fromStatusId_toStatusId: { spaceId: space.id, fromStatusId: body.fromStatusId, toStatusId: body.toStatusId } },
@@ -12988,7 +13029,9 @@ async function _handleJiraPgApi(
   // DELETE /workflows/:id/transitions/:transId
   const wfTransDel = path.match(/^workflows\/([^/]+)\/transitions\/([^/]+)$/);
   if (wfTransDel && method === 'DELETE') {
-    const [, , transId] = wfTransDel;
+    const [, wfId, transId] = wfTransDel;
+    const gate = await requireWorkflowAdmin(wfId);
+    if (!gate.ok) return gate.res;
     await (db as any).workflowTransition.delete({ where: { id: transId } });
     return json({ ok: true });
   }
@@ -14045,6 +14088,15 @@ async function _handleJiraPgApi(
   // GET /app-settings Ã¢â‚¬â€ return all key/value app settings
   // PUT /app-settings Ã¢â‚¬â€ upsert a key/value setting
   if (path === 'app-settings') {
+    // No isAdmin check existed here at all -- this table holds the real
+    // Jira API token/email/URL (getJiraCredentials() stores them here
+    // specifically, per its own comment, to avoid hardcoding a "real
+    // security exposure"). Any logged-in user, any role, could GET this and
+    // read the live Jira token directly, or PUT to overwrite it (e.g.
+    // redirecting Jira sync to an attacker-controlled token/URL). Confirmed
+    // via a security audit. Only Settings/Import (both admin-only pages)
+    // ever call this endpoint.
+    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
     await pool.query(
       `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`
     );

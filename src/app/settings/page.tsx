@@ -28,7 +28,10 @@ function SyncMsPhotosButton({ onDone }: { onDone: () => void }) {
     try {
       const res = await fetch('/api/admin/sync-ms-photos', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+        },
         body: JSON.stringify({ forceAll }),
       });
       const data = await res.json();
@@ -2002,7 +2005,10 @@ function SettingsContent() {
           const currentUser = useStore.getState().user;
           await fetch('/api/users/invite', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+            },
             body: JSON.stringify({
               email:      inviteForm.email,
               firstName:  inviteForm.firstName,
@@ -2340,7 +2346,10 @@ function SettingsContent() {
                                       const appUrl = window.location.origin;
                                       const res = await fetch('/api/users/invite', {
                                         method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
+                                        headers: {
+                                          'Content-Type': 'application/json',
+                                          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+                                        },
                                         body: JSON.stringify({
                                           email: u.email,
                                           firstName: u.firstName || '',
@@ -2577,7 +2586,10 @@ function SettingsContent() {
                   <button
                     onClick={async () => {
                       try {
-                        await fetch('/api/users/invite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        await fetch('/api/users/invite', { method: 'POST', headers: {
+                          'Content-Type': 'application/json',
+                          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+                        },
                           body: JSON.stringify({ email: u.email, firstName: u.firstName, lastName: u.lastName, role: u.role,
                             invitedBy: `${user?.firstName} ${user?.lastName}`.trim() }) });
                         setMessage(`Invite resent to ${u.email}`);

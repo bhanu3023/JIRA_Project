@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getAllOAuthEmails, getOAuthTokens } from '@/lib/oauth-service';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 
@@ -94,6 +95,13 @@ async function fetchOwnPhoto(token: string): Promise<string | null> {
 }
 
 export async function POST(req: NextRequest) {
+  // No auth check existed here at all -- this endpoint uses OTHER users'
+  // stored Microsoft OAuth tokens (from whoever has logged in via
+  // Microsoft) to call Graph on their behalf without their consent.
+  // Confirmed via a security audit.
+  const adminAuth = await requireAdmin(req);
+  if (!adminAuth.ok) return NextResponse.json({ error: adminAuth.error }, { status: adminAuth.status });
+
   const body = await req.json().catch(() => ({})) as { forceAll?: boolean };
 
   const allUsers = await db.user.findMany({
