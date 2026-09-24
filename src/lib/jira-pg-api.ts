@@ -39,6 +39,15 @@ async function userCanViewMbr(userId: string | null): Promise<boolean> {
   } catch { return false; }
 }
 
+// pg_trgm powers the fuzzy summary/description matching used by both
+// findPreviouslyResolvedSimilar (post-creation "Recurring issue" alert) and
+// GET /issues/similar (the live Create Issue duplicate check) -- confirmed
+// for real it's NOT installed on this database ("function similarity(text,
+// text) does not exist" in the logs), silently degrading both features to
+// whatever fallback each one has. Try once at startup; both callers still
+// work without it (their own fallbacks don't depend on this function), but
+// this is strictly better when it succeeds.
+pool.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`).catch(() => {});
 // Ensure original_dept column exists
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS original_dept TEXT`).catch(() => {});
 // Explicit admin override authorizing a department OTHER than the ticket's
@@ -7104,8 +7113,25 @@ async function _handleJiraPgApi(
     const sp = await db.space.findUnique({ where: { key: spaceKey } });
     if (!sp) return json({ matches: [] });
 
+    const descParam = description.length >= 8 ? description : null;
+    const buildResult = (rows: any[], summarySimOf: (r: any) => number) => rows.map((r: any) => {
+      const summarySim = summarySimOf(r);
+      const descSim = descParam ? textSimilarity(stripHtmlLocal(r.description || ''), descParam) : null;
+      const combined = descSim != null ? (summarySim + descSim) / 2 : summarySim;
+      const isExactMatch = summary.trim().toLowerCase() === String(r.summary || '').trim().toLowerCase()
+        && (descParam == null || descSim! > 0.9);
+      return {
+        key: r.key, displayKey: r.display_key, summary: r.summary,
+        status: r.status_name, statusCategory: r.status_category,
+        matchPercent: Math.round(combined * 100),
+        isExactMatch,
+      };
+    })
+    .filter((m: any) => m.matchPercent >= 30)
+    .sort((a: any, b: any) => b.matchPercent - a.matchPercent)
+    .slice(0, 5);
+
     try {
-      const descParam = description.length >= 8 ? description : null;
       const res = await pool.query(
         `SELECT i.key, COALESCE(i.cf_key, i.key) AS display_key, i.summary, i.description,
                 s.name AS status_name, s.category AS status_category,
@@ -7118,35 +7144,39 @@ async function _handleJiraPgApi(
          LIMIT 8`,
         [sp.id, summary]
       );
-
-      const matches = res.rows.map((r: any) => {
-        const summarySim = Number(r.summary_sim) || 0;
-        // Plain-text description similarity computed in JS, not SQL --
-        // stripHtml() already exists for exactly this (rich-text
-        // descriptions store HTML), and running it in SQL would mean a
-        // second regexp pass per row for no real benefit at this row
-        // count (top 8 candidates only, already summary-filtered).
-        const descSim = descParam ? textSimilarity(stripHtmlLocal(r.description || ''), descParam) : null;
-        const combined = descSim != null ? (summarySim + descSim) / 2 : summarySim;
-        const isExactMatch = summary.trim().toLowerCase() === String(r.summary || '').trim().toLowerCase()
-          && (descParam == null || descSim! > 0.9);
-        return {
-          key: r.key, displayKey: r.display_key, summary: r.summary,
-          status: r.status_name, statusCategory: r.status_category,
-          matchPercent: Math.round(combined * 100),
-          isExactMatch,
-        };
-      })
-      .filter((m: any) => m.matchPercent >= 30)
-      .sort((a: any, b: any) => b.matchPercent - a.matchPercent)
-      .slice(0, 5);
-
-      return json({ matches });
-    } catch (e: any) {
-      // pg_trgm not available, or any other query failure -- this is a
-      // convenience feature, never worth failing ticket creation over.
-      console.error('[issues/similar]', e?.message);
-      return json({ matches: [] });
+      return json({ matches: buildResult(res.rows, (r) => Number(r.summary_sim) || 0) });
+    } catch {
+      // pg_trgm's similarity() isn't available on this database (confirmed
+      // for real: the extension was never installed here, so this ALWAYS
+      // hit this path, and the previous version of this endpoint just
+      // swallowed the error and returned zero matches every time --
+      // exactly the bug reported: CF-33377's summary was a byte-for-byte
+      // exact match and still showed "no related ticket found"). Falls
+      // back to the same keyword/ILIKE candidate-narrowing
+      // findPreviouslyResolvedSimilar's own fallback already uses, then
+      // scores every candidate with the same JS bigram similarity already
+      // used for description matching above -- so summary matching still
+      // works, just without a trigram index doing the narrowing.
+      try {
+        const words = summary.toLowerCase().split(/[\s,.:;!?()\-|]+/).filter((w) => w.length > 3).slice(0, 8);
+        if (!words.length) return json({ matches: [] });
+        const clauses = words.map((_, i) => `LOWER(i.summary) LIKE $${i + 2}`).join(' OR ');
+        const res = await pool.query(
+          `SELECT i.key, COALESCE(i.cf_key, i.key) AS display_key, i.summary, i.description,
+                  s.name AS status_name, s.category AS status_category
+           FROM issues i
+           LEFT JOIN statuses s ON s.id = i."statusId"
+           WHERE i."spaceId" = $1 AND (${clauses})
+           LIMIT 50`,
+          [sp.id, ...words.map((w) => `%${w}%`)]
+        );
+        return json({ matches: buildResult(res.rows, (r) => textSimilarity(String(r.summary || ''), summary)) });
+      } catch (e2: any) {
+        // This is a convenience feature -- never worth failing ticket
+        // creation over, even if both the primary and fallback query fail.
+        console.error('[issues/similar] fallback also failed:', e2?.message);
+        return json({ matches: [] });
+      }
     }
   }
 
