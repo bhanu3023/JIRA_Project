@@ -6985,47 +6985,24 @@ async function _handleJiraPgApi(
       }
     } catch { /* sla breach is best-effort */ }
 
-    // Who a breached ticket's "SLA Breached: Yes" actually belongs to -- the
-    // Assignee column shows whoever CURRENTLY holds the ticket, which for a
-    // ticket resolved late and later reassigned (or handed off after the
-    // fact) attributes the breach to the wrong person entirely. The ticket
-    // detail page's own SLA panel already solves this correctly for a single
-    // issue (enrichSlaWithResolver: the author of that issue's last 'status'
-    // history row, i.e. whoever's change put it into its current state) --
-    // this mirrors that same definition in bulk, for just the breached rows
-    // on this page, so it's one small extra query instead of N. Only makes
-    // sense for a RESOLVED ticket -- one still open and merely overdue
-    // hasn't been "caused" by anyone yet, so attributing it to whoever most
-    // recently touched its (still not-done) status would just be noise.
+    // Who a breached ticket's "SLA Breached: Yes" actually belongs to.
     try {
-      // Same dept_statuses fallback as the isResolved check above -- a
-      // ticket resolved only per its per-department status snapshot (real
-      // statusId column not yet caught up) was silently excluded here,
-      // so it never got an "SLA Breached By" attribution even though
-      // sla_breached was already correctly true for it.
-      const isResolvedForAttribution = (i: any) => {
-        if (i.status?.category === 'done') return true;
-        const dept = (i.current_department || '').trim().toLowerCase();
-        const deptStatuses: Record<string, any> = i.dept_statuses || {};
-        const key = Object.keys(deptStatuses).find((k) => k.toLowerCase() === dept);
-        return key ? deptStatuses[key]?.category === 'done' : false;
-      };
-      const breachedIds = enrichedIssues
-        .filter((i: any) => i.sla_breached && isResolvedForAttribution(i))
-        .map((i: any) => i.id);
-      if (breachedIds.length) {
-        const breachHistRows = await pool.query(
-          `SELECT "issueId", "authorName", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'status' ORDER BY "issueId", "createdAt" ASC`,
-          [breachedIds]
-        );
-        const lastAuthorByIssue: Record<string, string> = {};
-        for (const h of breachHistRows.rows) {
-          if (h.authorName) lastAuthorByIssue[h.issueId] = h.authorName;
-        }
-        enrichedIssues = enrichedIssues.map((i: any) =>
-          i.sla_breached ? { ...i, sla_breached_by: lastAuthorByIssue[i.id] || null } : i
-        );
-      }
+      // Per explicit request, reversed from the prior design (which
+      // deliberately attributed a breach to whoever performed the resolving
+      // status change, on the reasoning that the current assignee "isn't
+      // necessarily who caused this"): "SLA Breached By" now always shows
+      // the ticket's own ASSIGNEE, not whoever happened to click Resolved.
+      // Confirmed for real: CF-33228 was resolved by Amulya A, but its
+      // actual assignee throughout was Habeebunnisa Begum -- attributing
+      // the breach to whoever clicks the button, rather than whoever was
+      // actually responsible for the work, read as wrong to the business,
+      // especially since someone else closing out a ticket on another
+      // person's behalf is routine (admin cleanup, handoffs, etc.).
+      enrichedIssues = enrichedIssues.map((i: any) =>
+        i.sla_breached
+          ? { ...i, sla_breached_by: i.assignee ? `${i.assignee.firstName} ${i.assignee.lastName}`.trim() || null : null }
+          : i
+      );
     } catch { /* attribution is best-effort — never block the list on it */ }
 
     // Which department a breach belongs to -- shown right alongside "by

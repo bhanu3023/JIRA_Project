@@ -2458,15 +2458,17 @@ export default function FiltersPage() {
                     ) : issue.sla_breached ? (
                       <div className="flex flex-col items-start gap-0.5">
                         <span className="inline-flex items-center rounded-full bg-red-100 border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-600">Yes</span>
-                        {/* Whoever currently holds the ticket (the Assignee column)
-                            isn't necessarily who caused this -- a ticket resolved
-                            late and reassigned afterward would otherwise pin the
-                            breach on the wrong person. This is the author of the
-                            status change that actually put it in its current
-                            state, same definition the ticket detail page's own
-                            SLA panel already uses for "Resolved by". */}
+                        {/* Per explicit request: shows the ticket's actual
+                            ASSIGNEE, not whoever happened to click Resolved
+                            -- reversed from an earlier design that
+                            attributed the breach to the resolving action's
+                            author, since someone else (an admin, a
+                            handoff) closing out a ticket on the assignee's
+                            behalf is routine, and the business wants the
+                            breach pinned on whoever was actually
+                            responsible for the work. */}
                         {issue.sla_breached_by && (
-                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Author of the status change that resolved this ticket">
+                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="This ticket's assignee">
                             by {issue.sla_breached_by}
                           </span>
                         )}
