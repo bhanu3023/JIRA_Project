@@ -7317,24 +7317,32 @@ async function _handleJiraPgApi(
     const autoClientName = resolvedReporterEmail ? resolvedReporterEmail.split('@')[1]?.toLowerCase() || null : null;
     let resolvedAssigneeId: string | null = body.assigneeId ? String(body.assigneeId) : (assigneeByEmail?.id ?? null);
     // Assignment logic:
-    // 1. Manual creation (userId present, not from email) Ã¢â€ ' assign to creator
-    // 2. Email ticket or queue-transfer Ã¢â€ ' round-robin for the department
+    // 1. Manual creation (userId present, not from email) -> assign to creator
+    // 2. Email ticket or queue-transfer -> round-robin for the department
+    //
+    // Per explicit request: manually creating a ticket now always assigns
+    // it to whoever created it, regardless of whether a department/queue
+    // was also selected. Confirmed for real this was never actually
+    // implemented this way before -- a dept-less manual ticket was left
+    // unassigned, and a dept-having one (the common case, since creating a
+    // ticket normally requires picking a queue) was round-robinned to
+    // someone else instead, contradicting this comment's own stated design.
     let rrDepartment: string | null = null;
     if (!resolvedAssigneeId) {
       const isEmailCreated = !userId || body.fromEmail === true || !!body.reporterEmail;
       const requestedDept = body.department ? String(body.department) : null;
 
       try {
-        if (!isEmailCreated && !requestedDept) {
-          // Manual creation with no explicit dept -- leave unassigned (RR only triggers on email or dept selection)
-          resolvedAssigneeId = null;
+        if (!isEmailCreated) {
+          // Manual creation by a real logged-in user -- assign to them.
+          resolvedAssigneeId = userId;
         } else if (requestedDept) {
-          // Ticket with an explicit queue/department Ã¢â€ ' RR for that dept
+          // Email-created ticket with an explicit queue/department -- RR for that dept
           rrDepartment = requestedDept;
           const nextAgent = await getNextAgent(sp.id, requestedDept, body.productType ? String(body.productType) : null);
           if (nextAgent) resolvedAssigneeId = nextAgent.userId;
-        } else if (isEmailCreated) {
-          // Email ticket with no dept Ã¢â€ ' use the default department RR
+        } else {
+          // Email ticket with no dept -- use the default department RR
           const defaultDept = await getDefaultDepartment(sp.id);
           if (defaultDept) {
             rrDepartment = defaultDept;
