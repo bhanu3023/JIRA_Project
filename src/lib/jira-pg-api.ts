@@ -7308,10 +7308,10 @@ async function _handleJiraPgApi(
     if (!resolvedAssigneeId) {
       const isEmailCreated = !userId || body.fromEmail === true || !!body.reporterEmail;
       const requestedDept = body.department ? String(body.department) : null;
-      // Per explicit request, SAT_Board (SB) is excluded from the
-      // assign-to-creator rule above -- a ticket manually created there
-      // should never auto-assign to whoever made it.
-      const skipCreatorAutoAssign = sp.key === 'SB';
+      // Per explicit request, SAT_Board (SB) and IT Administration (IA) are
+      // excluded from the assign-to-creator rule above -- a ticket manually
+      // created in either should never auto-assign to whoever made it.
+      const skipCreatorAutoAssign = ['SB', 'IA'].includes(sp.key);
 
       try {
         if (!isEmailCreated && !skipCreatorAutoAssign) {
