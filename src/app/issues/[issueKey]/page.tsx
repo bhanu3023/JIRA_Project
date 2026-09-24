@@ -1186,8 +1186,14 @@ export default function IssueDetailPage() {
   // QA gets the same full exemption as the IA space -- by request, resolving
   // a QA-queue ticket was blocking on Project Pool/Project Manager/etc. the
   // same way IA's own tickets used to before that exemption existed above.
+  // SAT_Board (SB) belongs in the same exemption as IA -- CreateIssueModal's
+  // NON_MIGRATION_SPACE_KEYS already exempts both IA and SB from these same
+  // fields at creation time (they're never shown/required there), but this
+  // resolve-time check only ever matched IA, so an SB ticket could be
+  // created with them correctly left blank and then get stuck unresolvable
+  // the moment someone tried to close it -- confirmed for real on CF-33408.
   const isMandatoryFieldsExemptDept = () => {
-    if ((issue?.spaceKey || '').toUpperCase() === 'IA') return true;
+    if (['IA', 'SB'].includes((issue?.spaceKey || '').toUpperCase())) return true;
     const dept = ((issue as any)?.current_department || '').trim().toLowerCase();
     return dept === 'qa';
   };
