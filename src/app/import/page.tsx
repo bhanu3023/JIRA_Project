@@ -549,9 +549,11 @@ export default function ImportPage() {
     try {
       const res = await fetch('/api/admin/jira-field-sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+        },
         body: JSON.stringify({
-          secret: 'cf-admin-sync-2024',
           jiraUrl,
           email,
           apiToken,
@@ -581,9 +583,11 @@ export default function ImportPage() {
     try {
       const res = await fetch('/api/admin/jira-link-sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+        },
         body: JSON.stringify({
-          secret: 'cf-admin-sync-2024',
           jiraUrl,
           email,
           apiToken,
@@ -613,8 +617,11 @@ export default function ImportPage() {
       const enabledBoards = commentSyncBoards.filter(b => b.enabled).map(({ jiraProject, spaceKey, matchBy }) => ({ jiraProject, spaceKey, matchBy }));
       const res = await fetch('/api/admin/jira-comment-sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ secret: 'cf-admin-sync-2024', jiraUrl, email, apiToken, boards: enabledBoards }),
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+        },
+        body: JSON.stringify({ jiraUrl, email, apiToken, boards: enabledBoards }),
       });
       const data = await res.json();
       if (!data.ok) setCommentSyncError(data.error || 'Sync failed');

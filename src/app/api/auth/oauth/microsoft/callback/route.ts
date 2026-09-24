@@ -15,7 +15,14 @@ export const runtime = 'nodejs';
 function makeToken(userId: string, extra?: { email?: string; firstName?: string; lastName?: string; avatarUrl?: string }): string {
   const jwt    = require('jsonwebtoken');
   const crypto = require('crypto');
-  const SECRET  = process.env.JWT_SECRET || 'NeutaraTech_SecureKey_2024_ab12f83079d8cadd0eb5678dc3d6aca6a5f65ed4d21646496093895b2ab4edfc';
+  // No hardcoded fallback -- see the matching JWT_SECRET check in
+  // jira-pg-api.ts for why (that same literal string was sitting in git
+  // history, making the "secret" public). Must sign with the exact same
+  // secret jira-pg-api.ts's resolveUserId() verifies against.
+  if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET environment variable is required and must not be empty.');
+  }
+  const SECRET  = process.env.JWT_SECRET;
   const TTL     = 24 * 30; // hours -- keep the session alive for 30 days, matching Jira's behavior of not forcing re-login on every visit
   const payload = { sub: userId, ...extra, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + TTL * 3600 };
   const token   = jwt.sign(payload, SECRET, { algorithm: 'HS256' });

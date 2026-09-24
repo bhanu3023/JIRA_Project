@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { pgPool as pool } from '@/lib/pg-pool';
+import { requireAdmin } from '@/lib/admin-auth';
 
 async function getStoredJiraCreds(): Promise<{ url: string; email: string; token: string } | null> {
   try {
@@ -27,8 +28,6 @@ async function getStoredJiraCreds(): Promise<{ url: string; email: string; token
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
-
-const SECRET = process.env.ADMIN_BULK_SECRET || 'cf-admin-sync-2024';
 
 const DEFAULT_JIRA_BASE  = process.env.JIRA_BASE_URL || 'https://cf2020.atlassian.net';
 const DEFAULT_JIRA_EMAIL = process.env.JIRA_EMAIL    || 'sujana.manapuram@cloudfuze.com';
@@ -169,10 +168,10 @@ async function syncBoard(
 
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireAdmin(req);
+    if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+
     const body = await req.json().catch(() => ({}));
-    if (body.secret !== SECRET) {
-      return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
-    }
 
     // Use credentials from request body, fall back to app_settings DB, then env defaults
     const stored = (!body.apiToken) ? await getStoredJiraCreds() : null;

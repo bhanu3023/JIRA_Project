@@ -1104,13 +1104,20 @@ export async function handleJiraDevMock(req: NextRequest, segments: string[], me
     path === 'email/receive' ||
     path.startsWith('email-logs/') ||
     path === 'stats';
-  // Internal admin operations (bulk sync, migrations) bypass auth
-  const isInternalAdmin = req.headers.get('x-internal-admin') === 'cf-admin-sync-2024';
-  if (!userId && !isPublicPath && !isInternalAdmin) {
+  // A static-secret "internal admin" bypass used to live here
+  // (`x-internal-admin: cf-admin-sync-2024` granted the identity of
+  // whichever user happened to be the FIRST admin in this mock store, no
+  // real auth at all) -- the same hardcoded secret exposed in client-side
+  // page source elsewhere (see src/lib/admin-auth.ts), and confirmed unused
+  // by any legitimate caller: the one place that ever sent this header
+  // (bulk-patch/route.ts) sends it to the REAL /api/issues/:key PATCH
+  // handler in jira-pg-api.ts, which never even reads this header -- it
+  // never reaches this file's routing at all. Removed as a pure, unused
+  // liability.
+  if (!userId && !isPublicPath) {
     return json({ error: 'Unauthorized' }, 401);
   }
-  // For internal admin calls, use first admin user as userId
-  const effectiveUserId = userId || (isInternalAdmin ? Array.from(s.users.values()).find(u => u.role === 'admin')?.id : undefined);
+  const effectiveUserId = userId ?? undefined;
 
   // ── Public stats (no auth needed — shown on login page) ─────────────
   if (path === 'stats' && method === 'GET') {
