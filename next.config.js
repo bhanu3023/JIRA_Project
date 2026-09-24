@@ -19,15 +19,24 @@ const nextConfig = {
   async headers() {
     return [
       {
-        // /uploads/* is excluded here and given its own relaxed rule below --
-        // the blanket X-Frame-Options: DENY + frame-ancestors 'none' applied
-        // to every route also applied to uploaded files, which blocked the
-        // app's own same-origin attachment-preview <iframe> (a PDF opened
-        // from a ticket's Attachments list showed Chrome's "refused to
-        // connect", its wording for a framing violation, not an actual
-        // network failure) -- DENY means "never embeddable in ANY iframe,
-        // including this app embedding its own files."
-        source: '/((?!uploads/).*)',
+        // /uploads/* and /api/uploads/* are excluded here and given their own
+        // relaxed rules below -- the blanket X-Frame-Options: DENY +
+        // frame-ancestors 'none' applied to every route also applied to
+        // uploaded files, which blocked the app's own same-origin
+        // attachment-preview <iframe> (a PDF opened from a ticket's
+        // Attachments list showed Chrome's "refused to connect", its wording
+        // for a framing violation, not an actual network failure) -- DENY
+        // means "never embeddable in ANY iframe, including this app
+        // embedding its own files." /api/uploads/* is a SEPARATE serving
+        // path from /uploads/* (jira-pg-api.ts's own handler for files
+        // embedded inline in a description/comment via the rich-text editor,
+        // as opposed to the Next.js static-file route for formal ticket
+        // "Attachments") -- confirmed for real on CF-33288: an inline PDF
+        // chip in the description hit this exact same framing error even
+        // after the /uploads/* fix was deployed, since that fix's exclusion
+        // pattern never matched "api/uploads/..." (it only excludes paths
+        // starting with "uploads/", not "api/uploads/").
+        source: '/((?!uploads/|api/uploads/).*)',
         headers: [
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
@@ -58,6 +67,19 @@ const nextConfig = {
         headers: [
           { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'Content-Security-Policy', value: "frame-ancestors 'self';" },
+        ],
+      },
+      {
+        // Same relaxation as /uploads/(.*) above, for the SEPARATE serving
+        // path jira-pg-api.ts uses for files embedded inline in a
+        // description/comment (e.g. a PDF/image chip pasted into the
+        // rich-text editor) -- see the exclusion-pattern comment on the
+        // blanket rule above for why this needed its own explicit rule
+        // rather than being covered by the /uploads/(.*) one.
+        source: '/api/uploads/(.*)',
+        headers: [
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
           { key: 'Content-Security-Policy', value: "frame-ancestors 'self';" },
         ],
       },
