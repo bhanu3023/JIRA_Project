@@ -511,6 +511,45 @@ async function getAdminRecipients(): Promise<{ ids: string[]; emails: string[] }
   return _adminRecipientsCache;
 }
 
+// Same idea as getAdminRecipients, but for a space's OWN Admin role
+// (space_members.role = 'admin', set on the space's People and access page)
+// rather than the global site-wide user role -- these are two entirely
+// different fields. Confirmed for real: a user shown as "Admin" for a space
+// there got none of that space's ticket-lifecycle emails, because
+// getAdminRecipients() only ever checked users.role, never space_members.role
+// -- by request, a space-level Admin should hear about everything in their
+// own space the same way a global admin does. Cached per space for the same
+// reason/duration as getAdminRecipients.
+const _spaceAdminRecipientsCache = new Map<string, { ids: string[]; emails: string[]; at: number }>();
+async function getSpaceAdminRecipients(spaceId: string | null | undefined): Promise<{ ids: string[]; emails: string[] }> {
+  if (!spaceId) return { ids: [], emails: [] };
+  const cached = _spaceAdminRecipientsCache.get(spaceId);
+  if (cached && Date.now() - cached.at < 60_000) return cached;
+  const members = await db.spaceMember.findMany({
+    where: { spaceId, role: 'admin', user: { isActive: true } },
+    select: { userId: true, user: { select: { email: true } } },
+  });
+  const result = {
+    ids: members.map((m: any) => m.userId).filter(Boolean),
+    emails: members.map((m: any) => m.user?.email).filter(Boolean),
+    at: Date.now(),
+  };
+  _spaceAdminRecipientsCache.set(spaceId, result);
+  return result;
+}
+
+// Combines global (site-wide) admins with a specific space's own Admin-role
+// members -- the union every ticket-lifecycle notification call site wants,
+// so callers don't each need their own getAdminRecipients() +
+// getSpaceAdminRecipients() merge.
+async function getAllAdminRecipients(spaceId: string | null | undefined): Promise<{ ids: string[]; emails: string[] }> {
+  const [global, spaceScoped] = await Promise.all([getAdminRecipients(), getSpaceAdminRecipients(spaceId)]);
+  return {
+    ids: Array.from(new Set([...global.ids, ...spaceScoped.ids])),
+    emails: Array.from(new Set([...global.emails, ...spaceScoped.emails])),
+  };
+}
+
 // Extra email recipients for every notification email on a given space,
 // beyond the normal assignee/reporter/admin set -- by request, IT
 // Administration (IA) always emails Vamshi Gande and Pavan B on every
@@ -571,7 +610,7 @@ async function notifyCommentMentions(commentBody: string, opts: {
   // By explicit request: admins see every mention too, not just
   // ticket-lifecycle events -- fetched once outside the loop rather than
   // per-mention, since it's the same list regardless of who got mentioned.
-  const { emails: mentionAdminEmails } = await getAdminRecipients();
+  const { emails: mentionAdminEmails } = await getAllAdminRecipients(opts.issue.spaceId);
   const mentionPreview = commentBody
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
@@ -790,7 +829,7 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
         if (already.has(key)) continue;
         already.add(key); // don't double-notify if more than one policy triggers this run
         const leadIds = await getSpaceLeadUserIds(row.spaceId);
-        const { ids: slaAdminIds, emails: slaAdminEmails } = await getAdminRecipients();
+        const { ids: slaAdminIds, emails: slaAdminEmails } = await getAllAdminRecipients(row.spaceId);
         await notifyUsers([row.assigneeId, row.reporterId, ...leadIds, ...slaAdminIds], null, {
           type: 'SLA_BREACH',
           title: `SLA breaching in ${minsLeft} min: ${key}`,
@@ -7567,8 +7606,9 @@ async function _handleJiraPgApi(
 
     // Admins should hear about every new ticket, not just ones they're
     // personally assigned/reporting on -- fan out to both the email path
-    // (notifyIssueCreated) and the in-app path below.
-    const { ids: adminIds, emails: adminEmails } = await getAdminRecipients();
+    // (notifyIssueCreated) and the in-app path below. Includes both global
+    // admins and this space's OWN Admin-role members.
+    const { ids: adminIds, emails: adminEmails } = await getAllAdminRecipients(sp.id);
     const boardCreateNotifyEmails = [...adminEmails, ...getExtraSpaceNotifyEmails(issue.space?.key ?? sk)];
 
     // Send email notification (fire-and-forget)
@@ -8119,7 +8159,7 @@ async function _handleJiraPgApi(
       // and a department move is exactly the kind of change both of them need
       // to know about (e.g. reporter's Migration ticket moving to Dev).
       if (updatedIssue) {
-        const { ids: deptAdminIds, emails: deptAdminEmails } = await getAdminRecipients();
+        const { ids: deptAdminIds, emails: deptAdminEmails } = await getAllAdminRecipients((updatedIssue as any).spaceId);
         notifyIssueUpdated({
           key: updatedIssue.key, cfKey: extraCols.cf_key, summary: updatedIssue.summary, priority: updatedIssue.priority,
           spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
@@ -8298,7 +8338,7 @@ async function _handleJiraPgApi(
         ? await db.user.findUnique({ where: { id: rrAgent.userId } })
         : null;
       const targetStatusCategory = firstStatus?.category ?? 'todo';
-      const { ids: transferAdminIds, emails: transferAdminEmails } = await getAdminRecipients();
+      const { ids: transferAdminIds, emails: transferAdminEmails } = await getAllAdminRecipients((targetSpace as any).id);
       notifyIssueUpdated({
         key: newKey, cfKey: newCfKey, summary: issue.summary, priority: issue.priority,
         spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
@@ -9340,7 +9380,7 @@ async function _handleJiraPgApi(
                 `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
                 [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), reopenChanger ? `${reopenChanger.firstName} ${reopenChanger.lastName}`.trim() : 'Unknown', reopenChanger?.email || null]
               ).catch(() => {});
-              const { ids: reopenAdminIds, emails: reopenAdminEmails } = await getAdminRecipients();
+              const { ids: reopenAdminIds, emails: reopenAdminEmails } = await getAllAdminRecipients(issue.spaceId);
               notifyStatusChanged({
                 key: issue.key, cfKey: issueCfKey, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
@@ -9429,7 +9469,7 @@ async function _handleJiraPgApi(
               // status left the assignee/reporter with zero notification of either
               // kind, even though a plain (non-queue) status change to Resolved does
               // notify them via the generic path further down in this handler.
-              const { ids: doneAdminIds, emails: doneAdminEmails } = await getAdminRecipients();
+              const { ids: doneAdminIds, emails: doneAdminEmails } = await getAllAdminRecipients(issue.spaceId);
               notifyStatusChanged({
                 key: issue.key, cfKey: issueCfKey, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
@@ -9591,7 +9631,7 @@ async function _handleJiraPgApi(
                 ).catch(() => {});
               }
               const refreshedDisplayKey = issueCfKey || refreshed.key;
-              const { ids: refreshedAdminIds, emails: refreshedAdminEmails } = await getAdminRecipients();
+              const { ids: refreshedAdminIds, emails: refreshedAdminEmails } = await getAllAdminRecipients((refreshed as any).spaceId);
               notifyStatusChanged({
                 key: refreshed.key, cfKey: issueCfKey, summary: refreshed.summary, priority: refreshed.priority,
                 spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
@@ -10160,7 +10200,7 @@ async function _handleJiraPgApi(
 
       const oldStatusRec = issue.space?.statuses?.find((s: any) => s.id === issue.statusId);
       const changer = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
-      const { ids: statusAdminIds, emails: statusAdminEmails } = await getAdminRecipients();
+      const { ids: statusAdminIds, emails: statusAdminEmails } = await getAllAdminRecipients(issue.spaceId);
       notifyStatusChanged({
         ...issueForNotif,
         oldStatus: { name: oldStatusRec?.name ?? 'Unknown', category: oldStatusRec?.category ?? 'todo' },
@@ -10179,7 +10219,7 @@ async function _handleJiraPgApi(
     // Assignee changed?
     if (assigneeChangedForNotif) {
       const prevAssignee = issue.assigneeId ? await db.user.findUnique({ where: { id: issue.assigneeId } }) : null;
-      const { ids: assignAdminIds, emails: assignAdminEmails } = await getAdminRecipients();
+      const { ids: assignAdminIds, emails: assignAdminEmails } = await getAllAdminRecipients(issue.spaceId);
       notifyIssueAssigned({ ...issueForNotif, previousAssignee: prevAssignee, adminEmails: [...assignAdminEmails, ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey)] }).catch(() => {});
       // In-app: notify new assignee + reporter + admins
       await notifyUsers(
@@ -10206,7 +10246,7 @@ async function _handleJiraPgApi(
       if (body.fixDescription !== undefined && body.fixDescription !== (issue as any).fixDescription)
         changes.push({ field: 'Fix Description', from: String((issue as any).fixDescription || ''), to: String(body.fixDescription || '') });
       if (changes.length > 0) {
-        const { ids: updateAdminIds, emails: updateAdminEmails } = await getAdminRecipients();
+        const { ids: updateAdminIds, emails: updateAdminEmails } = await getAllAdminRecipients(issue.spaceId);
         notifyIssueUpdated({
           ...issueForNotif,
           updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
@@ -10632,7 +10672,7 @@ async function _handleJiraPgApi(
 
 
     const issueDisplayKey = (issue as any).cf_key || issue.key;
-    const { ids: commentAdminIds, emails: commentAdminEmails } = await getAdminRecipients();
+    const { ids: commentAdminIds, emails: commentAdminEmails } = await getAllAdminRecipients(issue.spaceId);
     // Email: notify assignee + reporter + admins (not the commenter)
     notifyCommentAdded({
       key: issue.key, cfKey: (issue as any).cf_key, summary: issue.summary,
