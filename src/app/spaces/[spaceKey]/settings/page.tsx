@@ -19,13 +19,15 @@ import { PriorityIcon, getPriorityMeta } from '@/components/ui/PriorityIcon';
 // A member's role here is scoped to THIS space (SpaceMember.role), not their
 // site-wide account role -- this used to reuse the global role list
 // (Admin/Manager/Migration Engineer/QA Engineer/...) which doesn't match any
-// row in the "Space permissions" reference table below (admin/manager/dev/
+// row in the "Space permissions" reference table below (admin/manager/member/
 // viewer), so most choices silently fell through to no defined permissions
 // at all. These four are the only space roles the rest of the app (the
 // Sidebar's canManageSpace check, the permissions table) actually knows
-// about.
-const SPACE_ROLES = ['admin', 'manager', 'dev', 'viewer'] as const;
-const SPACE_ROLE_LABELS: Record<string, string> = { admin: 'Admin', manager: 'Manager', dev: 'Developer', viewer: 'Viewer' };
+// about. "member" is the standard/basic role (was labeled "Developer" and
+// keyed "dev" before -- renamed since most spaces, like Service Desk boards,
+// aren't dev teams).
+const SPACE_ROLES = ['admin', 'manager', 'member', 'viewer'] as const;
+const SPACE_ROLE_LABELS: Record<string, string> = { admin: 'Admin', manager: 'Manager', member: 'Member', viewer: 'Viewer' };
 
 // ── Sidebar nav ───────────────────────────────────────────────────────────────
 const NAV = [
@@ -177,14 +179,14 @@ function Section({ title, description, children }: { title: string; description?
 
 // ── People & Access section (own component so hooks are always called) ─────────
 // Kept in sync with SPACE_ROLES/SPACE_ROLE_LABELS below -- this used to offer
-// 'developer' (no matching row in the edit-role dropdown, which uses 'dev')
+// 'developer' (no matching row in the edit-role dropdown, which uses 'member')
 // and had no 'manager' option at all, so a member added here as anything but
 // Admin/Viewer landed on a role the rest of the space-permissions system
 // didn't recognize.
 const MEMBER_ROLES = [
   { value: 'admin',   label: 'Admin',     desc: 'Full control over space settings and members' },
   { value: 'manager', label: 'Manager',   desc: 'Can manage members and issues, not workflows or settings' },
-  { value: 'dev',     label: 'Developer', desc: 'Can create and manage issues' },
+  { value: 'member',  label: 'Member',    desc: 'Can create and manage issues' },
   { value: 'viewer',  label: 'Viewer',    desc: 'Read-only access to the space' },
 ];
 
@@ -200,7 +202,7 @@ function PeopleSection({
   const [showAddModal, setShowAddModal] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const [selectedUsers, setSelectedUsers] = useState<any[]>([]);
-  const [selectedRole, setSelectedRole] = useState('dev');
+  const [selectedRole, setSelectedRole] = useState('member');
   const [selectedDept, setSelectedDept] = useState('');
   const [addingMember, setAddingMember] = useState(false);
   const [addMemberMsg, setAddMemberMsg] = useState('');
@@ -244,7 +246,7 @@ function PeopleSection({
     setShowAddModal(true);
     setSelectedUsers([]);
     setMemberSearch('');
-    setSelectedRole('developer');
+    setSelectedRole('member');
     setSelectedDept('');
     setAddMemberMsg('');
   };
@@ -3401,7 +3403,7 @@ function SpaceSettingsContent() {
     }
   }, [currentSpace]);
 
-  const handleAddMember  = async (userId: string, role = 'dev', department = '') => { await api.addSpaceMember(spaceKey, { userId, role, department: department || null }); loadSpace(spaceKey, true); };
+  const handleAddMember  = async (userId: string, role = 'member', department = '') => { await api.addSpaceMember(spaceKey, { userId, role, department: department || null }); loadSpace(spaceKey, true); };
   const handleAddLabel   = async (e: React.FormEvent) => { e.preventDefault(); await api.createLabel({ spaceKey, ...newLabel }); setNewLabel({ name: '', color: '#3B82F6' }); api.getLabels(spaceKey).then(setLabels); };
   const handleSaveGeneral = async () => {
     setSaving(true);
@@ -3674,23 +3676,23 @@ function SpaceSettingsContent() {
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
                     <th className="px-5 py-3 text-left text-xs font-bold text-gray-500 uppercase">Permission</th>
-                    {['Admin','Manager','Developer','Viewer'].map(r => <th key={r} className="px-5 py-3 text-center text-xs font-bold text-gray-500 uppercase">{r}</th>)}
+                    {['Admin','Manager','Member','Viewer'].map(r => <th key={r} className="px-5 py-3 text-center text-xs font-bold text-gray-500 uppercase">{r}</th>)}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   {[
-                    { perm: 'View issues',        admin: true,  manager: true,  dev: true,  viewer: true  },
-                    { perm: 'Create issues',       admin: true,  manager: true,  dev: true,  viewer: false },
-                    { perm: 'Edit issues',         admin: true,  manager: true,  dev: true,  viewer: false },
-                    { perm: 'Delete issues',       admin: true,  manager: true,  dev: false, viewer: false },
-                    { perm: 'Manage members',      admin: true,  manager: true,  dev: false, viewer: false },
-                    { perm: 'Manage workflows',    admin: true,  manager: false, dev: false, viewer: false },
-                    { perm: 'Manage SLAs',         admin: true,  manager: false, dev: false, viewer: false },
-                    { perm: 'Edit space settings', admin: true,  manager: false, dev: false, viewer: false },
+                    { perm: 'View issues',        admin: true,  manager: true,  member: true,  viewer: true  },
+                    { perm: 'Create issues',       admin: true,  manager: true,  member: true,  viewer: false },
+                    { perm: 'Edit issues',         admin: true,  manager: true,  member: true,  viewer: false },
+                    { perm: 'Delete issues',       admin: true,  manager: true,  member: false, viewer: false },
+                    { perm: 'Manage members',      admin: true,  manager: true,  member: false, viewer: false },
+                    { perm: 'Manage workflows',    admin: true,  manager: false, member: false, viewer: false },
+                    { perm: 'Manage SLAs',         admin: true,  manager: false, member: false, viewer: false },
+                    { perm: 'Edit space settings', admin: true,  manager: false, member: false, viewer: false },
                   ].map(row => (
                     <tr key={row.perm} className="hover:bg-gray-50">
                       <td className="px-5 py-3 text-sm text-gray-800 font-medium">{row.perm}</td>
-                      {(['admin','manager','dev','viewer'] as const).map(role => (
+                      {(['admin','manager','member','viewer'] as const).map(role => (
                         <td key={role} className="px-5 py-3 text-center">
                           {(row as any)[role] ? <Check size={15} className="text-green-500 mx-auto" /> : <X size={15} className="text-gray-200 mx-auto" />}
                         </td>

@@ -4559,8 +4559,8 @@ async function _handleJiraPgApi(
     const memberDept = body.department ? String(body.department) : null;
     await db.spaceMember.upsert({
       where: { spaceId_userId: { spaceId: sp.id, userId: uid } },
-      create: { spaceId: sp.id, userId: uid, role: String(body.role || 'dev') },
-      update: { role: String(body.role || 'dev') },
+      create: { spaceId: sp.id, userId: uid, role: String(body.role || 'member') },
+      update: { role: String(body.role || 'member') },
     });
     if (memberDept !== null) {
       await pool.query(`UPDATE space_members SET department=$1 WHERE "spaceId"=$2 AND "userId"=$3`, [memberDept, sp.id, uid]);
