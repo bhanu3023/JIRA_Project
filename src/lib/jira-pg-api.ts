@@ -511,6 +511,20 @@ async function getAdminRecipients(): Promise<{ ids: string[]; emails: string[] }
   return _adminRecipientsCache;
 }
 
+// Extra email recipients for every notification email on a given space,
+// beyond the normal assignee/reporter/admin set -- by request, IT
+// Administration (IA) always emails Vamshi Gande and Pavan B on every
+// ticket-lifecycle event (created, commented, status changed, assigned,
+// updated), not just creation. Originally this only applied to the
+// "created" email (boardCreateNotifyEmails, inlined at that one call site);
+// centralizing it here so every email-sending call site for a space can
+// apply the same extra recipients consistently instead of each one needing
+// its own copy of this space-key check.
+function getExtraSpaceNotifyEmails(spaceKey: string | null | undefined): string[] {
+  if ((spaceKey || '').toUpperCase() === 'IA') return ['vamshi.gande@cloudfuze.com', 'pavan@cloudfuze.com'];
+  return [];
+}
+
 async function notifyUsers(userIds: (string | null | undefined)[], actorId: string | null | undefined, opts: { type: string; title: string; message?: string; issueKey?: string }) {
   const seen = new Set<string>();
   for (const uid of userIds) {
@@ -7555,14 +7569,7 @@ async function _handleJiraPgApi(
     // personally assigned/reporting on -- fan out to both the email path
     // (notifyIssueCreated) and the in-app path below.
     const { ids: adminIds, emails: adminEmails } = await getAdminRecipients();
-    // IT Administration board: Vamshi Gande and Pavan B want an email for
-    // every new ticket created here, regardless of assignee/reporter/admin
-    // status -- by request. Reuses the adminEmails channel on
-    // notifyIssueCreated rather than adding a new param, since it already
-    // means "extra recipients beyond assignee/reporter" for this event.
-    const boardCreateNotifyEmails = (issue.space?.key ?? sk) === 'IA'
-      ? [...adminEmails, 'vamshi.gande@cloudfuze.com', 'pavan@cloudfuze.com']
-      : adminEmails;
+    const boardCreateNotifyEmails = [...adminEmails, ...getExtraSpaceNotifyEmails(issue.space?.key ?? sk)];
 
     // Send email notification (fire-and-forget)
     notifyIssueCreated({
@@ -7573,7 +7580,7 @@ async function _handleJiraPgApi(
       status: { name: issue.status?.name ?? 'Open', category: issue.status?.category ?? 'todo' },
       assignee: issue.assignee, reporter: issue.reporter,
       adminEmails: boardCreateNotifyEmails,
-    }).catch(() => {});
+    }).catch((err: any) => console.error('[Issue Created Email] Failed to send:', err?.message || err));
 
     // If ticket has no assignee, email leads + shift leads so they can pick it up
     const issueDept = (issue as any).current_department || null;
@@ -10159,7 +10166,7 @@ async function _handleJiraPgApi(
         oldStatus: { name: oldStatusRec?.name ?? 'Unknown', category: oldStatusRec?.category ?? 'todo' },
         newStatus: issueForNotif.status,
         changedBy: changer,
-        adminEmails: statusAdminEmails,
+        adminEmails: [...statusAdminEmails, ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey)],
       }).catch(() => {});
       // In-app: notify assignee + reporter + admins (not the person who changed it)
       await notifyUsers(
@@ -10173,7 +10180,7 @@ async function _handleJiraPgApi(
     if (assigneeChangedForNotif) {
       const prevAssignee = issue.assigneeId ? await db.user.findUnique({ where: { id: issue.assigneeId } }) : null;
       const { ids: assignAdminIds, emails: assignAdminEmails } = await getAdminRecipients();
-      notifyIssueAssigned({ ...issueForNotif, previousAssignee: prevAssignee, adminEmails: assignAdminEmails }).catch(() => {});
+      notifyIssueAssigned({ ...issueForNotif, previousAssignee: prevAssignee, adminEmails: [...assignAdminEmails, ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey)] }).catch(() => {});
       // In-app: notify new assignee + reporter + admins
       await notifyUsers(
         [updated.assigneeId, updated.reporterId, ...assignAdminIds],
@@ -10204,7 +10211,7 @@ async function _handleJiraPgApi(
           ...issueForNotif,
           updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
           changes,
-          adminEmails: updateAdminEmails,
+          adminEmails: [...updateAdminEmails, ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey)],
         }).catch(() => {});
         // In-app: notify assignee + reporter + admins + watchers
         await notifyUsers(
@@ -10636,7 +10643,7 @@ async function _handleJiraPgApi(
         body: comment.body,
         author: comment.author ?? (authorUser ? { email: authorUser.email, firstName: authorUser.firstName, lastName: authorUser.lastName } : null),
       },
-      adminEmails: commentAdminEmails,
+      adminEmails: [...commentAdminEmails, ...getExtraSpaceNotifyEmails(issue.space?.key)],
     }).catch((err: any) => console.error('[Comment Email] Failed to send:', err?.message || err));
 
     // In-app: notify assignee + reporter + leads/shift leads + watchers (not the commenter)
