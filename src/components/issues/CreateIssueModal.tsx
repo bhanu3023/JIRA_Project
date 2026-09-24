@@ -989,9 +989,28 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     // department routing whatsoever at the time), still
                     // created the ticket with current_department='Infra' and
                     // started a real Infra SLA clock for it -- IA-25 / CF-31525.
+                    //
+                    // Clearing form.department here isn't enough by itself --
+                    // spaceQueues (and the queueOptions derived from it) still
+                    // holds the OLD space's queues until the async
+                    // `custom-queues/{key}` fetch for the new space resolves.
+                    // If the old space happened to have exactly one queue
+                    // (e.g. IT Administration's sole "Infra" queue), the
+                    // auto-default effect below (queueOptions.length === 1)
+                    // fires on that stale intermediate render and immediately
+                    // re-stamps the NEW space's department with the OLD
+                    // space's queue name, before the real (possibly empty)
+                    // queue list for the new space ever loads. Confirmed for
+                    // real: switching from IT Administration to SAT_Board
+                    // left form.department = 'infra', wrongly requiring
+                    // "Infra Issue Type" on a space with no queues at all.
+                    // Clearing spaceQueues too makes queueOptions read as
+                    // empty during that window instead of stale, so the
+                    // auto-default effect can't misfire on old data.
                     setSelectedSpaceKey(e.target.value);
                     setForm(f => (f.department ? { ...f, department: '' } : f));
                     setSelectedQueueId('');
+                    setSpaceQueues([]);
                   }}
                   className="w-full pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
