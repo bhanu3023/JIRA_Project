@@ -1472,6 +1472,13 @@ export default function IssueDetailPage() {
   // same way the Attachments list already does, since inline chips only
   // carry a filename/url, not a stored mimeType.
   const openFilePreview = (url: string, name: string) => {
+    // Per explicit request ("any type of files... should open"): this used
+    // to only recognize image/pdf/csv/xlsx/xls, defaulting every other
+    // extension (video, audio, plain text, docx, zip, ...) to generic
+    // application/octet-stream -- correctly routing to the "download it"
+    // fallback for genuinely unpreviewable types like docx/zip, but ALSO
+    // silently doing the same for video/audio/text files the preview modal
+    // can actually render natively once given the right mime.
     const mime = /\.(png|jpe?g|gif|webp|svg)$/i.test(name)
       ? `image/${name.split('.').pop()!.toLowerCase().replace('jpg', 'jpeg')}`
       : /\.pdf$/i.test(name)
@@ -1482,6 +1489,14 @@ export default function IssueDetailPage() {
       ? XLSX_MIME
       : /\.xls$/i.test(name)
       ? XLS_MIME
+      : /\.(mp4|webm|mov|m4v|ogv)$/i.test(name)
+      ? `video/${name.split('.').pop()!.toLowerCase().replace('mov', 'quicktime')}`
+      : /\.(mp3|wav|m4a|ogg)$/i.test(name)
+      ? `audio/${name.split('.').pop()!.toLowerCase()}`
+      : /\.(txt|log)$/i.test(name)
+      ? 'text/plain'
+      : /\.json$/i.test(name)
+      ? 'application/json'
       : 'application/octet-stream';
     setPreviewAttach({ url, name, mime });
   };
@@ -2382,6 +2397,16 @@ export default function IssueDetailPage() {
                       </table>
                     )}
                   </div>
+                ) : previewAttach.mime.startsWith('video/') ? (
+                  <div className="w-full h-full flex items-center justify-center p-6 bg-black">
+                    <video src={previewAttach.url} controls autoPlay={false} className="max-w-full max-h-full" />
+                  </div>
+                ) : previewAttach.mime.startsWith('audio/') ? (
+                  <div className="w-full h-full flex items-center justify-center p-6">
+                    <audio src={previewAttach.url} controls className="w-full max-w-md" />
+                  </div>
+                ) : previewAttach.mime === 'text/plain' || previewAttach.mime === 'application/json' ? (
+                  <iframe src={previewAttach.url} className="w-full h-full border-0 bg-white" title={previewAttach.name} />
                 ) : isXlsxPreview ? (
                   <div className="w-full h-full overflow-auto bg-white p-4">
                     {xlsxPreviewError ? (
@@ -2414,7 +2439,17 @@ export default function IssueDetailPage() {
                 ) : (
                   <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-gray-400">
                     <Paperclip size={28} />
-                    <p className="text-sm">No inline preview available for this file type.</p>
+                    {/* Word/PowerPoint/zip/etc. -- browsers genuinely can't
+                        render these inline no matter what headers say (that's
+                        not a framing/permission issue like the PDF/image one
+                        was, it's a real rendering-capability gap), so download
+                        is the correct outcome here, not a bug. Naming the file
+                        type explicitly (from the extension, since mimeType is
+                        often just generic octet-stream) so this doesn't read
+                        as an unexplained dead end. */}
+                    <p className="text-sm">
+                      {(previewAttach.name.split('.').pop() || '').toUpperCase() || 'This'} files can't be previewed in the browser — download it to open.
+                    </p>
                     <a href={previewAttach.url} download={previewAttach.name}
                       className="px-3 py-1.5 text-xs text-white bg-indigo-600 hover:bg-indigo-700 rounded-md transition-colors">
                       Download {previewAttach.name}
