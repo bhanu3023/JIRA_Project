@@ -7875,10 +7875,15 @@ async function _handleJiraPgApi(
               { type: 'DEPT_CHANGE', title: `Ticket ${displayKey} sent to ${newDept}`, message: `Your ticket "${issue.summary}" has been transferred to ${newDept}.`, issueKey: displayKey }
             );
           }
-          // Notify the RR-assigned agent
+          // Notify the RR-assigned agent -- and per explicit request, the
+          // reporter too. They already got a DEPT_CHANGE notification just
+          // above ("sent to new dept"), but that never says WHO it went to;
+          // this is the same ASSIGNED-type notification the direct
+          // assignment path (body.assigneeId PATCH) already sends to both
+          // assignee AND reporter, brought in line here for consistency.
           if (rrAssigneeId) {
             await notifyUsers(
-              [rrAssigneeId],
+              [rrAssigneeId, issue.reporterId],
               userId,
               { type: 'ASSIGNED', title: `Ticket assigned to you: ${displayKey}`, message: `You have been assigned to "${issue.summary}" in the ${newDept} queue.`, issueKey: displayKey }
             );
