@@ -654,8 +654,13 @@ function SpaceDetailContent() {
           // Closed tickets (service_desk boards) — the inverse of "All Tickets": only
           // resolved/done tickets. This used to link to all-requests, which has no
           // status filtering at all, so open tickets showed up under "Closed tickets".
+          // Also scoped to the current user, matching "Assigned to me" right above it
+          // in the sidebar — this used to show every closed ticket in the space
+          // regardless of assignee, so anyone viewing it saw everyone else's closed
+          // tickets too, not just their own.
           if (queueFilter === 'closed') {
             params.statusCategory = 'done';
+            if (user?.id) params.assignee = user.id;
           }
           // Unassigned queue — pass unassigned flag; dept-scoped users get filtered by dept
           if (queueFilter === 'unassigned') {
@@ -849,7 +854,10 @@ function SpaceDetailContent() {
       if (queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-queue') params.excludeDone = 'true';
       if (queueFilter === 'unassigned') params.unassigned = 'true';
       if (queueFilter === 'assigned' && user?.id) params.assignee = user.id;
-      if (queueFilter === 'closed') params.statusCategory = 'done';
+      if (queueFilter === 'closed') {
+        params.statusCategory = 'done';
+        if (user?.id) params.assignee = user.id;
+      }
       if (queueFilter === 'all-requests') params.limit = '50';
       prefetchIssues(params).catch(() => {});
     }, 30_000);
