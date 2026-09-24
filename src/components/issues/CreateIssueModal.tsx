@@ -311,15 +311,19 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // the user keeps typing before it resolves.
   const [similarIssues, setSimilarIssues] = useState<Array<{ key: string; displayKey: string; summary: string; status: string; statusCategory: string; matchPercent: number; isExactMatch: boolean }>>([]);
   const [similarLoading, setSimilarLoading] = useState(false);
+  // Distinguishes "haven't searched yet" (summary still too short) from
+  // "searched and found nothing" -- per explicit request, the latter case
+  // needs its own "no related ticket found" message, not just silence.
+  const [similarSearched, setSimilarSearched] = useState(false);
   useEffect(() => {
-    if (!selectedSpaceKey || form.summary.trim().length < 8) { setSimilarIssues([]); return; }
+    if (!selectedSpaceKey || form.summary.trim().length < 8) { setSimilarIssues([]); setSimilarSearched(false); return; }
     let cancelled = false;
     setSimilarLoading(true);
     const timer = setTimeout(() => {
       api.getSimilarIssues(selectedSpaceKey, form.summary, form.description)
         .then((res) => { if (!cancelled) setSimilarIssues(res.matches || []); })
         .catch(() => { if (!cancelled) setSimilarIssues([]); })
-        .finally(() => { if (!cancelled) setSimilarLoading(false); });
+        .finally(() => { if (!cancelled) { setSimilarLoading(false); setSimilarSearched(true); } });
     }, 500);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [selectedSpaceKey, form.summary, form.description]);
@@ -696,6 +700,9 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
               )}
               {similarLoading && (
                 <p className="text-[12px] text-gray-400 mt-1.5">Checking for similar tickets…</p>
+              )}
+              {!similarLoading && similarSearched && similarIssues.length === 0 && (
+                <p className="text-[12px] text-gray-400 mt-1.5">No related ticket found for this issue.</p>
               )}
               {!similarLoading && similarIssues.length > 0 && (
                 <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 overflow-hidden">
