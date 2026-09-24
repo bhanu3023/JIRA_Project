@@ -308,11 +308,35 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
           { name: 'References',  value: opts.inReplyTo },
         ];
       }
-      const res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+      const body = JSON.stringify({ message, saveToSentItems: false });
+      // A 429 here is Microsoft's per-mailbox ApplicationThrottled limit,
+      // not a real failure -- confirmed for real: sending the same
+      // notification to several recipients at once (this whole loop runs in
+      // parallel, see above) can trip one specific recipient's own
+      // concurrency limit while every other recipient succeeds in the same
+      // batch. This function used to just log that recipient's failure and
+      // move on (still returning true overall), so the caller believed the
+      // send succeeded and never fell through to another delivery path --
+      // that recipient's email was silently lost for good. Retrying a
+      // couple of times with a short backoff (honoring Retry-After when
+      // Microsoft sends one) clears the large majority of these without
+      // resorting to a slower/less-reliable fallback sender.
+      let res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, saveToSentItems: false }),
+        body,
       });
+      for (let attempt = 0; res.status === 429 && attempt < 3; attempt++) {
+        const retryAfterHeader = parseInt(res.headers.get('retry-after') || '', 10);
+        const waitMs = (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader * 1000 : 2000) * (attempt + 1);
+        console.warn(`[Notification] Graph throttled for ${recipient}, retrying in ${waitMs}ms (attempt ${attempt + 1}/3)`);
+        await new Promise(r => setTimeout(r, waitMs));
+        res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body,
+        });
+      }
       if (res.ok || res.status === 202) {
         console.log(`[Notification] Sent via Graph: ${opts.subject} → ${recipient}`);
       } else {
