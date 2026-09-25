@@ -103,7 +103,14 @@ export const useStore = create<AppState>((set, get) => ({
     const epoch = authEpoch;
     const { token, user } = await api.login(email, password);
     if (epoch !== authEpoch) return;
-    localStorage.setItem('jira_token', token);
+    // The server also sets this same session as an httpOnly cookie on this
+    // response (see setSessionCookie in jira-pg-api.ts) -- that cookie is
+    // what actually authenticates every request from here on, and unlike
+    // localStorage it can never be read by JavaScript (including a future
+    // XSS payload). No longer persisting the raw token to localStorage at
+    // all; `token` stays in this in-memory store only for any code that
+    // still reads it directly, and disappears on reload same as any other
+    // in-memory state.
     set({ user, token, isAuthenticated: true, initializing: false });
   },
 
@@ -112,12 +119,15 @@ export const useStore = create<AppState>((set, get) => ({
     const epoch = authEpoch;
     const { token, user } = await api.register(data);
     if (epoch !== authEpoch) return;
-    localStorage.setItem('jira_token', token);
     set({ user, token, isAuthenticated: true, initializing: false });
   },
 
   logout: () => {
     authEpoch++;
+    // Nothing should be there anymore under the cookie-based flow, but clear
+    // it anyway -- a session that logged in before this change still has its
+    // old token sitting in localStorage until they log out once, and this is
+    // that one-time cleanup.
     localStorage.removeItem('jira_token');
     set({ user: null, token: null, isAuthenticated: false, spaces: [], issues: [], notifications: [] });
   },
@@ -125,12 +135,16 @@ export const useStore = create<AppState>((set, get) => ({
   loadUser: async () => {
     const epochAtStart = authEpoch;
     try {
+      // Used to bail out immediately (no network call at all) when
+      // localStorage had no token -- correct for the old flow, where no
+      // token there really did mean "not logged in", but wrong now that a
+      // session can live entirely in an httpOnly cookie the page can't read.
+      // Always attempt GET /auth/me instead; it authenticates via whichever
+      // of the header (legacy localStorage token, if this session predates
+      // the cookie change) or the cookie is actually valid, and a genuinely
+      // logged-out visitor just gets a quick 401 here instead.
       const token = localStorage.getItem('jira_token');
-      if (!token) {
-        set({ user: null, token: null, isAuthenticated: false, initializing: false });
-        return;
-      }
-      set({ token });
+      if (token) set({ token });
       const user = await api.getMe();
       if (epochAtStart !== authEpoch) return;
       set({ user, isAuthenticated: true, initializing: false });

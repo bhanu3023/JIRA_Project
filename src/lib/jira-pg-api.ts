@@ -541,6 +541,33 @@ function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status });
 }
 
+// Session cookie is the real defense-in-depth piece of the token-storage
+// fix: httpOnly means client-side JS (DevTools console, or a future stored-
+// XSS payload) can never read it -- only the browser can send it, and only
+// back to this same origin. Set on login/register/OAuth login; the
+// Authorization-header/localStorage flow keeps working unchanged alongside
+// it (see resolveUserId's cookie fallback above), so nothing already
+// depending on a Bearer header breaks.
+const SESSION_COOKIE_NAME = 'jira_session';
+function setSessionCookie(res: NextResponse, token: string) {
+  res.cookies.set(SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: SESSION_TTL_HOURS * 3600,
+  });
+}
+function clearSessionCookie(res: NextResponse) {
+  res.cookies.set(SESSION_COOKIE_NAME, '', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 0,
+  });
+}
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ In-app notification helper Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 async function createNotification({
   userId, type, title, message, issueKey,
@@ -4200,7 +4227,22 @@ async function _handleJiraPgApi(
   segments: string[],
   method: string,
 ): Promise<NextResponse> {
-  const auth = req.headers.get('authorization');
+  // Prefer the Authorization header (personal API tokens, admin scripts,
+  // any explicit caller) but fall back to the httpOnly session cookie --
+  // the browser sends this automatically on every same-origin request, and
+  // unlike a token sitting in localStorage/a JS variable, it can never be
+  // read by JavaScript (including an injected XSS payload), only sent by
+  // the browser itself. Set on login/register/OAuth login below.
+  const sessionCookie = req.cookies.get('jira_session')?.value;
+  const headerAuth = req.headers.get('authorization');
+  // A caller sending "Authorization: Bearer " with nothing after it (a
+  // logged-in-via-cookie session whose frontend code still unconditionally
+  // attaches `Bearer ${localStorage.getItem('jira_token') || ''}`) is a
+  // non-empty, truthy STRING -- `headerAuth || cookie` would wrongly prefer
+  // that empty header over a genuinely valid cookie. Only treat the header
+  // as present when it actually carries a token after "Bearer ".
+  const hasRealHeaderToken = !!headerAuth?.startsWith('Bearer ') && headerAuth.slice(7).trim().length > 0;
+  const auth = hasRealHeaderToken ? headerAuth : (sessionCookie ? `Bearer ${sessionCookie}` : null);
   // Get client IP for session binding
   const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0].trim()
     || req.headers.get('x-real-ip')
@@ -4228,10 +4270,13 @@ async function _handleJiraPgApi(
       user.isActive = true;
     }
     await pool.query(`UPDATE users SET status='active' WHERE id=$1 AND status='invited'`, [user.id]).catch(() => {});
-    return json({
-      token: encodeToken(user.id, clientIp, clientUA),
+    const loginToken = encodeToken(user.id, clientIp, clientUA);
+    const loginRes = json({
+      token: loginToken,
       user: { ...formatUser(user), status: 'active' },
     });
+    setSessionCookie(loginRes, loginToken);
+    return loginRes;
   }
 
   // Generic small-file upload for description images/attachments — returns a
@@ -4314,7 +4359,10 @@ async function _handleJiraPgApi(
         isActive: true,
       },
     });
-    return json({ token: encodeToken(user.id, clientIp, clientUA), user: formatUser(user) });
+    const registerToken = encodeToken(user.id, clientIp, clientUA);
+    const registerRes = json({ token: registerToken, user: formatUser(user) });
+    setSessionCookie(registerRes, registerToken);
+    return registerRes;
   }
 
   if (path === 'auth/me' && method === 'GET') {
@@ -4365,7 +4413,9 @@ async function _handleJiraPgApi(
         [tokenHash]
       ).catch(() => {});
     }
-    return json({ ok: true });
+    const logoutRes = json({ ok: true });
+    clearSessionCookie(logoutRes);
+    return logoutRes;
   }
 
   // A dead auth/oauth-token endpoint used to live here ("called by OAuth

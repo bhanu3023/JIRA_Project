@@ -26,8 +26,11 @@ export async function POST(req: NextRequest) {
   // /api/issues/:key handler never actually checks (confirmed -- that
   // header string doesn't appear anywhere in jira-pg-api.ts), so this
   // internal call was unauthenticated and presumably failing outright.
-  // Forwarding the caller's own already-verified admin Bearer token instead
-  // actually authenticates it, the same way any other API call does.
+  // Forwarding the caller's own already-verified session instead actually
+  // authenticates it, the same way any other API call does -- falls back to
+  // the session cookie if the caller authenticated that way (no
+  // Authorization header to forward in that case).
+  const cookieHeader = req.headers.get('cookie');
   const callerAuth = req.headers.get('authorization') || '';
 
   for (const { key, patch } of patches) {
@@ -36,7 +39,8 @@ export async function POST(req: NextRequest) {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: callerAuth,
+          ...(callerAuth ? { Authorization: callerAuth } : {}),
+          ...(cookieHeader ? { Cookie: cookieHeader } : {}),
         },
         body: JSON.stringify(patch),
       });

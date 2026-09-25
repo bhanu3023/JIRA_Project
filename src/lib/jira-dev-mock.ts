@@ -220,13 +220,15 @@ function encodeToken(userId: string) {
 function decodeToken(auth: string | null): string | null {
   if (!auth?.startsWith('Bearer ')) return null;
   const t = auth.slice(7).trim();
-  // Legacy dev. tokens (base64url encoded)
-  if (t.startsWith('dev.')) {
-    try {
-      const payload = JSON.parse(Buffer.from(t.slice(4), 'base64url').toString('utf8')) as { sub: string };
-      return payload.sub || null;
-    } catch { return null; }
-  }
+  // A "dev." unsigned-token branch used to live here too -- the SAME
+  // no-signature-check impersonation bug already removed from
+  // jira-pg-api.ts's resolveUserId(), but this file has its own separate
+  // decodeToken() and still had its own separate copy of the bug. Routes
+  // that fall through to this file (sprints, labels, automation, filters,
+  // custom-fields, email -- confirmed to run in production, not just dev,
+  // despite the filename) were still exploitable via
+  // `Authorization: Bearer dev.<base64url({"sub":"<any user id>"})>` even
+  // after the other file's fix. Removed entirely, same as there.
   // New JWT tokens (eyJ...) — signature already verified by jira-pg-api.ts before delegating here;
   // just extract the `sub` claim from the payload (middle segment).
   if (t.startsWith('eyJ')) {
@@ -1021,7 +1023,16 @@ async function readJson(req: NextRequest): Promise<Record<string, unknown>> {
 
 export async function handleJiraDevMock(req: NextRequest, segments: string[], method: string): Promise<NextResponse> {
   const s = getStore();
-  const auth = req.headers.get('authorization');
+  // Same cookie fallback (and same empty-header guard) as jira-pg-api.ts's
+  // resolveUserId -- a cookie-based session (no token in localStorage) has
+  // nothing to put in an Authorization header for routes that fall through
+  // to this file, and some frontend calls still send a literal empty
+  // "Bearer " header in that case, which is a truthy string that would
+  // otherwise wrongly win over a valid cookie.
+  const sessionCookie = req.cookies.get('jira_session')?.value;
+  const headerAuth = req.headers.get('authorization');
+  const hasRealHeaderToken = !!headerAuth?.startsWith('Bearer ') && headerAuth.slice(7).trim().length > 0;
+  const auth = hasRealHeaderToken ? headerAuth : (sessionCookie ? `Bearer ${sessionCookie}` : null);
   const userId = decodeToken(auth);
   const url = new URL(req.url);
 

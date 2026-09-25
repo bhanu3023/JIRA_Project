@@ -17,10 +17,31 @@
 import { db } from '@/lib/db';
 import { pgPool as pool } from '@/lib/pg-pool';
 
+// Reads the jira_session cookie from a raw Cookie header -- these routes
+// type their request as plain Request (not NextRequest), so no .cookies
+// convenience accessor is available; this mirrors what jira-pg-api.ts's
+// resolveUserId cookie fallback does with req.cookies.get(...).
+function readSessionCookie(req: Request): string | null {
+  const raw = req.headers.get('cookie');
+  if (!raw) return null;
+  const match = raw.split(';').map(s => s.trim()).find(s => s.startsWith('jira_session='));
+  return match ? decodeURIComponent(match.slice('jira_session='.length)) : null;
+}
+
 export async function requireAdmin(req: Request): Promise<{ ok: true; userId: string } | { ok: false; status: number; error: string }> {
-  const auth = req.headers.get('authorization');
-  if (!auth?.startsWith('Bearer ')) return { ok: false, status: 401, error: 'Unauthorized' };
-  const token = auth.slice(7).trim();
+  // Prefer the Authorization header (explicit callers) but fall back to the
+  // httpOnly session cookie, same as jira-pg-api.ts's resolveUserId -- a
+  // cookie-based session (no token in localStorage at all) would otherwise
+  // send an empty/missing Authorization header here and get rejected.
+  const headerAuth = req.headers.get('authorization');
+  // A literal "Bearer " with nothing after it (sent by a cookie-based
+  // session whose frontend call still unconditionally attaches
+  // `Bearer ${localStorage.getItem('jira_token') || ''}`) must NOT win over
+  // a real cookie -- .slice(7).trim() on it is an empty string, which is
+  // falsy, so the `||` below already falls through to the cookie correctly.
+  const headerToken = headerAuth?.startsWith('Bearer ') ? headerAuth.slice(7).trim() : '';
+  const token = headerToken || readSessionCookie(req);
+  if (!token) return { ok: false, status: 401, error: 'Unauthorized' };
   if (!token.startsWith('eyJ')) return { ok: false, status: 401, error: 'Unauthorized' };
 
   if (!process.env.JWT_SECRET) {

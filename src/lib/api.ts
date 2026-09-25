@@ -72,6 +72,12 @@ class ApiClient {
       res = await fetch(url, {
         ...options,
         headers,
+        // Explicit, matching the browser's own same-origin default -- the
+        // httpOnly session cookie (see setSessionCookie in jira-pg-api.ts)
+        // only authenticates the request if it's actually sent, and being
+        // explicit here means that keeps working even if API_URL is ever
+        // pointed at a different origin in some config.
+        credentials: 'same-origin',
         // No timeout here at all previously meant a stalled request (a slow
         // query under real load, a dropped connection that never errors)
         // left the caller's promise pending forever -- e.g. the issue detail

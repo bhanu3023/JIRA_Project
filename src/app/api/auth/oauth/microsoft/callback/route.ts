@@ -12,7 +12,7 @@ import { db } from '@/lib/db';
 
 export const runtime = 'nodejs';
 
-function makeToken(userId: string, extra?: { email?: string; firstName?: string; lastName?: string; avatarUrl?: string }): string {
+function makeToken(userId: string, extra?: { email?: string; firstName?: string; lastName?: string; avatarUrl?: string }): { token: string; ttlSeconds: number } {
   const jwt    = require('jsonwebtoken');
   const crypto = require('crypto');
   // No hardcoded fallback -- see the matching JWT_SECRET check in
@@ -33,7 +33,26 @@ function makeToken(userId: string, extra?: { email?: string; firstName?: string;
     `INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES ($1,$2,$3) ON CONFLICT (token_hash) DO NOTHING`,
     hash, userId, exp
   ).catch(() => {});
-  return token;
+  return { token, ttlSeconds: TTL * 3600 };
+}
+
+// Redirects to the client-side bridge page with the session set as an
+// httpOnly cookie instead of a ?token= query parameter -- a raw JWT in a
+// redirect URL ends up in browser history and often in server/proxy access
+// logs (full request URLs, query string included), a worse exposure than
+// even localStorage. The cookie can't be read by JavaScript at all, and the
+// browser carries it automatically; the bridge page just confirms the
+// session via GET /auth/me instead of parsing a token out of the URL.
+function redirectWithSession(appUrl: string, next: string, token: string, ttlSeconds: number): NextResponse {
+  const res = NextResponse.redirect(`${appUrl}/auth/oauth-callback?next=${encodeURIComponent(next)}`);
+  res.cookies.set('jira_session', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: ttlSeconds,
+  });
+  return res;
 }
 
 export async function GET(req: NextRequest) {
@@ -119,27 +138,21 @@ export async function GET(req: NextRequest) {
       }
       if (!user && process.env.NODE_ENV === 'development') {
         // DB is up but user not found — still allow login locally with real identity
-        const token = makeToken(devId, devTokenExtras);
-        return NextResponse.redirect(
-          `${appUrl}/auth/oauth-callback?token=${encodeURIComponent(token)}&next=${encodeURIComponent(returnUrl || '/dashboard')}`
-        );
+        const { token, ttlSeconds } = makeToken(devId, devTokenExtras);
+        return redirectWithSession(appUrl, returnUrl || '/dashboard', token, ttlSeconds);
       }
       if (!user) {
         const msg = encodeURIComponent(`No account found for ${rawEmail}. Contact your administrator.`);
         return NextResponse.redirect(`${appUrl}/auth/login?oauth_error=${msg}`);
       }
-      const token = makeToken(user.id, devTokenExtras);
-      return NextResponse.redirect(
-        `${appUrl}/auth/oauth-callback?token=${encodeURIComponent(token)}&next=${encodeURIComponent(returnUrl || '/dashboard')}`
-      );
+      const { token, ttlSeconds } = makeToken(user.id, devTokenExtras);
+      return redirectWithSession(appUrl, returnUrl || '/dashboard', token, ttlSeconds);
     } catch (e: any) {
       console.error('[OAuthCallback] Login error:', e);
       // DB unreachable — fall back to identity-only token in dev
       if (process.env.NODE_ENV === 'development') {
-        const token = makeToken(devId, devTokenExtras);
-        return NextResponse.redirect(
-          `${appUrl}/auth/oauth-callback?token=${encodeURIComponent(token)}&next=${encodeURIComponent(returnUrl || '/dashboard')}`
-        );
+        const { token, ttlSeconds } = makeToken(devId, devTokenExtras);
+        return redirectWithSession(appUrl, returnUrl || '/dashboard', token, ttlSeconds);
       }
       return NextResponse.redirect(`${appUrl}/auth/login?oauth_error=server_error`);
     }
