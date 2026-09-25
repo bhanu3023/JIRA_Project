@@ -179,6 +179,12 @@ export default function IssueDetailPage() {
   const [isUploadingComment, setIsUploadingComment] = useState(false);
   const [isUploadingDescription, setIsUploadingDescription] = useState(false);
   const [isUploadingEditComment, setIsUploadingEditComment] = useState(false);
+  // Root Cause / Fix Description were plain <textarea> fields with no image
+  // paste/upload support at all -- switched to the same RichTextEditor used
+  // for Description/comments (which handles image paste/drag-drop/upload),
+  // by request. Shared between both fields since only one is ever being
+  // edited at a time (editingCustomField is a single value).
+  const [isUploadingCustomField, setIsUploadingCustomField] = useState(false);
   // Inline reply box -- opens directly under the comment being replied to
   // (matching Jira's own placement) instead of jumping to the main composer
   // at the top, which put the reply nowhere near the comment it referenced
@@ -2615,13 +2621,22 @@ export default function IssueDetailPage() {
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_rootCause' ? (
                       <div className="flex flex-col gap-2">
-                        <textarea value={customFieldEditValue} onChange={e => { const words = e.target.value.trim().split(/\s+/).filter(Boolean); if (words.length <= 500 || e.target.value.length < customFieldEditValue.length) setCustomFieldEditValue(e.target.value); }} autoFocus rows={6}
-                          className="w-full border border-blue-400 rounded px-3 py-2 text-[13px] focus:outline-none resize-y" placeholder="Describe the root cause…" />
+                        <RichTextEditor
+                          value={customFieldEditValue}
+                          onChange={(html) => {
+                            const words = html.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean);
+                            if (words.length <= 500 || html.length < customFieldEditValue.length) setCustomFieldEditValue(html);
+                          }}
+                          placeholder="Describe the root cause… (paste or drag images)"
+                          minHeight="120px"
+                          members={allMembers}
+                          onUploadingChange={setIsUploadingCustomField}
+                        />
                         <div className="flex items-center justify-between">
-                          <span className="text-[11px] text-gray-400">{customFieldEditValue.trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
+                          <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button onClick={async () => { try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } }}
-                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">Save</button>
+                            <button disabled={isUploadingCustomField} onClick={async () => { try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } }}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
                           </div>
@@ -2631,7 +2646,9 @@ export default function IssueDetailPage() {
                       <button onClick={() => { setEditingCustomField('l2b_rootCause'); setCustomFieldEditValue((issue as any).rootCause || ''); }}
                         className="w-full text-left text-[13px] text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 transition-colors min-h-[32px]">
                         {(issue as any).rootCause
-                          ? <span className="whitespace-pre-wrap break-words">{(issue as any).rootCause}</span>
+                          ? (/<[a-z][\s\S]*>/i.test((issue as any).rootCause)
+                              ? <div className="[&_img]:max-w-full [&_img]:rounded [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline break-words" dangerouslySetInnerHTML={{ __html: (issue as any).rootCause }} />
+                              : <span className="whitespace-pre-wrap break-words">{(issue as any).rootCause}</span>)
                           : <span className="text-gray-400 italic">Click to add root cause…</span>}
                       </button>
                     )}
@@ -2648,13 +2665,22 @@ export default function IssueDetailPage() {
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_fixDescription' ? (
                       <div className="flex flex-col gap-2">
-                        <textarea value={customFieldEditValue} onChange={e => { const words = e.target.value.trim().split(/\s+/).filter(Boolean); if (words.length <= 500 || e.target.value.length < customFieldEditValue.length) setCustomFieldEditValue(e.target.value); }} autoFocus rows={6}
-                          className="w-full border border-blue-400 rounded px-3 py-2 text-[13px] focus:outline-none resize-y" placeholder="Describe the fix…" />
+                        <RichTextEditor
+                          value={customFieldEditValue}
+                          onChange={(html) => {
+                            const words = html.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean);
+                            if (words.length <= 500 || html.length < customFieldEditValue.length) setCustomFieldEditValue(html);
+                          }}
+                          placeholder="Describe the fix… (paste or drag images)"
+                          minHeight="120px"
+                          members={allMembers}
+                          onUploadingChange={setIsUploadingCustomField}
+                        />
                         <div className="flex items-center justify-between">
-                          <span className="text-[11px] text-gray-400">{customFieldEditValue.trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
+                          <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button onClick={async () => { try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } }}
-                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">Save</button>
+                            <button disabled={isUploadingCustomField} onClick={async () => { try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } }}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
                           </div>
@@ -2664,7 +2690,9 @@ export default function IssueDetailPage() {
                       <button onClick={() => { setEditingCustomField('l2b_fixDescription'); setCustomFieldEditValue((issue as any).fixDescription || ''); }}
                         className="w-full text-left text-[13px] text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 transition-colors min-h-[32px]">
                         {(issue as any).fixDescription
-                          ? <span className="whitespace-pre-wrap break-words">{(issue as any).fixDescription}</span>
+                          ? (/<[a-z][\s\S]*>/i.test((issue as any).fixDescription)
+                              ? <div className="[&_img]:max-w-full [&_img]:rounded [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline break-words" dangerouslySetInnerHTML={{ __html: (issue as any).fixDescription }} />
+                              : <span className="whitespace-pre-wrap break-words">{(issue as any).fixDescription}</span>)
                           : <span className="text-gray-400 italic">Click to add fix description…</span>}
                       </button>
                     )}
