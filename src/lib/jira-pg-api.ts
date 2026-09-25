@@ -2256,8 +2256,26 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       // been through. jira_sla_breached carries breach history imported
       // from Jira for tickets that were already breached before this app's
       // own SLA clock started tracking them.
+      // jira_sla_breached (a single per-issue flag imported from Jira's own,
+      // separate/legacy SLA field -- see the boot-time backfill guarded by
+      // jira_source_key/L2B-/L3B-/etc keys) used to be OR'd in
+      // unconditionally here regardless of what this app's own tracked data
+      // says. Confirmed for real on CF-31002/CF-31001: both were resolved
+      // well BEFORE their computed dueTime (priorElapsedMs < durationMs, a
+      // clean on-time resolution this app's own dept_sla_log genuinely
+      // tracked), yet still came back isBreached: true purely because the
+      // imported Jira flag was set -- directly contradicting this exact
+      // instance's own history entry (wasBreached: false, computed the same
+      // resolvedAt-vs-dueTime way at the actual moment of resolution).
+      // deptLogEntry (above) is only trustworthy as a fallback when it's
+      // null -- meaning this app's clock never tracked this department for
+      // this ticket AT ALL, so priorElapsedMs is an unknown 0, not a
+      // confidently-tracked one, and the imported flag is the only signal
+      // available. Once a real log entry exists, this app's own live math
+      // is authoritative and must not be overridden by a different SLA
+      // system's verdict.
       const rawIsBreached = isResolved
-        ? (!!(issue as any).jira_sla_breached || priorElapsedMs >= durationMs)
+        ? ((!deptLogEntry && !!(issue as any).jira_sla_breached) || priorElapsedMs >= durationMs)
         : !isPaused && new Date(dueTime) < new Date();
 
       // An admin can waive this specific policy's breach on this specific
@@ -2879,13 +2897,21 @@ function computeSlaBreachedAndOverdue(
   const deptStatusKeyForStatus = Object.keys(deptStatusesForStatus).find((k) => k.toLowerCase() === issueDeptForStatus);
   const deptStatusCategoryForStatus = deptStatusKeyForStatus ? deptStatusesForStatus[deptStatusKeyForStatus]?.category : undefined;
   const isResolved = i.status?.category === 'done' || deptStatusCategoryForStatus === 'done';
-  // Historical breach imported from Jira (L2B/L3B) always counts, even for
-  // a ticket that's since been resolved here -- the checks below all force
-  // `breached` back to false once resolved, which is right for this app's
-  // OWN SLA clock (no point alarming on a stopped clock), but would erase
-  // the fact that Jira already recorded a real breach before the ticket
-  // ever got resolved.
-  let breached = !!i.jira_sla_breached;
+  // jira_sla_breached (a single per-issue flag imported from Jira's own,
+  // separate/legacy SLA field) used to unconditionally seed `breached =
+  // true` here, which also SKIPPED the entire live per-policy computation
+  // below via `if (!breached)` -- meaning a ticket with this flag set never
+  // even got its real dept_sla_log data checked. Confirmed for real on
+  // CF-31002/CF-31001: both resolved well before their own computed due
+  // time (priorElapsedMs < durationMs, real tracked data this app's own
+  // clock genuinely captured), yet still showed "Breached: Yes" purely from
+  // the imported flag, contradicting their own SLA history entry recorded
+  // at the actual moment of resolution. Only trusted now as a fallback when
+  // this app's own dept_sla_log genuinely never tracked this ticket's
+  // department at all (hasRealDeptTracking stays false below) -- see where
+  // it's applied after the live computation runs.
+  let breached = false;
+  let hasRealDeptTracking = false;
   // A department nobody has configured an SLA policy for (e.g. Infra, which
   // never had one set up) previously still showed a hard "No" in the SLA
   // Breached column -- indistinguishable from "there IS an SLA and it's
@@ -2910,11 +2936,10 @@ function computeSlaBreachedAndOverdue(
     const pDept = (p.dept_name || '').trim().toLowerCase();
     return !pDept || pDept === dept;
   });
-  // Resolving a ticket must never ERASE a breach that already happened
-  // before it was resolved -- gating this whole block on `!isResolved` did
-  // exactly that, since jira_sla_breached only covers tickets imported
-  // already-breached from Jira, not ones that breached live in this app
-  // before getting resolved here.
+  // Always runs now (breached starts false) -- this used to be skipped
+  // entirely whenever jira_sla_breached was already true, which is exactly
+  // what hid the real per-department tracked data (deptLogEntry below) that
+  // should have taken priority over it.
   if (!breached) {
     if (!isResolved && i.dueDate && new Date(i.dueDate).getTime() < nowMs) breached = true;
     // Same fallback as computeIssueSLAsFromDb: tickets never routed through
@@ -2974,6 +2999,7 @@ function computeSlaBreachedAndOverdue(
         const deptSlaLog: Record<string, any> = i.dept_sla_log || {};
         const deptLogKey = Object.keys(deptSlaLog).find((k) => k.toLowerCase() === dept);
         const deptLogEntry = deptLogKey ? deptSlaLog[deptLogKey] : null;
+        if (deptLogEntry) hasRealDeptTracking = true;
         // No "same stint" guard here -- see the matching comment in
         // computeSLAInstancesPure. pauseDeptSLA's elapsed_ms is already a
         // running incremental total; it is never double-counted by also
@@ -3014,6 +3040,13 @@ function computeSlaBreachedAndOverdue(
       }
     }
   }
+  // Only NOW fall back to the imported Jira flag -- after the live
+  // computation above has had its chance, and only when this app's own
+  // dept_sla_log never tracked the relevant department at all (a genuine
+  // data gap, not a disagreement with real tracked data). This is what
+  // stops the imported flag from overriding a resolution this app's own
+  // clock can already prove was on time.
+  if (!breached && !hasRealDeptTracking && i.jira_sla_breached) breached = true;
   // No policy configured for this department, and nothing else (a real
   // imported Jira breach) already forced a true -- there's genuinely no SLA
   // to have breached or not, so report that honestly (frontend renders this
