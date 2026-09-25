@@ -592,6 +592,41 @@ function clearSessionCookie(res: NextResponse) {
   });
 }
 
+// Rate limiting -- targets bulk/automated data-pulling through a real,
+// valid token (e.g. a script or Postman looping through this API), by
+// request. A person clicking around the app generates a handful of
+// requests per page view, even for a heavy page; a script iterating
+// through hundreds/thousands of records back-to-back produces far more,
+// far faster -- that request-RATE difference is the actual, detectable
+// signal, independent of which tool (browser, curl, Postman) sends the
+// request. Per-user (not per-IP -- a shared office network shouldn't
+// collectively trip this), sliding 60s window, in-memory (this runs as a
+// single Node process -- no distributed store needed).
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 400;
+const _rateLimitLog = new Map<string, number[]>();
+function isRateLimited(userId: string): boolean {
+  const now = Date.now();
+  const timestamps = (_rateLimitLog.get(userId) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+  timestamps.push(now);
+  _rateLimitLog.set(userId, timestamps);
+  if (timestamps.length > RATE_LIMIT_MAX_REQUESTS) {
+    console.warn(`[RateLimit] userId=${userId} made ${timestamps.length} requests in the last ${RATE_LIMIT_WINDOW_MS / 1000}s -- throttling as likely automated/bulk access`);
+    return true;
+  }
+  return false;
+}
+if (!globalThis.__rateLimitCleanupInterval) {
+  globalThis.__rateLimitCleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [uid, timestamps] of _rateLimitLog.entries()) {
+      const fresh = timestamps.filter((t: number) => now - t < RATE_LIMIT_WINDOW_MS);
+      if (fresh.length === 0) _rateLimitLog.delete(uid);
+      else _rateLimitLog.set(uid, fresh);
+    }
+  }, RATE_LIMIT_WINDOW_MS);
+}
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ In-app notification helper Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 async function createNotification({
   userId, type, title, message, issueKey,
@@ -1077,6 +1112,8 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
 declare global {
   // eslint-disable-next-line no-var
   var __monitorAgentInterval: ReturnType<typeof setInterval> | undefined;
+  // eslint-disable-next-line no-var
+  var __rateLimitCleanupInterval: ReturnType<typeof setInterval> | undefined;
 }
 
 // Server-side singleton scheduler. This used to be triggered from every open browser tab
@@ -4273,6 +4310,9 @@ async function _handleJiraPgApi(
     || '0.0.0.0';
   const clientUA = req.headers.get('user-agent') || '';
   const userId = await resolveUserId(auth, clientIp);
+  if (userId && isRateLimited(userId)) {
+    return json({ error: 'Too many requests. Please slow down and try again shortly.' }, 429);
+  }
   touchLastSeen(userId);
   const url = new URL(req.url);
   const path = segments.join('/');
