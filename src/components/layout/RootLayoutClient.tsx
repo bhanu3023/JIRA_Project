@@ -25,8 +25,19 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
   const isAuthPage = pathname.startsWith('/auth');
 
   useEffect(() => {
+    // Never on an /auth/* page (login/register/oauth-callback) -- there's
+    // no reason to check "am I logged in" on the login form itself, and
+    // doing so was the direct cause of a real, confirmed reload loop: a
+    // logged-out visit to /auth/login called loadUser() -> GET /auth/me ->
+    // 401 -> api.ts's 401 handler force-navigated to /auth/login (the page
+    // already showing) -> full remount -> loadUser() fires again -> 401
+    // again -> loop, locking every user out of logging in at all right
+    // after every session was force-invalidated. (oauth-callback still
+    // calls loadUser() itself, directly, to confirm its own session after
+    // the redirect -- this skip doesn't affect that.)
+    if (isAuthPage) return;
     loadUser();
-  }, [loadUser]);
+  }, [loadUser, isAuthPage]);
 
   // Session recording. No-ops when no Hotjar site ID is configured, which is the default.
   // Runs above the isAuthPage early return so /auth/login and /auth/register are recorded too --

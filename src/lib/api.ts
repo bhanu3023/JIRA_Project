@@ -127,7 +127,20 @@ class ApiClient {
       const isLoginOrRegister =
         method === 'POST' && (endpoint === '/auth/login' || endpoint === '/auth/register');
       const errMsg = typeof data.error === 'string' ? data.error : 'Unauthorized';
-      if (!isLoginOrRegister && typeof window !== 'undefined') {
+      // Already on an /auth/* page (login/register/oauth-callback) -- never
+      // force-navigate there again. This guard didn't exist before, and
+      // relied entirely on `current === null || current === tokenUsed` to
+      // avoid redirect loops -- but a cookie-based session never has
+      // anything in localStorage at all, so `current` (this.getToken()) is
+      // now ALWAYS null, making that check pass unconditionally on every
+      // single 401. Confirmed for real: after force-invalidating every
+      // session, loadUser()'s GET /auth/me on the login page itself 401'd,
+      // triggered this same window.location.href navigation to the page
+      // already showing, which remounted the app and fired loadUser()
+      // again -- an infinite reload loop that locked every user out of
+      // logging in at all.
+      const alreadyOnAuthPage = typeof window !== 'undefined' && window.location.pathname.startsWith('/auth');
+      if (!isLoginOrRegister && !alreadyOnAuthPage && typeof window !== 'undefined') {
         const current = this.getToken();
         if (current === null || current === tokenUsed) {
           localStorage.removeItem('jira_token');
