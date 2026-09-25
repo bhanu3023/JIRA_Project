@@ -298,6 +298,11 @@ export default function IssueDetailPage() {
   // Client Name has 90+) — reset whenever a different field opens for editing.
   const [customFieldSearch, setCustomFieldSearch] = useState('');
   useEffect(() => { setCustomFieldSearch(''); }, [editingCustomField]);
+  // "Other" mode for select-type custom fields that opt in via allowOther
+  // (currently just Infra Issue Type) -- tracked separately from
+  // customFieldEditValue so the <select> can show "Other" selected while
+  // the actual value being typed doesn't match any real option.
+  const [customFieldOtherMode, setCustomFieldOtherMode] = useState(false);
   const [pinnedFields, setPinnedFields] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('jira_pinned_fields') || '[]'); }
     catch { return []; }
@@ -1056,6 +1061,7 @@ export default function IssueDetailPage() {
     type: 'select' | 'multiselect' | 'tags' | 'text' | 'textarea',
     options: string[] | undefined,
     editPrefix: string,
+    allowOther?: boolean,
   ) => {
     const rawVal = (issue as any)[key];
     const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
@@ -1076,11 +1082,30 @@ export default function IssueDetailPage() {
               <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
                 className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
             ) : type === 'select' ? (
-              <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                <option value="">None</option>
-                {allOptions.map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
+              <div className="flex flex-col gap-1">
+                <select
+                  value={allowOther && customFieldOtherMode ? '__other__' : customFieldEditValue}
+                  onChange={e => {
+                    if (e.target.value === '__other__') {
+                      setCustomFieldOtherMode(true);
+                      setCustomFieldEditValue('');
+                    } else {
+                      setCustomFieldOtherMode(false);
+                      setCustomFieldEditValue(e.target.value);
+                    }
+                  }}
+                  autoFocus
+                  className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
+                  <option value="">None</option>
+                  {allOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                  {allowOther && <option value="__other__">Other</option>}
+                </select>
+                {allowOther && customFieldOtherMode && (
+                  <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
+                    placeholder="Type a value"
+                    className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
+                )}
+              </div>
             ) : type === 'tags' ? (
               <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
                 placeholder="Comma-separated values"
@@ -1158,7 +1183,11 @@ export default function IssueDetailPage() {
             </div>
           </div>
         ) : (
-          <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
+          <button onClick={() => {
+            setEditingCustomField(editKey);
+            setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal);
+            setCustomFieldOtherMode(!!allowOther && type === 'select' && !!currentVal && !allOptions.includes(currentVal as string));
+          }}
             className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
             {displayVal
               ? <span className="text-gray-700 whitespace-pre-wrap break-words">{displayVal}</span>
@@ -3756,7 +3785,7 @@ export default function IssueDetailPage() {
               const L1_COMBO_OPTIONS = ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','My Drive - My Drive','MyDrive - MyDrive','Shared Drive- Shared Drive','Shared Drive- SharePoint ','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','Box - Citrix','DropBox - Azure','Dropbox - Box','DropBox - Egnyte','Citrix - Citrix','Shared Drive - Egnyte','Shared Drive - Onedrive','SharePoint -  Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint ','SharePoint - Egnyte','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','Share Point - Amazon S3','Shared Drive - Amazon S3','Sharefile - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Sharefile - Azure','Egnyte - Azure','Amazon S3 - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Amazon workdocs - NFS','Slack to Slack','Chat to Chat','Teams to Teams','Meta to Chat','Meta to Viva','Meta to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Other','Amazon workdocs - Onedrive/SharePoint','MyDrive to MyDrive','ShareFile to SharePoint','ShareFile to ShareDrive','Drive Change','Box - Microsoft','Chat to Team','Teams to Slack','Chat To Slack'];
               // Exact options from Jira CFITS customfield_10883
               const L1_CLIENT_OPTIONS = ['ab-inbev','cloudfuze','MarmicFire','global-v','manypets','medifast','cms','epiq-global','computer_headquarters','groundedpackaging','nfl','realtimecloudservicesllc','capmation/aaron.salazar@capmation.com','365datacenters','icf','amputeecoalitionofamerica','concertai','xica','digantararesearchandtechnologiespvtltd','utopia','oassetmanagement','hyland','bluebeaminc','secloudexperts','tandemengineeringgroup','astoundbroadband','cadence','manhattanassociates','ovo','noahmedical','lighthouselearning','insight','roccoforte','phillipsexeteracademy','kbcadvisors','palmettotechnologygroup','convergetechnologysolutions','traditionone','tvsebike','alphabest','cheilagencynetwork','steelecanvasbasket','viasuninternal','rpmtechnologies','caseware','foundationcitizengo','curtlandryministries','nferenceinc.(pramana)','aplazame','alexandriarealeestateequitiesinc','warnermedia','atlasprimary','cuorementelab','curtlandryindustries','aresmanagement','kizantechnologies','instituteofinternationaleducation(iie)','ivyrehabnetworkinc','adventinternationalltd','exactsciencescorporation','glenno.hawbaker','barrattassetmanagementllc','aqueity','ontarionursesassociation','xavier','nationalgeographic','harvardbusinesspublishing','thirdpackettechnologies','butlercohen','alliancetechnologysolutions','Washington Post','schott','roccoforte&family','wegochemicalgroup','pilottravelcenters','aptlogix','nextiva','gearboxsoftware','nozominetworks','twelvebenefitcorporation','casepoint','jamessteelelaw','trevitherapeutics','restorixhealth','wheeleezinc','getweave','None','regala_consulting','binaryevolution','softmax','gearbox','nubius','IVYREHAB-Network-Inc.','MIG','goh-inc','bossdesigncenter','onespan','lgads','savvymoney','phoenixgamesholding','todaydentalnetwork','phillipseexeter','cheil','Chryselis','papereducation','synergygatewayverified','blackeducatordevelopment','morrisconsultinggroup','convergetechnologies','tunneltotowersfoundation','gadero','wasteprosUSA','krishservices','ForvisMazars'];
-              const l1bFields: { key: string; label: string; type: 'select' | 'multiselect' | 'tags'; options?: string[] }[] = [
+              const l1bFields: { key: string; label: string; type: 'select' | 'multiselect' | 'tags'; options?: string[]; allowOther?: boolean }[] = [
                 { key: 'productType',    label: 'Product Type',    type: 'select',      options: ['Content Migration','Message Migration','Email Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
                 { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes'] },
                 { key: 'projectPool',    label: 'Project Pool',    type: 'select',      options: ['ENT', 'SMB'] },
@@ -3764,9 +3793,9 @@ export default function IssueDetailPage() {
                 { key: 'projectManager', label: 'Project Manager', type: 'multiselect', options: projectManagerOptions },
                 { key: 'customerName',   label: 'Customer Name',   type: 'multiselect', options: ['Ab-Inbev','CloudFuze','CMS','Epiq_Global','EPIQ-GLOBAL','Global-V','Manypets','MarmicFire','NoahMedical','Thirdpacket'] },
                 { key: 'clientName',     label: 'Client Name',     type: 'multiselect', options: L1_CLIENT_OPTIONS },
-                { key: 'infraIssueType', label: 'Infra Issue Type', type: 'select',     options: INFRA_ISSUE_TYPES },
+                { key: 'infraIssueType', label: 'Infra Issue Type', type: 'select',     options: INFRA_ISSUE_TYPES, allowOther: true },
               ];
-              return l1bFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'l1b'));
+              return l1bFields.map(({ key, label, type, options, allowOther }) => renderCustomField(key, label, type, options, 'l1b', allowOther));
             })()}
 
             {/* ── INFRABOARD Custom Fields ─────────────────────────────── */}
