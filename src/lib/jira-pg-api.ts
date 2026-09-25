@@ -656,6 +656,15 @@ async function userWantsNotif(userId: string, type: string): Promise<boolean> {
   } catch { return true; }
 }
 
+// Temporary pause, by request -- admins were getting flooded with an
+// email for every single ticket-lifecycle event across every space. Only
+// mutes the EMAIL channel (both getAdminRecipients and
+// getSpaceAdminRecipients below still return real ids, so admins keep
+// getting the in-app bell notification, just not an email for each one).
+// Flip back to false to restore admin emails -- nothing else about the
+// feature was touched or removed.
+const PAUSE_ADMIN_EMAIL_NOTIFICATIONS = true;
+
 // Create notification for multiple users (dedup Ã¢â‚¬â€ don't notify the actor, respect preferences)
 // Admin recipients (id + email) for every ticket-lifecycle notification --
 // created, assigned, status changed, commented, updated (incl. root
@@ -668,7 +677,7 @@ async function getAdminRecipients(): Promise<{ ids: string[]; emails: string[] }
   const admins = await db.user.findMany({ where: { role: 'admin', isActive: true }, select: { id: true, email: true } });
   _adminRecipientsCache = {
     ids: admins.map((u: any) => u.id),
-    emails: admins.map((u: any) => u.email).filter(Boolean),
+    emails: PAUSE_ADMIN_EMAIL_NOTIFICATIONS ? [] : admins.map((u: any) => u.email).filter(Boolean),
     at: Date.now(),
   };
   return _adminRecipientsCache;
@@ -694,7 +703,7 @@ async function getSpaceAdminRecipients(spaceId: string | null | undefined): Prom
   });
   const result = {
     ids: members.map((m: any) => m.userId).filter(Boolean),
-    emails: members.map((m: any) => m.user?.email).filter(Boolean),
+    emails: PAUSE_ADMIN_EMAIL_NOTIFICATIONS ? [] : members.map((m: any) => m.user?.email).filter(Boolean),
     at: Date.now(),
   };
   _spaceAdminRecipientsCache.set(spaceId, result);
