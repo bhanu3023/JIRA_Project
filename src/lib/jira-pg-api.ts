@@ -2091,6 +2091,52 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
   } catch { return []; }
 }
 
+// The actual "is this one policy instance breached" decision -- shared by
+// computeSLAInstancesPure (ticket detail's live SLA panel) and
+// computeSlaBreachedAndOverdue (Filters' SLA Breached column), which used
+// to each hand-roll this same comparison independently and had
+// independently drifted into disagreeing with each other multiple times
+// (most recently CF-31002/CF-31001: both resolved well before their own
+// computed due time -- real tracked data this app's own dept_sla_log
+// genuinely captured -- but still came back "breached" in one or both
+// places because of how each one separately handled the imported
+// jira_sla_breached flag). Centralizing it here means a future fix to this
+// exact logic only has to happen once, and both callers (plus any new one)
+// get it automatically instead of needing the same fix applied twice.
+//
+// jira_sla_breached is a single per-issue flag imported from Jira's own,
+// separate/legacy SLA field (see the boot-time backfill a few hundred
+// lines up) -- only trustworthy as a fallback when this app's own
+// dept_sla_log genuinely never tracked the relevant department at all
+// (hasDeptLogEntry false). Once a real log entry exists -- even one
+// recording 0 elapsed time -- this app's own tracked data is authoritative
+// and must never be overridden by a different SLA system's verdict.
+function isSlaInstanceBreached(opts: {
+  isResolved: boolean;
+  isPaused: boolean;
+  priorElapsedMs: number;
+  durationMs: number;
+  dueTimeMs: number;
+  nowMs: number;
+  // Optional: computeSLAInstancesPure passes these (each returned instance
+  // stands alone, so its jira_sla_breached fallback has to be decided right
+  // here). computeSlaBreachedAndOverdue omits them and applies that same
+  // fallback itself, once, after checking every applicable policy -- Filters
+  // only needs one aggregate boolean per ticket, not a per-policy verdict.
+  // Omitting them (both come back undefined, i.e. falsy) simply skips the
+  // fallback in this function, deferring it to that caller instead.
+  hasDeptLogEntry?: boolean;
+  jiraSlaBreached?: boolean;
+}): boolean {
+  if (opts.isResolved) {
+    if (opts.priorElapsedMs >= opts.durationMs) return true;
+    if (!opts.hasDeptLogEntry && opts.jiraSlaBreached) return true;
+    return false;
+  }
+  if (opts.isPaused) return false;
+  return opts.dueTimeMs < opts.nowMs;
+}
+
 // Pure computation half of computeIssueSLAsFromDb, split out so a caller that
 // needs this for MANY issues at once (my-dashboard) can batch-fetch policies
 // and notification flags ONCE per space/issue-set up front, instead of
@@ -2255,28 +2301,19 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       // correct regardless of how many pause/resume cycles this dept has
       // been through. jira_sla_breached carries breach history imported
       // from Jira for tickets that were already breached before this app's
-      // own SLA clock started tracking them.
-      // jira_sla_breached (a single per-issue flag imported from Jira's own,
-      // separate/legacy SLA field -- see the boot-time backfill guarded by
-      // jira_source_key/L2B-/L3B-/etc keys) used to be OR'd in
-      // unconditionally here regardless of what this app's own tracked data
-      // says. Confirmed for real on CF-31002/CF-31001: both were resolved
-      // well BEFORE their computed dueTime (priorElapsedMs < durationMs, a
-      // clean on-time resolution this app's own dept_sla_log genuinely
-      // tracked), yet still came back isBreached: true purely because the
-      // imported Jira flag was set -- directly contradicting this exact
-      // instance's own history entry (wasBreached: false, computed the same
-      // resolvedAt-vs-dueTime way at the actual moment of resolution).
-      // deptLogEntry (above) is only trustworthy as a fallback when it's
-      // null -- meaning this app's clock never tracked this department for
-      // this ticket AT ALL, so priorElapsedMs is an unknown 0, not a
-      // confidently-tracked one, and the imported flag is the only signal
-      // available. Once a real log entry exists, this app's own live math
-      // is authoritative and must not be overridden by a different SLA
-      // system's verdict.
-      const rawIsBreached = isResolved
-        ? ((!deptLogEntry && !!(issue as any).jira_sla_breached) || priorElapsedMs >= durationMs)
-        : !isPaused && new Date(dueTime) < new Date();
+      // own SLA clock started tracking them. See isSlaInstanceBreached's own
+      // comment for the full reasoning -- this is the single shared
+      // decision, also used by computeSlaBreachedAndOverdue (Filters).
+      const rawIsBreached = isSlaInstanceBreached({
+        isResolved,
+        isPaused,
+        priorElapsedMs,
+        durationMs,
+        hasDeptLogEntry: !!deptLogEntry,
+        jiraSlaBreached: !!(issue as any).jira_sla_breached,
+        dueTimeMs: new Date(dueTime).getTime(),
+        nowMs: Date.now(),
+      });
 
       // An admin can waive this specific policy's breach on this specific
       // ticket (e.g. it was resolved late for a reason outside anyone's
@@ -3023,20 +3060,25 @@ function computeSlaBreachedAndOverdue(
         const deptClockIsLive = isResolved
           ? false
           : !deptParam || (i.current_department || '').trim().toLowerCase() === dept;
-        if (isResolved || !deptClockIsLive) {
-          // The clock is frozen -- priorElapsedMs already reflects the FULL
-          // total time logged across every period up to and including the
-          // one that just ended (pauseDeptSLA folds it in), so it alone
-          // tells us whether the goal was exceeded by the time this ticket
-          // was resolved. The running-clock formula below (slaStartedAt +
-          // remaining vs "now") would double-count that same just-ended
-          // period on top of itself if reused here across more than one
-          // pause/resume cycle.
-          if (priorElapsedMs >= durationMs && !waiver) { breached = true; break; }
-        } else {
-          const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
-          if (new Date(slaStartedAt).getTime() + remainingBudgetMs < nowMs && !waiver) { breached = true; break; }
-        }
+        // Frozen (resolved, or scoped to a department the ticket has since
+        // moved away from) vs. live uses the same shared comparison
+        // computeSLAInstancesPure uses -- see isSlaInstanceBreached's own
+        // comment for why this is centralized. jira_sla_breached isn't
+        // passed here; this function applies that fallback itself, once,
+        // after checking every applicable policy (see hasRealDeptTracking
+        // below), rather than per-policy.
+        const frozen = isResolved || !deptClockIsLive;
+        const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+        const dueTimeMs = new Date(slaStartedAt).getTime() + remainingBudgetMs;
+        const instanceBreached = isSlaInstanceBreached({
+          isResolved: frozen,
+          isPaused: false, // pause-status policies were already skipped via `continue` above
+          priorElapsedMs,
+          durationMs,
+          dueTimeMs,
+          nowMs,
+        });
+        if (instanceBreached && !waiver) { breached = true; break; }
       }
     }
   }
