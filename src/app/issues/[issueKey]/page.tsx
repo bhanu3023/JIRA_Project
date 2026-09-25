@@ -3161,7 +3161,27 @@ export default function IssueDetailPage() {
                 // isn't manually routed still follows its parent automatically
                 // whenever the PARENT moves (see cascadeDeptToChildren), so
                 // this is only for the explicit manual override case.
-                const options: { status: any; transitionName: string }[] =
+                // Two different workflow transitions can each point at a
+                // DIFFERENT status row (different id) that happens to share
+                // the exact same display name (e.g. a queue-specific "In
+                // Progress" alongside a generic one) -- validToIds mapped
+                // each id to its own option with no regard for name
+                // collisions, so the dropdown showed the same-looking "In
+                // Progress" entry twice, indistinguishable to whoever's
+                // picking from it. Deduplicated by name (case-insensitive,
+                // first occurrence wins) since two options a user can't
+                // tell apart are confusing regardless of having different
+                // underlying ids.
+                const dedupeByStatusName = (opts: { status: any; transitionName: string }[]) => {
+                  const seen = new Set<string>();
+                  return opts.filter((o) => {
+                    const key = (o.status.name || '').trim().toLowerCase();
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                  });
+                };
+                const options: { status: any; transitionName: string }[] = dedupeByStatusName(
                   validToIds.length > 0
                     ? (validToIds
                         .map((toId: string) => {
@@ -3173,7 +3193,8 @@ export default function IssueDetailPage() {
                         .filter(o => !isCurrentStatus(o.status))
                     : spaceStatuses
                         .filter((s: any) => !isCurrentStatus(s))
-                        .map((s: any) => ({ status: s, transitionName: '' }));
+                        .map((s: any) => ({ status: s, transitionName: '' }))
+                );
 
                 return (
                   <Dropdown onClose={() => setShowStatusDropdown(false)} width="w-60" align="left-0">
