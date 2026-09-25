@@ -73,9 +73,38 @@ const RICH_TEXT_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   allowedSchemesByTag: { img: ['http', 'https', 'data'] },
   allowVulnerableTags: false,
 };
+// A stray "<" in what's actually plain text (someone typing a password
+// like "j<9QdY2VNNx...", a comparison like "< 5 days", or any other
+// informal use of the character) is parsed by ANY real HTML parser --
+// sanitize-html included -- as the start of a tag. If what follows doesn't
+// look like a real tag name, the parser doesn't just leave the "<" alone;
+// it can swallow everything after it up to the next plausible boundary,
+// silently deleting real content. Confirmed for real: a comment on
+// CF-33365 was reduced to a completely empty, unrecoverable string the
+// moment sanitizeRichText ran on save. Escaping every "<" that isn't
+// immediately followed by one of this function's OWN recognized tag names
+// (or a real closing tag/comment) into "&lt;" before sanitizing neutralizes
+// this at the source: a genuine "<div>", "<img ...>" etc. from the rich
+// text editor is left completely untouched, while "<9QdY..." or "< 5 days"
+// becomes literal, visible text instead of vanishing.
+const _allowedTagNamesLower = new Set((RICH_TEXT_SANITIZE_OPTIONS.allowedTags || []).map((t) => t.toLowerCase()));
+function escapeStrayAngleBrackets(html: string): string {
+  // Always escape unless a genuinely recognized tag name follows -- there is
+  // no case where leaving an unrecognized "<...", including a bare "<" with
+  // nothing/non-letters after it, unescaped is ever safer than escaping it.
+  // (An earlier version of this function special-cased a bare "<" as safe
+  // to leave alone, which was exactly wrong: "<9QdY..." -- the real
+  // CF-33365 failure case -- has no captured tag name AND no slash, so that
+  // special case skipped escaping precisely the input it was meant to
+  // catch.)
+  return html.replace(/<(\/?)([a-zA-Z][a-zA-Z0-9]*)?/g, (match, slash: string, tagName?: string) => {
+    if (tagName && _allowedTagNamesLower.has(tagName.toLowerCase())) return match;
+    return `&lt;${slash}${tagName || ''}`;
+  });
+}
 function sanitizeRichText(html: string | null | undefined): string {
   if (!html) return '';
-  return sanitizeHtml(html, RICH_TEXT_SANITIZE_OPTIONS);
+  return sanitizeHtml(escapeStrayAngleBrackets(html), RICH_TEXT_SANITIZE_OPTIONS);
 }
 
 // 60-second in-memory cache for user role lookups so every API request
