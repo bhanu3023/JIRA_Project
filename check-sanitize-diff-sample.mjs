@@ -17,20 +17,32 @@ import sanitizeHtml from 'sanitize-html';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
+// Kept byte-for-byte in sync with RICH_TEXT_SANITIZE_OPTIONS in
+// src/lib/jira-pg-api.ts.
 const OPTIONS = {
   allowedTags: [
     'p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'strike', 'blockquote',
     'ul', 'ol', 'li', 'a', 'img', 'code', 'pre', 'span', 'div',
-    'h1', 'h2', 'h3', 'h4', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr',
+    'details', 'summary', 'sub', 'sup', 'mark',
   ],
   allowedAttributes: {
-    a: ['href', 'target', 'rel', 'class'],
-    img: ['src', 'alt', 'width', 'height', 'style'],
-    span: ['class', 'data-userid', 'data-mention', 'style'],
-    div: ['class'],
-    td: ['colspan', 'rowspan'],
-    th: ['colspan', 'rowspan'],
-    '*': ['class'],
+    a: ['href', 'target', 'rel', 'class', 'title', 'style', 'data-*'],
+    img: ['src', 'alt', 'width', 'height', 'style', 'title', 'loading', 'data-*'],
+    span: ['class', 'style', 'title', 'contenteditable', 'data-*'],
+    div: ['class', 'style', 'contenteditable', 'data-*'],
+    p: ['class', 'style', 'data-*'],
+    blockquote: ['class', 'style', 'data-*'],
+    ul: ['class', 'style', 'data-*'],
+    ol: ['class', 'style', 'data-*'],
+    li: ['class', 'style', 'data-*'],
+    table: ['class', 'style', 'data-*'],
+    thead: ['class', 'style', 'data-*'],
+    tbody: ['class', 'style', 'data-*'],
+    tr: ['class', 'style', 'data-*'],
+    td: ['colspan', 'rowspan', 'class', 'style', 'data-*'],
+    th: ['colspan', 'rowspan', 'class', 'style', 'data-*'],
+    '*': ['class', 'data-*'],
   },
   allowedSchemes: ['http', 'https', 'mailto'],
   allowedSchemesByTag: { img: ['http', 'https', 'data'] },

@@ -27,20 +27,44 @@ import sanitizeHtml from 'sanitize-html';
 // lists/links/images/code blocks/tables/the mention spans used for
 // @mentions) while stripping <script>, inline event handlers (onerror,
 // onclick, ...), and javascript:/data:text/html URLs.
+// Tuned against a real sample of this app's own stored comments/descriptions
+// (see backfill-sanitize-rich-text.mjs's dry run + check-sanitize-diff-
+// sample.mjs) -- the first version of this allowlist was too strict and was
+// stripping large amounts of GENUINE content, not attacks: inline `style`
+// on tags other than img/span (pasted tables, colored/aligned text), the
+// app's own RichTextEditor's functional markup (`data-rte-img-wrap`/
+// `data-rte-img-remove`/`contenteditable`, used for the hover-to-remove-
+// image UI -- see RichTextEditor.tsx), and harmless metadata Outlook/Teams
+// paste adds (`data-og*`, `data-olk-*`, `title`, etc., none of which can
+// execute anything). `data-*`/`style`/`title` are broadly allowed via glob
+// (sanitize-html supports this) since none of those three can execute code
+// by themselves -- the actual dangerous surface (inline event handlers like
+// onerror/onclick, <script>, javascript:/vbscript: URLs) is unaffected by
+// broadening these, and remains stripped for every tag.
 const RICH_TEXT_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   allowedTags: [
     'p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'strike', 'blockquote',
     'ul', 'ol', 'li', 'a', 'img', 'code', 'pre', 'span', 'div',
-    'h1', 'h2', 'h3', 'h4', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr',
+    'details', 'summary', 'sub', 'sup', 'mark',
   ],
   allowedAttributes: {
-    a: ['href', 'target', 'rel', 'class'],
-    img: ['src', 'alt', 'width', 'height', 'style'],
-    span: ['class', 'data-userid', 'data-mention', 'style'],
-    div: ['class'],
-    td: ['colspan', 'rowspan'],
-    th: ['colspan', 'rowspan'],
-    '*': ['class'],
+    a: ['href', 'target', 'rel', 'class', 'title', 'style', 'data-*'],
+    img: ['src', 'alt', 'width', 'height', 'style', 'title', 'loading', 'data-*'],
+    span: ['class', 'style', 'title', 'contenteditable', 'data-*'],
+    div: ['class', 'style', 'contenteditable', 'data-*'],
+    p: ['class', 'style', 'data-*'],
+    blockquote: ['class', 'style', 'data-*'],
+    ul: ['class', 'style', 'data-*'],
+    ol: ['class', 'style', 'data-*'],
+    li: ['class', 'style', 'data-*'],
+    table: ['class', 'style', 'data-*'],
+    thead: ['class', 'style', 'data-*'],
+    tbody: ['class', 'style', 'data-*'],
+    tr: ['class', 'style', 'data-*'],
+    td: ['colspan', 'rowspan', 'class', 'style', 'data-*'],
+    th: ['colspan', 'rowspan', 'class', 'style', 'data-*'],
+    '*': ['class', 'data-*'],
   },
   allowedSchemes: ['http', 'https', 'mailto'],
   // data: URLs are how the editor embeds small inline images -- allow only
