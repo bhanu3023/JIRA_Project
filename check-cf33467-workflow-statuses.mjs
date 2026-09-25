@@ -33,13 +33,16 @@ async function main() {
 
   console.log('\nAll workflow transitions in this space:');
   const { rows: transitions } = await pool.query(
-    `SELECT id, "fromStatusId", "toStatusId", name FROM "WorkflowTransition" WHERE "spaceId" = $1`,
+    `SELECT id, "fromStatusId", "toStatusId", name FROM workflow_transitions WHERE "spaceId" = $1`,
     [r.spaceId]
-  ).catch(async () => {
-    // Table name might be snake_case if not using Prisma's default mapping
-    return pool.query(`SELECT id, "fromStatusId", "toStatusId", name FROM workflow_transitions WHERE "spaceId" = $1`, [r.spaceId]);
-  });
+  );
   for (const t of transitions) console.log(`  ${t.id}: from=${t.fromStatusId} to=${t.toStatusId} name="${t.name}"`);
+
+  console.log(`\nTransitions FROM the ticket's current statusId (${r.statusId}):`);
+  for (const t of transitions.filter(t => t.fromStatusId === r.statusId)) {
+    const toStatus = statuses.find(s => s.id === t.toStatusId);
+    console.log(`  -> toStatusId=${t.toStatusId}  name="${toStatus?.name}"  transitionLabel="${t.name}"`);
+  }
 
   await pool.end();
 }
