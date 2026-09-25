@@ -7248,10 +7248,25 @@ async function _handleJiraPgApi(
           if (!assigneeOverride && (workedRange || movedAwayFromQueue || (queueMembersOnlyParam && !row.assignee_id))) {
             const deptAssignees: Record<string, any> = row.dept_assignees || {};
             const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
-            const snap = snapKey ? deptAssignees[snapKey] : null;
+            // snapKey !== undefined distinguishes "this dept has a recorded
+            // snapshot, and it's explicitly null (confirmed nobody was
+            // assigned when it left)" from "no snapshot was ever written for
+            // this dept at all" -- `snapKey ? ... : null` above already got
+            // this right for snapKey itself, but reusing plain `snap` (which
+            // collapses BOTH of those cases to the same falsy value) below to
+            // decide when to fall back to the reporter did not. Confirmed
+            // for real on CF-33365: dept_assignees.Dev is an explicit `null`
+            // (real history: assignee was deliberately cleared before the
+            // handoff out of Dev), which is a confirmed "nobody" -- but this
+            // still fell through to crediting the ticket's REPORTER
+            // (Sanjana Nerella, a Migration person with zero connection to
+            // its time in Dev) as if she were Dev's own historical
+            // assignee, mislabeled "in Dev" in the UI.
+            const snapExists = snapKey !== undefined;
+            const snap = snapExists ? deptAssignees[snapKey!] : null;
             if (snap?.id) {
               assigneeOverride = { id: snap.id, firstName: snap.firstName || '', lastName: snap.lastName || '', email: snap.email || null, avatarUrl: snap.avatarUrl || avatarRef(snap.id, null) };
-            } else if (movedAwayFromQueue && row.reporter_id) {
+            } else if (!snapExists && movedAwayFromQueue && row.reporter_id) {
               // No per-dept assignee snapshot exists at all -- confirmed for
               // real on CF-29845: reported by a Dev-queue member, transferred
               // to Infra about a minute later, and never formally assigned to
