@@ -17,7 +17,10 @@ import crypto from 'crypto';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const JWT_SECRET = process.env.JWT_SECRET;
-const PORT = process.env.PORT || 3000;
+// The Dockerfile's EXPOSE 3000 is stale -- the app actually starts via
+// `next start -p 8080` (see package.json's "start" script), confirmed
+// after the first version of this script got ECONNREFUSED on :3000.
+const PORT = process.env.PORT || 8080;
 
 async function main() {
   if (!JWT_SECRET) { console.log('No JWT_SECRET in env'); await pool.end(); return; }
