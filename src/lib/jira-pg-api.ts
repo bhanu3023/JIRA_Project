@@ -6330,7 +6330,16 @@ async function _handleJiraPgApi(
     // scalar column including the full raw description. A legacy ticket with a
     // base64-embedded image in its description (from before uploads moved to
     // URL-based storage) could balloon this list response by tens of MB on its own.
-    let enrichedIssues = issues.map((i: any) => formatIssue({ ...i, ...(deptMap[i.key] || {}), description: (i.description || '').slice(0, 500) }));
+    let enrichedIssues = issues.map((i: any) => {
+      const formatted = formatIssue({ ...i, ...(deptMap[i.key] || {}), description: (i.description || '').slice(0, 500) });
+      // true_assignee carries the ticket's actual current assignee through
+      // any later override that replaces .assignee for display purposes
+      // (the "worked-on" filter override just below, and the dept-scoped
+      // branch's own assigneeOverride further down) -- see the long comment
+      // where it's finally consumed, near sla_breached_by, for why this
+      // matters and the real ticket (CF-33352) that exposed the bug.
+      return { ...formatted, true_assignee: formatted.assignee };
+    });
     // Assignee filter matched some of these via a worked-on record, not the
     // ticket's current live assignee (see generalAssigneeFilterIds above) --
     // show the filtered person's own name on those rows instead of whoever
@@ -7369,7 +7378,12 @@ async function _handleJiraPgApi(
           jira_assignee_name: row.jira_assignee_name || null,
           jira_reporter_name: row.jira_reporter_name || null,
           space: { key: row.space_key || spaceKey },
-        }), assigneeIsHistorical, movedAwayFromQueue };
+        }), assigneeIsHistorical, movedAwayFromQueue,
+        // See the long comment on true_assignee in the non-dept branch above
+        // -- same reasoning, but here the override being bypassed is this
+        // branch's own assigneeOverride (queue-historical snapshot /
+        // Assignee-filter match) rather than the worked-on one.
+        true_assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), displayName: row.assignee_name || '', email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null };
         });
       } catch { /* keep Prisma results as fallback */ }
     }
@@ -7440,9 +7454,22 @@ async function _handleJiraPgApi(
       // actually responsible for the work, read as wrong to the business,
       // especially since someone else closing out a ticket on another
       // person's behalf is routine (admin cleanup, handoffs, etc.).
+      //
+      // Reads i.true_assignee, NOT i.assignee -- .assignee can have already
+      // been swapped out for display purposes by either branch above (the
+      // "worked-on" Assignee-filter override, or the dept-scoped branch's
+      // own queue-historical assigneeOverride), and "SLA Breached by" must
+      // always name whoever actually holds the ticket right now, not
+      // whichever person a filter or historical-queue view is displaying it
+      // as. Confirmed for real on CF-33352: viewing it under an Assignee
+      // filter for Anish Pitta (who briefly held it during an earlier Infra
+      // handoff) showed "SLA Breached by Anish Pitta in Dev" even though
+      // the ticket had long since moved to Dev and been reassigned to
+      // Mayank Jain -- current_department correctly said "Dev" (that field
+      // was never overridden), but the assignee name was stale/filtered.
       enrichedIssues = enrichedIssues.map((i: any) =>
         i.sla_breached
-          ? { ...i, sla_breached_by: i.assignee ? `${i.assignee.firstName} ${i.assignee.lastName}`.trim() || null : null }
+          ? { ...i, sla_breached_by: i.true_assignee ? `${i.true_assignee.firstName} ${i.true_assignee.lastName}`.trim() || null : null }
           : i
       );
     } catch { /* attribution is best-effort — never block the list on it */ }
