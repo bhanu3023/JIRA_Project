@@ -160,11 +160,20 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
   // that "everywhere" (not just this queue) is what they actually wanted.
   const currentUser = useStore((s) => s.user);
   const isAdmin = currentUser?.role === 'admin';
-  const [disabledGlobal, setDisabledGlobal] = useState<string[]>([]);
+  // Reads from the SAME global store slice every picker reads (see
+  // PriorityDropdown.tsx, the subtask picker and the board's inline
+  // quick-edit) instead of its own separate local state -- the first
+  // version of this fetched into a local useState here, which updated
+  // this page's own display fine but left every OTHER open tab/component
+  // (most importantly the Create ticket modal) still showing whatever
+  // disabledPriorities was at THEIR last app load, since nothing told the
+  // store anything had changed. Confirmed for real: disabling Highest/
+  // Lowest here correctly showed "Hidden from Priority field" on this
+  // page, but Create Task's Priority dropdown still offered both.
+  const disabledGlobal = useStore((s) => s.disabledPriorities);
+  const loadDisabledPriorities = useStore((s) => s.loadDisabledPriorities);
   const [priorityActionError, setPriorityActionError] = useState('');
-  useEffect(() => {
-    api.getDisabledPriorities().then((r) => setDisabledGlobal(r.disabled || [])).catch(() => {});
-  }, []);
+  useEffect(() => { loadDisabledPriorities(); }, [loadDisabledPriorities]);
   const toggleGlobalPriority = async (priorityLabel: string) => {
     if (!isAdmin) return;
     const val = priorityLabel.toLowerCase();
@@ -172,11 +181,11 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
     const next = isDisabled ? disabledGlobal.filter((v) => v !== val) : [...disabledGlobal, val];
     setPriorityActionError('');
     const prev = disabledGlobal;
-    setDisabledGlobal(next); // optimistic
+    useStore.setState({ disabledPriorities: next }); // optimistic, and visible to every other component immediately
     try {
       await api.setDisabledPriorities(next);
     } catch (e: any) {
-      setDisabledGlobal(prev); // revert -- most likely cause: trying to disable the last remaining priority
+      useStore.setState({ disabledPriorities: prev }); // revert -- most likely cause: trying to disable the last remaining priority
       setPriorityActionError(e?.message || 'Could not update Priority options');
     }
   };
