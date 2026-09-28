@@ -4926,8 +4926,27 @@ async function _handleJiraPgApi(
       'fixDescription','customerName','clientName','projectManager','manageClientName','customerPlan']);
     if (!ALLOWED.has(field)) return json({ error: 'Invalid field' }, 400);
     const col = field;
+    // Scoped to spaces the caller is actually a member of, same rule the
+    // main issues list already enforces (see the isAdmin block on the
+    // Prisma `where` builder above) -- this endpoint existed unused by any
+    // frontend picker until Customer Name/Client Name's Filters dropdown
+    // started calling it; querying every space unconditionally would have
+    // newly exposed customer/client names from spaces a non-admin has no
+    // access to at all, the first time this endpoint actually got used.
+    if (isAdmin) {
+      const rows = await pool.query(
+        `SELECT DISTINCT "${col}" AS val FROM issues WHERE "${col}" IS NOT NULL AND "${col}" <> '' ORDER BY val`
+      );
+      return json(rows.rows.map((r: any) => r.val));
+    }
+    const myMemberships = userId
+      ? await db.spaceMember.findMany({ where: { userId }, select: { spaceId: true } })
+      : [];
+    const mySpaceIds = myMemberships.map((m: any) => m.spaceId);
+    if (!mySpaceIds.length) return json([]);
     const rows = await pool.query(
-      `SELECT DISTINCT "${col}" AS val FROM issues WHERE "${col}" IS NOT NULL AND "${col}" <> '' ORDER BY val`
+      `SELECT DISTINCT "${col}" AS val FROM issues WHERE "spaceId" = ANY($1::text[]) AND "${col}" IS NOT NULL AND "${col}" <> '' ORDER BY val`,
+      [mySpaceIds]
     );
     return json(rows.rows.map((r: any) => r.val));
   }

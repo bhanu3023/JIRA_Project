@@ -235,6 +235,24 @@ class ApiClient {
     }
   }
 
+  // Every distinct non-null value a text field (Customer Name, Client Name,
+  // Combination, etc.) actually has across every space -- backs the
+  // GET /field-values endpoint that already existed server-side but wasn't
+  // wired into any picker on the Filters page for Customer Name/Client
+  // Name, which instead used a plain free-text box. That box's typed value
+  // was then matched with an EXACT string comparison server-side (same as
+  // every other field in this family), so typing anything that didn't
+  // exactly match a ticket's full, correctly-cased stored value returned
+  // zero results with no indication why -- confirmed for real via a user
+  // report ("options not showing" + "selecting it doesn't show tickets").
+  async getFieldValues(field: string): Promise<string[]> {
+    try {
+      return await this.request<string[]>(`/field-values?field=${encodeURIComponent(field)}`);
+    } catch {
+      return [];
+    }
+  }
+
   // Spaces
   getSpaces() { return this.request<any[]>('/spaces'); }
   getSpace(key: string) { return this.request<any>(`/spaces/${key}`); }

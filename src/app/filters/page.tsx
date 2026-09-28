@@ -978,6 +978,20 @@ export default function FiltersPage() {
   const [PROJECT_MANAGER_OPTIONS, setProjectManagerOptions] = useState<string[]>(['Others']);
   useEffect(() => { api.getProjectManagerOptions().then(setProjectManagerOptions).catch(() => {}); }, []);
 
+  // Customer Name / Client Name used to be a plain free-text box with no
+  // visible options at all, whose typed value then had to EXACTLY match a
+  // ticket's stored value server-side (same "comes from a DB dropdown"
+  // assumption every field in this family makes) -- so almost anything
+  // typed returned zero results with no indication why. Fetching the real,
+  // currently-used values (same GET /field-values this app already uses
+  // for other pickers) and offering them as a searchable multi-select
+  // fixes both: the options are now visible, and a selected value is
+  // guaranteed to match exactly.
+  const [CUSTOMER_NAME_OPTIONS, setCustomerNameOptions] = useState<string[]>([]);
+  const [CLIENT_NAME_OPTIONS, setClientNameOptions] = useState<string[]>([]);
+  useEffect(() => { api.getFieldValues('customerName').then(setCustomerNameOptions).catch(() => {}); }, []);
+  useEffect(() => { api.getFieldValues('clientName').then(setClientNameOptions).catch(() => {}); }, []);
+
   /* filter bar state */
   const [text, setText]                   = useState('');
   const [selSpaces, setSelSpaces]         = useState<string[]>([]);
@@ -1021,8 +1035,8 @@ export default function FiltersPage() {
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
   const [selCombination, setSelCombination] = useState('');
-  const [selCustomerName, setSelCustomerName] = useState('');
-  const [selClientName, setSelClientName] = useState('');
+  const [selCustomerName, setSelCustomerName] = useState<string[]>([]);
+  const [selClientName, setSelClientName] = useState<string[]>([]);
   const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
   const [selProjectPool, setSelProjectPool] = useState('');
   const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
@@ -1093,8 +1107,8 @@ export default function FiltersPage() {
     if (key === 'department')     setSelDepartment('');
     if (key === 'productType')    setSelProductType([]);
     if (key === 'combination')    setSelCombination('');
-    if (key === 'customerName')   setSelCustomerName('');
-    if (key === 'clientName')     setSelClientName('');
+    if (key === 'customerName')   setSelCustomerName([]);
+    if (key === 'clientName')     setSelClientName([]);
     if (key === 'projectManager') setSelProjectManager([]);
     if (key === 'projectPool')    setSelProjectPool('');
   };
@@ -1207,8 +1221,8 @@ export default function FiltersPage() {
     if (rDepartment) setSelDepartment(rDepartment);
     if (rProductType) setSelProductType(rProductType.split(','));
     if (rCombination) setSelCombination(rCombination);
-    if (rCustomerName) setSelCustomerName(rCustomerName);
-    if (rClientName) setSelClientName(rClientName);
+    if (rCustomerName) setSelCustomerName(rCustomerName.split(','));
+    if (rClientName) setSelClientName(rClientName.split(','));
     if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
     if (rProjectPool) setSelProjectPool(rProjectPool);
     if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
@@ -1259,8 +1273,8 @@ export default function FiltersPage() {
     if (selDepartment) p.rDepartment = selDepartment;
     if (selProductType.length) p.rProductType = selProductType.join(',');
     if (selCombination) p.rCombination = selCombination;
-    if (selCustomerName) p.rCustomerName = selCustomerName;
-    if (selClientName) p.rClientName = selClientName;
+    if (selCustomerName.length) p.rCustomerName = selCustomerName.join(',');
+    if (selClientName.length) p.rClientName = selClientName.join(',');
     if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
     if (selProjectPool) p.rProjectPool = selProjectPool;
     if (selBreached) p.rBreached = selBreached;
@@ -1327,7 +1341,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selWorked || selDueDate || selDepartment ||
-    selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selProjectPool || selBreached || selOverdue,
+    selProductType.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selBreached || selOverdue,
   );
 
   // Builds the filter params both the live table and the CSV export send —
@@ -1420,8 +1434,8 @@ export default function FiltersPage() {
         if (selDepartment)     params.department     = selDepartment;
         if (selProductType.length) params.productType = selProductType.join(',');
         if (selCombination)    params.combination    = selCombination;
-        if (selCustomerName)   params.customerName   = selCustomerName;
-        if (selClientName)     params.clientName     = selClientName;
+        if (selCustomerName.length) params.customerName = selCustomerName.join(',');
+        if (selClientName.length)   params.clientName   = selClientName.join(',');
         // Joined with a delimiter that won't collide with commas already inside a
         // stored value (e.g. "Abhishikth, Abhishek" naming two people as one value).
         if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
@@ -1545,8 +1559,8 @@ export default function FiltersPage() {
       const fieldsWithSelectedValue = {
         productType: selProductType.length > 0,
         combination: !!selCombination,
-        customerName: !!selCustomerName,
-        clientName: !!selClientName,
+        customerName: selCustomerName.length > 0,
+        clientName: selClientName.length > 0,
         projectManager: selProjectManager.length > 0,
         projectPool: !!selProjectPool,
         dueDate: !!selDueDate,
@@ -1660,8 +1674,8 @@ export default function FiltersPage() {
     productType: selProductType.length > 0,
     combination: !!selCombination,
     projectManager: selProjectManager.length > 0,
-    customerName: !!selCustomerName,
-    clientName: !!selClientName,
+    customerName: selCustomerName.length > 0,
+    clientName: selClientName.length > 0,
     projectPool: !!selProjectPool,
     dueDate: !!selDueDate,
   };
@@ -1689,7 +1703,7 @@ export default function FiltersPage() {
     setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
     setSelDepartment(''); setSelProductType([]);
-    setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager([]);
+    setSelCombination(''); setSelCustomerName([]); setSelClientName([]); setSelProjectManager([]);
     setSelProjectPool('');
     setSelBreached('');
     setSelOverdue('');
@@ -2103,13 +2117,23 @@ export default function FiltersPage() {
             )}
             {activeExtras.includes('customerName') && (
               <div className="flex items-center gap-1">
-                <TextFilterBtn label="Customer Name" value={selCustomerName} onChange={setSelCustomerName} />
+                <DropBtn
+                  label="Customer Name"
+                  options={CUSTOMER_NAME_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selCustomerName}
+                  onChange={setSelCustomerName}
+                />
                 <button onClick={() => toggleExtra('customerName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('clientName') && (
               <div className="flex items-center gap-1">
-                <TextFilterBtn label="Client Name" value={selClientName} onChange={setSelClientName} />
+                <DropBtn
+                  label="Client Name"
+                  options={CLIENT_NAME_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selClientName}
+                  onChange={setSelClientName}
+                />
                 <button onClick={() => toggleExtra('clientName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
