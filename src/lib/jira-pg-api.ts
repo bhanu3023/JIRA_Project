@@ -82,23 +82,65 @@ const RICH_TEXT_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
 // silently deleting real content. Confirmed for real: a comment on
 // CF-33365 was reduced to a completely empty, unrecoverable string the
 // moment sanitizeRichText ran on save. Escaping every "<" that isn't
-// immediately followed by one of this function's OWN recognized tag names
-// (or a real closing tag/comment) into "&lt;" before sanitizing neutralizes
-// this at the source: a genuine "<div>", "<img ...>" etc. from the rich
-// text editor is left completely untouched, while "<9QdY..." or "< 5 days"
-// becomes literal, visible text instead of vanishing.
-const _allowedTagNamesLower = new Set((RICH_TEXT_SANITIZE_OPTIONS.allowedTags || []).map((t) => t.toLowerCase()));
+// immediately followed by a REAL html tag name -- not just one on this
+// app's own allowlist, but the full standard vocabulary below, legacy tags
+// included -- into "&lt;" before sanitizing neutralizes this at the
+// source: a genuine "<div>", "<img ...>" etc. from the rich text editor is
+// left completely untouched, while "<9QdY..." or "< 5 days" becomes
+// literal, visible text instead of vanishing.
+//
+// This went through two wrong versions before landing here, both caught by
+// testing real cases before deploy:
+//   1. First version left a tag name alone only if it was in THIS app's
+//      narrower allowedTags. Real bug (CF-33620): a comment pasted from
+//      Outlook contained well-formed "<font color=...>...</font>" wrapper
+//      tags -- "font" isn't in allowedTags, so that version escaped it
+//      into literal, ugly "<font color=...>" TEXT visible in the comment.
+//      sanitize-html's own default behavior for a disallowed-but-real tag
+//      (strip the tag, keep its inner text) was already exactly correct
+//      and had always worked fine before the escaping was added.
+//   2. Loosening it to "any letter-led word, real tag or not" fixed that
+//      but reopened the ORIGINAL CF-33365 class of bug from a different
+//      angle: "<Please check>" (an informal phrase, not a tag at all) then
+//      got left unescaped too, and sanitize-html's parser -- seeing what
+//      looks like an opening tag named "Please" with a "check" attribute
+//      and no closing tag -- silently swallowed the whole thing, again
+//      producing an empty comment. Confirmed reproducible locally before
+//      this was ever deployed.
+// The actual CF-33365 danger was never "an unrecognized tag name" --
+// sanitize-html parses and strips any REAL tag name safely regardless of
+// whether it's allowlisted. The danger is a "<" followed by something that
+// merely LOOKS letter-led to a naive check but isn't an actual HTML
+// element, which confuses the real parser into treating it as a
+// malformed/unterminated tag and swallowing everything after it. So the
+// tag name has to be checked against real HTML vocabulary, not against
+// this app's own (much narrower, and beside the point) allowlist.
+const _knownHtmlTagNames = new Set([
+  'a','abbr','acronym','address','applet','area','article','aside','audio',
+  'b','base','basefont','bdi','bdo','big','blockquote','body','br','button',
+  'canvas','caption','center','cite','code','col','colgroup',
+  'data','datalist','dd','del','details','dfn','dialog','dir','div','dl','dt',
+  'em','embed',
+  'fieldset','figcaption','figure','font','footer','form','frame','frameset',
+  'h1','h2','h3','h4','h5','h6','head','header','hgroup','hr','html',
+  'i','iframe','img','input','ins',
+  'kbd',
+  'label','legend','li','link',
+  'main','map','mark','marquee','menu','meta','meter',
+  'nav','noframes','noscript',
+  'object','ol','optgroup','option','output',
+  'p','param','picture','pre','progress',
+  'q',
+  'rp','rt','ruby',
+  's','samp','script','section','select','small','source','span','strike','strong','style','sub','summary','sup',
+  'table','tbody','td','template','textarea','tfoot','th','thead','time','title','tr','track','tt',
+  'u','ul',
+  'var','video',
+  'wbr',
+]);
 function escapeStrayAngleBrackets(html: string): string {
-  // Always escape unless a genuinely recognized tag name follows -- there is
-  // no case where leaving an unrecognized "<...", including a bare "<" with
-  // nothing/non-letters after it, unescaped is ever safer than escaping it.
-  // (An earlier version of this function special-cased a bare "<" as safe
-  // to leave alone, which was exactly wrong: "<9QdY..." -- the real
-  // CF-33365 failure case -- has no captured tag name AND no slash, so that
-  // special case skipped escaping precisely the input it was meant to
-  // catch.)
   return html.replace(/<(\/?)([a-zA-Z][a-zA-Z0-9]*)?/g, (match, slash: string, tagName?: string) => {
-    if (tagName && _allowedTagNamesLower.has(tagName.toLowerCase())) return match;
+    if (tagName && _knownHtmlTagNames.has(tagName.toLowerCase())) return match;
     return `&lt;${slash}${tagName || ''}`;
   });
 }
