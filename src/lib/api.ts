@@ -243,6 +243,12 @@ class ApiClient {
   deleteSpace(key: string) { return this.request<any>(`/spaces/${key}`, { method: 'DELETE' }); }
   addSpaceMember(key: string, data: any) { return this.request<any>(`/spaces/${key}/members`, { method: 'POST', body: JSON.stringify(data) }); }
 
+  // Priority (global, app-wide -- see disabled-priorities in jira-pg-api.ts)
+  getDisabledPriorities() { return this.request<{ disabled: string[] }>('/disabled-priorities'); }
+  setDisabledPriorities(disabled: string[]) {
+    return this.request<{ ok: boolean; disabled: string[] }>('/disabled-priorities', { method: 'PUT', body: JSON.stringify({ disabled }) });
+  }
+
   // Issues
   getIssues(params: Record<string, string> = {}) {
     const qs = new URLSearchParams(params).toString();

@@ -6,9 +6,10 @@ import { api } from '@/lib/api';
 import {
   ArrowLeft, Users, Clock, Plus, X, Check, Search,
   Trash2, Calendar, ChevronRight, Edit2, AlertCircle, RefreshCw, Mail, Link2, Unlink,
-  Eye, EyeOff, Wifi, WifiOff, Loader2, GitMerge, Network
+  Eye, EyeOff, Wifi, WifiOff, Loader2, GitMerge, Network, Ban
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useStore } from '@/store';
 
 type SLAGoal = { id: string; priority: string; timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' };
 type SLAPolicy = {
@@ -148,6 +149,38 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
     setGoals(prev => prev.map(g => g.priority === priority ? { ...g, [field]: val } : g));
   };
 
+  // Global Priority disable/enable (see disabled-priorities in
+  // jira-pg-api.ts). Deliberately NOT scoped to this one SLA/queue --
+  // Priority is one shared field across every space, so removing it here
+  // hides it from the Priority PICKER everywhere in the app (Create
+  // ticket, the ticket detail Priority field, subtask creation, the
+  // board's inline quick-edit) -- an existing ticket that already has a
+  // now-disabled priority keeps showing it; disabling only removes it as
+  // something new or changed. Confirmed with the user before building this
+  // that "everywhere" (not just this queue) is what they actually wanted.
+  const currentUser = useStore((s) => s.user);
+  const isAdmin = currentUser?.role === 'admin';
+  const [disabledGlobal, setDisabledGlobal] = useState<string[]>([]);
+  const [priorityActionError, setPriorityActionError] = useState('');
+  useEffect(() => {
+    api.getDisabledPriorities().then((r) => setDisabledGlobal(r.disabled || [])).catch(() => {});
+  }, []);
+  const toggleGlobalPriority = async (priorityLabel: string) => {
+    if (!isAdmin) return;
+    const val = priorityLabel.toLowerCase();
+    const isDisabled = disabledGlobal.includes(val);
+    const next = isDisabled ? disabledGlobal.filter((v) => v !== val) : [...disabledGlobal, val];
+    setPriorityActionError('');
+    const prev = disabledGlobal;
+    setDisabledGlobal(next); // optimistic
+    try {
+      await api.setDisabledPriorities(next);
+    } catch (e: any) {
+      setDisabledGlobal(prev); // revert -- most likely cause: trying to disable the last remaining priority
+      setPriorityActionError(e?.message || 'Could not update Priority options');
+    }
+  };
+
   const handleToggleEnabled = () => {
     const next = !enabled;
     setEnabled(next);
@@ -224,6 +257,14 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
         <div className="px-6 py-4 border-b border-gray-100">
           <h2 className="text-[14px] font-bold text-gray-900">Goals</h2>
           <p className="text-[12px] text-gray-500 mt-0.5">Work items will be checked against this list, top to bottom, and assigned a time goal based on the first matching priority.</p>
+          {isAdmin && (
+            <p className="text-[11.5px] text-blue-600 bg-blue-50 rounded-lg px-3 py-2 mt-2.5">
+              Turning a priority off here removes it from the Priority field on every ticket, in every space — not just this queue. Existing tickets already set to it are unaffected.
+            </p>
+          )}
+          {priorityActionError && (
+            <p className="text-[11.5px] text-red-600 bg-red-50 rounded-lg px-3 py-2 mt-2.5">{priorityActionError}</p>
+          )}
         </div>
         <table className="w-full">
           <thead>
@@ -231,16 +272,21 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
               <th className="text-left px-6 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Apply to work items</th>
               <th className="text-left px-6 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Calendar</th>
               <th className="text-left px-6 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Time Target</th>
+              {isAdmin && <th className="text-left px-6 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Priority field</th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
             {goals.map(goal => {
               const meta = PRIORITY_META[goal.priority] || { color: 'text-gray-500', icon: '•' };
+              const isDisabledGlobally = disabledGlobal.includes(goal.priority.toLowerCase());
               return (
-                <tr key={goal.priority} className="hover:bg-gray-50/50 transition-colors">
+                <tr key={goal.priority} className={cn('hover:bg-gray-50/50 transition-colors', isDisabledGlobally && 'opacity-50')}>
                   <td className="px-6 py-3.5">
                     <span className={cn('flex items-center gap-2 text-[13px] font-medium', meta.color)}>
                       <span className="text-[10px]">{meta.icon}</span>{goal.priority}
+                      {isDisabledGlobally && (
+                        <span className="text-[10px] font-semibold text-gray-400 bg-gray-100 rounded-full px-2 py-0.5">Hidden from Priority field</span>
+                      )}
                     </span>
                   </td>
                   <td className="px-6 py-3.5">
@@ -268,6 +314,23 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
                       </span>
                     )}
                   </td>
+                  {isAdmin && (
+                    <td className="px-6 py-3.5">
+                      <button
+                        onClick={() => toggleGlobalPriority(goal.priority)}
+                        className={cn(
+                          'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium border transition-colors',
+                          isDisabledGlobally
+                            ? 'text-emerald-700 border-emerald-200 bg-emerald-50 hover:bg-emerald-100'
+                            : 'text-red-600 border-red-200 bg-red-50 hover:bg-red-100'
+                        )}
+                        title={isDisabledGlobally ? `Restore ${goal.priority} to the Priority field app-wide` : `Remove ${goal.priority} from the Priority field app-wide`}
+                      >
+                        {isDisabledGlobally ? <Check size={12} /> : <Ban size={12} />}
+                        {isDisabledGlobally ? 'Restore' : 'Remove'}
+                      </button>
+                    </td>
+                  )}
                 </tr>
               );
             })}
@@ -276,6 +339,7 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
               <td className="px-6 py-3.5"><span className="text-[13px] font-medium text-orange-600">All remaining work items</span></td>
               <td className="px-6 py-3.5"><span className="flex items-center gap-1.5 text-[12.5px] text-gray-500"><Calendar size={13} className="text-gray-400" />24/7 Calendar (Default)</span></td>
               <td className="px-6 py-3.5"><span className="text-[13px] text-gray-300">—</span></td>
+              {isAdmin && <td className="px-6 py-3.5" />}
             </tr>
           </tbody>
         </table>

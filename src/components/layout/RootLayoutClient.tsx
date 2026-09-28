@@ -11,13 +11,14 @@ import DotLoader from '@/components/ui/DotLoader';
 import NavigationLoader from '@/components/ui/NavigationLoader';
 
 export default function RootLayoutClient({ children }: { children: React.ReactNode }) {
-  const { user, isAuthenticated, initializing, loadUser, sidebarOpen } = useStore(
+  const { user, isAuthenticated, initializing, loadUser, sidebarOpen, loadDisabledPriorities } = useStore(
     useShallow((s) => ({
       user: s.user,
       isAuthenticated: s.isAuthenticated,
       initializing: s.initializing,
       loadUser: s.loadUser,
       sidebarOpen: s.sidebarOpen,
+      loadDisabledPriorities: s.loadDisabledPriorities,
     })),
   );
   const pathname = usePathname() ?? '';
@@ -37,7 +38,8 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
     // the redirect -- this skip doesn't affect that.)
     if (isAuthPage) return;
     loadUser();
-  }, [loadUser, isAuthPage]);
+    loadDisabledPriorities();
+  }, [loadUser, loadDisabledPriorities, isAuthPage]);
 
   // Session recording. No-ops when no Hotjar site ID is configured, which is the default.
   // Runs above the isAuthPage early return so /auth/login and /auth/register are recorded too --

@@ -89,6 +89,14 @@ interface AppState {
   sidebarOpen: boolean;
   toggleSidebar: () => void;
   loading: boolean;
+
+  // Global config
+  // Which of the 5 fixed priority levels are currently hidden from every
+  // Priority PICKER app-wide (see disabled-priorities in jira-pg-api.ts).
+  // Loaded once per session, same as `user` -- every picker reads this
+  // instead of each fetching its own copy.
+  disabledPriorities: string[];
+  loadDisabledPriorities: () => Promise<void>;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -368,4 +376,18 @@ export const useStore = create<AppState>((set, get) => ({
   sidebarOpen: true,
   toggleSidebar: () => set(s => ({ sidebarOpen: !s.sidebarOpen })),
   loading: false,
+
+  // Global config
+  disabledPriorities: [],
+  loadDisabledPriorities: async () => {
+    try {
+      const { disabled } = await api.getDisabledPriorities();
+      set({ disabledPriorities: Array.isArray(disabled) ? disabled : [] });
+    } catch {
+      // Best-effort -- every picker falls back to the full 5-value list
+      // (getSelectablePriorities treats an empty/missing array as "nothing
+      // disabled"), so a failed fetch here never blocks anyone from
+      // creating or editing a ticket.
+    }
+  },
 }));

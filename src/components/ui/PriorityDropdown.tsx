@@ -2,7 +2,8 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { ChevronDown } from 'lucide-react';
-import { PriorityIcon, PRIORITIES, getPriorityMeta } from './PriorityIcon';
+import { PriorityIcon, getPriorityMeta, getSelectablePriorities } from './PriorityIcon';
+import { useStore } from '@/store';
 
 interface Props {
   value: string;
@@ -15,6 +16,8 @@ export default function PriorityDropdown({ value, onChange, label, required }: P
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const meta = getPriorityMeta(value);
+  const disabledPriorities = useStore((s) => s.disabledPriorities);
+  const selectable = getSelectablePriorities(disabledPriorities);
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -47,7 +50,7 @@ export default function PriorityDropdown({ value, onChange, label, required }: P
       {/* Dropdown */}
       {open && (
         <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-md shadow-lg border border-[#dfe1e6] py-1 z-50 overflow-hidden">
-          {PRIORITIES.filter(p => p.value !== value).map(p => (
+          {selectable.filter(p => p.value !== value).map(p => (
             <button
               key={p.value}
               type="button"

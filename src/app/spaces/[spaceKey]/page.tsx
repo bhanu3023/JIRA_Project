@@ -10,7 +10,7 @@ import { typeIcons, getInitials, getIssueStatus, getEffectiveIssueStatus, timeAg
 import CommentReactions from '@/components/ui/CommentReactions';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { trackRecentItem } from '@/lib/recent-items';
-import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
+import { PriorityIcon, getPriorityMeta, PRIORITIES, getSelectablePriorities } from '@/components/ui/PriorityIcon';
 import SpaceIcon from '@/components/ui/SpaceIcon';
 import DotLoader from '@/components/ui/DotLoader';
 import RichTextEditor from '@/components/ui/RichTextEditor';
@@ -120,7 +120,7 @@ function SpaceDetailContent() {
       : Array.isArray(rawKey)
         ? (rawKey[0] || '').toUpperCase()
         : '';
-  const { currentSpace, currentSpaceError, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion, bumpIssuesVersion } = useStore(
+  const { currentSpace, currentSpaceError, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion, bumpIssuesVersion, disabledPriorities } = useStore(
     useShallow((s) => ({
       currentSpace: s.currentSpace,
       currentSpaceError: s.currentSpaceError,
@@ -134,6 +134,7 @@ function SpaceDetailContent() {
       user: s.user,
       issuesVersion: s.issuesVersion,
       bumpIssuesVersion: s.bumpIssuesVersion,
+      disabledPriorities: s.disabledPriorities,
     })),
   );
   // Declared this early (rather than down near the access-check block) because
@@ -3628,7 +3629,7 @@ function SpaceDetailContent() {
                         {openDropdown?.key === issue.key && openDropdown.field === 'priority' && (
                           <InlineDropdown onClose={() => setOpenDropdown(null)} anchorRect={openDropdown.rect}>
                             <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Priority</div>
-                            {PRIORITIES.map(p => (
+                            {getSelectablePriorities(disabledPriorities).map(p => (
                               <button key={p.value} onClick={() => handleInlineUpdate(issue.key, 'priority', p.value)}
                                 className="w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-gray-50 text-gray-700 transition-colors">
                                 <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full border"

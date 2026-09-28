@@ -8,7 +8,7 @@ import { useStore } from '@/store';
 import { api } from '@/lib/api';
 import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getEffectiveIssueStatus, resolveStatusColor, getDeptColor, buildMentionHtml } from '@/lib/utils';
 import { trackRecentItem } from '@/lib/recent-items';
-import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
+import { PriorityIcon, getPriorityMeta, getSelectablePriorities } from '@/components/ui/PriorityIcon';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import CommentReactions from '@/components/ui/CommentReactions';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
@@ -147,15 +147,17 @@ export default function IssueDetailPage() {
   // Normalize key: strip Jira sub-issue colon suffix (e.g. L2B-12718:1 → L2B-12718)
   const rawKey = (params.issueKey as string).toUpperCase();
   const issueKey = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-  const { currentIssue, currentIssueError, loadIssue, user, spaces } = useStore(
+  const { currentIssue, currentIssueError, loadIssue, user, spaces, disabledPriorities } = useStore(
     useShallow((s) => ({
       currentIssue: s.currentIssue,
       currentIssueError: s.currentIssueError,
       loadIssue: s.loadIssue,
       user: s.user,
       spaces: s.spaces,
+      disabledPriorities: s.disabledPriorities,
     })),
   );
+  const selectablePriorities = getSelectablePriorities(disabledPriorities);
   // Project Manager's option list used to be a hand-maintained hardcoded
   // name array here (5 separate copies) that drifted from who actually
   // holds the migration_manager role in User Management. Fetched live
@@ -4101,7 +4103,7 @@ export default function IssueDetailPage() {
                       <>
                         <div className="fixed inset-0 z-[10000]" onClick={() => setSubtaskPriorityOpen(false)} />
                         <div className="absolute left-0 top-full mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-xl z-[10001] py-1 overflow-hidden">
-                          {PRIORITIES.map(p => (
+                          {selectablePriorities.map(p => (
                             <button
                               key={p.value}
                               type="button"

@@ -14388,6 +14388,50 @@ async function _handleJiraPgApi(
     }
   }
 
+  // GET/PUT /disabled-priorities -- which of the 5 fixed priority levels
+  // (highest/high/medium/low/lowest) are currently hidden from every
+  // Priority PICKER in the app (Create ticket, the ticket detail Priority
+  // field, subtask creation, the board's inline quick-edit). Deliberately
+  // global, not per-space/queue -- Priority itself is one shared field
+  // across every space, so a per-space toggle would need Priority to
+  // become a per-space concept first, which it isn't today. Deliberately a
+  // soft hide, not a delete: an existing ticket that already has a
+  // now-disabled priority keeps showing it (PRIORITIES in PriorityIcon.tsx
+  // is untouched, still used for display/badges/Filters) -- disabling only
+  // removes it as something NEW tickets, or a priority CHANGE, can select.
+  // GET has no admin check (every logged-in user's picker needs to read
+  // this to know what to hide); PUT is admin-only, same pattern as
+  // app-settings just above.
+  if (path === 'disabled-priorities') {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`
+    );
+    if (method === 'GET') {
+      const row = await pool.query(`SELECT value FROM app_settings WHERE key = 'disabled_priorities'`);
+      let disabled: string[] = [];
+      try { disabled = row.rows[0] ? JSON.parse(row.rows[0].value) : []; } catch { disabled = []; }
+      return json({ disabled });
+    }
+    if (method === 'PUT') {
+      if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+      const body = await req.json();
+      const disabled = Array.isArray(body.disabled)
+        ? [...new Set(body.disabled.filter((v: any) => typeof v === 'string'))]
+        : [];
+      // At least one priority must stay selectable -- every ticket create/
+      // edit path requires SOME value, and disabling all 5 would leave
+      // those pickers with nothing to offer.
+      if (disabled.length >= 5) return json({ error: 'At least one priority must remain enabled' }, 400);
+      await pool.query(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('disabled_priorities', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [JSON.stringify(disabled)]
+      );
+      return json({ ok: true, disabled });
+    }
+    return json({ error: 'Method not allowed' }, 405);
+  }
+
   // POST /jira-issue-sync -- admin-triggered manual run of the same catch-up
   // sync that also runs automatically on a timer (see instrumentation.ts).
   // Bounded to a small batch since this goes over HTTP and has a real
