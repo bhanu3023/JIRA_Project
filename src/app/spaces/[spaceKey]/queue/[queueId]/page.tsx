@@ -25,6 +25,13 @@ type CustomQueue = {
   statusIds?: string[];
   queueStatuses?: { id: string; name: string; color: string; category: string; order: number }[];
   queueTransitions?: { from: string; to: string }[];
+  // Extra recipients notified by email on every ticket action in this
+  // queue (created, status change, comment, assignment, etc.) -- on top
+  // of whoever already gets emailed (assignee/reporter/admins). Not
+  // people accounts, just plain addresses (a shared team DL, typically).
+  // By request. See getQueueNotifyEmails in jira-pg-api.ts for how this
+  // gets pulled into the actual notification send.
+  notifyEmails?: string[];
 };
 
 const ALL_PRIORITIES = ['Highest', 'High', 'Medium', 'Low', 'Lowest'];
@@ -1115,6 +1122,8 @@ export default function QueueSettingsPage() {
 
   const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email' | 'workflow'>(initialTab);
   const [queue, setQueue] = useState<CustomQueue | null>(null);
+  const [notifyEmailDraft, setNotifyEmailDraft] = useState('');
+  const [notifyEmailError, setNotifyEmailError] = useState('');
   const [spaceStatuses, setSpaceStatuses] = useState<{ id: string; name: string; color: string; category: string }[]>([]);
   const [allSpaces, setAllSpaces] = useState<{ key: string; name: string }[]>([]);
   const [workflowSaving, setWorkflowSaving] = useState(false);
@@ -1258,6 +1267,21 @@ export default function QueueSettingsPage() {
   const removeMember  = (id: string) => { if (!queue) return; persistQueue({ ...queue, memberIds: queue.memberIds.filter(x => x !== id), suspendedIds: (queue.suspendedIds||[]).filter(x => x !== id) }); };
   const suspendMember = (id: string) => { if (!queue) return; persistQueue({ ...queue, suspendedIds: [...(queue.suspendedIds||[]), id] }); };
   const reactivate    = (id: string) => { if (!queue) return; persistQueue({ ...queue, suspendedIds: (queue.suspendedIds||[]).filter(x => x !== id) }); };
+  const addNotifyEmail = () => {
+    if (!queue) return;
+    const email = notifyEmailDraft.trim().toLowerCase();
+    if (!email) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setNotifyEmailError('Enter a valid email address'); return; }
+    const current = queue.notifyEmails || [];
+    if (current.includes(email)) { setNotifyEmailError('Already added'); return; }
+    setNotifyEmailError('');
+    persistQueue({ ...queue, notifyEmails: [...current, email] });
+    setNotifyEmailDraft('');
+  };
+  const removeNotifyEmail = (email: string) => {
+    if (!queue) return;
+    persistQueue({ ...queue, notifyEmails: (queue.notifyEmails || []).filter(e => e !== email) });
+  };
   const addMember = async (id: string) => {
     if (!queue) return;
     // If user is not in space_members yet, add them first
@@ -1449,6 +1473,54 @@ export default function QueueSettingsPage() {
                   </tbody>
                 </table>
               )}
+            </div>
+
+            {/* Extra emails notified on every action in this queue -- a
+                shared team DL, not a person's own account. Separate from
+                the "Email" tab, which is only about INBOUND mail creating
+                tickets here; this is outbound notifications going OUT for
+                actions already happening. By request. */}
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <Mail size={15} className="text-gray-400" />
+                  <h2 className="text-[14px] font-semibold text-gray-800">Notify by email</h2>
+                </div>
+                <p className="text-[12.5px] text-gray-500 mt-1">
+                  Add a distribution list or shared inbox to CC on every action in the <strong>{queue.name}</strong> queue -- ticket created, status changes, comments, assignment. On top of whoever already gets emailed (assignee, reporter, admins).
+                </p>
+              </div>
+              <div className="px-6 py-4">
+                <div className="flex items-center gap-2">
+                  <input
+                    value={notifyEmailDraft}
+                    onChange={e => { setNotifyEmailDraft(e.target.value); setNotifyEmailError(''); }}
+                    onKeyDown={e => { if (e.key === 'Enter') addNotifyEmail(); }}
+                    placeholder="team-dl@yourcompany.com"
+                    className="flex-1 border border-gray-200 rounded-lg px-3.5 py-2 text-[13px] text-gray-800 focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                  />
+                  <button onClick={addNotifyEmail}
+                    className="flex items-center gap-1.5 px-4 py-2 text-[12.5px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors">
+                    <Plus size={13} /> Add
+                  </button>
+                </div>
+                {notifyEmailError && <p className="text-[11.5px] text-red-500 mt-1.5">{notifyEmailError}</p>}
+
+                {(queue.notifyEmails || []).length === 0 ? (
+                  <p className="text-[12.5px] text-gray-400 mt-4">No extra addresses yet -- only the assignee, reporter and admins are notified.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    {(queue.notifyEmails || []).map(email => (
+                      <span key={email} className="inline-flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-full bg-gray-100 text-[12.5px] text-gray-700">
+                        {email}
+                        <button onClick={() => removeNotifyEmail(email)} className="text-gray-400 hover:text-red-500 transition-colors">
+                          <X size={12} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}

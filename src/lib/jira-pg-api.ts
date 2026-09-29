@@ -807,6 +807,31 @@ function getExtraSpaceNotifyEmails(spaceKey: string | null | undefined): string[
   return [];
 }
 
+// Per-queue equivalent of getExtraSpaceNotifyEmails above, but data-driven
+// (custom_queues.queues[].notifyEmails) instead of hardcoded -- set from
+// the queue's own "People & Access" settings page (see notifyEmails on
+// CustomQueue in queue/[queueId]/page.tsx). By request: a plain distribution
+// list or shared inbox that should hear about every action in ONE specific
+// queue (created, status changed, commented, assigned), not a whole space
+// or a real user account. department is matched case-insensitively against
+// the queue's own name, same as every other department-keyed lookup in this
+// file (e.g. dept_statuses/dept_assignees matching). Cached per space for
+// the same reason/duration as getSpaceAdminRecipients -- this now runs on
+// every ticket-lifecycle notification, not just once per page load.
+const _queueNotifyEmailsCache = new Map<string, { queues: any[]; at: number }>();
+async function getQueueNotifyEmails(spaceKey: string | null | undefined, department: string | null | undefined): Promise<string[]> {
+  if (!spaceKey || !department) return [];
+  const key = spaceKey.toUpperCase();
+  let cached = _queueNotifyEmailsCache.get(key);
+  if (!cached || Date.now() - cached.at > 60_000) {
+    const row = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [key]).catch(() => null);
+    cached = { queues: row?.rows[0]?.queues || [], at: Date.now() };
+    _queueNotifyEmailsCache.set(key, cached);
+  }
+  const match = cached.queues.find((q: any) => String(q.name || '').toLowerCase() === department.toLowerCase());
+  return Array.isArray(match?.notifyEmails) ? match.notifyEmails : [];
+}
+
 async function notifyUsers(userIds: (string | null | undefined)[], actorId: string | null | undefined, opts: { type: string; title: string; message?: string; issueKey?: string }) {
   const seen = new Set<string>();
   for (const uid of userIds) {
@@ -7983,10 +8008,14 @@ async function _handleJiraPgApi(
     if (!issue) return json({ error: 'Failed to generate unique issue key' }, 500);
 
     // Set original_dept and assign next CF key at creation time
+    // Hoisted out of the try block below (was declared let inside it, so out
+    // of scope where the "issue created" notification email further down
+    // needs it too, to find this new department's own queue notifyEmails DL).
+    let deptToSet: string | null = null;
     try {
       if (issue?.id) {
         // current_department is a raw ALTER TABLE column -- Prisma doesn't know it, so set via raw SQL
-        let deptToSet = body.department ? String(body.department) : (rrDepartment || null);
+        deptToSet = body.department ? String(body.department) : (rrDepartment || null);
         // For a subtask, body.department is whatever the parent ticket's
         // department happened to be at the moment "Create subtask" was
         // clicked (handleCreateSubtask in issues/[issueKey]/page.tsx) --
@@ -8039,11 +8068,12 @@ async function _handleJiraPgApi(
           // Open/Inprogress/Waiting For Dev/...), and the status pill disagrees with
           // the dropdown options (which ARE queue-aware).
           let queueStatuses: any[] = [];
+          const deptToSetLower = deptToSet.toLowerCase();
           try {
             const allQueueRows = await pool.query(`SELECT queues FROM custom_queues`);
             for (const row of allQueueRows.rows) {
               const queues: any[] = row.queues || [];
-              const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === deptToSet.toLowerCase());
+              const matchedQ = queues.find((q: any) => (q.name || '').toLowerCase() === deptToSetLower);
               if (matchedQ?.queueStatuses?.length) { queueStatuses = matchedQ.queueStatuses; break; }
             }
           } catch {}
@@ -8113,7 +8143,11 @@ async function _handleJiraPgApi(
     // (notifyIssueCreated) and the in-app path below. Includes both global
     // admins and this space's OWN Admin-role members.
     const { ids: adminIds, emails: adminEmails } = await getAllAdminRecipients(sp.id);
-    const boardCreateNotifyEmails = [...adminEmails, ...getExtraSpaceNotifyEmails(issue.space?.key ?? sk)];
+    const boardCreateNotifyEmails = [
+      ...adminEmails,
+      ...getExtraSpaceNotifyEmails(issue.space?.key ?? sk),
+      ...(await getQueueNotifyEmails(issue.space?.key ?? sk, deptToSet)),
+    ];
 
     // Send email notification (fire-and-forget)
     notifyIssueCreated({
@@ -8126,8 +8160,15 @@ async function _handleJiraPgApi(
       adminEmails: boardCreateNotifyEmails,
     }).catch((err: any) => console.error('[Issue Created Email] Failed to send:', err?.message || err));
 
-    // If ticket has no assignee, email leads + shift leads so they can pick it up
-    const issueDept = (issue as any).current_department || null;
+    // If ticket has no assignee, email leads + shift leads so they can pick it up.
+    // Was (issue as any).current_department -- always undefined (current_department
+    // is a raw ALTER TABLE column, not in the Prisma schema, and `issue` here is a
+    // plain Prisma-fetched record that was never updated in-memory after the raw
+    // UPDATE above set it on the DB row). Found while adding the queue-notify-DL
+    // feature right below, which needed the real department value at this exact
+    // point too -- getSpaceLeadUserIds(sp.id, issueDept) had been silently getting
+    // null for department on every single new-ticket-unassigned alert.
+    const issueDept = deptToSet;
     const displayKey = (issue as any).cf_key || issue.key;
     if (!issue.assigneeId) {
       try {
@@ -8664,6 +8705,10 @@ async function _handleJiraPgApi(
       // to know about (e.g. reporter's Migration ticket moving to Dev).
       if (updatedIssue) {
         const { ids: deptAdminIds, emails: deptAdminEmails } = await getAllAdminRecipients((updatedIssue as any).spaceId);
+        // The ticket now BELONGS to newDept's queue -- that queue's own DL
+        // (if configured) should hear about it landing there, same as its
+        // members would via the in-app notification just below.
+        const deptQueueEmails = await getQueueNotifyEmails(updatedIssue.space?.key ?? '', newDept);
         notifyIssueUpdated({
           key: updatedIssue.key, cfKey: extraCols.cf_key, summary: updatedIssue.summary, priority: updatedIssue.priority,
           spaceKey: updatedIssue.space?.key ?? '', spaceName: updatedIssue.space?.name ?? '',
@@ -8671,7 +8716,7 @@ async function _handleJiraPgApi(
           assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
           updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
           changes: [{ field: 'Department', from: oldDept || 'None', to: newDept }],
-          adminEmails: deptAdminEmails,
+          adminEmails: [...deptAdminEmails, ...deptQueueEmails],
         }).catch(() => {});
         // The "Department" email above never says WHO the ticket is now
         // assigned to — a separate "Issue Assigned" email is what actually
@@ -8685,7 +8730,7 @@ async function _handleJiraPgApi(
             status: { name: updatedIssue.status?.name ?? newStatusName, category: updatedIssue.status?.category ?? 'todo' },
             assignee: updatedIssue.assignee, reporter: updatedIssue.reporter,
             previousAssignee: issue.assignee,
-            adminEmails: deptAdminEmails,
+            adminEmails: [...deptAdminEmails, ...deptQueueEmails],
           }).catch(() => {});
         }
         await notifyUsers(deptAdminIds, userId, {
@@ -8843,6 +8888,7 @@ async function _handleJiraPgApi(
         : null;
       const targetStatusCategory = firstStatus?.category ?? 'todo';
       const { ids: transferAdminIds, emails: transferAdminEmails } = await getAllAdminRecipients((targetSpace as any).id);
+      const transferQueueEmails = await getQueueNotifyEmails(targetSpace.key, newDept);
       notifyIssueUpdated({
         key: newKey, cfKey: newCfKey, summary: issue.summary, priority: issue.priority,
         spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
@@ -8850,7 +8896,7 @@ async function _handleJiraPgApi(
         assignee: newAssigneeUser, reporter: issue.reporter,
         updatedBy: authorUser,
         changes: [{ field: 'Department', from: (issue as any).current_department || 'None', to: newDept }],
-        adminEmails: transferAdminEmails,
+        adminEmails: [...transferAdminEmails, ...transferQueueEmails],
       }).catch(() => {});
       if (newAssigneeUser) {
         notifyIssueAssigned({
@@ -8858,7 +8904,7 @@ async function _handleJiraPgApi(
           spaceKey: targetSpace.key, spaceName: (targetSpace as any).name ?? '',
           status: { name: newStatusName, category: targetStatusCategory },
           assignee: newAssigneeUser, reporter: issue.reporter,
-          adminEmails: transferAdminEmails,
+          adminEmails: [...transferAdminEmails, ...transferQueueEmails],
         }).catch(() => {});
       }
       const inAppIds = [issue.reporterId, newAssigneeUser?.id, ...transferAdminIds].filter((id): id is string => !!id);
@@ -9892,6 +9938,7 @@ async function _handleJiraPgApi(
                 [rid(), issue.id, 'status', oldQueueStatusName, String(body.queueStatusName || ''), reopenChanger ? `${reopenChanger.firstName} ${reopenChanger.lastName}`.trim() : 'Unknown', reopenChanger?.email || null]
               ).catch(() => {});
               const { ids: reopenAdminIds, emails: reopenAdminEmails } = await getAllAdminRecipients(issue.spaceId);
+              const reopenQueueEmails = await getQueueNotifyEmails(issue.space?.key, dept);
               notifyStatusChanged({
                 key: issue.key, cfKey: issueCfKey, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
@@ -9899,7 +9946,7 @@ async function _handleJiraPgApi(
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
                 assignee: issue.assignee, reporter: issue.reporter,
                 changedBy: reopenChanger,
-                adminEmails: reopenAdminEmails,
+                adminEmails: [...reopenAdminEmails, ...reopenQueueEmails],
               }).catch(() => {});
               // This branch had NO in-app bell notification at all (only the
               // email above) -- admins/assignee/reporter got nothing in the
@@ -9981,6 +10028,7 @@ async function _handleJiraPgApi(
               // kind, even though a plain (non-queue) status change to Resolved does
               // notify them via the generic path further down in this handler.
               const { ids: doneAdminIds, emails: doneAdminEmails } = await getAllAdminRecipients(issue.spaceId);
+              const doneQueueEmails = await getQueueNotifyEmails(issue.space?.key, dept);
               notifyStatusChanged({
                 key: issue.key, cfKey: issueCfKey, summary: issue.summary, priority: issue.priority,
                 spaceKey: issue.space?.key ?? '', spaceName: issue.space?.name ?? '',
@@ -9988,7 +10036,7 @@ async function _handleJiraPgApi(
                 newStatus: { name: String(body.queueStatusName || ''), category: 'done' },
                 assignee: issue.assignee, reporter: issue.reporter,
                 changedBy: doneChanger,
-                adminEmails: doneAdminEmails,
+                adminEmails: [...doneAdminEmails, ...doneQueueEmails],
               }).catch(() => {});
               const doneDisplayKey = issueCfKey || issue.key;
               // Admins got the email (adminEmails above) but not the in-app
@@ -10143,6 +10191,10 @@ async function _handleJiraPgApi(
               }
               const refreshedDisplayKey = issueCfKey || refreshed.key;
               const { ids: refreshedAdminIds, emails: refreshedAdminEmails } = await getAllAdminRecipients((refreshed as any).spaceId);
+              // If this status change also handed the ticket off to another
+              // department (queueHandoffDone), it now belongs to THAT queue,
+              // not the one it started this request in.
+              const refreshedQueueEmails = await getQueueNotifyEmails(refreshed.space?.key, queueHandoffDone ? queueHandoffTargetDept : dept);
               notifyStatusChanged({
                 key: refreshed.key, cfKey: issueCfKey, summary: refreshed.summary, priority: refreshed.priority,
                 spaceKey: refreshed.space?.key ?? '', spaceName: refreshed.space?.name ?? '',
@@ -10150,7 +10202,7 @@ async function _handleJiraPgApi(
                 newStatus: { name: String(body.queueStatusName || ''), category: String(body.queueStatusCategory || 'todo') },
                 assignee: refreshed.assignee, reporter: refreshed.reporter,
                 changedBy: changer,
-                adminEmails: refreshedAdminEmails,
+                adminEmails: [...refreshedAdminEmails, ...refreshedQueueEmails],
               }).catch(() => {});
               // This branch returns early right below, so it never reached the
               // generic "Status changed?" block further down that normally
@@ -10595,6 +10647,18 @@ async function _handleJiraPgApi(
     const statusChangedForNotif = body.statusId !== undefined && issue.statusId !== data.statusId;
     const assigneeChangedForNotif = body.assigneeId !== undefined && issue.assigneeId !== data.assigneeId;
 
+    // current_department isn't a Prisma-schema column (raw ALTER TABLE, same
+    // as dept_sla_log/dept_statuses elsewhere in this handler) -- `issue`
+    // (from db.issue.findUnique further up) never carries it, so it has to
+    // be read separately. Fetched once here and shared by the status/
+    // assignee/general-update notification blocks below, all of which need
+    // it to find this queue's own notifyEmails DL -- none of those three
+    // branches changes the department themselves (that's the separate
+    // dept-handoff logic elsewhere in this handler, already fetching its
+    // own fresh value), so one read covers all three.
+    const currentDeptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]).catch(() => null);
+    const currentDeptForNotif: string | null = currentDeptRow?.rows[0]?.current_department || null;
+
     // Status changed?
     if (statusChangedForNotif) {
       // If status moved to 'done' category, record worked-on for current assignee
@@ -10717,7 +10781,11 @@ async function _handleJiraPgApi(
         oldStatus: { name: oldStatusRec?.name ?? 'Unknown', category: oldStatusRec?.category ?? 'todo' },
         newStatus: issueForNotif.status,
         changedBy: changer,
-        adminEmails: [...statusAdminEmails, ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey)],
+        adminEmails: [
+          ...statusAdminEmails,
+          ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey),
+          ...(await getQueueNotifyEmails(issueForNotif.spaceKey, currentDeptForNotif)),
+        ],
       }).catch(() => {});
       // In-app: notify assignee + reporter + admins (not the person who changed it)
       await notifyUsers(
@@ -10731,7 +10799,15 @@ async function _handleJiraPgApi(
     if (assigneeChangedForNotif) {
       const prevAssignee = issue.assigneeId ? await db.user.findUnique({ where: { id: issue.assigneeId } }) : null;
       const { ids: assignAdminIds, emails: assignAdminEmails } = await getAllAdminRecipients(issue.spaceId);
-      notifyIssueAssigned({ ...issueForNotif, previousAssignee: prevAssignee, adminEmails: [...assignAdminEmails, ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey)] }).catch(() => {});
+      notifyIssueAssigned({
+        ...issueForNotif,
+        previousAssignee: prevAssignee,
+        adminEmails: [
+          ...assignAdminEmails,
+          ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey),
+          ...(await getQueueNotifyEmails(issueForNotif.spaceKey, currentDeptForNotif)),
+        ],
+      }).catch(() => {});
       // In-app: notify new assignee + reporter + admins
       await notifyUsers(
         [updated.assigneeId, updated.reporterId, ...assignAdminIds],
@@ -10762,7 +10838,11 @@ async function _handleJiraPgApi(
           ...issueForNotif,
           updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
           changes,
-          adminEmails: [...updateAdminEmails, ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey)],
+          adminEmails: [
+            ...updateAdminEmails,
+            ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey),
+            ...(await getQueueNotifyEmails(issueForNotif.spaceKey, currentDeptForNotif)),
+          ],
         }).catch(() => {});
         // In-app: notify assignee + reporter + admins + watchers
         await notifyUsers(
@@ -11176,13 +11256,18 @@ async function _handleJiraPgApi(
     // with no status or assignee change at all -- that was previously
     // invisible to "Worked on" / the Filters page's Worked chip / Team
     // Analytics, same gap the PATCH-handler fix closed for status/assignee.
+    // current_department isn't a Prisma-schema column (added via raw ALTER
+    // TABLE, like dept_sla_log/dept_statuses) -- db.issue.findUnique above
+    // never actually returns it, so it has to be read via a raw query, the
+    // same way the queue-suspension check earlier in this handler does.
+    // Hoisted out of the try block below (was declared const inside it,
+    // so out of scope where the comment-notification email needs it too,
+    // further down) so both uses share the one query instead of each
+    // needing their own.
+    let commentDept: string | null = null;
     try {
-      // current_department isn't a Prisma-schema column (added via raw ALTER
-      // TABLE, like dept_sla_log/dept_statuses) -- db.issue.findUnique above
-      // never actually returns it, so it has to be read via a raw query, the
-      // same way the queue-suspension check earlier in this handler does.
       const commentDeptRow = await pool.query(`SELECT current_department FROM issues WHERE id = $1`, [issue.id]);
-      const commentDept = commentDeptRow.rows[0]?.current_department || null;
+      commentDept = commentDeptRow.rows[0]?.current_department || null;
       if (userId && commentDept) {
         await pool.query(
           `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
@@ -11205,7 +11290,11 @@ async function _handleJiraPgApi(
         body: comment.body,
         author: comment.author ?? (authorUser ? { email: authorUser.email, firstName: authorUser.firstName, lastName: authorUser.lastName } : null),
       },
-      adminEmails: [...commentAdminEmails, ...getExtraSpaceNotifyEmails(issue.space?.key)],
+      adminEmails: [
+        ...commentAdminEmails,
+        ...getExtraSpaceNotifyEmails(issue.space?.key),
+        ...(await getQueueNotifyEmails(issue.space?.key, commentDept)),
+      ],
     }).catch((err: any) => console.error('[Comment Email] Failed to send:', err?.message || err));
 
     // In-app: notify assignee + reporter + leads/shift leads + watchers (not the commenter)
