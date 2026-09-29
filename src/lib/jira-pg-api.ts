@@ -564,6 +564,13 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_started_at TIME
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_assignees JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_statuses JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS dept_sla_log JSONB DEFAULT '{}'::jsonb`).catch(() => {});
+// Frozen SLA result (the array computeSLAInstancesPure would return) for a
+// RESOLVED ticket -- written once, the first time it's computed after this
+// column existed, and read back on every later call instead of ever
+// recomputing from live sla_definitions again. See computeSLAInstancesPure's
+// own long comment on why: editing an SLA policy was silently changing the
+// breach verdict of tickets resolved weeks earlier.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS sla_snapshot JSONB`).catch(() => {});
 // Referenced throughout the codebase (formatIssue, the SLA breach check, the
 // ticket detail page's "Resolved ·" timestamp) as if it already existed, but
 // no migration ever actually created it -- every read of issue.resolvedAt
@@ -1060,7 +1067,7 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
       // get warned late, not at all, or wrongly logged as "just breached"
       // here while every other view of that same ticket disagreed.
       const issueForCompute = { ...row, status: { category: row.status_category, name: row.status_name } };
-      const instances = computeSLAInstancesPure(issueForCompute, policies, false);
+      const instances = await computeSLAInstancesPure(issueForCompute, policies, false);
       for (const inst of instances) {
         if (inst.isPaused || inst.isCompleted) continue;
         const timeToBreachMs = new Date(inst.dueTime).getTime() - Date.now();
@@ -2192,7 +2199,7 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
       ).catch(() => ({ rows: [] as any[] })), // notifications table may not have issueKey column
     ]);
     const isNotified = notifRes.rows.length > 0;
-    return computeSLAInstancesPure(issue, res.rows, isNotified);
+    return await computeSLAInstancesPure(issue, res.rows, isNotified);
   } catch { return []; }
 }
 
@@ -2247,7 +2254,13 @@ function isSlaInstanceBreached(opts: {
 // and notification flags ONCE per space/issue-set up front, instead of
 // computeIssueSLAsFromDb's own two-query-per-issue fetch repeating the exact
 // same "SLA policies for this space" lookup once per issue in that space.
-function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean): any[] {
+// Made async (was sync) specifically for the snapshot logic just below --
+// every call site had to add `await`, which is deliberate: TypeScript then
+// catches any call site that doesn't (a Promise used where an array was
+// expected), which is how every one of the ~18 call sites in this file got
+// found and fixed for this change, rather than risking silently missing
+// one via a manual audit.
+async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean): Promise<any[]> {
   try {
     if (!allPolicies.length) return [];
 
@@ -2308,6 +2321,31 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
     const deptStatusCategory = deptStatusKey ? deptStatuses[deptStatusKey]?.category : undefined;
     const isResolved = issue.status?.category === 'done' || deptStatusCategory === 'done';
     const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
+
+    // By explicit request: editing an SLA policy (e.g. tightening Migration's
+    // Medium target from 8h to 6h) was silently changing the breach verdict
+    // of every ALREADY-RESOLVED ticket ever handled under that department,
+    // because this function always recomputes from whatever sla_definitions
+    // currently says -- there was no memory of what the target used to be.
+    // Confirmed for real on CF-32756: resolved weeks before a Sep 28 policy
+    // edit, its breach status (and displayed Due time) still shifted to
+    // match the NEW target the moment anyone looked at it again. A resolved
+    // ticket's outcome shouldn't retroactively change because someone edited
+    // a setting after the fact -- once resolved, freeze the computed result
+    // the first time it's computed post-fix, and always return that frozen
+    // snapshot afterward regardless of any later policy edits. (The true
+    // pre-edit value for tickets resolved before this fix shipped is
+    // unrecoverable -- sla_definitions never kept history -- so the first
+    // freeze uses whatever the policy says as of right now; going forward,
+    // no further edits can ever move it again.)
+    if (isResolved) {
+      const existingSnapshot = issue.sla_snapshot !== undefined
+        ? issue.sla_snapshot
+        : (await pool.query(`SELECT sla_snapshot FROM issues WHERE id=$1`, [issue.id]).catch(() => null))?.rows[0]?.sla_snapshot;
+      if (Array.isArray(existingSnapshot) && existingSnapshot.length) {
+        return existingSnapshot;
+      }
+    }
 
     // dept_sla_started_at is reset to NOW() on every department handoff --
     // including a RETURN to a dept that already spent some of its SLA
@@ -2523,7 +2561,15 @@ function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boo
       }
     }
 
-    return [...currentDeptInstances, ...historicalInstances];
+    const result = [...currentDeptInstances, ...historicalInstances];
+    // Freeze it the moment we first compute a resolved ticket's result post-
+    // fix (see the long comment above) -- fire-and-forget, never blocks the
+    // response, and every later call for this same ticket takes the
+    // short-circuit above instead of ever reaching this point again.
+    if (isResolved && issue.id && result.length) {
+      pool.query(`UPDATE issues SET sla_snapshot=$1::jsonb WHERE id=$2`, [JSON.stringify(result), issue.id]).catch(() => {});
+    }
+    return result;
   } catch { return []; }
 }
 
@@ -2675,7 +2721,11 @@ async function loadTeamAnalyticsScope(url: URL) {
   }
 
   const now = Date.now();
-  const enriched = issues.map((row: any) => {
+  // Made async (was a plain .map) specifically so the breach check below can
+  // await computeSLAInstancesPure -- see that function's own comment for why
+  // it's now async. Promise.all keeps every row computed in parallel, same
+  // as a plain .map would have, just resolved before use.
+  const enriched = await Promise.all(issues.map(async (row: any) => {
     const statusHist = statusHistByIssue[row.id] || [];
     const assigneeHist = assigneeHistByIssue[row.id] || [];
     const createdMs = new Date(row.createdAt).getTime();
@@ -2708,7 +2758,7 @@ async function loadTeamAnalyticsScope(url: URL) {
     let isBreached: boolean | null = null;
     if (row.resolvedAt) {
       const policies = policiesBySpace[row.spaceId] || [];
-      const instances = computeSLAInstancesPure({ ...row, status: { name: row.status_name, category: row.status_category } }, policies, false);
+      const instances = await computeSLAInstancesPure({ ...row, status: { name: row.status_name, category: row.status_category } }, policies, false);
       if (instances.length) isBreached = instances.some((x: any) => x.isBreached);
       else if (typeof row.jira_sla_breached === 'boolean') isBreached = row.jira_sla_breached;
     } else if (typeof row.jira_sla_breached === 'boolean') {
@@ -2726,7 +2776,7 @@ async function loadTeamAnalyticsScope(url: URL) {
       resolvedAtComputed, resolvedHrs, isBreached, inProgressHrs,
       slaBreachEvents: slaBreachEventsByIssue[row.id] || [],
     };
-  });
+  }));
 
   return { issues: enriched, depts, dateType, dateFrom, dateTo, productType: productTypeParam };
 }
@@ -3054,6 +3104,19 @@ function computeSlaBreachedAndOverdue(
   // it's applied after the live computation runs.
   let breached = false;
   let hasRealDeptTracking = false;
+  // Same frozen-snapshot rule computeSLAInstancesPure now applies for the
+  // ticket detail page (see its own long comment) -- a resolved ticket's
+  // breach verdict shouldn't keep shifting every time an SLA policy gets
+  // edited. Read-only here (no query, no write): i.sla_snapshot rides along
+  // for free on any row fetched via `SELECT i.*` (every call site of this
+  // function already does), so this only ever uses whatever the detail-page
+  // path (or the one-time backfill) already froze -- never forces a write
+  // itself, since this runs across potentially thousands of Filters rows at
+  // once and can't afford a per-row round trip. A ticket that's never been
+  // individually viewed keeps using the live computation below until it has.
+  if (isResolved && Array.isArray(i.sla_snapshot) && i.sla_snapshot.length) {
+    return { slaBreached: i.sla_snapshot.some((x: any) => x.isBreached), overdue: false };
+  }
   // A department nobody has configured an SLA policy for (e.g. Infra, which
   // never had one set up) previously still showed a hard "No" in the SLA
   // Breached column -- indistinguishable from "there IS an SLA and it's
@@ -5291,7 +5354,10 @@ async function _handleJiraPgApi(
       // historical fact independent of who held it, so there's no single
       // "this list's own person" answer to substitute -- the per-dept
       // snapshot is still the right source here.
-      const issues = rows.rows.map((r: any) => {
+      // Made async (Promise.all over an async map) specifically so the
+      // breach check below can await computeSLAInstancesPure -- see that
+      // function's own comment for why.
+      const issues = await Promise.all(rows.rows.map(async (r: any) => {
         const deptStatuses: Record<string, any> = r.dept_statuses || {};
         const statusSnapKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === String(r.dept_name || '').toLowerCase());
         const statusSnap = statusSnapKey ? deptStatuses[statusSnapKey] : null;
@@ -5321,7 +5387,7 @@ async function _handleJiraPgApi(
 
         let slaBreached = false;
         if (r.resolvedAt) {
-          const instances = computeSLAInstancesPure(
+          const instances = await computeSLAInstancesPure(
             { ...withStatus, current_department: r.dept_name, status: { name: withStatus.status_name, category: withStatus.status_category } },
             slaPolicies,
             false
@@ -5341,7 +5407,7 @@ async function _handleJiraPgApi(
           };
         }
         return { ...withStatus, sla_breached: slaBreached };
-      });
+      }));
 
       // "Worked on" is meant to be the record of tickets THIS queue is actually
       // done with -- but user_worked_on_tickets' 'passed' entries fire on any
@@ -5433,7 +5499,7 @@ async function _handleJiraPgApi(
         statusMap[name].count++;
         const p = (row.priority || 'medium').toLowerCase();
         if (p in priorityMap) priorityMap[p]++;
-        const instances = computeSLAInstancesPure(
+        const instances = await computeSLAInstancesPure(
           { ...row, current_department: dept, status: { name: row.status_name, category: row.status_category } },
           slaPolicies, false
         );
@@ -5504,7 +5570,7 @@ async function _handleJiraPgApi(
           // not just the imported jira_sla_breached flag, which is false for
           // nearly every locally-tracked ticket and silently undercounted
           // real local breaches here.
-          const workedInstances = computeSLAInstancesPure(
+          const workedInstances = await computeSLAInstancesPure(
             { ...r, current_department: dept, status: { category: r.status_category } },
             slaPolicies, false
           );
@@ -5564,7 +5630,7 @@ async function _handleJiraPgApi(
           // here even though the ticket detail page's own SLA panel already
           // shows it waived.
           if (!isDone) {
-            const currentInstances = computeSLAInstancesPure(
+            const currentInstances = await computeSLAInstancesPure(
               { ...r, current_department: dept, status: { name: r.status_name, category: r.status_category } },
               slaPolicies, false
             );
@@ -6120,7 +6186,7 @@ async function _handleJiraPgApi(
         const issueKeys = issues.map((i: any) => i.key);
         if (issueKeys.length) {
           const deptRows = await pool.query(
-            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_sla_log, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at, sla_waivers FROM issues WHERE key = ANY($1::text[])`,
+            `SELECT key, current_department, department_assignee_id, dept_sla_started_at, dept_sla_log, dept_assignees, dept_statuses, cf_key, jira_assignee_name, jira_reporter_name, jira_sla_breached, jira_sla_due_at, jira_sla_start_at, sla_waivers, sla_snapshot FROM issues WHERE key = ANY($1::text[])`,
             [issueKeys]
           );
           for (const row of deptRows.rows) {
@@ -6137,7 +6203,12 @@ async function _handleJiraPgApi(
             // Yes" purely from elapsed time, even for a ticket whose detail page
             // (which reads sla_waivers directly) already shows it resolved in
             // time. Confirmed for real: CF-30920, CF-30911, CF-29386.
-            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_sla_log: row.dept_sla_log, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at, sla_waivers: row.sla_waivers };
+            // sla_snapshot: same reasoning -- without carrying it through here,
+            // this branch's computeSlaBreachedAndOverdue call could never see a
+            // frozen resolved-ticket verdict and would keep recomputing live
+            // from whatever sla_definitions currently says, same bug this
+            // column exists to fix.
+            deptMap[row.key] = { current_department: row.current_department, department_assignee_id: row.department_assignee_id, dept_sla_started_at: row.dept_sla_started_at, dept_sla_log: row.dept_sla_log, dept_assignees: row.dept_assignees, dept_statuses: row.dept_statuses, cf_key: row.cf_key, jira_assignee_name: row.jira_assignee_name, jira_reporter_name: row.jira_reporter_name, jira_sla_breached: row.jira_sla_breached, jira_sla_due_at: row.jira_sla_due_at, jira_sla_start_at: row.jira_sla_start_at, sla_waivers: row.sla_waivers, sla_snapshot: row.sla_snapshot };
           }
         }
       } catch { /* ignore */ }
@@ -7211,6 +7282,7 @@ async function _handleJiraPgApi(
           const lightRows = await pool.query(
             `SELECT i.id, i.priority, i."createdAt", i."dueDate", i."spaceId", i.current_department,
                     i.dept_statuses, i.jira_sla_breached, i.dept_sla_started_at, i.dept_sla_log, i.sla_waivers,
+                    i.sla_snapshot,
                     s.name AS status_name, s.category AS status_category
              FROM issues i
              LEFT JOIN statuses s ON i."statusId" = s.id
@@ -7520,6 +7592,7 @@ async function _handleJiraPgApi(
           jira_sla_due_at: row.jira_sla_due_at,
           jira_sla_start_at: row.jira_sla_start_at,
           sla_waivers: row.sla_waivers,
+          sla_snapshot: row.sla_snapshot,
           status: row.status_name ? { id: row.statusId, name: row.status_name, category: row.status_category, color: row.status_color } : null,
           assignee: assigneeOverride || (row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null),
           reporter: row.reporter_id ? { id: row.reporter_id, firstName: (row.reporter_name||'').split(' ')[0], lastName: (row.reporter_name||'').split(' ').slice(1).join(' '), email: row.reporter_email, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) } : null,
@@ -11952,7 +12025,7 @@ async function _handleJiraPgApi(
       // doesn't quietly look like 100% either way.
       if (!row.resolvedAt) continue;
       const policies = policiesBySpace[row.spaceId] || [];
-      const instances = computeSLAInstancesPure(
+      const instances = await computeSLAInstancesPure(
         { ...row, status: { name: row.status_name, category: row.status_category } },
         policies,
         false
@@ -12177,7 +12250,7 @@ async function _handleJiraPgApi(
     const slaBreachedByIssue: Record<string, boolean> = {};
     const slaBreachedByDept: Record<string, number> = {};
     for (const r of slaRawRows.rows) {
-      const instances = computeSLAInstancesPure(
+      const instances = await computeSLAInstancesPure(
         { ...r, current_department: r.dept, status: { name: r.status_name, category: r.status_category } },
         slaPoliciesBySpace[r.spaceId] || [],
         false
@@ -13094,7 +13167,7 @@ async function _handleJiraPgApi(
     const peopleTextAgg: Record<string, WeeklyTextAgg> = {};
     const summaryTextAgg = newTextAgg();
     for (const row of slaCandidatesRes.rows) {
-      const instances = computeSLAInstancesPure(
+      const instances = await computeSLAInstancesPure(
         { ...row, status: { name: row.status_name, category: row.status_category } },
         slaPoliciesBySpace[row.spaceId] || [],
         false
@@ -13862,8 +13935,8 @@ async function _handleJiraPgApi(
         }
         // Most urgent applicable policy per ticket: an already-breached one
         // first, else the soonest due -- same selection rule as below.
-        const primarySlaInstance = (r: any) => {
-          const instances = computeSLAInstancesPure(
+        const primarySlaInstance = async (r: any) => {
+          const instances = await computeSLAInstancesPure(
             { ...r, status: { name: r.status_name, category: r.status_category } },
             deptPoliciesBySpace[r.spaceId] || [],
             deptNotifiedKeys.has(r.cf_key || r.key),
@@ -13891,8 +13964,8 @@ async function _handleJiraPgApi(
         // exact department-locking behavior (a department's own breach
         // freezing once a ticket leaves it) was already verified against
         // production data earlier this session.
-        const primarySlaInstanceForQueue = (r: any) => {
-          const instances = computeSLAInstancesPure(
+        const primarySlaInstanceForQueue = async (r: any) => {
+          const instances = await computeSLAInstancesPure(
             { ...r, current_department: viewedQueueParam, status: { name: r.status_name, category: r.status_category } },
             deptPoliciesBySpace[r.spaceId] || [],
             deptNotifiedKeys.has(r.cf_key || r.key),
@@ -13912,7 +13985,7 @@ async function _handleJiraPgApi(
         // feeds the User-wise Tickets table's SLA Breached column.
         const breachedByMember: Record<string, number> = {};
         for (const r of openDeptIssues) {
-          const primary = primarySlaInstance(r);
+          const primary = await primarySlaInstance(r);
           if (primary && !primary.isPaused && primary.isBreached) {
             currentlyBreached++;
             if (r.assigneeId) breachedByMember[r.assigneeId] = (breachedByMember[r.assigneeId] || 0) + 1;
@@ -14018,7 +14091,7 @@ async function _handleJiraPgApi(
         // arrived that week, what fraction ever breached") -- there's no
         // historical breach snapshot anywhere in this app to answer "the
         // breach rate as it stood a week ago" any more precisely than that.
-        const breachRateFor = (fromD: Date, toD: Date) => {
+        const breachRateFor = async (fromD: Date, toD: Date) => {
           const cohort = originDeptIssues.filter((r: any) => {
             const c = new Date(r.createdAt).getTime();
             return c >= fromD.getTime() && c < toD.getTime();
@@ -14026,13 +14099,13 @@ async function _handleJiraPgApi(
           if (!cohort.length) return { total: 0, breached: 0, pct: 0 };
           let breached = 0;
           for (const r of cohort) {
-            const primary = primarySlaInstanceForQueue(r);
+            const primary = await primarySlaInstanceForQueue(r);
             if (primary && !primary.isPaused && primary.isBreached) breached++;
           }
           return { total: cohort.length, breached, pct: Math.round((breached / cohort.length) * 100) };
         };
-        const slaBreachRateLastWeek = breachRateFor(lastWeekFrom, lastWeekTo);
-        const slaBreachRateThisWeek = breachRateFor(thisWeekFrom, thisWeekTo);
+        const slaBreachRateLastWeek = await breachRateFor(lastWeekFrom, lastWeekTo);
+        const slaBreachRateThisWeek = await breachRateFor(thisWeekFrom, thisWeekTo);
 
         // 2. Created vs resolved
         const countCreated = (fromD: Date, toD: Date) => originDeptIssues.filter((r: any) => {
@@ -14088,7 +14161,7 @@ async function _handleJiraPgApi(
         // defined cohort. Building an actual point-in-time snapshot system
         // just for this one comparison would be well beyond what this feature
         // needs.
-        const memberWeekStats = (fromD: Date, toD: Date) => {
+        const memberWeekStats = async (fromD: Date, toD: Date) => {
           const byMember: Record<string, { breached: number; inProgress: number; open: number }> = {};
           for (const id of memberIds) byMember[id] = { breached: 0, inProgress: 0, open: 0 };
           const cohort = originDeptIssues.filter((r: any) => {
@@ -14102,13 +14175,13 @@ async function _handleJiraPgApi(
               byMember[aid].open++;
               if (isDeptInProgress(r)) byMember[aid].inProgress++;
             }
-            const primary = primarySlaInstanceForQueue(r);
+            const primary = await primarySlaInstanceForQueue(r);
             if (primary && !primary.isPaused && primary.isBreached) byMember[aid].breached++;
           }
           return byMember;
         };
-        const memberWeekStatsLastWeek = memberWeekStats(lastWeekFrom, lastWeekTo);
-        const memberWeekStatsThisWeek = memberWeekStats(thisWeekFrom, thisWeekTo);
+        const memberWeekStatsLastWeek = await memberWeekStats(lastWeekFrom, lastWeekTo);
+        const memberWeekStatsThisWeek = await memberWeekStats(thisWeekFrom, thisWeekTo);
 
         const memberWorkload = members.map((m: any) => ({
           userId: m.id,
@@ -14297,7 +14370,7 @@ async function _handleJiraPgApi(
       } catch { /* notifications table may not have issueKey column */ }
     }
     for (const r of openIssues) {
-      const instances = computeSLAInstancesPure(
+      const instances = await computeSLAInstancesPure(
         { ...r, status: { name: r.status_name, category: r.status_category } },
         policiesBySpace[r.spaceId] || [],
         notifiedKeys.has(r.cf_key || r.key),
@@ -14851,6 +14924,65 @@ async function _handleJiraPgApi(
       return json({ checked, fixed, breachedFound });
     } catch (e: any) {
       console.error('[backfill-sla-breach] failed:', e?.message || e);
+      return json({ error: 'Backfill failed', details: e?.message }, 500);
+    }
+  }
+
+  // POST /admin/backfill-sla-snapshots -- one-time freeze of every currently-
+  // resolved ticket's SLA verdict, so an SLA policy edit made from today
+  // onward can never again retroactively change a ticket that's already
+  // done. See computeSLAInstancesPure's own long comment for the full
+  // reasoning (confirmed for real on CF-32756, resolved weeks before a Sep
+  // 28 policy edit still shifted its displayed breach/due state). This
+  // endpoint doesn't duplicate that computation -- it just calls the real
+  // function for every resolved ticket that doesn't have a snapshot yet,
+  // which computes AND writes it as a side effect (the exact same thing
+  // that happens organically the first time anyone views that ticket).
+  // Batched via `limit`/`offset` query params (default 500/0) so a single
+  // call can't time out against however many resolved tickets exist --
+  // call it repeatedly, advancing offset, until `remaining` is 0.
+  if (path === 'admin/backfill-sla-snapshots' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '500', 10) || 500, 2000);
+      const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
+
+      const totalRow = await pool.query(
+        `SELECT COUNT(*) FROM issues i LEFT JOIN statuses s ON s.id = i."statusId"
+         WHERE (s.category = 'done' OR i.dept_statuses::text ILIKE '%"category":"done"%')
+           AND i.sla_snapshot IS NULL`
+      );
+      const remaining = parseInt(totalRow.rows[0].count, 10);
+
+      const rows = await pool.query(
+        `SELECT i.id, i.key, i.cf_key, i.priority, i."spaceId", i."createdAt", i."resolvedAt",
+                i.current_department, i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.sla_waivers,
+                i.jira_sla_breached, s.name AS status_name, s.category AS status_category
+         FROM issues i LEFT JOIN statuses s ON s.id = i."statusId"
+         WHERE (s.category = 'done' OR i.dept_statuses::text ILIKE '%"category":"done"%')
+           AND i.sla_snapshot IS NULL
+         ORDER BY i.id
+         LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      );
+
+      const spaceIds = Array.from(new Set(rows.rows.map((r: any) => r.spaceId).filter(Boolean)));
+      const policiesBySpace: Record<string, any[]> = {};
+      if (spaceIds.length) {
+        const polRows = await pool.query(`SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`, [spaceIds]);
+        for (const p of polRows.rows) (policiesBySpace[p.spaceId] ??= []).push(p);
+      }
+
+      let frozen = 0;
+      for (const row of rows.rows) {
+        const issueShaped = { ...row, status: row.status_name ? { name: row.status_name, category: row.status_category } : null };
+        const instances = await computeSLAInstancesPure(issueShaped, policiesBySpace[row.spaceId] || [], false);
+        if (instances.length) frozen++;
+      }
+
+      return json({ processedThisBatch: rows.rows.length, frozen, remainingBeforeThisBatch: remaining, nextOffset: offset + limit });
+    } catch (e: any) {
+      console.error('[backfill-sla-snapshots] failed:', e?.message || e);
       return json({ error: 'Backfill failed', details: e?.message }, 500);
     }
   }
