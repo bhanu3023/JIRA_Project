@@ -2241,19 +2241,7 @@ export default function FiltersPage() {
           // by scrolling. Adding fields via "More filters" pushes the
           // table well past 1800px, so those columns were being cut off
           // entirely, not just off-screen.
-          // Bounded height + its own vertical scroll, on top of the
-          // horizontal scroll this div already had: without this, the
-          // horizontal scrollbar sat at the very bottom of the table's
-          // full content -- past up to 100 rendered rows -- so reaching it
-          // meant scrolling the whole PAGE far down first. Confirmed for
-          // real via a direct user report: "left scroll bar is not
-          // working" turned out to mean it was simply unreachable, not
-          // broken. Now it's always right at the bottom of a fixed-size
-          // viewport, and the header row is pinned (sticky top-0) so
-          // column labels stay visible through the vertical scroll too,
-          // same reasoning as the sticky Key/Work columns below for the
-          // horizontal one.
-          <div className="overflow-x-auto overflow-y-auto max-h-[65vh]">
+          <div className="overflow-x-auto">
           <table className="table-fixed">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
@@ -2266,11 +2254,8 @@ export default function FiltersPage() {
                     solid background (bg-gray-50, matching the header row's
                     own background) since sticky cells are otherwise
                     see-through and the scrolling columns underneath would
-                    show through them. Also pinned to the top now (z-30, the
-                    highest of any sticky cell) since it's sticky in BOTH
-                    directions at once -- the one cell that has to stay put
-                    through either kind of scroll. */}
-                <th className="sticky left-0 top-0 z-30 bg-gray-50 px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24 border-r border-gray-200">Key</th>
+                    show through them. */}
+                <th className="sticky left-0 z-10 bg-gray-50 px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24 border-r border-gray-200">Key</th>
                 {/* Explicit width, not left to soak up whatever's left --
                     table-fixed hands 100% of any unclaimed width to the one
                     column with no width class, which at the page's widened
@@ -2289,9 +2274,9 @@ export default function FiltersPage() {
                     below already truncates with an ellipsis, so this only
                     trades off how much of a long title shows before
                     truncating, not readability of what does fit. */}
-                <th className="sticky left-24 top-0 z-30 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[220px] border-r border-gray-200">Work</th>
+                <th className="sticky left-24 z-10 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[220px] border-r border-gray-200">Work</th>
                 {tableExtraCols.map((id) => (
-                  <th key={id} className="sticky top-0 z-20 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
+                  <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
                     {TABLE_COLUMN_DEFS[id].label}
                   </th>
                 ))}
@@ -2300,13 +2285,13 @@ export default function FiltersPage() {
                     more compact column sizing the space board view (spaces/[spaceKey]/
                     page.tsx's STATIC_COLUMNS, ~150px per text column) already uses, so
                     more of the row fits on screen before needing to scroll. */}
-                <th className="sticky top-0 z-20 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>
-                <th className="sticky top-0 z-20 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>
-                <th className="sticky top-0 z-20 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
-                <th className="sticky top-0 z-20 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>
-                <th className="sticky top-0 z-20 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>
-                <th className="sticky top-0 z-20 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
-                <th className="sticky top-0 z-20 bg-gray-50 px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-20">Time Spent</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>
+                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
+                <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-20">Time Spent</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
