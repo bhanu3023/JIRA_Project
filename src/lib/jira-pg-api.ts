@@ -5983,7 +5983,21 @@ async function _handleJiraPgApi(
       // Single value: exact match; multiple values: IN clause (match any)
       (where as any)[field] = vals.length === 1 ? vals[0] : { in: vals };
     };
-    applyMultiField(customerNameParam,   'customerName');
+    // By request: picking a Customer Name should also catch a ticket whose
+    // CLIENT Name matches the same value, not just its own customerName
+    // field -- some tickets only ever got one of the two filled in for what
+    // is, in practice, the same real customer. One-directional (Client
+    // Name's own filter, just below, still only matches clientName) since
+    // that's what was actually asked for.
+    if (customerNameParam) {
+      const vals = customerNameParam.split(',').map(v => v.trim()).filter(Boolean);
+      if (vals.length) {
+        addOrGroup([
+          { customerName: vals.length === 1 ? vals[0] : { in: vals } },
+          { clientName: vals.length === 1 ? vals[0] : { in: vals } },
+        ]);
+      }
+    }
     applyMultiField(clientNameParam,     'clientName');
     // Project Manager filter checkboxes are individual people (the same fixed list
     // the ticket's own Project Manager field picks from), but a ticket's stored
@@ -6267,7 +6281,6 @@ async function _handleJiraPgApi(
             [testEnvParam, 'testEnvironment'],
             [rootCauseParam, 'rootCause'],
             [fixDescParam, 'fixDescription'],
-            [customerNameParam, 'customerName'],
             [clientNameParam, 'clientName'],
             [manageClientParam, 'manageClientName'],
             [customerPlanParam, 'customerPlan'],
@@ -6279,6 +6292,17 @@ async function _handleJiraPgApi(
             sentExtraClauses.push(`i."${col}" = ANY($${sentParamIdx}::text[])`);
             sentExtraParams.push(vals);
             sentParamIdx++;
+          }
+          // customerName handled separately -- by request, also matches a
+          // ticket whose CLIENT Name equals the same value (see the general
+          // branch's own comment on this same fix for why).
+          if (customerNameParam) {
+            const vals = customerNameParam.split(',').map((v) => v.trim()).filter(Boolean);
+            if (vals.length) {
+              sentExtraClauses.push(`(i."customerName" = ANY($${sentParamIdx}::text[]) OR i."clientName" = ANY($${sentParamIdx}::text[]))`);
+              sentExtraParams.push(vals);
+              sentParamIdx++;
+            }
           }
           if (createdRange) {
             const { from, to } = parseDateRange(createdRange);
@@ -6805,7 +6829,6 @@ async function _handleJiraPgApi(
         [testEnvParam, 'testEnvironment'],
         [rootCauseParam, 'rootCause'],
         [fixDescParam, 'fixDescription'],
-        [customerNameParam, 'customerName'],
         [clientNameParam, 'clientName'],
         [manageClientParam, 'manageClientName'],
         [customerPlanParam, 'customerPlan'],
@@ -6817,6 +6840,18 @@ async function _handleJiraPgApi(
         deptExtraClauses.push(`i."${col}" = ANY($${deptParamIdx}::text[])`);
         deptExtraParams.push(vals);
         deptParamIdx++;
+      }
+      // customerName handled separately from the loop above -- by request,
+      // picking a Customer Name also matches a ticket whose CLIENT Name
+      // equals the same value (same reasoning as the general branch's own
+      // fix, see its comment there).
+      if (customerNameParam) {
+        const vals = customerNameParam.split(',').map((v) => v.trim()).filter(Boolean);
+        if (vals.length) {
+          deptExtraClauses.push(`(i."customerName" = ANY($${deptParamIdx}::text[]) OR i."clientName" = ANY($${deptParamIdx}::text[]))`);
+          deptExtraParams.push(vals);
+          deptParamIdx++;
+        }
       }
       // Created/Updated date-range filters (Filter > Created: Today/Last 7 days/...)
       // were likewise only ever wired into the general Prisma branch — picking any
