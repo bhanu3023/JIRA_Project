@@ -6038,7 +6038,9 @@ async function _handleJiraPgApi(
             reporter: true,
             space: { select: { key: true, name: true } },
           },
-          orderBy: { createdAt: 'desc' },
+          // See the matching orderBy just below (the non-prefilter branch)
+          // for why category:'desc' -- same reasoning, same fix.
+          orderBy: [{ status: { category: 'desc' } }, { createdAt: 'desc' }],
           take: Math.min(candidateCount, SLA_PREFILTER_CAP),
         });
         total = issues.length; // placeholder -- corrected after breach filtering below
@@ -6053,7 +6055,22 @@ async function _handleJiraPgApi(
               reporter: true,
               space: { select: { key: true, name: true } },
               },
-            orderBy: { createdAt: 'desc' },
+            // By request: still-open tickets (any status category other than
+            // 'done') should sort ahead of resolved ones, newest-first within
+            // each group -- same fix already applied to the dept-scoped
+            // branch's raw-SQL ORDER BY (used by every department queue
+            // view); this is the plain/queueless branch (Filters with no
+            // Queue selected, and any space with no configured custom queues
+            // at all, e.g. SAT_Board after its one queue was removed).
+            // category:'desc' relies on 'done' being the alphabetically
+            // lowest real category value this app uses (confirmed against
+            // live data: done < in-progress/in_progress < todo) -- Prisma's
+            // typed orderBy can't express an explicit CASE/priority list for
+            // a related field the way the raw-SQL branch can, so this is the
+            // equivalent done-last ordering without rewriting this whole
+            // branch to raw SQL. If a new category is ever introduced that
+            // sorts before 'done' alphabetically, this would need revisiting.
+            orderBy: [{ status: { category: 'desc' } }, { createdAt: 'desc' }],
             skip: (page - 1) * limit,
             take: limit,
           }),
