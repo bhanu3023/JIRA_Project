@@ -2260,6 +2260,39 @@ function isSlaInstanceBreached(opts: {
 // expected), which is how every one of the ~18 call sites in this file got
 // found and fixed for this change, rather than risking silently missing
 // one via a manual audit.
+// Migration and Dev's SLA policies were both edited on 2026-09-28 (confirmed
+// against sla_definitions' own updatedAt), which the snapshot-freeze above
+// isn't enough to fix on its own: freezing "whatever the policy says as of
+// right now" for an already-resolved ticket still uses the NEW post-edit
+// target if that ticket's dept-SLA period actually ran under the OLD one.
+// Confirmed for real on CF-32756 (Migration, resolved Sep 9): its dept-SLA
+// period started under the old 10h Medium target, not today's 6h one.
+// Dev's old policy is still sitting in sla_definitions as a deactivated row
+// (id=pg_h1ifhuhw1i) with every priority tier intact, read directly rather
+// than guessed. Migration's old row was edited in place (no history kept),
+// so only the Medium tier is known -- confirmed directly by the user (the
+// ticket that surfaced this, CF-32756, is Medium priority). Migration
+// tickets at other priority levels from before the edit keep using the
+// live policy until/unless those old values are confirmed too, same as
+// before this fix -- never guessed.
+const HISTORICAL_SLA_OVERRIDES: Record<string, { beforeMs: number; hoursByPriority: Partial<Record<string, number>> }> = {
+  migration: {
+    beforeMs: Date.parse('2026-09-28T10:57:56.000Z'),
+    hoursByPriority: { medium: 10 },
+  },
+  dev: {
+    beforeMs: Date.parse('2026-09-28T10:57:19.000Z'),
+    hoursByPriority: { highest: 6, high: 8, medium: 24, low: 48, lowest: 48 },
+  },
+};
+
+function getHistoricalOverrideDurationMs(deptName: string, priority: string, periodStartMs: number): number | null {
+  const override = HISTORICAL_SLA_OVERRIDES[(deptName || '').trim().toLowerCase()];
+  if (!override || !(periodStartMs < override.beforeMs)) return null;
+  const hours = override.hoursByPriority[(priority || '').trim().toLowerCase()];
+  return typeof hours === 'number' ? hours * 3_600_000 : null;
+}
+
 async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean): Promise<any[]> {
   try {
     if (!allPolicies.length) return [];
@@ -2381,6 +2414,9 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
 
     const currentDeptInstances = dedupedPolicies.map((policy: any) => {
+      const periodStartMs = (issue as any).dept_sla_started_at
+        ? new Date((issue as any).dept_sla_started_at).getTime()
+        : (issue.createdAt ? new Date(issue.createdAt).getTime() : Date.now());
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
       const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
       for (const goal of goals) {
@@ -2399,6 +2435,8 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
           break;
         }
       }
+      const historicalOverrideMs = getHistoricalOverrideDurationMs(issueDept, priority, periodStartMs);
+      if (historicalOverrideMs !== null) durationMs = historicalOverrideMs;
 
       // Check if current status is a pause status for this policy
       const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
@@ -2536,8 +2574,10 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
             break;
           }
         }
-        const histElapsed: number = histEntry.elapsed_ms || 0;
         const histStartedAt = histEntry.started_at ? new Date(histEntry.started_at).toISOString() : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
+        const histOverrideMs = getHistoricalOverrideDurationMs(histDeptKey, priority, new Date(histStartedAt).getTime());
+        if (histOverrideMs !== null) histDurationMs = histOverrideMs;
+        const histElapsed: number = histEntry.elapsed_ms || 0;
         const histIsDone = histEntry.status === 'done';
         const histRemainingMs = Math.max(0, histDurationMs - histElapsed);
         historicalInstances.push({
@@ -3189,6 +3229,8 @@ function computeSlaBreachedAndOverdue(
             break;
           }
         }
+        const overrideMs = getHistoricalOverrideDurationMs(dept, priority, new Date(slaStartedAt).getTime());
+        if (overrideMs !== null) durationMs = overrideMs;
         // dept_sla_started_at resets to NOW() on every department handoff,
         // including a RETURN to a dept that already burned part of its SLA
         // budget on an earlier visit (dept_sla_log[dept].elapsed_ms -- the
