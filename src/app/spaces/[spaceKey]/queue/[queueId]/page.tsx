@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import {
   ArrowLeft, Users, Clock, Plus, X, Check, Search,
   Trash2, Calendar, ChevronRight, Edit2, AlertCircle, RefreshCw, Mail, Link2, Unlink,
-  Eye, EyeOff, Wifi, WifiOff, Loader2, GitMerge, Network, Ban
+  Eye, EyeOff, Wifi, WifiOff, Loader2, GitMerge, Network, Ban, Bell
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useStore } from '@/store';
@@ -1118,9 +1118,9 @@ export default function QueueSettingsPage() {
   const searchParams = useSearchParams();
   const spaceKey = (params?.spaceKey as string || '').toUpperCase();
   const queueId = params?.queueId as string || '';
-  const initialTab = (searchParams?.get('tab') || 'people') as 'people' | 'sla' | 'rr' | 'email' | 'workflow';
+  const initialTab = (searchParams?.get('tab') || 'people') as 'people' | 'sla' | 'rr' | 'email' | 'notify' | 'workflow';
 
-  const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email' | 'workflow'>(initialTab);
+  const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email' | 'notify' | 'workflow'>(initialTab);
   const [queue, setQueue] = useState<CustomQueue | null>(null);
   const [notifyEmailDraft, setNotifyEmailDraft] = useState('');
   const [notifyEmailError, setNotifyEmailError] = useState('');
@@ -1352,6 +1352,18 @@ export default function QueueSettingsPage() {
             <Mail size={15} className={tab === 'email' ? 'text-blue-600' : 'text-gray-400'} />
             Email
           </button>
+          {/* Separate tab, not a section buried in People & Access -- moved
+              here by explicit request after a real user got stuck for
+              several rounds confusing this with the "Email" tab right above
+              (that one is inbound-only: linking a mailbox so incoming mail
+              creates tickets here) and not finding this one scrolled below
+              a 30-person member list. */}
+          <button onClick={() => setTab('notify')}
+            className={cn('flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
+              tab === 'notify' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900')}>
+            <Bell size={15} className={tab === 'notify' ? 'text-blue-600' : 'text-gray-400'} />
+            Notifications
+          </button>
           <button onClick={() => setTab('workflow')}
             className={cn('flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
               tab === 'workflow' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900')}>
@@ -1474,20 +1486,30 @@ export default function QueueSettingsPage() {
                 </table>
               )}
             </div>
+          </div>
+        )}
 
-            {/* Extra emails notified on every action in this queue -- a
-                shared team DL, not a person's own account. Separate from
-                the "Email" tab, which is only about INBOUND mail creating
-                tickets here; this is outbound notifications going OUT for
-                actions already happening. By request. */}
+        {/* ── Notifications: extra emails CC'd on every action in this queue
+            -- a shared team DL, not a person's own account. Its own tab, not
+            a section buried in People & Access, and deliberately separate
+            from the "Email" tab (that one is INBOUND-only: linking a mailbox
+            so incoming mail creates tickets here; this is OUTBOUND, for
+            actions already happening). By request -- moved to its own tab
+            after a real user got stuck several rounds confusing the two. ── */}
+        {tab === 'notify' && queue && (
+          <div className="max-w-3xl mx-auto px-8 py-8">
+            <div className="mb-6">
+              <h1 className="text-[20px] font-bold text-gray-900">Notifications</h1>
+              <p className="text-[13px] text-gray-500 mt-1">Extra emails CC'd on every action in the <strong>{queue.name}</strong> queue.</p>
+            </div>
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
               <div className="px-6 py-4 border-b border-gray-100">
                 <div className="flex items-center gap-2">
-                  <Mail size={15} className="text-gray-400" />
+                  <Bell size={15} className="text-gray-400" />
                   <h2 className="text-[14px] font-semibold text-gray-800">Notify by email</h2>
                 </div>
                 <p className="text-[12.5px] text-gray-500 mt-1">
-                  Add a distribution list or shared inbox to CC on every action in the <strong>{queue.name}</strong> queue -- ticket created, status changes, comments, assignment. On top of whoever already gets emailed (assignee, reporter, admins).
+                  Add a distribution list or shared inbox to CC on every action in this queue -- ticket created, status changes, comments, assignment. On top of whoever already gets emailed (assignee, reporter, admins). No password needed -- this only ever SENDS to the address, it never logs into it.
                 </p>
               </div>
               <div className="px-6 py-4">
