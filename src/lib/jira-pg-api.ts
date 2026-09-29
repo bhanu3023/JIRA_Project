@@ -5687,6 +5687,7 @@ async function _handleJiraPgApi(
     const projectManagerParam = url.searchParams.get('projectManager');
     const workTypeParam       = url.searchParams.get('workType');
     const productTypeParam    = url.searchParams.get('productType');
+    const productionTicketParam = url.searchParams.get('productionTicket');
     const combinationParam    = url.searchParams.get('combination');
     const projectPoolParam    = url.searchParams.get('projectPool');
     const testEnvParam        = url.searchParams.get('testEnvironment');
@@ -5982,6 +5983,7 @@ async function _handleJiraPgApi(
     }
     applyMultiField(workTypeParam,       'workType');
     applyMultiField(productTypeParam,    'productType');
+    applyMultiField(productionTicketParam, 'productionTicket');
     applyMultiField(combinationParam,    'combination');
     applyMultiField(projectPoolParam,    'projectPool');
     applyMultiField(testEnvParam,        'testEnvironment');
@@ -6338,7 +6340,7 @@ async function _handleJiraPgApi(
               id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: (row.description || '').slice(0, 500),
               priority: row.priority, type: row.type, labels: row.labels,
               createdAt: row.createdAt, updatedAt: row.updatedAt,
-              workType: row.workType, productType: row.productType, combination: row.combination,
+              workType: row.workType, productType: row.productType, productionTicket: row.productionTicket, combination: row.combination,
               testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
               customerName: row.customerName, clientName: row.clientName,
               manageClientName: row.manageClientName, customerPlan: row.customerPlan,
@@ -6754,6 +6756,7 @@ async function _handleJiraPgApi(
       // DB-driven dropdown so they match exactly.
       const deptSimpleTextFields: [string | null, string][] = [
         [productTypeParam, 'productType'],
+        [productionTicketParam, 'productionTicket'],
         [combinationParam, 'combination'],
         [projectPoolParam, 'projectPool'],
         [workTypeParam, 'workType'],
@@ -7419,7 +7422,7 @@ async function _handleJiraPgApi(
           priority: row.priority, type: row.type, labels: row.labels,
           createdAt: row.createdAt, updatedAt: row.updatedAt,
           spaceId: row.spaceId, dueDate: row.dueDate,
-          workType: row.workType, productType: row.productType, combination: row.combination,
+          workType: row.workType, productType: row.productType, productionTicket: row.productionTicket, combination: row.combination,
           testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
           customerName: row.customerName, clientName: row.clientName,
           manageClientName: row.manageClientName, customerPlan: row.customerPlan,

@@ -51,6 +51,11 @@ const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
 // required typing the value out exactly (case and all) to match anything,
 // which is why it looked broken; a handful of known values is a dropdown.
 const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others', 'Others'];
+// Same fixed list the ticket's own Production Ticket field picks from (see
+// the 'productionTicket' custom-field entries in issues/[issueKey]/page.tsx
+// and CreateIssueModal.tsx) -- this filter didn't exist on the Filters page
+// at all before, per explicit request.
+const PRODUCTION_TICKET_OPTIONS = ['Operational Support', 'Code Fixes'];
 const PRIORITY_LABELS: Record<string, string> = {
   highest: 'Highest', high: 'High', medium: 'Medium', low: 'Low', lowest: 'Lowest',
 };
@@ -703,6 +708,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'priority',       label: 'Priority',        group: 'Issue' },
   { id: 'department',     label: 'Department',      group: 'Issue' },
   { id: 'productType',    label: 'Product Type',    group: 'Issue' },
+  { id: 'productionTicket', label: 'Production Ticket', group: 'Issue' },
   { id: 'combination',    label: 'Combination',     group: 'Issue' },
   { id: 'customerName',   label: 'Customer Name',   group: 'Issue' },
   { id: 'clientName',     label: 'Client Name',     group: 'Issue' },
@@ -1034,6 +1040,7 @@ export default function FiltersPage() {
   const [selDueDate, setSelDueDate]       = useState('');
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
+  const [selProductionTicket, setSelProductionTicket] = useState<string[]>([]);
   const [selCombination, setSelCombination] = useState('');
   const [selCustomerName, setSelCustomerName] = useState<string[]>([]);
   const [selClientName, setSelClientName] = useState<string[]>([]);
@@ -1106,6 +1113,7 @@ export default function FiltersPage() {
     if (key === 'priority')       setSelPriorities([]);
     if (key === 'department')     setSelDepartment('');
     if (key === 'productType')    setSelProductType([]);
+    if (key === 'productionTicket') setSelProductionTicket([]);
     if (key === 'combination')    setSelCombination('');
     if (key === 'customerName')   setSelCustomerName([]);
     if (key === 'clientName')     setSelClientName([]);
@@ -1197,6 +1205,7 @@ export default function FiltersPage() {
     const rDueDate         = urlParams?.get('rDueDate');
     const rDepartment      = urlParams?.get('rDepartment');
     const rProductType     = urlParams?.get('rProductType');
+    const rProductionTicket = urlParams?.get('rProductionTicket');
     const rCombination     = urlParams?.get('rCombination');
     const rCustomerName    = urlParams?.get('rCustomerName');
     const rClientName      = urlParams?.get('rClientName');
@@ -1220,6 +1229,7 @@ export default function FiltersPage() {
     if (rDueDate) setSelDueDate(rDueDate);
     if (rDepartment) setSelDepartment(rDepartment);
     if (rProductType) setSelProductType(rProductType.split(','));
+    if (rProductionTicket) setSelProductionTicket(rProductionTicket.split(','));
     if (rCombination) setSelCombination(rCombination);
     if (rCustomerName) setSelCustomerName(rCustomerName.split(','));
     if (rClientName) setSelClientName(rClientName.split(','));
@@ -1238,7 +1248,7 @@ export default function FiltersPage() {
     // always implies its chip should be active too, regardless of what
     // rExtras itself says.
     const impliedExtras = [
-      rProductType && 'productType', rCombination && 'combination', rCustomerName && 'customerName',
+      rProductType && 'productType', rProductionTicket && 'productionTicket', rCombination && 'combination', rCustomerName && 'customerName',
       rClientName && 'clientName', rProjectManager && 'projectManager', rProjectPool && 'projectPool',
       rWorked && 'worked', rDueDate && 'dueDate',
     ].filter(Boolean) as string[];
@@ -1272,6 +1282,7 @@ export default function FiltersPage() {
     if (selDueDate) p.rDueDate = selDueDate;
     if (selDepartment) p.rDepartment = selDepartment;
     if (selProductType.length) p.rProductType = selProductType.join(',');
+    if (selProductionTicket.length) p.rProductionTicket = selProductionTicket.join(',');
     if (selCombination) p.rCombination = selCombination;
     if (selCustomerName.length) p.rCustomerName = selCustomerName.join(',');
     if (selClientName.length) p.rClientName = selClientName.join(',');
@@ -1282,7 +1293,7 @@ export default function FiltersPage() {
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1341,7 +1352,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selWorked || selDueDate || selDepartment ||
-    selProductType.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selBreached || selOverdue,
+    selProductType.length || selProductionTicket.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selBreached || selOverdue,
   );
 
   // Builds the filter params both the live table and the CSV export send —
@@ -1433,6 +1444,7 @@ export default function FiltersPage() {
         // Extra text/field filters
         if (selDepartment)     params.department     = selDepartment;
         if (selProductType.length) params.productType = selProductType.join(',');
+        if (selProductionTicket.length) params.productionTicket = selProductionTicket.join(',');
         if (selCombination)    params.combination    = selCombination;
         if (selCustomerName.length) params.customerName = selCustomerName.join(',');
         if (selClientName.length)   params.clientName   = selClientName.join(',');
@@ -1447,7 +1459,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy.
      Short (150ms) debounce -- NOT the old flat 400ms, which made every
@@ -1530,6 +1542,7 @@ export default function FiltersPage() {
   // fixed list that silently omits whichever extra field they're using.
   const EXPORT_EXTRA_COLUMNS: Record<string, { label: string; getValue: (issue: any) => string }> = {
     productType:    { label: 'Product Type',    getValue: (i) => i.productType ?? '' },
+    productionTicket: { label: 'Production Ticket', getValue: (i) => i.productionTicket ?? '' },
     projectManager: { label: 'Project Manager', getValue: (i) => i.projectManager ?? '' },
     combination:    { label: 'Combination',     getValue: (i) => i.combination ?? '' },
     customerName:   { label: 'Customer Name',   getValue: (i) => i.customerName ?? '' },
@@ -1558,6 +1571,7 @@ export default function FiltersPage() {
       // anything was wrong. Union instead of relying on activeExtras alone.
       const fieldsWithSelectedValue = {
         productType: selProductType.length > 0,
+        productionTicket: selProductionTicket.length > 0,
         combination: !!selCombination,
         customerName: selCustomerName.length > 0,
         clientName: selClientName.length > 0,
@@ -1672,6 +1686,7 @@ export default function FiltersPage() {
     created: !!selCreated,
     updated: !!selUpdated,
     productType: selProductType.length > 0,
+    productionTicket: selProductionTicket.length > 0,
     combination: !!selCombination,
     projectManager: selProjectManager.length > 0,
     customerName: selCustomerName.length > 0,
@@ -1702,7 +1717,7 @@ export default function FiltersPage() {
     setText(''); setSelSpaces([]); setSelQueue(''); setSelAssignees([]); setSelReporters([]);
     setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
-    setSelDepartment(''); setSelProductType([]);
+    setSelDepartment(''); setSelProductType([]); setSelProductionTicket([]);
     setSelCombination(''); setSelCustomerName([]); setSelClientName([]); setSelProjectManager([]);
     setSelProjectPool('');
     setSelBreached('');
@@ -2107,6 +2122,17 @@ export default function FiltersPage() {
                   onChange={setSelProductType}
                 />
                 <button onClick={() => toggleExtra('productType')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('productionTicket') && (
+              <div className="flex items-center gap-1">
+                <DropBtn
+                  label="Production Ticket"
+                  options={PRODUCTION_TICKET_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selProductionTicket}
+                  onChange={setSelProductionTicket}
+                />
+                <button onClick={() => toggleExtra('productionTicket')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('combination') && (
