@@ -7141,7 +7141,7 @@ async function _handleJiraPgApi(
                AND ${deptDeptMatchSql}
              ${deptSearchClause}
              ${deptExtraSql}
-             ORDER BY i."createdAt" DESC
+             ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC
              LIMIT $${lightCapIdx}`,
             lightParams
           );
@@ -7193,7 +7193,7 @@ async function _handleJiraPgApi(
                  LEFT JOIN users a ON i."assigneeId" = a.id
                  LEFT JOIN users r ON i."reporterId" = r.id
                  WHERE i.id = ANY($1::text[])
-                 ORDER BY i."createdAt" DESC`,
+                 ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC`,
                 [pageIds]
               )
             : { rows: [] };
@@ -7211,6 +7211,13 @@ async function _handleJiraPgApi(
         // (non-dept) branch above already orders by createdAt only; this dept-
         // scoped branch (used by every department queue view: All Tickets,
         // Unassigned, Assigned to me) was the one still sorting by updatedAt first.
+        //
+        // By explicit request: still-open work (any status whose category isn't
+        // 'done') sorts ahead of finished work, newest-first within each of those
+        // two groups -- so a queue's "All Tickets" view leads with what actually
+        // needs attention instead of interleaving resolved tickets among it by
+        // raw creation date. Still fully deterministic (status category + a real
+        // column), so pagination stability holds exactly as before.
         rows = await pool.query(
           `SELECT i.*, sp.key AS space_key,
                   s.name AS status_name, s.category AS status_category, s.color AS status_color,
@@ -7226,7 +7233,7 @@ async function _handleJiraPgApi(
              AND ${deptDeptMatchSql}
            ${deptSearchClause}
            ${deptExtraSql}
-           ORDER BY i."createdAt" DESC
+           ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC
            LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
           rowParams
         );
