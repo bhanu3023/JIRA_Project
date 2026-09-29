@@ -1613,7 +1613,19 @@ function SpaceDetailContent() {
         // effect and this render check now share the exact same condition
         // (wait for customQueuesLoadedFor, then allCustomQueues.length),
         // so whichever one is correct for this space, both agree on it.
-        if (customQueuesLoadedFor !== spaceKey) {
+        // The redirect effect right above fires unconditionally whenever
+        // allCustomQueues.length === 0, regardless of this space's type --
+        // so that case is NEVER a real, permanent "no queues" state to show
+        // someone, only a brief transitional one on the way to being
+        // redirected to ?queue=all-open. Rendering the "No queues
+        // available" empty state for it anyway (as this used to) meant
+        // every visit to a queueless board's bare URL flashed that
+        // confusing message for however long the redirect took to land --
+        // confirmed for real via a direct user report ("why it is showing
+        // that queue for only a few seconds then it is showing tickets").
+        // Keep showing the spinner through that same window instead, same
+        // as while the fetch itself is still in flight.
+        if (customQueuesLoadedFor !== spaceKey || allCustomQueues.length === 0) {
           return (
             <div className="flex-1 flex items-center justify-center">
               <DotLoader className="h-64" />
