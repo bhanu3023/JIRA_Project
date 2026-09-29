@@ -701,6 +701,26 @@ function DateDropBtn({
   );
 }
 
+// The table's own fixed (non-filter-driven) columns -- Key/Work are always
+// shown (they're the ticket's identity), everything else here can be
+// hidden via the "Columns" button. Added by explicit request: with
+// Key/Work plus up to several "More filters" columns plus all 7 of these,
+// nothing fits on one screen without horizontal scrolling no matter how
+// narrow each column gets -- letting people hide the ones they don't care
+// about (Time Spent, SLA Breached, etc.) means the ones they DO want can
+// actually fit without scrolling.
+const STATIC_COLUMN_OPTIONS = [
+  { value: 'assignee', label: 'Assignee' },
+  { value: 'reportedBy', label: 'Reported By' },
+  { value: 'status', label: 'Status' },
+  { value: 'priority', label: 'Priority' },
+  { value: 'slaBreached', label: 'SLA Breached' },
+  { value: 'overdue', label: 'Overdue' },
+  { value: 'timeSpent', label: 'Time Spent' },
+];
+const STATIC_COLUMN_IDS = STATIC_COLUMN_OPTIONS.map((c) => c.value);
+const VISIBLE_COLUMNS_STORAGE_KEY = 'filters_visible_static_columns_v1';
+
 // All available "extra" filter options that can be added to the bar from More filters
 const EXTRA_FILTER_OPTIONS = [
   { id: 'reporter',       label: 'Reporter',        group: 'People' },
@@ -1529,6 +1549,26 @@ export default function FiltersPage() {
      browsing cap, so the export covers everything a saved/shared filter
      would actually match, not just what's currently rendered. */
   const [exporting, setExporting] = useState(false);
+
+  // Which of STATIC_COLUMN_OPTIONS are currently shown in the results
+  // table -- per-browser preference (not shared/synced), read once on
+  // mount and persisted on every change. Defaults to everything visible
+  // (today's behavior) when nothing's saved yet or the value can't be
+  // read/parsed, so a private window or blocked storage never breaks the
+  // table, just always shows every column.
+  const [visibleStaticCols, setVisibleStaticCols] = useState<string[]>(STATIC_COLUMN_IDS);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(VISIBLE_COLUMNS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) setVisibleStaticCols(parsed.filter((v) => STATIC_COLUMN_IDS.includes(v)));
+      }
+    } catch { /* fall back to all columns visible */ }
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(visibleStaticCols)); } catch { /* per-viewer convenience only */ }
+  }, [visibleStaticCols]);
   const csvCell = (value: unknown): string => {
     const s = value == null ? '' : String(value);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -2058,6 +2098,12 @@ export default function FiltersPage() {
                 <X size={12} /> Clear
               </button>
             )}
+            <DropBtn
+              label="Columns"
+              options={STATIC_COLUMN_OPTIONS}
+              selected={visibleStaticCols}
+              onChange={setVisibleStaticCols}
+            />
             {can(user?.role, 'exportData') && (
               <button
                 onClick={handleExport}
@@ -2285,13 +2331,13 @@ export default function FiltersPage() {
                     more compact column sizing the space board view (spaces/[spaceKey]/
                     page.tsx's STATIC_COLUMNS, ~150px per text column) already uses, so
                     more of the row fits on screen before needing to scroll. */}
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
-                <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-20">Time Spent</th>
+                {visibleStaticCols.includes('assignee') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>}
+                {visibleStaticCols.includes('reportedBy') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>}
+                {visibleStaticCols.includes('status') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>}
+                {visibleStaticCols.includes('priority') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>}
+                {visibleStaticCols.includes('slaBreached') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>}
+                {visibleStaticCols.includes('overdue') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>}
+                {visibleStaticCols.includes('timeSpent') && <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-20">Time Spent</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -2353,6 +2399,7 @@ export default function FiltersPage() {
                       </span>
                     </td>
                   ))}
+                  {visibleStaticCols.includes('assignee') && (
                   <td className="px-2 py-2.5">
                     {issue.assignee ? (
                       <div className="flex items-center gap-1.5">
@@ -2385,6 +2432,8 @@ export default function FiltersPage() {
                       <span className="text-[11.5px] text-gray-300">Unassigned</span>
                     )}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('reportedBy') && (
                   <td className="px-2 py-2.5">
                     {issue.reporter ? (
                       <div className="flex items-center gap-1.5">
@@ -2399,6 +2448,8 @@ export default function FiltersPage() {
                       <span className="text-[11.5px] text-gray-300">—</span>
                     )}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('status') && (
                   <td className="px-2 py-2.5">
                     {(() => {
                       // Queue-scoped, same as the Assignee column right next
@@ -2505,9 +2556,13 @@ export default function FiltersPage() {
                       );
                     })()}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('priority') && (
                   <td className="px-2 py-2.5">
                     <PriorityIcon priority={issue.priority} size={14} />
                   </td>
+                  )}
+                  {visibleStaticCols.includes('slaBreached') && (
                   <td className="px-2 py-2.5">
                     {issue.sla_breached == null ? (
                       // No SLA policy applies to this ticket's department at all
@@ -2548,6 +2603,8 @@ export default function FiltersPage() {
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
                     )}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('overdue') && (
                   <td className="px-2 py-2.5">
                     {/* The ticket's own dueDate crossing "now" while still open --
                         independent of SLA Breached, which is the fact this exact
@@ -2558,6 +2615,8 @@ export default function FiltersPage() {
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
                     )}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('timeSpent') && (
                   <td className="px-2 py-2.5 text-right">
                     <span className="text-[11.5px] text-gray-600 tabular-nums font-medium whitespace-nowrap">
                       {typeof issue.inProgressHrs === 'number' ? `${issue.inProgressHrs}h` : '—'}
@@ -2566,6 +2625,7 @@ export default function FiltersPage() {
                       )}
                     </span>
                   </td>
+                  )}
                 </tr>
                 );
               })}
