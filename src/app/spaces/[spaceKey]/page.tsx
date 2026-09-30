@@ -3675,11 +3675,17 @@ function SpaceDetailContent() {
                           const queueStatusList: any[] = rowQueue?.queueStatuses || [];
                           const isQueueStatus = queueStatusList.length > 0;
                           const optionStatuses = isQueueStatus ? queueStatusList : statuses;
-                          const optionTransitions: {fromStatusId:string; toStatusId:string}[] = isQueueStatus
-                            ? (rowQueue?.queueTransitions || []).map((t: any) => ({ fromStatusId: t.fromStatusId ?? t.from, toStatusId: t.toStatusId ?? t.to }))
+                          const optionTransitions: {fromStatusId:string; toStatusId:string; name?: string}[] = isQueueStatus
+                            ? (rowQueue?.queueTransitions || []).map((t: any) => ({ fromStatusId: t.fromStatusId ?? t.from, toStatusId: t.toStatusId ?? t.to, name: t.name }))
                             : ((currentSpace as any).transitions || []);
-                          const validIds = optionTransitions.filter(t => t.fromStatusId === st.id).map(t => t.toStatusId);
+                          const validTransitionsForRow = optionTransitions.filter(t => t.fromStatusId === st.id);
+                          const validIds = validTransitionsForRow.map(t => t.toStatusId);
                           const options = validIds.length > 0 ? optionStatuses.filter(s => validIds.includes(s.id)) : optionStatuses.filter(s => s.id !== st.id);
+                          // A named transition (e.g. Migration's "Resolved" ->
+                          // "In Progress" labeled "Reopen") is a user-facing
+                          // ACTION -- matches the same primary-label treatment
+                          // the issue detail page's own status dropdown uses.
+                          const transitionNameFor = (statusId: string) => validTransitionsForRow.find(t => t.toStatusId === statusId)?.name || '';
                           return (
                             <InlineDropdown onClose={() => setOpenDropdown(null)} anchorRect={openDropdown.rect}>
                               <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Move to</div>
@@ -3705,7 +3711,7 @@ function SpaceDetailContent() {
                                   }
                                 }}
                                   className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-50 transition-colors">
-                                  {s.name}
+                                  {transitionNameFor(s.id) || s.name}
                                 </button>
                               ))}
                             </InlineDropdown>

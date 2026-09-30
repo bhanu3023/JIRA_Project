@@ -3220,14 +3220,23 @@ export default function IssueDetailPage() {
                             className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-gray-50 transition-colors group"
                           >
                             <div className="flex-1 text-left">
-                              {/* Status name */}
+                              {/* A named transition (e.g. Migration's "Resolved" ->
+                                  "In Progress" labeled "Reopen") represents a
+                                  user-facing ACTION, not the raw destination
+                                  status -- show that as the primary label instead
+                                  of the status name, with the real resulting
+                                  status as a small hint underneath. Without this,
+                                  the option always showed the destination status's
+                                  own name ("In Progress") with the action name
+                                  buried as a tiny "via Reopen" sub-label, when the
+                                  whole point of naming a transition is for the
+                                  action itself to be what the user picks. */}
                               <p className="text-[13px] font-semibold text-gray-800 leading-tight">
-                                {s.name}
+                                {transitionName || s.name}
                               </p>
-                              {/* Transition name (sub-label) if different from status name */}
                               {transitionName && transitionName.toLowerCase() !== s.name.toLowerCase() && (
                                 <p className="text-[10px] text-gray-400 leading-tight mt-0.5">
-                                  via {transitionName}
+                                  → {s.name}
                                 </p>
                               )}
                             </div>
