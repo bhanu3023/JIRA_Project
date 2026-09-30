@@ -20,7 +20,9 @@ async function main() {
   const clientId = process.env.MICROSOFT_CLIENT_ID;
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET;
 
-  const targets = configs.filter(c => /migration|dev/i.test(c.department || ''));
+  // Both TESTIN email_configs rows have department=null (not department-
+  // scoped) -- check both rather than filtering on a field that's empty.
+  const targets = configs;
   for (const cfg of targets) {
     const tokRow = tokRows.find(r => r.email.toLowerCase() === cfg.address.toLowerCase());
     if (!tokRow) { console.log(`\n[${cfg.address}] No OAuth tokens stored for this mailbox.`); continue; }
