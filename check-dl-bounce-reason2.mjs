@@ -42,8 +42,8 @@ async function main() {
     const { access_token } = await tokenRes.json();
 
     const listRes = await fetch(
-      `https://graph.microsoft.com/v1.0/me/messages?$filter=startswith(subject,'Undeliverable')&$top=10&$select=id,subject,receivedDateTime&$orderby=receivedDateTime desc`,
-      { headers: { Authorization: `Bearer ${access_token}` } }
+      `https://graph.microsoft.com/v1.0/me/messages?$search="subject:Undeliverable"&$top=25&$select=id,subject,receivedDateTime`,
+      { headers: { Authorization: `Bearer ${access_token}`, ConsistencyLevel: 'eventual' } }
     );
     if (!listRes.ok) { console.log(`\n[${cfg.address}] List failed: ${listRes.status} ${await listRes.text().catch(()=> '')}`); continue; }
     const listData = await listRes.json();
