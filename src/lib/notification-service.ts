@@ -412,6 +412,22 @@ async function getInboxEmailForSpace(spaceKey: string): Promise<string | null> {
 }
 
 // ── Look up emailthreadid + inbox email for a ticket in one query ──────────────
+// A space can have more than one email_configs row (e.g. TESTIN/CloudFuze
+// Board has both leo@fuzebot.io and no-reply@cloudfuze.info), and this join
+// had no ORDER BY -- LIMIT 1 just took whatever order Postgres happened to
+// return, which landed on no-reply@cloudfuze.info. Confirmed for real via
+// the actual NDR bounce body: Microsoft rejects it outright with `550
+// 5.1.8 Access denied, bad outbound sender` ("suspected of sending spam"),
+// not a per-recipient problem -- EVERY notification sent from it bounces
+// (assigned-to, status-changed, comment-reply, the queue DL emails, all of
+// it), for every recipient, silently, since sendNotification's Graph send
+// reports success immediately (Graph queues it) and the real rejection
+// only arrives later as an NDR nothing reads. Excluding this specific
+// confirmed-blocked sender so the lookup falls through to the other,
+// working connected mailbox instead. If it's ever unblocked (or the org
+// fixes/replaces it) and should be usable again, remove this exclusion.
+const BLOCKED_SENDER_ADDRESSES = ['no-reply@cloudfuze.info'];
+
 async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: string; inboxEmail?: string }> {
   try {
     const { pgPool: pool } = await import('@/lib/pg-pool');
@@ -420,9 +436,11 @@ async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: 
       FROM issues i
       JOIN spaces s ON i."spaceId" = s.id
       LEFT JOIN email_configs ec ON LOWER(ec.space_key) = LOWER(s.key)
+        AND LOWER(ec.address) != ALL($2::text[])
       WHERE i.key = $1
+      ORDER BY ec.created_at ASC
       LIMIT 1
-    `, [issueKey]);
+    `, [issueKey, BLOCKED_SENDER_ADDRESSES]);
     return {
       emailthreadid: row.rows[0]?.emailthreadid || undefined,
       inboxEmail:    row.rows[0]?.inbox_email    || undefined,
