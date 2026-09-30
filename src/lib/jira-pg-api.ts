@@ -10108,6 +10108,37 @@ async function _handleJiraPgApi(
                 userId,
                 { type: 'STATUS_CHANGED', title: `${reopenDisplayKey} status → ${String(body.queueStatusName || '')}`, message: issue.summary, issueKey: reopenDisplayKey }
               ).catch(() => {});
+              // A reopen queue status can ALSO name a target department (e.g.
+              // "Routed to QA" picked directly on a Resolved ticket) -- this
+              // whole reopen branch used to be treated as mutually exclusive
+              // with a handoff (the "waiting for X"/"routed to X" check
+              // further below only runs when !queueStatusSyncedReopen), so
+              // current_department silently never moved even though the
+              // status text said "Routed to QA". Confirmed for real on
+              // CF-33639: Department stayed on Migration through a
+              // Resolved -> Routed to QA -> In Progress sequence. Run the
+              // same handoff here too when the reopened-into status name
+              // matches that pattern.
+              const reopenWaitMatch = String(body.queueStatusName || '').match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
+              if (reopenWaitMatch) {
+                const reopenTargetDept = reopenWaitMatch[1].trim();
+                if (dept.trim().toLowerCase() !== reopenTargetDept.toLowerCase()) {
+                  try {
+                    const priorStatusForReopenHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
+                    const reopenHandoffOldDept = await performDeptHandoff(
+                      issue.id, issue.spaceId, (issue as any).productType || null,
+                      reopenTargetDept, priorStatusForReopenHandoff, null, userId,
+                    );
+                    console.log(`[DeptHandoff] ${issue.key}: ${reopenHandoffOldDept} → ${reopenTargetDept} (via reopen queue status)`);
+                    pool.query(
+                      `INSERT INTO issue_history (id, "issueId", field, "oldValue", "newValue", "authorName", "authorEmail", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+                      [rid(), issue.id, 'department', reopenHandoffOldDept || 'None', `Handed to ${reopenTargetDept} — SLA started`, reopenChanger ? `${reopenChanger.firstName} ${reopenChanger.lastName}`.trim() : 'Unknown', reopenChanger?.email || null]
+                    ).catch(() => {});
+                  } catch (handoffErr: any) {
+                    console.error(`[DeptHandoff ERROR - reopen] ${issue.key}:`, handoffErr?.message || handoffErr);
+                  }
+                }
+              }
             } catch (e: any) { console.error('[SLA resume on reopen failed]', issue.key, e?.message || e); }
           }
 
