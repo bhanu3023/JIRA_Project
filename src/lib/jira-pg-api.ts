@@ -612,6 +612,25 @@ pool.query(`
   )
 `).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS issue_worklogs_issue_idx ON issue_worklogs ("issueId")`).catch(() => {});
+// Records every real (non-dev-mode) notification send attempt and its
+// outcome -- written by notification-service.ts's sendNotification, the
+// single choke point every notification email (status change, comment,
+// queue DL, assignment, etc.) already goes through. Exists so the
+// scheduled health-check email below (runNotificationHealthCheckScan) has
+// something queryable to report on -- console.log output isn't readable
+// from inside the running process itself.
+pool.query(`
+  CREATE TABLE IF NOT EXISTS notification_log (
+    id TEXT PRIMARY KEY,
+    success BOOLEAN NOT NULL,
+    subject TEXT,
+    recipients TEXT,
+    method TEXT,
+    error TEXT,
+    "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS notification_log_created_idx ON notification_log ("createdAt")`).catch(() => {});
 
 // Indexes for hot query paths
 pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_space_dept ON queue_closed_tickets(space_id, LOWER(dept_name))`).catch(() => {});
@@ -1248,6 +1267,86 @@ declare global {
   var __monitorAgentInterval: ReturnType<typeof setInterval> | undefined;
   // eslint-disable-next-line no-var
   var __rateLimitCleanupInterval: ReturnType<typeof setInterval> | undefined;
+  // eslint-disable-next-line no-var
+  var __notificationHealthCheckInterval: ReturnType<typeof setInterval> | undefined;
+}
+
+// Every notification send (status change, comment, queue DL, assignment,
+// etc.) goes through sendNotification (notification-service.ts), which now
+// logs its own outcome to notification_log -- this scan reads that back
+// every 3 hours and emails a status report to the requested recipient, by
+// explicit request: a way to know notifications are actually working
+// without needing to grep server logs by hand every time, the way this
+// session's own earlier investigation (the blocked-sender bug) had to.
+const NOTIFICATION_HEALTH_CHECK_RECIPIENT = 'bhanu.srikakulam@cloudfuze.com';
+const NOTIFICATION_HEALTH_CHECK_WINDOW_MS = 3 * 60 * 60 * 1000;
+
+async function runNotificationHealthCheckScan(): Promise<void> {
+  try {
+    const since = new Date(Date.now() - NOTIFICATION_HEALTH_CHECK_WINDOW_MS);
+    const rows = await pool.query(
+      `SELECT success, subject, recipients, method, error, "createdAt"
+       FROM notification_log WHERE "createdAt" >= $1 ORDER BY "createdAt" DESC`,
+      [since]
+    );
+    const entries = rows.rows;
+
+    // Every DL address configured on any queue, across every space -- used
+    // to split the report into "DL notifications" vs "normal" ones, since
+    // that's specifically what was asked for, not just an overall total.
+    const cqRows = await pool.query(`SELECT queues FROM custom_queues`);
+    const dlAddresses = new Set<string>();
+    for (const row of cqRows.rows) {
+      for (const q of (Array.isArray(row.queues) ? row.queues : [])) {
+        for (const email of (Array.isArray(q.notifyEmails) ? q.notifyEmails : [])) {
+          dlAddresses.add(String(email).toLowerCase().trim());
+        }
+      }
+    }
+    const isDlEntry = (recipients: string) =>
+      recipients.split(',').some((r: string) => dlAddresses.has(r.trim().toLowerCase()));
+
+    const dlEntries = entries.filter((e: any) => isDlEntry(e.recipients || ''));
+    const normalEntries = entries.filter((e: any) => !isDlEntry(e.recipients || ''));
+    const countOf = (list: any[], success: boolean) => list.filter((e) => e.success === success).length;
+    const failures = entries.filter((e: any) => !e.success).slice(0, 20);
+
+    const overallStatus = entries.length === 0
+      ? 'NO ACTIVITY'
+      : failures.length === 0 ? 'WORKING' : (countOf(entries, true) > 0 ? 'PARTIALLY WORKING' : 'NOT WORKING');
+    const statusColor = overallStatus === 'WORKING' ? '#10B981' : overallStatus === 'NO ACTIVITY' ? '#6B7280' : '#EF4444';
+
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto;">
+        <h2 style="color: ${statusColor};">Notification Health Check — ${overallStatus}</h2>
+        <p style="color: #6B778C; font-size: 13px;">Window: last 3 hours (since ${since.toISOString()})</p>
+        <table style="border-collapse: collapse; width: 100%; font-size: 13px; margin: 16px 0;">
+          <tr style="background: #F4F5F7;"><th style="text-align:left; padding: 8px; border: 1px solid #DFE1E6;">Category</th><th style="text-align:left; padding: 8px; border: 1px solid #DFE1E6;">Sent OK</th><th style="text-align:left; padding: 8px; border: 1px solid #DFE1E6;">Failed</th></tr>
+          <tr><td style="padding: 8px; border: 1px solid #DFE1E6;">DL notifications</td><td style="padding: 8px; border: 1px solid #DFE1E6;">${countOf(dlEntries, true)}</td><td style="padding: 8px; border: 1px solid #DFE1E6;">${countOf(dlEntries, false)}</td></tr>
+          <tr><td style="padding: 8px; border: 1px solid #DFE1E6;">Normal notifications</td><td style="padding: 8px; border: 1px solid #DFE1E6;">${countOf(normalEntries, true)}</td><td style="padding: 8px; border: 1px solid #DFE1E6;">${countOf(normalEntries, false)}</td></tr>
+        </table>
+        ${failures.length > 0 ? `
+          <h3 style="color: #EF4444; font-size: 14px;">Failures (most recent ${failures.length})</h3>
+          <ul style="font-size: 12.5px; color: #42526E; padding-left: 18px;">
+            ${failures.map((f: any) => `<li style="margin-bottom: 6px;"><b>${(f.subject || '').replace(/</g, '&lt;')}</b> → ${f.recipients} <br/><span style="color: #97A0AF;">${f.method}: ${(f.error || 'unknown error').replace(/</g, '&lt;')} — ${new Date(f.createdAt).toLocaleString()}</span></li>`).join('')}
+          </ul>
+        ` : entries.length > 0 ? '<p style="color: #10B981; font-size: 13px;">No failures in this window.</p>' : '<p style="color: #6B778C; font-size: 13px;">No notifications were sent in this window at all -- nothing to report on either way.</p>'}
+      </div>
+    `;
+    const text = `Notification Health Check — ${overallStatus}\nDL: ${countOf(dlEntries, true)} OK / ${countOf(dlEntries, false)} failed\nNormal: ${countOf(normalEntries, true)} OK / ${countOf(normalEntries, false)} failed\n${failures.length ? `${failures.length} failure(s) -- see email for details.` : ''}`;
+
+    const { sendNotification } = await import('@/lib/notification-service');
+    await sendNotification([NOTIFICATION_HEALTH_CHECK_RECIPIENT], `Notification Health Check — ${overallStatus}`, html, text);
+  } catch (e: any) {
+    console.error('[NotificationHealthCheck] scan failed:', e?.message || e);
+  }
+}
+
+if (!globalThis.__notificationHealthCheckInterval) {
+  runNotificationHealthCheckScan().catch((e) => console.error('[NotificationHealthCheck] initial run failed:', e?.message));
+  globalThis.__notificationHealthCheckInterval = setInterval(() => {
+    runNotificationHealthCheckScan().catch((e) => console.error('[NotificationHealthCheck] scheduled run failed:', e?.message));
+  }, NOTIFICATION_HEALTH_CHECK_WINDOW_MS);
 }
 
 // Server-side singleton scheduler. This used to be triggered from every open browser tab

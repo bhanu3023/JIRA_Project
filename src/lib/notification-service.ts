@@ -448,6 +448,22 @@ async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: 
   } catch { return {}; }
 }
 
+// Fire-and-forget outcome log for the periodic notification-health-check
+// email (see runNotificationHealthCheckScan in jira-pg-api.ts) -- that job
+// has no other way to know whether sends are actually succeeding since
+// console.log output isn't queryable from inside the running process.
+// Never blocks or fails a real send: logging failures are swallowed.
+async function logNotificationOutcome(success: boolean, subject: string, to: string[], method: string, error?: string) {
+  try {
+    const { pgPool: pool } = await import('@/lib/pg-pool');
+    await pool.query(
+      `INSERT INTO notification_log (id, success, subject, recipients, method, error, "createdAt")
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, NOW())`,
+      [success, subject.slice(0, 500), to.join(', ').slice(0, 1000), method, error ? error.slice(0, 500) : null]
+    );
+  } catch { /* non-critical */ }
+}
+
 // ── Send helper ────────────────────────────────────────────────────────────────
 // Priority: (1) the ticket's own linked mailbox via Graph — lands in a
 // monitored inbox and threads correctly — (2) the single global SMTP
@@ -475,7 +491,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
 
   if (fromEmail) {
     const sentViaTicketInbox = await sendViaGraph({ from: fromEmail, to: uniqueTo, subject, html, text, inReplyTo, attachments });
-    if (sentViaTicketInbox) return;
+    if (sentViaTicketInbox) { logNotificationOutcome(true, subject, uniqueTo, `graph:${fromEmail}`); return; }
   }
 
   // A configured shared sender (DEFAULT_NOTIFICATION_SENDER, e.g.
@@ -489,6 +505,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
   // it has to be tried up here, not as SMTP's fallback.
   const defaultSender = (process.env.DEFAULT_NOTIFICATION_SENDER || '').toLowerCase().trim();
   if (defaultSender && await sendViaGraph({ from: defaultSender, to: uniqueTo, subject, html, text, inReplyTo, attachments })) {
+    logNotificationOutcome(true, subject, uniqueTo, `graph:${defaultSender}`);
     return;
   }
 
@@ -520,6 +537,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
       await transporter.sendMail(mailOpts);
       console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')} via SMTP (${FROM_EMAIL})`);
       smtpBrokenUntil = 0;
+      logNotificationOutcome(true, subject, uniqueTo, `smtp:${FROM_EMAIL}`);
       return;
     } catch (err: any) {
       console.error(`[Notification] SMTP send failed for "${subject}", trying OAuth fallback:`, err.message);
@@ -531,6 +549,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
   const candidates = await getSenderEmailCandidates();
   if (!candidates.length) {
     console.warn(`[Notification] Skipping "${subject}" — no working SMTP and no OAuth account connected`);
+    logNotificationOutcome(false, subject, uniqueTo, 'none', 'No working SMTP and no OAuth account connected');
     return;
   }
   // Try the shared-mailbox-looking account(s) first, then fall through to
@@ -540,9 +559,13 @@ export async function sendNotification(to: string[], subject: string, html: stri
   // (or several) accounts' tokens having quietly expired without turning a
   // single notification send into a long serial sweep of the whole table.
   for (const candidate of candidates.slice(0, 10)) {
-    if (await sendViaGraph({ from: candidate, to: uniqueTo, subject, html, text, inReplyTo, attachments })) return;
+    if (await sendViaGraph({ from: candidate, to: uniqueTo, subject, html, text, inReplyTo, attachments })) {
+      logNotificationOutcome(true, subject, uniqueTo, `graph:${candidate}`);
+      return;
+    }
   }
   console.error(`[Notification] All send methods failed for "${subject}" to ${uniqueTo.join(', ')}`);
+  logNotificationOutcome(false, subject, uniqueTo, 'all-failed', 'All send methods failed (ticket inbox, default sender, SMTP, and every OAuth candidate)');
 }
 
 function issueUrl(issueKey: string) {
