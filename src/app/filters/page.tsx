@@ -1769,6 +1769,32 @@ export default function FiltersPage() {
     .map((f) => f.id)
     .filter((id) => TABLE_COLUMN_DEFS[id] && (activeExtras.includes(id) || EXTRA_COLUMN_HAS_VALUE[id]));
 
+  // "Columns" used to list only the 7 fixed columns (Assignee/Status/etc)
+  // -- a field added via "More filters" (Infra Issue Type, Combination,
+  // etc.) DID already auto-show as a table column via tableExtraCols
+  // above, but had no entry here, so there was no way to see it listed or
+  // turn it back off except by removing the filter chip entirely. Merged
+  // into one combined checklist: picking any of these fields here either
+  // flips the static column's own visibility, or toggles the extra
+  // field's "More filters" chip (same effect as adding/removing it there,
+  // including clearing its value on removal via toggleExtra).
+  const columnsDropdownOptions = [
+    ...STATIC_COLUMN_OPTIONS,
+    ...EXTRA_FILTER_OPTIONS.filter((f) => TABLE_COLUMN_DEFS[f.id]).map((f) => ({ value: f.id, label: f.label })),
+  ];
+  const columnsDropdownSelected = [...visibleStaticCols, ...tableExtraCols];
+  const handleColumnsDropdownChange = (next: string[]) => {
+    const added = next.find((id) => !columnsDropdownSelected.includes(id));
+    const removed = columnsDropdownSelected.find((id) => !next.includes(id));
+    const toggledId = added ?? removed;
+    if (!toggledId) return;
+    if (STATIC_COLUMN_IDS.includes(toggledId)) {
+      setVisibleStaticCols(next.filter((id) => STATIC_COLUMN_IDS.includes(id)));
+    } else {
+      toggleExtra(toggledId);
+    }
+  };
+
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
     if (selStatuses.length === 0) return;
@@ -2131,9 +2157,9 @@ export default function FiltersPage() {
             )}
             <DropBtn
               label="Columns"
-              options={STATIC_COLUMN_OPTIONS}
-              selected={visibleStaticCols}
-              onChange={setVisibleStaticCols}
+              options={columnsDropdownOptions}
+              selected={columnsDropdownSelected}
+              onChange={handleColumnsDropdownChange}
             />
             {can(user?.role, 'exportData') && (
               <button
