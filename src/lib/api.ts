@@ -288,6 +288,9 @@ class ApiClient {
   updateComment(commentId: string, data: { body: string }) { return this.request<any>(`/comments/${commentId}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteComment(commentId: string) { return this.request<any>(`/comments/${commentId}`, { method: 'DELETE' }); }
   toggleCommentReaction(commentId: string, emoji: string) { return this.request<any>(`/comments/${commentId}/reactions`, { method: 'POST', body: JSON.stringify({ emoji }) }); }
+  getWorklogs(key: string) { return this.request<any>(`/issues/${key}/worklogs`); }
+  addWorklog(key: string, data: { department: string; timeSpentMinutes: number; description?: string; workDate?: string }) { return this.request<any>(`/issues/${key}/worklogs`, { method: 'POST', body: JSON.stringify(data) }); }
+  deleteWorklog(id: string) { return this.request<any>(`/worklogs/${id}`, { method: 'DELETE' }); }
   resyncFromJira(key: string) { return this.request<any>(`/issues/${key}/resync-from-jira`, { method: 'POST' }); }
   addLink(key: string, data: any) { return this.request<any>(`/issues/${key}/links`, { method: 'POST', body: JSON.stringify(data) }); }
   addIssueLink(key: string, data: { targetKey: string; linkType: string }) { return this.addLink(key, data); }

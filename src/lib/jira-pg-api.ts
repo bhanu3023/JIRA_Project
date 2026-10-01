@@ -590,6 +590,28 @@ pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`
 pool.query(`ALTER TABLE comments ADD COLUMN IF NOT EXISTS reactions JSONB DEFAULT '{}'::jsonb`).catch(() => {});
 pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS department TEXT`).catch(() => {});
 pool.query(`ALTER TABLE space_members ADD COLUMN IF NOT EXISTS department VARCHAR(100)`).catch(() => {});
+// Per-department work log, Jira-style "Log Work" but split by which
+// department actually did the work -- a ticket that passed through
+// Dev -> Migration -> Infra needs each team's own time logged separately
+// against the SAME ticket, not one combined log with no way to tell whose
+// hours are whose. `department` is freeform (not a FK to custom_queues,
+// same as current_department/dept_statuses keys elsewhere) so it stays
+// valid even if a queue is later renamed or removed.
+pool.query(`
+  CREATE TABLE IF NOT EXISTS issue_worklogs (
+    id TEXT PRIMARY KEY,
+    "issueId" TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    department TEXT NOT NULL,
+    "timeSpentMinutes" INTEGER NOT NULL,
+    description TEXT,
+    "workDate" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "authorId" TEXT,
+    "authorName" TEXT,
+    "authorEmail" TEXT,
+    "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS issue_worklogs_issue_idx ON issue_worklogs ("issueId")`).catch(() => {});
 
 // Indexes for hot query paths
 pool.query(`CREATE INDEX IF NOT EXISTS idx_qct_space_dept ON queue_closed_tickets(space_id, LOWER(dept_name))`).catch(() => {});
@@ -11571,6 +11593,89 @@ async function _handleJiraPgApi(
       updatedAt: comment.updatedAt.toISOString(),
       reactions: {},
     });
+  }
+
+  // ── Per-department work log ─────────────────────────────────────────
+  // GET issues/:key/worklogs -- list every logged entry for this ticket,
+  // across every department it's touched, newest first. The frontend
+  // groups these into Dev/Migration/Infra/QA sections itself.
+  const issueWorklogs = path.match(/^issues\/([^/]+)\/worklogs$/);
+  if (issueWorklogs && method === 'GET') {
+    const key = await resolveCfKey(issueWorklogs[1].toUpperCase());
+    const issue = await db.issue.findUnique({ where: { key }, select: { id: true, spaceId: true, reporterId: true, assigneeId: true } });
+    if (!issue) return json({ error: 'Not found' }, 404);
+    if (!(await canAccessIssue(issue as any, userId, isAdmin))) return json({ error: 'Not found' }, 404);
+    const rows = await pool.query(
+      `SELECT id, department, "timeSpentMinutes", description, "workDate", "authorId", "authorName", "authorEmail", "createdAt"
+       FROM issue_worklogs WHERE "issueId" = $1 ORDER BY "workDate" DESC, "createdAt" DESC`,
+      [issue.id]
+    );
+    return json(rows.rows);
+  }
+  // POST issues/:key/worklogs -- log time against ONE department. Only a
+  // member of that department's own queue (or an admin/manager) may log
+  // work under it -- a Dev team member logging hours under "Migration"
+  // would misattribute whose work it actually was, the whole reason this
+  // is split per-department instead of one shared log.
+  if (issueWorklogs && method === 'POST') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const key = await resolveCfKey(issueWorklogs[1].toUpperCase());
+    const issue = await db.issue.findUnique({
+      where: { key },
+      include: { space: { select: { key: true, name: true } } },
+    });
+    if (!issue) return json({ error: 'Not found' }, 404);
+    if (!(await canAccessIssue(issue as any, userId, isAdmin))) return json({ error: 'Not found' }, 404);
+    const body = await readJson(req);
+    const department = String(body.department || '').trim();
+    if (!department) return json({ error: 'Department is required' }, 400);
+    const timeSpentMinutes = Math.round(Number(body.timeSpentMinutes));
+    if (!Number.isFinite(timeSpentMinutes) || timeSpentMinutes <= 0) {
+      return json({ error: 'Time spent must be a positive number' }, 400);
+    }
+    if (!isAdmin && !isManager(currentUser?.role)) {
+      const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(issue.space?.key || '').toUpperCase()]);
+      const queues: any[] = cq.rows[0]?.queues || [];
+      const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === department.toLowerCase());
+      const isMember = Array.isArray(q?.memberIds) && q.memberIds.includes(userId);
+      if (q && !isMember) {
+        return json({ error: `You're not a member of the ${department} queue.` }, 403);
+      }
+      // A department with no configured queue at all (q undefined) has no
+      // roster to check against -- fall through and allow it, same
+      // "no config = no restriction" fallback the DL/notification and
+      // queue-membership checks elsewhere in this file already use.
+    }
+    const authorUser = await getCachedUser(userId);
+    const id = rid();
+    const workDate = body.workDate ? new Date(String(body.workDate)) : new Date();
+    const result = await pool.query(
+      `INSERT INTO issue_worklogs (id, "issueId", department, "timeSpentMinutes", description, "workDate", "authorId", "authorName", "authorEmail", "createdAt")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) RETURNING *`,
+      [
+        id, issue.id, department, timeSpentMinutes,
+        body.description ? sanitizeRichText(String(body.description)) : null,
+        workDate,
+        authorUser?.id ?? null,
+        authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : null,
+        authorUser?.email ?? null,
+      ]
+    );
+    pool.query(`UPDATE issues SET "updatedAt"=NOW() WHERE id=$1`, [issue.id]).catch(() => {});
+    return json(result.rows[0]);
+  }
+
+  // DELETE worklogs/:id -- the entry's own author, or an admin, only.
+  const worklogById = path.match(/^worklogs\/([^/]+)$/);
+  if (worklogById && method === 'DELETE') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const row = await pool.query(`SELECT "authorId" FROM issue_worklogs WHERE id = $1`, [worklogById[1]]);
+    if (!row.rows[0]) return json({ ok: true });
+    if (!isAdmin && row.rows[0].authorId !== userId) {
+      return json({ error: 'You can only delete your own worklog entries.' }, 403);
+    }
+    await pool.query(`DELETE FROM issue_worklogs WHERE id = $1`, [worklogById[1]]);
+    return json({ ok: true });
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Comment Update / Delete Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
