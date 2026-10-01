@@ -2,10 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api, type KbFile } from '@/lib/api';
-import { Download, Eye, EyeOff, FileText, Image as ImageIcon, Paperclip, Trash2, Upload, X } from 'lucide-react';
-
-// Must match INLINE_MIME in kb-api.ts -- anything else is served as a download.
-const PREVIEWABLE = new Set(['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+import { KbFileViewer, viewKindOf, type ViewKind } from '@/components/kb/KbFileViewer';
+import {
+  BookOpenText, Download, FileSpreadsheet, FileText, Image as ImageIcon, Maximize2, Minimize2, Paperclip,
+  Presentation, Trash2, Upload, X,
+} from 'lucide-react';
 
 export function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -13,9 +14,11 @@ export function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function FileIcon({ mime }: { mime: string | null }) {
-  if (mime?.startsWith('image/')) return <ImageIcon size={16} className="text-purple-500" />;
-  if (mime === 'application/pdf') return <FileText size={16} className="text-red-500" />;
+function FileIcon({ kind }: { kind: ViewKind | null }) {
+  if (kind === 'image') return <ImageIcon size={16} className="text-purple-500" />;
+  if (kind === 'pdf') return <FileText size={16} className="text-red-500" />;
+  if (kind === 'sheet') return <FileSpreadsheet size={16} className="text-green-600" />;
+  if (kind === 'pptx') return <Presentation size={16} className="text-orange-500" />;
   return <FileText size={16} className="text-blue-500" />;
 }
 
@@ -31,41 +34,21 @@ async function downloadFile(articleId: string, file: KbFile) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-function FilePreview({ articleId, file }: { articleId: string; file: KbFile }) {
-  const [url, setUrl] = useState<string | null>(null);
+/** Read-only list of an article's documents; each readable one opens in the page. */
+export function KbDocumentList({ articleId, files }: { articleId: string; files: KbFile[] }) {
+  // The first readable document opens straight away -- for an article that
+  // is mostly its uploaded document, that document IS the article.
+  const [openId, setOpenId] = useState<string | null>(() => files.find((f) => viewKindOf(f))?.id ?? null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let objectUrl: string | null = null;
-    let cancelled = false;
-    api.fetchKbFileBlob(articleId, file.id)
-      .then((blob) => {
-        if (cancelled) return;
-        // Re-type the blob so the browser's PDF viewer / <img> knows what it is.
-        objectUrl = URL.createObjectURL(new Blob([blob], { type: file.mime || blob.type }));
-        setUrl(objectUrl);
-      })
-      .catch((e) => { if (!cancelled) setError(e?.message || 'Failed to load preview'); });
-    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [articleId, file.id, file.mime]);
-
-  if (error) return <p className="px-3 py-4 text-[12px] text-red-600">{error}</p>;
-  if (!url) return <div className="flex h-40 items-center justify-center"><div className="h-6 w-6 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" /></div>;
-  if (file.mime === 'application/pdf') {
-    return <iframe src={url} title={file.filename} className="h-[75vh] w-full rounded-b-lg border-0 bg-gray-100" />;
-  }
-  return <img src={url} alt={file.filename} className="mx-auto max-h-[75vh] max-w-full rounded-b-lg object-contain" />;
-}
-
-/** Read-only list of an article's documents, with inline preview for PDFs/images. */
-export function KbDocumentList({ articleId, files }: { articleId: string; files: KbFile[] }) {
-  // PDFs and images open expanded when they're the only document -- that's
-  // the article, and the reader shouldn't have to click to see it.
-  const [openId, setOpenId] = useState<string | null>(
-    files.length === 1 && PREVIEWABLE.has(files[0].mime || '') ? files[0].id : null,
-  );
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [fullscreen]);
 
   if (files.length === 0) return null;
 
@@ -75,17 +58,39 @@ export function KbDocumentList({ articleId, files }: { articleId: string; files:
       {error && <p className="mb-2 text-[12px] text-red-600">{error}</p>}
       <div className="space-y-2">
         {files.map((f) => {
-          const previewable = PREVIEWABLE.has(f.mime || '');
+          const kind = viewKindOf(f);
           const open = openId === f.id;
+          const full = open && fullscreen;
           return (
-            <div key={f.id} className="rounded-lg border border-gray-200">
-              <div className="flex flex-wrap items-center gap-3 px-3 py-2">
-                <FileIcon mime={f.mime} />
-                <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-gray-800" title={f.filename}>{f.filename}</span>
+            <div
+              key={f.id}
+              className={full
+                ? 'fixed inset-3 z-50 flex flex-col overflow-hidden rounded-xl border border-gray-300 bg-white shadow-2xl'
+                : 'overflow-hidden rounded-lg border border-gray-200'}
+            >
+              <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+                <FileIcon kind={kind} />
+                <button
+                  disabled={!kind}
+                  onClick={() => { setOpenId(open ? null : f.id); setFullscreen(false); }}
+                  className="min-w-0 flex-1 truncate text-left text-[13px] font-medium text-gray-800 enabled:hover:text-blue-700 disabled:cursor-default"
+                  title={f.filename}
+                >
+                  {f.filename}
+                </button>
                 <span className="text-[11px] text-gray-400">{formatSize(f.size)}</span>
-                {previewable && (
-                  <button onClick={() => setOpenId(open ? null : f.id)} className="flex items-center gap-1 rounded px-2 py-1 text-[12px] text-gray-600 hover:bg-gray-100">
-                    {open ? <><EyeOff size={13} /> Hide</> : <><Eye size={13} /> Preview</>}
+                {kind && (
+                  <button
+                    onClick={() => { setOpenId(open ? null : f.id); setFullscreen(false); }}
+                    className={`flex items-center gap-1 rounded px-2 py-1 text-[12px] ${open ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                  >
+                    <BookOpenText size={13} /> {open ? 'Close' : 'Read'}
+                  </button>
+                )}
+                {open && (
+                  <button onClick={() => setFullscreen(!fullscreen)} title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen'}
+                    className="flex items-center gap-1 rounded px-2 py-1 text-[12px] text-gray-600 hover:bg-gray-100">
+                    {fullscreen ? <><Minimize2 size={13} /> Exit full screen</> : <><Maximize2 size={13} /> Full screen</>}
                   </button>
                 )}
                 <button
@@ -100,11 +105,22 @@ export function KbDocumentList({ articleId, files }: { articleId: string; files:
                   <Download size={13} /> {busyId === f.id ? 'Downloading…' : 'Download'}
                 </button>
               </div>
-              {open && <div className="border-t border-gray-200"><FilePreview articleId={articleId} file={f} /></div>}
+              {!kind && (
+                <p className="border-t border-gray-100 px-3 py-1.5 text-[11.5px] text-gray-500">
+                  This file type can&apos;t be shown in the browser. Download it to read it.
+                  {/\.(doc|ppt)$/i.test(f.filename) && ' (Older .doc/.ppt files can be re-saved as .docx/.pptx to read them here.)'}
+                </p>
+              )}
+              {open && (
+                <div className={`border-t border-gray-200 ${full ? 'min-h-0 flex-1 overflow-auto [&>*]:!max-h-none [&_iframe]:!h-full' : ''}`}>
+                  <KbFileViewer articleId={articleId} file={f} />
+                </div>
+              )}
             </div>
           );
         })}
       </div>
+      {fullscreen && openId && <div className="fixed inset-0 z-40 bg-black/50" onClick={() => setFullscreen(false)} />}
     </section>
   );
 }
@@ -195,7 +211,7 @@ export function KbDocumentEditor({
       >
         Drop files here or click to choose. PDF, Word, Excel, PowerPoint, images and more, up to 50 MB each.
         <br />
-        <span className="text-[12px] text-gray-400">PDFs and images can be read right on the page; other files are downloaded.</span>
+        <span className="text-[12px] text-gray-400">Word, Excel, PowerPoint, PDF, image and text files can be read right on the page.</span>
       </div>
 
       {error && <p className="mt-2 text-[12px] text-red-600">{error}</p>}
@@ -204,7 +220,7 @@ export function KbDocumentEditor({
         <ul className="mt-3 space-y-1.5">
           {files.map((f) => (
             <li key={f.id} className="flex items-center gap-3 rounded-lg border border-gray-200 px-3 py-2">
-              <FileIcon mime={f.mime} />
+              <FileIcon kind={viewKindOf(f)} />
               <span className="min-w-0 flex-1 truncate text-[13px] text-gray-800" title={f.filename}>{f.filename}</span>
               <span className="text-[11px] text-gray-400">{formatSize(f.size)}</span>
               <button
