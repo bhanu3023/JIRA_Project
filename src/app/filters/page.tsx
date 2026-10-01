@@ -2300,17 +2300,12 @@ export default function FiltersPage() {
           <table className="table-fixed">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
-                {/* Key + Work are pinned to the left edge (sticky) so they
-                    stay visible while scrolling right to reach
-                    Assignee/Status/SLA/etc -- without this, scrolling to see
-                    any of those columns scrolled the ticket's own identity
-                    (key + title) off-screen with it, leaving no way to tell
-                    which row you were even looking at. Needs an explicit
-                    solid background (bg-gray-50, matching the header row's
-                    own background) since sticky cells are otherwise
-                    see-through and the scrolling columns underneath would
-                    show through them. */}
-                <th className="sticky left-0 z-10 bg-gray-50 px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24 border-r border-gray-200">Key</th>
+                {/* Key + Work used to be pinned to the left edge (sticky) so
+                    they stayed visible while scrolling right -- reverted per
+                    explicit request: the whole row (key included) should
+                    scroll together as one unit, not leave Key/Work frozen
+                    while the rest of the row moves underneath them. */}
+                <th className="bg-gray-50 px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24 border-r border-gray-200">Key</th>
                 {/* Explicit width, not left to soak up whatever's left --
                     table-fixed hands 100% of any unclaimed width to the one
                     column with no width class, which at the page's widened
@@ -2329,7 +2324,7 @@ export default function FiltersPage() {
                     below already truncates with an ellipsis, so this only
                     trades off how much of a long title shows before
                     truncating, not readability of what does fit. */}
-                <th className="sticky left-24 z-10 bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[220px] border-r border-gray-200">Work</th>
+                <th className="bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[220px] border-r border-gray-200">Work</th>
                 {tableExtraCols.map((id) => (
                   <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
                     {TABLE_COLUMN_DEFS[id].label}
@@ -2382,7 +2377,7 @@ export default function FiltersPage() {
                   : `/issues/${issue.cfKey ?? issue.key}?ref=filters`;
                 return (
                 <tr key={issue.id || issue.key} className="group hover:bg-gray-50 transition-colors">
-                  <td className="sticky left-0 z-10 bg-white group-hover:bg-gray-50 transition-colors px-4 py-2.5 border-r border-gray-100">
+                  <td className="bg-white group-hover:bg-gray-50 transition-colors px-4 py-2.5 border-r border-gray-100">
                     <div className="flex items-center gap-1.5">
                       <IssueTypeIcon type={issue.type || 'task'} size={15} />
                       <Link
@@ -2393,7 +2388,7 @@ export default function FiltersPage() {
                       </Link>
                     </div>
                   </td>
-                  <td className="sticky left-24 z-10 bg-white group-hover:bg-gray-50 transition-colors px-2 py-2.5 border-r border-gray-100">
+                  <td className="bg-white group-hover:bg-gray-50 transition-colors px-2 py-2.5 border-r border-gray-100">
                     <Link
                       href={issueHref}
                       className="block truncate text-[13px] text-gray-900 hover:text-blue-600 transition-colors"
