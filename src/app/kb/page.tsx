@@ -1,12 +1,19 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useStore } from '@/store';
-import { api, type KbAccess, type KbArticle, type KbTeam } from '@/lib/api';
+import { api, type KbAccess, type KbArticle, type KbFile, type KbTeam } from '@/lib/api';
 import { sanitizeForDisplay } from '@/lib/kb-sanitize';
 import RichTextEditor from '@/components/ui/RichTextEditor';
-import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText } from 'lucide-react';
+import { KbDocumentEditor, KbDocumentList } from '@/components/kb/KbDocuments';
+import { KbQuestions } from '@/components/kb/KbQuestions';
+import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion } from 'lucide-react';
+
+// True when the editor HTML has something a reader would see (text or an image).
+function hasBodyContent(html: string) {
+  return /<img\b/i.test(html) || html.replace(/<[^>]+>/g, '').replace(/&nbsp;|​/g, '').trim().length > 0;
+}
 
 type Scope = 'all' | 'mine' | 'drafts';
 const SCOPES: { id: Scope; label: string }[] = [
@@ -216,9 +223,14 @@ function ArticleList({ onOpen, onNew }: { onOpen: (id: string) => void; onNew: (
                   <VisibilityBadge article={a} />
                 </div>
                 {a.excerpt && <p className="mt-1.5 line-clamp-2 text-[13px] text-gray-600">{a.excerpt}</p>}
-                <p className="mt-2 text-[12px] text-gray-400">
-                  {a.authorName || 'Unknown'} · {a.status === 'draft' ? `Edited ${formatDate(a.updatedAt)}` : `Published ${formatDate(a.publishedAt)}`}
-                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-gray-400">
+                  <span>{a.authorName || 'Unknown'} · {a.status === 'draft' ? `Edited ${formatDate(a.updatedAt)}` : `Published ${formatDate(a.publishedAt)}`}</span>
+                  {a.fileCount > 0 && <span className="flex items-center gap-1"><Paperclip size={12} /> {a.fileCount} document{a.fileCount === 1 ? '' : 's'}</span>}
+                  {a.questionCount > 0 && <span className="flex items-center gap-1"><MessageCircleQuestion size={12} /> {a.questionCount} question{a.questionCount === 1 ? '' : 's'}</span>}
+                  {a.canManage && a.openQuestionCount > 0 && (
+                    <span className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700">{a.openQuestionCount} awaiting answer</span>
+                  )}
+                </div>
               </button>
             ))}
           </div>
@@ -288,7 +300,10 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
           <div className="flex h-40 items-center justify-center"><div className="h-7 w-7 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" /></div>
         )}
         {article && (
-          <article className="mx-auto max-w-4xl rounded-xl border border-gray-200 bg-white px-8 py-7">
+          // Questions sit beside the article on wide screens (sticky, so they
+          // stay in reach while reading) and drop below it on narrow ones.
+          <div className="mx-auto grid max-w-7xl items-start gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
+          <article className="min-w-0 rounded-xl border border-gray-200 bg-white px-8 py-7">
             <div className="mb-2"><VisibilityBadge article={article} /></div>
             <h1 className="text-2xl font-bold text-gray-900">{article.title}</h1>
             <p className="mt-1 text-[12.5px] text-gray-500">
@@ -298,9 +313,16 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
             </p>
             <div
               className="mt-6 break-words text-[14px] leading-relaxed text-[#172B4D] [&_a]:text-blue-600 [&_a]:underline [&_blockquote]:border-l-4 [&_blockquote]:border-gray-200 [&_blockquote]:pl-3 [&_blockquote]:text-gray-600 [&_code]:rounded [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_h1]:mb-2 [&_h1]:mt-5 [&_h1]:text-xl [&_h1]:font-bold [&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:mt-3 [&_h3]:font-semibold [&_img]:my-2 [&_img]:max-w-full [&_img]:rounded-md [&_li]:my-0.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-slate-100 [&_pre]:p-3 [&_table]:my-2 [&_td]:border [&_td]:border-gray-300 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-300 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc [&_ul]:pl-5"
-              dangerouslySetInnerHTML={{ __html: html || '<p style="color:#9ca3af">This article has no content yet.</p>' }}
+              dangerouslySetInnerHTML={{
+                __html: html || ((article.files?.length || 0) > 0 ? '' : '<p style="color:#9ca3af">This article has no content yet.</p>'),
+              }}
             />
+            <KbDocumentList articleId={article.id} files={article.files || []} />
           </article>
+          <aside className="lg:sticky lg:top-0">
+            <KbQuestions articleId={article.id} published={article.status === 'published'} canAnswer={article.canManage} />
+          </aside>
+          </div>
         )}
       </div>
 
@@ -311,7 +333,8 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
           onCancel={() => setDialog(null)}
           onConfirm={async (access) => {
             const updated = dialog === 'publish' ? await api.publishKbArticle(id, access) : await api.updateKbAccess(id, access);
-            setArticle(updated);
+            // publish/access responses don't carry the file list -- keep the one we have.
+            setArticle((prev) => ({ ...updated, files: prev?.files }));
             setDialog(null);
           }}
         />
@@ -329,6 +352,8 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
   const [bodyHtml, setBodyHtml] = useState('');
   const [loaded, setLoaded] = useState(!id);
   const [uploading, setUploading] = useState(false);
+  const [docsUploading, setDocsUploading] = useState(false);
+  const [files, setFiles] = useState<KbFile[]>([]);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -339,32 +364,43 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
     api.getKbArticle(id)
       .then((a) => {
         if (!a.canManage) { onDone(a.id); return; }
-        setTitle(a.title); setBodyHtml(a.bodyHtml || ''); setStatus(a.status); setLoaded(true);
+        setTitle(a.title); setBodyHtml(a.bodyHtml || ''); setFiles(a.files || []); setStatus(a.status); setLoaded(true);
       })
       .catch((e) => { setError(e?.message || 'Failed to load article'); setLoaded(true); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   // Creates the article on first save, updates it after that. Returns its id.
-  const save = async (): Promise<string | null> => {
-    if (!title.trim()) { setError('Add a title first'); return null; }
+  // An in-flight save is shared, so two quick document uploads on a brand-new
+  // article can't each create their own draft.
+  const savePromise = useRef<Promise<string | null> | null>(null);
+  const save = (): Promise<string | null> => {
+    if (savePromise.current) return savePromise.current;
+    if (!title.trim()) { setError('Add a title first'); return Promise.resolve(null); }
     setSaving(true);
     setError(null);
-    try {
-      const saved = articleId
-        ? await api.updateKbArticle(articleId, { title, bodyHtml })
-        : await api.createKbArticle({ title, bodyHtml });
-      setArticleId(saved.id);
-      return saved.id;
-    } catch (e: any) {
-      setError(e?.message || 'Failed to save');
-      return null;
-    } finally {
-      setSaving(false);
-    }
+    const p = (async () => {
+      try {
+        const saved = articleId
+          ? await api.updateKbArticle(articleId, { title, bodyHtml })
+          : await api.createKbArticle({ title, bodyHtml });
+        setArticleId(saved.id);
+        return saved.id;
+      } catch (e: any) {
+        setError(e?.message || 'Failed to save');
+        return null;
+      } finally {
+        setSaving(false);
+        savePromise.current = null;
+      }
+    })();
+    savePromise.current = p;
+    return p;
   };
 
-  const busy = saving || uploading;
+  const busy = saving || uploading || docsUploading;
+  // Written text is optional: an article can be just its uploaded documents.
+  const hasContent = hasBodyContent(bodyHtml) || files.length > 0;
 
   return (
     <>
@@ -382,7 +418,8 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
                 Save draft
               </button>
               <button
-                disabled={busy}
+                disabled={busy || !hasContent}
+                title={hasContent ? undefined : 'Write something or upload a document first'}
                 onClick={async () => { if (await save()) setPublishOpen(true); }}
                 className="rounded-lg bg-blue-600 px-3.5 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700 disabled:opacity-50"
               >
@@ -404,7 +441,7 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
       <div className="flex-1 overflow-auto px-8 py-6">
         <div className="mx-auto max-w-4xl space-y-4">
           {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-700">{error}</div>}
-          {uploading && <p className="text-[12px] text-gray-500">Uploading attachment… saving is paused until it finishes.</p>}
+          {(uploading || docsUploading) && <p className="text-[12px] text-gray-500">Uploading… saving is paused until it finishes.</p>}
           {!loaded ? (
             <div className="flex h-40 items-center justify-center"><div className="h-7 w-7 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" /></div>
           ) : (
@@ -419,11 +456,20 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
               <RichTextEditor
                 value={bodyHtml}
                 onChange={setBodyHtml}
-                placeholder="Write the article: steps, screenshots, links…"
-                minHeight="360px"
+                placeholder="Write the article: steps, screenshots, links… (optional if you upload a document below)"
+                minHeight="300px"
                 onUploadingChange={setUploading}
               />
             </div>
+          )}
+          {loaded && (
+            <KbDocumentEditor
+              articleId={articleId}
+              files={files}
+              onFilesChange={setFiles}
+              ensureSaved={save}
+              onUploadingChange={setDocsUploading}
+            />
           )}
         </div>
       </div>

@@ -14,8 +14,13 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { pgPool as pool } from '@/lib/pg-pool';
+import { db } from '@/lib/db';
 
-pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_QA_CHARS = 4000;
+const INLINE_MIME = new Set(['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   body_html TEXT NOT NULL DEFAULT '',
@@ -27,7 +32,74 @@ pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   published_at TIMESTAMPTZ
-)`).then(() => pool.query(`CREATE INDEX IF NOT EXISTS kb_articles_status_idx ON kb_articles(status)`)).catch(() => {});
+)`)
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS kb_articles_status_idx ON kb_articles(status)`))
+  // Uploaded documents. Bytes live on disk under uploads/kb/<articleId>/,
+  // which the public uploads route refuses to serve (see jira-pg-api.ts) --
+  // they're only reachable through kb/articles/:id/files/:fileId below.
+  .then(() => pool.query(`CREATE TABLE IF NOT EXISTS kb_files (
+    id TEXT PRIMARY KEY,
+    article_id TEXT NOT NULL REFERENCES kb_articles(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL,
+    mime TEXT,
+    size BIGINT,
+    storage_path TEXT NOT NULL,
+    uploaded_by TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  )`))
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS kb_files_article_idx ON kb_files(article_id)`))
+  // Reader questions, answered by the author (or an admin). Plain text only.
+  .then(() => pool.query(`CREATE TABLE IF NOT EXISTS kb_questions (
+    id TEXT PRIMARY KEY,
+    article_id TEXT NOT NULL REFERENCES kb_articles(id) ON DELETE CASCADE,
+    asker_id TEXT NOT NULL,
+    asker_name TEXT,
+    question TEXT NOT NULL,
+    answer TEXT,
+    answered_by_id TEXT,
+    answered_by_name TEXT,
+    answered_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  )`))
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS kb_questions_article_idx ON kb_questions(article_id)`))
+  .catch((e) => { console.error('[kb] schema setup failed:', e?.message || e); });
+
+// Same row the bell in Header.tsx polls for. KB_* notifications carry the
+// article id in issueKey; Header routes those to /kb instead of /issues.
+async function notify(userId: string, type: 'KB_QUESTION' | 'KB_ANSWER', title: string, message: string, articleId: string) {
+  if (!userId) return;
+  try {
+    await db.notification.create({ data: { userId, type, title, message, issueKey: articleId } });
+  } catch { /* fire-and-forget */ }
+}
+
+function clip(text: string, max: number) {
+  return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
+}
+
+function kbDir(articleId: string) {
+  const safeId = articleId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `uploads/kb/${safeId}`;
+}
+
+function formatFile(row: any) {
+  return { id: row.id, filename: row.filename, mime: row.mime, size: Number(row.size || 0), createdAt: row.created_at };
+}
+
+function formatQuestion(row: any, viewerId: string, viewerCanManage: boolean) {
+  return {
+    id: row.id,
+    question: row.question,
+    askerId: row.asker_id,
+    askerName: row.asker_name,
+    createdAt: row.created_at,
+    answer: row.answer,
+    answeredById: row.answered_by_id,
+    answeredByName: row.answered_by_name,
+    answeredAt: row.answered_at,
+    canDelete: viewerCanManage || row.asker_id === viewerId,
+  };
+}
 
 function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status });
@@ -114,8 +186,22 @@ function formatArticle(row: any, teams: Map<string, Team>, canManage: boolean, i
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     publishedAt: row.published_at,
+    fileCount: Number(row.file_count || 0),
+    questionCount: Number(row.question_count || 0),
+    openQuestionCount: Number(row.open_question_count || 0),
     canManage,
   };
+}
+
+// Per-article counts, joined onto every article row we return.
+const COUNT_COLUMNS = `
+  (SELECT COUNT(*) FROM kb_files f WHERE f.article_id = a.id) AS file_count,
+  (SELECT COUNT(*) FROM kb_questions q WHERE q.article_id = a.id) AS question_count,
+  (SELECT COUNT(*) FROM kb_questions q WHERE q.article_id = a.id AND q.answer IS NULL) AS open_question_count`;
+
+async function loadArticle(id: string) {
+  const res = await pool.query(`SELECT a.*, ${COUNT_COLUMNS} FROM kb_articles a WHERE a.id = $1`, [id]);
+  return res.rows[0] || null;
 }
 
 // Validates a {visibility, teams} payload; returns normalized values or an error.
@@ -147,6 +233,7 @@ export async function handleKbApi(
   if (path !== 'kb' && !path.startsWith('kb/')) return null;
   const { userId, currentUser, isAdmin } = ctx;
   if (!userId) return json({ error: 'Unauthorized' }, 401);
+  await kbSchemaReady;
 
   const canManage = (row: any) => isAdmin || row.author_id === userId;
   const canRead = (row: any, myTeams: string[]) =>
@@ -185,11 +272,12 @@ export async function handleKbApi(
     }
     if (q) {
       const like = p(`%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
-      where.push(`(title ILIKE ${like} OR body_html ILIKE ${like})`);
+      where.push(`(a.title ILIKE ${like} OR a.body_html ILIKE ${like}
+        OR EXISTS (SELECT 1 FROM kb_files f WHERE f.article_id = a.id AND f.filename ILIKE ${like}))`);
     }
     const rows = await pool.query(
-      `SELECT * FROM kb_articles WHERE ${where.join(' AND ')}
-       ORDER BY COALESCE(published_at, updated_at) DESC LIMIT 500`,
+      `SELECT a.*, ${COUNT_COLUMNS} FROM kb_articles a WHERE ${where.join(' AND ')}
+       ORDER BY COALESCE(a.published_at, a.updated_at) DESC LIMIT 500`,
       params,
     );
     const teams = await loadTeams();
@@ -210,23 +298,165 @@ export async function handleKbApi(
     return json(formatArticle(row.rows[0], await loadTeams(), true, true), 201);
   }
 
-  const m = path.match(/^kb\/articles\/([^/]+)(?:\/(publish|access))?$/);
+  // kb/articles/:id
+  // kb/articles/:id/(publish|access)
+  // kb/articles/:id/files[/:fileId]
+  // kb/articles/:id/questions[/:qid[/answer]]
+  const m = path.match(/^kb\/articles\/([^/]+)(?:\/(publish|access|files|questions)(?:\/([^/]+)(?:\/(answer))?)?)?$/);
   if (!m) return json({ error: 'Not found' }, 404);
   const id = m[1];
   const action = m[2] || null;
+  const subId = m[3] || null;
+  const subAction = m[4] || null;
+  if (subId && action !== 'files' && action !== 'questions') return json({ error: 'Not found' }, 404);
+  if (subAction && action !== 'questions') return json({ error: 'Not found' }, 404);
 
-  const existing = await pool.query(`SELECT * FROM kb_articles WHERE id = $1`, [id]);
-  const article = existing.rows[0];
+  const article = await loadArticle(id);
   // Unreadable articles answer 404, not 403, so their existence isn't leaked.
   if (!article) return json({ error: 'Article not found' }, 404);
   const myTeams = await getUserTeamKeys(userId);
   if (!canRead(article, myTeams)) return json({ error: 'Article not found' }, 404);
+  const manager = canManage(article);
 
   if (!action && method === 'GET') {
-    return json(formatArticle(article, await loadTeams(), canManage(article), true));
+    const files = await pool.query(`SELECT * FROM kb_files WHERE article_id = $1 ORDER BY created_at`, [id]);
+    return json({ ...formatArticle(article, await loadTeams(), manager, true), files: files.rows.map(formatFile) });
   }
 
-  if (!canManage(article)) {
+  // ── Files ────────────────────────────────────────────────────────────────
+  if (action === 'files') {
+    const nodePath = await import('path');
+    const fs = await import('fs/promises');
+    const uploadsRoot = nodePath.resolve(process.cwd(), 'uploads');
+
+    // GET kb/articles/:id/files/:fileId -- any reader
+    if (subId && method === 'GET') {
+      const row = (await pool.query(`SELECT * FROM kb_files WHERE id = $1 AND article_id = $2`, [subId, id])).rows[0];
+      if (!row) return json({ error: 'File not found' }, 404);
+      const filePath = nodePath.resolve(process.cwd(), row.storage_path);
+      if (!filePath.startsWith(uploadsRoot)) return json({ error: 'File not found' }, 404);
+      const buf = await fs.readFile(filePath).catch(() => null);
+      if (!buf) return json({ error: 'File is missing on the server' }, 404);
+      const asciiName = String(row.filename).replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+      // Only types that can't carry script are served as themselves (that's
+      // what the page previews). Anything else -- HTML, SVG, whatever the
+      // browser claimed on upload -- goes out as an opaque download.
+      const previewable = INLINE_MIME.has(String(row.mime || '').toLowerCase());
+      return new NextResponse(buf, {
+        headers: {
+          'Content-Type': previewable ? row.mime : 'application/octet-stream',
+          'Content-Length': String(buf.length),
+          'Content-Disposition': `${previewable ? 'inline' : 'attachment'}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+
+    if (!manager) return json({ error: 'Only the author or an admin can change documents' }, 403);
+
+    // POST kb/articles/:id/files  (multipart field "file")
+    if (!subId && method === 'POST') {
+      const form = await req.formData().catch(() => null);
+      const file = form?.get('file');
+      if (!(file instanceof Blob)) return json({ error: 'No file provided' }, 400);
+      if (file.size > MAX_FILE_BYTES) return json({ error: 'File too large (max 50 MB)' }, 413);
+      const originalName = String((file as any).name || 'document').slice(0, 255);
+      const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'document';
+      const fileId = rid();
+      const relPath = `${kbDir(id)}/${fileId}-${safeName}`;
+      const absPath = nodePath.resolve(process.cwd(), relPath);
+      await fs.mkdir(nodePath.dirname(absPath), { recursive: true });
+      await fs.writeFile(absPath, Buffer.from(await file.arrayBuffer()));
+      const row = await pool.query(
+        `INSERT INTO kb_files (id, article_id, filename, mime, size, storage_path, uploaded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [fileId, id, originalName, file.type || null, file.size, relPath, userId],
+      );
+      await pool.query(`UPDATE kb_articles SET updated_at = NOW() WHERE id = $1`, [id]);
+      return json(formatFile(row.rows[0]), 201);
+    }
+
+    // DELETE kb/articles/:id/files/:fileId
+    if (subId && method === 'DELETE') {
+      const row = (await pool.query(`DELETE FROM kb_files WHERE id = $1 AND article_id = $2 RETURNING *`, [subId, id])).rows[0];
+      if (!row) return json({ error: 'File not found' }, 404);
+      const filePath = nodePath.resolve(process.cwd(), row.storage_path);
+      if (filePath.startsWith(uploadsRoot)) await fs.unlink(filePath).catch(() => {});
+      return json({ ok: true });
+    }
+
+    return json({ error: 'Method not allowed' }, 405);
+  }
+
+  // ── Questions ────────────────────────────────────────────────────────────
+  if (action === 'questions') {
+    // GET kb/articles/:id/questions -- every reader sees the whole thread
+    if (!subId && method === 'GET') {
+      const rows = await pool.query(`SELECT * FROM kb_questions WHERE article_id = $1 ORDER BY created_at`, [id]);
+      return json(rows.rows.map((r) => formatQuestion(r, userId, manager)));
+    }
+
+    // POST kb/articles/:id/questions {question}
+    if (!subId && method === 'POST') {
+      if (article.status !== 'published') return json({ error: 'Questions open once the article is published' }, 400);
+      const body: any = await req.json().catch(() => ({}));
+      const question = String(body.question || '').trim();
+      if (!question) return json({ error: 'Type a question first' }, 400);
+      if (question.length > MAX_QA_CHARS) return json({ error: `Questions are limited to ${MAX_QA_CHARS} characters` }, 400);
+      const askerName = displayNameOf(currentUser);
+      const row = await pool.query(
+        `INSERT INTO kb_questions (id, article_id, asker_id, asker_name, question)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [rid(), id, userId, askerName, question],
+      );
+      if (article.author_id !== userId) {
+        await notify(article.author_id, 'KB_QUESTION', `${askerName} asked a question on "${clip(article.title, 80)}"`, clip(question, 140), id);
+      }
+      return json(formatQuestion(row.rows[0], userId, manager), 201);
+    }
+
+    if (!subId) return json({ error: 'Method not allowed' }, 405);
+    const q = (await pool.query(`SELECT * FROM kb_questions WHERE id = $1 AND article_id = $2`, [subId, id])).rows[0];
+    if (!q) return json({ error: 'Question not found' }, 404);
+
+    // PUT kb/articles/:id/questions/:qid/answer {answer} -- author or admin
+    if (subAction === 'answer' && method === 'PUT') {
+      if (!manager) return json({ error: 'Only the author or an admin can answer' }, 403);
+      const body: any = await req.json().catch(() => ({}));
+      const answer = String(body.answer || '').trim();
+      if (!answer) return json({ error: 'Type an answer first' }, 400);
+      if (answer.length > MAX_QA_CHARS) return json({ error: `Answers are limited to ${MAX_QA_CHARS} characters` }, 400);
+      const answererName = displayNameOf(currentUser);
+      const firstAnswer = !q.answer;
+      const row = await pool.query(
+        `UPDATE kb_questions SET answer = $2, answered_by_id = $3, answered_by_name = $4, answered_at = NOW()
+         WHERE id = $1 RETURNING *`,
+        [subId, answer, userId, answererName],
+      );
+      if (q.asker_id !== userId) {
+        await notify(
+          q.asker_id,
+          'KB_ANSWER',
+          `${answererName} ${firstAnswer ? 'answered' : 'updated the answer to'} your question on "${clip(article.title, 80)}"`,
+          clip(answer, 140),
+          id,
+        );
+      }
+      return json(formatQuestion(row.rows[0], userId, manager));
+    }
+
+    // DELETE kb/articles/:id/questions/:qid -- author, admin, or the asker
+    if (!subAction && method === 'DELETE') {
+      if (!manager && q.asker_id !== userId) return json({ error: 'You can only delete your own questions' }, 403);
+      await pool.query(`DELETE FROM kb_questions WHERE id = $1`, [subId]);
+      return json({ ok: true });
+    }
+
+    return json({ error: 'Method not allowed' }, 405);
+  }
+
+  if (!manager) {
     return json({ error: 'Only the author or an admin can change this article' }, 403);
   }
 
@@ -244,6 +474,12 @@ export async function handleKbApi(
 
   if (!action && method === 'DELETE') {
     await pool.query(`DELETE FROM kb_articles WHERE id = $1`, [id]);
+    // Rows in kb_files/kb_questions cascade; the documents on disk don't.
+    try {
+      const nodePath = await import('path');
+      const fs = await import('fs/promises');
+      await fs.rm(nodePath.resolve(process.cwd(), kbDir(id)), { recursive: true, force: true });
+    } catch { /* best-effort cleanup */ }
     return json({ ok: true });
   }
 

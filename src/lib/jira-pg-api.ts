@@ -4795,6 +4795,9 @@ async function _handleJiraPgApi(
 
   // Serve previously uploaded files by reading straight from disk (see note above).
   if (segments[0] === 'uploads' && method === 'GET') {
+    // KB documents can be restricted to specific teams, so they're never
+    // served from this unauthenticated route -- only via kb/articles/:id/files.
+    if (segments[1] === 'kb') return new NextResponse(null, { status: 404 });
     try {
       const nodePath = await import('path');
       const { readFile, stat } = await import('fs/promises');

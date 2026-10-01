@@ -448,6 +448,56 @@ class ApiClient {
   deleteKbArticle(id: string) {
     return this.request<{ ok: boolean }>(`/kb/articles/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
+  // XHR rather than fetch so the editor can show upload progress.
+  uploadKbFile(id: string, file: File, onProgress?: (pct: number) => void): Promise<KbFile> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_URL}/kb/articles/${encodeURIComponent(id)}/files`);
+      const token = this.getToken();
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100)); };
+      xhr.onload = () => {
+        let data: any = {};
+        try { data = JSON.parse(xhr.responseText || '{}'); } catch {}
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data as KbFile);
+        else reject(new Error(data.error || (xhr.status === 413 ? 'File too large (max 50 MB)' : 'Upload failed')));
+      };
+      xhr.onerror = () => reject(new Error('Upload failed: network error'));
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      xhr.send(fd);
+    });
+  }
+  // KB documents are access-controlled, so they can't be a plain <a href> /
+  // <iframe src> (neither sends the Authorization header). Fetch the bytes
+  // with the token and let the page turn them into a blob: URL.
+  async fetchKbFileBlob(id: string, fileId: string): Promise<Blob> {
+    const token = this.getToken();
+    const res = await fetch(`${API_URL}/kb/articles/${encodeURIComponent(id)}/files/${encodeURIComponent(fileId)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let msg = 'Failed to load document';
+      try { msg = (await res.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    return res.blob();
+  }
+  deleteKbFile(id: string, fileId: string) {
+    return this.request<{ ok: boolean }>(`/kb/articles/${encodeURIComponent(id)}/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' });
+  }
+  listKbQuestions(id: string) {
+    return this.request<KbQuestion[]>(`/kb/articles/${encodeURIComponent(id)}/questions`);
+  }
+  askKbQuestion(id: string, question: string) {
+    return this.request<KbQuestion>(`/kb/articles/${encodeURIComponent(id)}/questions`, { method: 'POST', body: JSON.stringify({ question }) });
+  }
+  answerKbQuestion(id: string, qid: string, answer: string) {
+    return this.request<KbQuestion>(`/kb/articles/${encodeURIComponent(id)}/questions/${encodeURIComponent(qid)}/answer`, { method: 'PUT', body: JSON.stringify({ answer }) });
+  }
+  deleteKbQuestion(id: string, qid: string) {
+    return this.request<{ ok: boolean }>(`/kb/articles/${encodeURIComponent(id)}/questions/${encodeURIComponent(qid)}`, { method: 'DELETE' });
+  }
   getFileHealth() {
     return this.request<{ totalChecked: number; missingCount: number; missing: Array<{ ticketKey: string; filename: string; url: string; source: string }> }>('/admin/file-health');
   }
@@ -536,7 +586,24 @@ export type KbArticle = {
   createdAt: string;
   updatedAt: string;
   publishedAt: string | null;
+  fileCount: number;
+  questionCount: number;
+  openQuestionCount: number;
+  files?: KbFile[];
   canManage: boolean;
+};
+export type KbFile = { id: string; filename: string; mime: string | null; size: number; createdAt: string };
+export type KbQuestion = {
+  id: string;
+  question: string;
+  askerId: string;
+  askerName: string | null;
+  createdAt: string;
+  answer: string | null;
+  answeredById: string | null;
+  answeredByName: string | null;
+  answeredAt: string | null;
+  canDelete: boolean;
 };
 
 export const api = new ApiClient();
