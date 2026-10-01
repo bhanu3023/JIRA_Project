@@ -17,6 +17,7 @@ import {
   List, LayoutGrid, Download,
 } from 'lucide-react';
 import { can } from '@/lib/permissions';
+import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
 
 /* ─── types ─── */
 interface FilterCriteria {
@@ -742,6 +743,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'customerName',   label: 'Customer Name',   group: 'Issue' },
   { id: 'clientName',     label: 'Client Name',     group: 'Issue' },
   { id: 'projectPool',    label: 'Project Pool',    group: 'Issue' },
+  { id: 'infraIssueType', label: 'Infra Issue Type', group: 'Issue' },
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'worked',         label: 'Worked',          group: 'Date' },
@@ -1075,6 +1077,7 @@ export default function FiltersPage() {
   const [selClientName, setSelClientName] = useState<string[]>([]);
   const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
   const [selProjectPool, setSelProjectPool] = useState('');
+  const [selInfraIssueType, setSelInfraIssueType] = useState<string[]>([]);
   const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
   const [selOverdue, setSelOverdue] = useState<'yes' | 'no' | ''>('');
 
@@ -1148,6 +1151,7 @@ export default function FiltersPage() {
     if (key === 'clientName')     setSelClientName([]);
     if (key === 'projectManager') setSelProjectManager([]);
     if (key === 'projectPool')    setSelProjectPool('');
+    if (key === 'infraIssueType') setSelInfraIssueType([]);
   };
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
@@ -1240,6 +1244,7 @@ export default function FiltersPage() {
     const rClientName      = urlParams?.get('rClientName');
     const rProjectManager  = urlParams?.get('rProjectManager');
     const rProjectPool     = urlParams?.get('rProjectPool');
+    const rInfraIssueType  = urlParams?.get('rInfraIssueType');
     const rBreached        = urlParams?.get('rBreached');
     const rOverdue         = urlParams?.get('rOverdue');
     const rQ               = urlParams?.get('rQ');
@@ -1264,6 +1269,7 @@ export default function FiltersPage() {
     if (rClientName) setSelClientName(rClientName.split(','));
     if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
     if (rProjectPool) setSelProjectPool(rProjectPool);
+    if (rInfraIssueType) setSelInfraIssueType(rInfraIssueType.split(','));
     if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
     if (rOverdue === 'yes' || rOverdue === 'no') setSelOverdue(rOverdue);
     if (rQ) setText(rQ);
@@ -1279,6 +1285,7 @@ export default function FiltersPage() {
     const impliedExtras = [
       rProductType && 'productType', rProductionTicket && 'productionTicket', rCombination && 'combination', rCustomerName && 'customerName',
       rClientName && 'clientName', rProjectManager && 'projectManager', rProjectPool && 'projectPool',
+      rInfraIssueType && 'infraIssueType',
       rWorked && 'worked', rDueDate && 'dueDate',
     ].filter(Boolean) as string[];
     if (rExtras || impliedExtras.length) {
@@ -1317,12 +1324,13 @@ export default function FiltersPage() {
     if (selClientName.length) p.rClientName = selClientName.join(',');
     if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
     if (selProjectPool) p.rProjectPool = selProjectPool;
+    if (selInfraIssueType.length) p.rInfraIssueType = selInfraIssueType.join(',');
     if (selBreached) p.rBreached = selBreached;
     if (selOverdue) p.rOverdue = selOverdue;
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1381,7 +1389,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selWorked || selDueDate || selDepartment ||
-    selProductType.length || selProductionTicket.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selBreached || selOverdue,
+    selProductType.length || selProductionTicket.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selInfraIssueType.length || selBreached || selOverdue,
   );
 
   // Builds the filter params both the live table and the CSV export send —
@@ -1481,6 +1489,7 @@ export default function FiltersPage() {
         // stored value (e.g. "Abhishikth, Abhishek" naming two people as one value).
         if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
         if (selProjectPool)    params.projectPool    = selProjectPool;
+        if (selInfraIssueType.length) params.infraIssueType = selInfraIssueType.join(',');
         if (selBreached) params.slaBreached = selBreached;
         if (selOverdue) params.overdue = selOverdue;
 
@@ -1488,7 +1497,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy.
      Short (150ms) debounce -- NOT the old flat 400ms, which made every
@@ -1597,6 +1606,7 @@ export default function FiltersPage() {
     customerName:   { label: 'Customer Name',   getValue: (i) => i.customerName ?? '' },
     clientName:     { label: 'Client Name',     getValue: (i) => i.clientName ?? '' },
     projectPool:    { label: 'Project Pool',    getValue: (i) => i.projectPool ?? '' },
+    infraIssueType: { label: 'Infra Issue Type', getValue: (i) => i.infraIssueType ?? '' },
     dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
   };
   const handleExport = async () => {
@@ -1626,6 +1636,7 @@ export default function FiltersPage() {
         clientName: selClientName.length > 0,
         projectManager: selProjectManager.length > 0,
         projectPool: !!selProjectPool,
+        infraIssueType: selInfraIssueType.length > 0,
         dueDate: !!selDueDate,
       };
       const extraCols = Object.keys(EXPORT_EXTRA_COLUMNS).filter(
@@ -1741,6 +1752,7 @@ export default function FiltersPage() {
     customerName: selCustomerName.length > 0,
     clientName: selClientName.length > 0,
     projectPool: !!selProjectPool,
+    infraIssueType: selInfraIssueType.length > 0,
     dueDate: !!selDueDate,
   };
   const tableExtraCols = EXTRA_FILTER_OPTIONS
@@ -2222,6 +2234,17 @@ export default function FiltersPage() {
               <div className="flex items-center gap-1">
                 <TextFilterBtn label="Project Pool" value={selProjectPool} onChange={setSelProjectPool} />
                 <button onClick={() => toggleExtra('projectPool')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('infraIssueType') && (
+              <div className="flex items-center gap-1">
+                <DropBtn
+                  label="Infra Issue Type"
+                  options={INFRA_ISSUE_TYPES.map(v => ({ value: v, label: v }))}
+                  selected={selInfraIssueType}
+                  onChange={setSelInfraIssueType}
+                />
+                <button onClick={() => toggleExtra('infraIssueType')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('projectManager') && (

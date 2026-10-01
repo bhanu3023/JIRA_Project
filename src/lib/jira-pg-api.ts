@@ -5828,6 +5828,7 @@ async function _handleJiraPgApi(
     const fixDescParam        = url.searchParams.get('fixDescription');
     const manageClientParam   = url.searchParams.get('manageClientName');
     const customerPlanParam   = url.searchParams.get('customerPlan');
+    const infraIssueTypeParam = url.searchParams.get('infraIssueType');
 
     // Build Prisma WHERE
     const where: Record<string, unknown> = {};
@@ -6137,6 +6138,7 @@ async function _handleJiraPgApi(
     applyMultiField(rootCauseParam,      'rootCause');
     applyMultiField(fixDescParam,        'fixDescription');
     applyMultiField(manageClientParam,   'manageClientName');
+    applyMultiField(infraIssueTypeParam, 'infraIssueType');
     applyMultiField(customerPlanParam,   'customerPlan');
 
     // Exclude done statuses Ã¢â‚¬â€ fetches done status IDs for the space and excludes them
@@ -6397,6 +6399,7 @@ async function _handleJiraPgApi(
             [clientNameParam, 'clientName'],
             [manageClientParam, 'manageClientName'],
             [customerPlanParam, 'customerPlan'],
+            [infraIssueTypeParam, 'infraIssueType'],
           ];
           for (const [param, col] of sentSimpleTextFields) {
             if (!param) continue;
@@ -6958,6 +6961,7 @@ async function _handleJiraPgApi(
         [clientNameParam, 'clientName'],
         [manageClientParam, 'manageClientName'],
         [customerPlanParam, 'customerPlan'],
+        [infraIssueTypeParam, 'infraIssueType'],
       ];
       for (const [param, col] of deptSimpleTextFields) {
         if (!param) continue;
