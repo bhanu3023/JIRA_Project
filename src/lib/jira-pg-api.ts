@@ -3483,13 +3483,23 @@ function parseDateRange(range: string): { from: Date; to: Date } {
   }
 
   if (range.startsWith('moreThan:')) {
+    // Redefined per explicit request from "anytime before N units ago, no
+    // upper bound" (from: epoch) to a single bounded window ending N units
+    // ago -- confirmed for real on Queue: Infra + "More than 1 day ago":
+    // open-ended unbounded matching returned 3,304 of ~3,327 total tickets
+    // (nearly everything, since the filter had no ceiling), when what was
+    // actually expected was a small, specific count for "around N units
+    // ago" -- the same single-day-window idea "In the range -> Yesterday"
+    // already uses for N=1 day. `to` is N units ago; `from` is N+1 units
+    // ago, giving exactly one unit's width.
     const [, ns, unit] = range.split(':');
     const n = parseInt(ns, 10) || 7;
     const t = new Date(now);
-    if (unit === 'weeks') t.setDate(t.getDate() - n * 7);
-    else if (unit === 'months') t.setMonth(t.getMonth() - n);
-    else t.setDate(t.getDate() - n);
-    return { from: new Date(0), to: t };
+    const f = new Date(now);
+    if (unit === 'weeks') { t.setDate(t.getDate() - n * 7); f.setDate(f.getDate() - (n + 1) * 7); }
+    else if (unit === 'months') { t.setMonth(t.getMonth() - n); f.setMonth(f.getMonth() - (n + 1)); }
+    else { t.setDate(t.getDate() - n); f.setDate(f.getDate() - (n + 1)); }
+    return { from: f, to: t };
   }
 
   // "Between" (custom from/to date picker) was never handled here -- it fell

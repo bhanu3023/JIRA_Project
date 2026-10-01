@@ -481,7 +481,14 @@ function decodeDateLabel(val: string): string {
   }
   if (val.startsWith('moreThan:')) {
     const [, n, unit] = val.split(':');
-    return `More than ${n} ${unit} ago`;
+    // Redefined per explicit request: this used to be open-ended ("N+
+    // units ago, no upper bound"), which always returned a huge count on
+    // an established dataset -- confirmed the expectation was actually a
+    // single bounded window ("exactly N units ago"), matching what "In the
+    // range -> Yesterday" already does for N=1 day. Label updated to match
+    // -- "More than" would now be actively misleading for what this
+    // actually computes.
+    return `Exactly ${n} ${unit} ago`;
   }
   if (val.startsWith('between:')) {
     const parts = val.split(':');
@@ -639,9 +646,12 @@ function DateDropBtn({
               </div>
             )}
 
-            {/* More than */}
+            {/* "Exactly N ago" -- a single bounded window ending N units
+                ago, not an open-ended "anytime before N units ago" (see
+                decodeDateLabel's own comment for why this was renamed from
+                "More than"). */}
             <RadioRow m="moreThan">
-              <span className="text-[13px] font-medium text-gray-800 flex-1">More than</span>
+              <span className="text-[13px] font-medium text-gray-800 flex-1">Exactly</span>
             </RadioRow>
             {mode === 'moreThan' && (
               <div className="flex items-center gap-2 bg-blue-50 px-3 py-2">
