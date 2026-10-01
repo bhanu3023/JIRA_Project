@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api, type KbFile } from '@/lib/api';
-import { KbFileViewer, viewKindOf, type ViewKind } from '@/components/kb/KbFileViewer';
+import { viewKindOf, type ViewKind } from '@/components/kb/KbFileViewer';
 import { BookOpenText, Download, FileSpreadsheet, FileText, Image as ImageIcon, Paperclip, Presentation, Trash2, Upload, X } from 'lucide-react';
 
 export function formatSize(bytes: number) {
@@ -11,7 +11,7 @@ export function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function FileIcon({ kind }: { kind: ViewKind | null }) {
+export function FileIcon({ kind }: { kind: ViewKind | null }) {
   if (kind === 'image') return <ImageIcon size={16} className="text-purple-500" />;
   if (kind === 'pdf') return <FileText size={16} className="text-red-500" />;
   if (kind === 'sheet') return <FileSpreadsheet size={16} className="text-green-600" />;
@@ -19,7 +19,7 @@ function FileIcon({ kind }: { kind: ViewKind | null }) {
   return <FileText size={16} className="text-blue-500" />;
 }
 
-async function downloadFile(articleId: string, file: KbFile) {
+export async function downloadFile(articleId: string, file: KbFile) {
   const blob = await api.fetchKbFileBlob(articleId, file.id);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -55,19 +55,18 @@ export function KbDocumentList({
       <div className="space-y-2">
         {files.map((f) => {
           const kind = viewKindOf(f);
-          const open = openId === f.id;
           return (
             <div
               key={f.id}
               id={`kb-file-${f.id}`}
               data-kb-file-id={f.id}
-              className={`scroll-mt-3 overflow-hidden rounded-lg border ${open ? 'border-blue-300 ring-1 ring-blue-100' : 'border-gray-200'}`}
+              className="overflow-hidden rounded-lg border border-gray-200"
             >
-              <div className={`flex flex-wrap items-center gap-2 px-3 py-2 ${open ? 'bg-blue-50/40' : ''}`}>
+              <div className="flex flex-wrap items-center gap-2 px-3 py-2">
                 <FileIcon kind={kind} />
                 <button
                   disabled={!kind}
-                  onClick={() => onOpenChange(open ? null : f.id)}
+                  onClick={() => onOpenChange(f.id)}
                   className="min-w-0 flex-1 truncate text-left text-[13px] font-medium text-gray-800 enabled:hover:text-blue-700 disabled:cursor-default"
                   title={f.filename}
                 >
@@ -76,10 +75,10 @@ export function KbDocumentList({
                 <span className="text-[11px] text-gray-400">{formatSize(f.size)}</span>
                 {kind && (
                   <button
-                    onClick={() => onOpenChange(open ? null : f.id)}
-                    className={`flex items-center gap-1 rounded px-2 py-1 text-[12px] ${open ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                    onClick={() => onOpenChange(f.id)}
+                    className="flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-blue-700"
                   >
-                    <BookOpenText size={13} /> {open ? 'Close' : 'Read'}
+                    <BookOpenText size={13} /> Read
                   </button>
                 )}
                 <button
@@ -99,11 +98,6 @@ export function KbDocumentList({
                   This file type can&apos;t be shown in the browser. Download it to read it.
                   {/\.(doc|ppt)$/i.test(f.filename) && ' (Older .doc/.ppt files can be re-saved as .docx/.pptx to read them here.)'}
                 </p>
-              )}
-              {open && (
-                <div className="border-t border-gray-200">
-                  <KbFileViewer articleId={articleId} file={f} />
-                </div>
               )}
             </div>
           );
