@@ -6062,19 +6062,21 @@ async function _handleJiraPgApi(
       ]);
     }
 
-    // Date range filters -- Created+Updated together is a union (everything
-    // created in that window, plus everything updated in that window), not
-    // an intersection requiring both on the same ticket; see the matching
-    // fix in the dept-scoped branch below for why. Routed through addOrGroup
-    // (see its own comment above) since assignee/search may have already
-    // added their own OR groups.
+    // Date range filters -- Created+Updated together used to be a union
+    // (everything created in that window, plus everything updated in that
+    // window) rather than requiring both on the same ticket, specifically
+    // to avoid dropping a ticket created in one window but only updated in
+    // the other. Reverted back to an intersection per explicit request:
+    // confirmed for real that "Created: More than 1 day ago" (matching
+    // nearly every ticket ever created) unioned with "Updated: Within last
+    // 1 day" swamped the result with thousands of unrelated tickets the
+    // Created side alone already matched, once the "More than" date filter
+    // bug (separately fixed) let that combination actually get typed.
     if (createdRange && updatedRange) {
       const created = parseDateRange(createdRange);
       const updated = parseDateRange(updatedRange);
-      addOrGroup([
-        { createdAt: { gte: created.from, lte: created.to } },
-        { updatedAt: { gte: updated.from, lte: updated.to } },
-      ]);
+      where.createdAt = { gte: created.from, lte: created.to };
+      where.updatedAt = { gte: updated.from, lte: updated.to };
     } else if (createdRange) {
       const { from, to } = parseDateRange(createdRange);
       where.createdAt = { gte: from, lte: to };
@@ -6987,20 +6989,24 @@ async function _handleJiraPgApi(
       // were likewise only ever wired into the general Prisma branch — picking any
       // of these while viewing a department queue showed "0 issues" even for tickets
       // created that same day.
-      // Created + Updated active together used to push two SEPARATE AND
-      // clauses here, requiring a ticket's createdAt AND its updatedAt to
-      // each fall in their own window -- an intersection that silently
-      // dropped every ticket that only satisfied one of the two (e.g. one
-      // created back in July but resolved in August, which "Updated: Aug"
-      // alone would correctly surface). Confirmed with the user this is
-      // meant to be a union instead: everything created in that window,
-      // plus everything updated in that window, not just tickets that
-      // happen to hit both windows on the same ticket.
+      // Created + Updated active together was switched to a union here (OR
+      // instead of two separate AND clauses) to avoid dropping a ticket
+      // created in one window but only updated in the other. Reverted back
+      // to requiring both per explicit request: confirmed for real that
+      // "Created: More than 1 day ago" (matching nearly every ticket ever
+      // created) unioned with "Updated: Within last 1 day" swamped the
+      // result with thousands of tickets the Created side alone already
+      // matched, once the separately-fixed "More than" date filter bug let
+      // that combination actually get typed. Note this only restricts the
+      // date COLUMNS themselves -- deptScopeSql's own union of origin/
+      // updated/status-based department-membership broadening (further
+      // down) is a different, still-intentional concern and is unaffected.
       if (createdRange && updatedRange) {
         const created = parseDateRange(createdRange);
         const updated = parseDateRange(updatedRange);
         deptExtraClauses.push(
-          `((i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}) OR (i."updatedAt" >= $${deptParamIdx + 2} AND i."updatedAt" <= $${deptParamIdx + 3}))`
+          `(i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1})`,
+          `(i."updatedAt" >= $${deptParamIdx + 2} AND i."updatedAt" <= $${deptParamIdx + 3})`
         );
         deptExtraParams.push(created.from, created.to, updated.from, updated.to);
         deptParamIdx += 4;
