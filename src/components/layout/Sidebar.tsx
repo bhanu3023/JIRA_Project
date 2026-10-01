@@ -637,6 +637,7 @@ export default function Sidebar() {
           { href: '/search', icon: <Search size={16} />, match: pathname === '/search' },
           { href: '/my-dashboard', icon: <LayoutDashboard size={16} />, match: pathname === '/my-dashboard' },
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
+          { href: '/kb', icon: <BookOpen size={16} />, match: pathname.startsWith('/kb') },
           ...(canSeeMbr ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
           ...(isPrivileged ? [{ href: '/file-health', icon: <FileWarning size={16} />, match: pathname === '/file-health' }] : []),
         ].map((item, i) => (
@@ -692,6 +693,7 @@ export default function Sidebar() {
             <GlobalNavItem href="/filters" icon={<List size={15} />} label="Filters" active={pathname === '/filters'} />
             <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
             <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
+            <GlobalNavItem href="/kb" icon={<BookOpen size={15} />} label="KB Articles" active={pathname.startsWith('/kb')} />
             {canSeeMbr && (
               <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
             )}

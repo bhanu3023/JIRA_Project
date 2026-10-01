@@ -344,6 +344,33 @@ class ApiClient {
     if (exportAll)    params.set('export',       '1');
     return this.request<{ people: any[]; monthly: any[]; summary: any; tickets: any[]; totalMatched: number }>(`/reports/mbr-team?${params}`);
   }
+  // ── KB Articles ──
+  getKbTeams() {
+    return this.request<KbTeam[]>('/kb/teams');
+  }
+  listKbArticles(scope: 'all' | 'mine' | 'drafts' = 'all', q?: string) {
+    const params = new URLSearchParams({ scope });
+    if (q) params.set('q', q);
+    return this.request<KbArticle[]>(`/kb/articles?${params}`);
+  }
+  getKbArticle(id: string) {
+    return this.request<KbArticle>(`/kb/articles/${encodeURIComponent(id)}`);
+  }
+  createKbArticle(data: { title: string; bodyHtml: string }) {
+    return this.request<KbArticle>('/kb/articles', { method: 'POST', body: JSON.stringify(data) });
+  }
+  updateKbArticle(id: string, data: { title?: string; bodyHtml?: string }) {
+    return this.request<KbArticle>(`/kb/articles/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) });
+  }
+  publishKbArticle(id: string, access: KbAccess) {
+    return this.request<KbArticle>(`/kb/articles/${encodeURIComponent(id)}/publish`, { method: 'POST', body: JSON.stringify(access) });
+  }
+  updateKbAccess(id: string, access: KbAccess) {
+    return this.request<KbArticle>(`/kb/articles/${encodeURIComponent(id)}/access`, { method: 'PATCH', body: JSON.stringify(access) });
+  }
+  deleteKbArticle(id: string) {
+    return this.request<{ ok: boolean }>(`/kb/articles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
   getFileHealth() {
     return this.request<{ totalChecked: number; missingCount: number; missing: Array<{ ticketKey: string; filename: string; url: string; source: string }> }>('/admin/file-health');
   }
@@ -416,5 +443,23 @@ class ApiClient {
   starFilter(id: string) { return this.request<any>(`/filters/${id}/star`, { method: 'POST' }); }
   unstarFilter(id: string) { return this.request<any>(`/filters/${id}/star`, { method: 'DELETE' }); }
 }
+
+export type KbTeam = { key: string; name: string; memberCount: number };
+export type KbAccess = { visibility: 'org' | 'teams'; teams: string[] };
+export type KbArticle = {
+  id: string;
+  title: string;
+  bodyHtml?: string;
+  excerpt?: string;
+  status: 'draft' | 'published';
+  visibility: 'org' | 'teams';
+  teams: { key: string; name: string }[];
+  authorId: string;
+  authorName: string | null;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  canManage: boolean;
+};
 
 export const api = new ApiClient();
