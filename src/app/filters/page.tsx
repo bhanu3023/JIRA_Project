@@ -17,6 +17,7 @@ import {
   List, LayoutGrid, Download,
 } from 'lucide-react';
 import { can } from '@/lib/permissions';
+import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
 
 /* ─── types ─── */
 interface FilterCriteria {
@@ -40,15 +41,22 @@ const TYPE_LABELS: Record<string, string> = {
   bug: 'Bug', task: 'Task', subtask: 'Subtask',
 };
 const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
-// Same fixed list the ticket's own Project Manager field picks from (CreateIssueModal.tsx,
-// issues/[issueKey]/page.tsx) — individual people, not the comma-joined combinations a
-// ticket ends up storing once multiple are picked (e.g. "Abhishikth, Abhishek").
-const PROJECT_MANAGER_OPTIONS = ['Harika', 'Abhishek', 'Ajay Singh', 'Abhishikth', 'Raghu', 'Lakshmi Prasanna', 'Sri Ram', 'Chandra Mouli', 'Sravan', 'Pranavi', 'Meghana', 'Others'];
+// Was a hand-maintained hardcoded name list here (and in CreateIssueModal.tsx /
+// issues/[issueKey]/page.tsx) that drifted from reality -- a real
+// migration_manager-role user (Kiran U) was missing from it, while others
+// listed no longer held that role. Now fetched live via
+// api.getProjectManagerOptions() (see PROJECT_MANAGER_OPTIONS state below)
+// from whoever currently has the migration_manager role in User Management.
 // Same fixed list the ticket's own Product Type field picks from (see
 // CreateIssueModal.tsx / issues/[issueKey]/page.tsx) — a free-text box here
 // required typing the value out exactly (case and all) to match anything,
 // which is why it looked broken; a handful of known values is a dropdown.
 const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message Migration', 'Board Migration', 'CF Connect', 'CF Manage', 'UI', 'others', 'Others'];
+// Same fixed list the ticket's own Production Ticket field picks from (see
+// the 'productionTicket' custom-field entries in issues/[issueKey]/page.tsx
+// and CreateIssueModal.tsx) -- this filter didn't exist on the Filters page
+// at all before, per explicit request.
+const PRODUCTION_TICKET_OPTIONS = ['Operational Support', 'Code Fixes'];
 const PRIORITY_LABELS: Record<string, string> = {
   highest: 'Highest', high: 'High', medium: 'Medium', low: 'Low', lowest: 'Lowest',
 };
@@ -473,7 +481,14 @@ function decodeDateLabel(val: string): string {
   }
   if (val.startsWith('moreThan:')) {
     const [, n, unit] = val.split(':');
-    return `More than ${n} ${unit} ago`;
+    // Redefined per explicit request: this used to be open-ended ("N+
+    // units ago, no upper bound"), which always returned a huge count on
+    // an established dataset -- confirmed the expectation was actually a
+    // single bounded window ("exactly N units ago"), matching what "In the
+    // range -> Yesterday" already does for N=1 day. Label updated to match
+    // -- "More than" would now be actively misleading for what this
+    // actually computes.
+    return `Exactly ${n} ${unit} ago`;
   }
   if (val.startsWith('between:')) {
     const parts = val.split(':');
@@ -547,7 +562,16 @@ function DateDropBtn({
   };
 
   const handleUpdate = () => {
-    const val = encodeDateFilter(mode, wlN, wlUnit, btFrom, btTo, preset);
+    // Always passed wlN/wlUnit ("Within the last") regardless of which mode
+    // was actually selected -- encodeDateFilter's 'moreThan' branch then
+    // silently used the untouched "Within the last" value (default 7)
+    // instead of whatever was typed into the "More than" field. Confirmed
+    // for real: "Created: More than 7 days ago" never changed no matter
+    // what was typed, while "Updated" (using "Within the last") worked
+    // fine. Pass each mode's own n/unit instead.
+    const n = mode === 'moreThan' ? mtN : wlN;
+    const unit = mode === 'moreThan' ? mtUnit : wlUnit;
+    const val = encodeDateFilter(mode, n, unit, btFrom, btTo, preset);
     onChange(val);
     setOpen(false);
   };
@@ -622,9 +646,12 @@ function DateDropBtn({
               </div>
             )}
 
-            {/* More than */}
+            {/* "Exactly N ago" -- a single bounded window ending N units
+                ago, not an open-ended "anytime before N units ago" (see
+                decodeDateLabel's own comment for why this was renamed from
+                "More than"). */}
             <RadioRow m="moreThan">
-              <span className="text-[13px] font-medium text-gray-800 flex-1">More than</span>
+              <span className="text-[13px] font-medium text-gray-800 flex-1">Exactly</span>
             </RadioRow>
             {mode === 'moreThan' && (
               <div className="flex items-center gap-2 bg-blue-50 px-3 py-2">
@@ -694,6 +721,26 @@ function DateDropBtn({
   );
 }
 
+// The table's own fixed (non-filter-driven) columns -- Key/Work are always
+// shown (they're the ticket's identity), everything else here can be
+// hidden via the "Columns" button. Added by explicit request: with
+// Key/Work plus up to several "More filters" columns plus all 7 of these,
+// nothing fits on one screen without horizontal scrolling no matter how
+// narrow each column gets -- letting people hide the ones they don't care
+// about (Time Spent, SLA Breached, etc.) means the ones they DO want can
+// actually fit without scrolling.
+const STATIC_COLUMN_OPTIONS = [
+  { value: 'assignee', label: 'Assignee' },
+  { value: 'reportedBy', label: 'Reported By' },
+  { value: 'status', label: 'Status' },
+  { value: 'priority', label: 'Priority' },
+  { value: 'slaBreached', label: 'SLA Breached' },
+  { value: 'overdue', label: 'Overdue' },
+  { value: 'timeSpent', label: 'Time Spent' },
+];
+const STATIC_COLUMN_IDS = STATIC_COLUMN_OPTIONS.map((c) => c.value);
+const VISIBLE_COLUMNS_STORAGE_KEY = 'filters_visible_static_columns_v1';
+
 // All available "extra" filter options that can be added to the bar from More filters
 const EXTRA_FILTER_OPTIONS = [
   { id: 'reporter',       label: 'Reporter',        group: 'People' },
@@ -701,10 +748,12 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'priority',       label: 'Priority',        group: 'Issue' },
   { id: 'department',     label: 'Department',      group: 'Issue' },
   { id: 'productType',    label: 'Product Type',    group: 'Issue' },
+  { id: 'productionTicket', label: 'Production Ticket', group: 'Issue' },
   { id: 'combination',    label: 'Combination',     group: 'Issue' },
   { id: 'customerName',   label: 'Customer Name',   group: 'Issue' },
   { id: 'clientName',     label: 'Client Name',     group: 'Issue' },
   { id: 'projectPool',    label: 'Project Pool',    group: 'Issue' },
+  { id: 'infraIssueType', label: 'Infra Issue Type', group: 'Issue' },
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'worked',         label: 'Worked',          group: 'Date' },
@@ -973,6 +1022,23 @@ export default function FiltersPage() {
   const { user, spaces } = useStore(useShallow((s) => ({ user: s.user, spaces: s.spaces })));
   const router = useRouter();
 
+  const [PROJECT_MANAGER_OPTIONS, setProjectManagerOptions] = useState<string[]>(['Others']);
+  useEffect(() => { api.getProjectManagerOptions().then(setProjectManagerOptions).catch(() => {}); }, []);
+
+  // Customer Name / Client Name used to be a plain free-text box with no
+  // visible options at all, whose typed value then had to EXACTLY match a
+  // ticket's stored value server-side (same "comes from a DB dropdown"
+  // assumption every field in this family makes) -- so almost anything
+  // typed returned zero results with no indication why. Fetching the real,
+  // currently-used values (same GET /field-values this app already uses
+  // for other pickers) and offering them as a searchable multi-select
+  // fixes both: the options are now visible, and a selected value is
+  // guaranteed to match exactly.
+  const [CUSTOMER_NAME_OPTIONS, setCustomerNameOptions] = useState<string[]>([]);
+  const [CLIENT_NAME_OPTIONS, setClientNameOptions] = useState<string[]>([]);
+  useEffect(() => { api.getFieldValues('customerName').then(setCustomerNameOptions).catch(() => {}); }, []);
+  useEffect(() => { api.getFieldValues('clientName').then(setClientNameOptions).catch(() => {}); }, []);
+
   /* filter bar state */
   const [text, setText]                   = useState('');
   const [selSpaces, setSelSpaces]         = useState<string[]>([]);
@@ -1015,11 +1081,13 @@ export default function FiltersPage() {
   const [selDueDate, setSelDueDate]       = useState('');
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
+  const [selProductionTicket, setSelProductionTicket] = useState<string[]>([]);
   const [selCombination, setSelCombination] = useState('');
-  const [selCustomerName, setSelCustomerName] = useState('');
-  const [selClientName, setSelClientName] = useState('');
+  const [selCustomerName, setSelCustomerName] = useState<string[]>([]);
+  const [selClientName, setSelClientName] = useState<string[]>([]);
   const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
   const [selProjectPool, setSelProjectPool] = useState('');
+  const [selInfraIssueType, setSelInfraIssueType] = useState<string[]>([]);
   const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
   const [selOverdue, setSelOverdue] = useState<'yes' | 'no' | ''>('');
 
@@ -1087,11 +1155,13 @@ export default function FiltersPage() {
     if (key === 'priority')       setSelPriorities([]);
     if (key === 'department')     setSelDepartment('');
     if (key === 'productType')    setSelProductType([]);
+    if (key === 'productionTicket') setSelProductionTicket([]);
     if (key === 'combination')    setSelCombination('');
-    if (key === 'customerName')   setSelCustomerName('');
-    if (key === 'clientName')     setSelClientName('');
+    if (key === 'customerName')   setSelCustomerName([]);
+    if (key === 'clientName')     setSelClientName([]);
     if (key === 'projectManager') setSelProjectManager([]);
     if (key === 'projectPool')    setSelProjectPool('');
+    if (key === 'infraIssueType') setSelInfraIssueType([]);
   };
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
@@ -1178,11 +1248,13 @@ export default function FiltersPage() {
     const rDueDate         = urlParams?.get('rDueDate');
     const rDepartment      = urlParams?.get('rDepartment');
     const rProductType     = urlParams?.get('rProductType');
+    const rProductionTicket = urlParams?.get('rProductionTicket');
     const rCombination     = urlParams?.get('rCombination');
     const rCustomerName    = urlParams?.get('rCustomerName');
     const rClientName      = urlParams?.get('rClientName');
     const rProjectManager  = urlParams?.get('rProjectManager');
     const rProjectPool     = urlParams?.get('rProjectPool');
+    const rInfraIssueType  = urlParams?.get('rInfraIssueType');
     const rBreached        = urlParams?.get('rBreached');
     const rOverdue         = urlParams?.get('rOverdue');
     const rQ               = urlParams?.get('rQ');
@@ -1201,11 +1273,13 @@ export default function FiltersPage() {
     if (rDueDate) setSelDueDate(rDueDate);
     if (rDepartment) setSelDepartment(rDepartment);
     if (rProductType) setSelProductType(rProductType.split(','));
+    if (rProductionTicket) setSelProductionTicket(rProductionTicket.split(','));
     if (rCombination) setSelCombination(rCombination);
-    if (rCustomerName) setSelCustomerName(rCustomerName);
-    if (rClientName) setSelClientName(rClientName);
+    if (rCustomerName) setSelCustomerName(rCustomerName.split(','));
+    if (rClientName) setSelClientName(rClientName.split(','));
     if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
     if (rProjectPool) setSelProjectPool(rProjectPool);
+    if (rInfraIssueType) setSelInfraIssueType(rInfraIssueType.split(','));
     if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
     if (rOverdue === 'yes' || rOverdue === 'no') setSelOverdue(rOverdue);
     if (rQ) setText(rQ);
@@ -1219,8 +1293,9 @@ export default function FiltersPage() {
     // always implies its chip should be active too, regardless of what
     // rExtras itself says.
     const impliedExtras = [
-      rProductType && 'productType', rCombination && 'combination', rCustomerName && 'customerName',
+      rProductType && 'productType', rProductionTicket && 'productionTicket', rCombination && 'combination', rCustomerName && 'customerName',
       rClientName && 'clientName', rProjectManager && 'projectManager', rProjectPool && 'projectPool',
+      rInfraIssueType && 'infraIssueType',
       rWorked && 'worked', rDueDate && 'dueDate',
     ].filter(Boolean) as string[];
     if (rExtras || impliedExtras.length) {
@@ -1253,17 +1328,19 @@ export default function FiltersPage() {
     if (selDueDate) p.rDueDate = selDueDate;
     if (selDepartment) p.rDepartment = selDepartment;
     if (selProductType.length) p.rProductType = selProductType.join(',');
+    if (selProductionTicket.length) p.rProductionTicket = selProductionTicket.join(',');
     if (selCombination) p.rCombination = selCombination;
-    if (selCustomerName) p.rCustomerName = selCustomerName;
-    if (selClientName) p.rClientName = selClientName;
+    if (selCustomerName.length) p.rCustomerName = selCustomerName.join(',');
+    if (selClientName.length) p.rClientName = selClientName.join(',');
     if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
     if (selProjectPool) p.rProjectPool = selProjectPool;
+    if (selInfraIssueType.length) p.rInfraIssueType = selInfraIssueType.join(',');
     if (selBreached) p.rBreached = selBreached;
     if (selOverdue) p.rOverdue = selOverdue;
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1322,7 +1399,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selWorked || selDueDate || selDepartment ||
-    selProductType.length || selCombination || selCustomerName || selClientName || selProjectManager.length || selProjectPool || selBreached || selOverdue,
+    selProductType.length || selProductionTicket.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selInfraIssueType.length || selBreached || selOverdue,
   );
 
   // Builds the filter params both the live table and the CSV export send —
@@ -1414,13 +1491,15 @@ export default function FiltersPage() {
         // Extra text/field filters
         if (selDepartment)     params.department     = selDepartment;
         if (selProductType.length) params.productType = selProductType.join(',');
+        if (selProductionTicket.length) params.productionTicket = selProductionTicket.join(',');
         if (selCombination)    params.combination    = selCombination;
-        if (selCustomerName)   params.customerName   = selCustomerName;
-        if (selClientName)     params.clientName     = selClientName;
+        if (selCustomerName.length) params.customerName = selCustomerName.join(',');
+        if (selClientName.length)   params.clientName   = selClientName.join(',');
         // Joined with a delimiter that won't collide with commas already inside a
         // stored value (e.g. "Abhishikth, Abhishek" naming two people as one value).
         if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
         if (selProjectPool)    params.projectPool    = selProjectPool;
+        if (selInfraIssueType.length) params.infraIssueType = selInfraIssueType.join(',');
         if (selBreached) params.slaBreached = selBreached;
         if (selOverdue) params.overdue = selOverdue;
 
@@ -1428,7 +1507,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy.
      Short (150ms) debounce -- NOT the old flat 400ms, which made every
@@ -1498,6 +1577,26 @@ export default function FiltersPage() {
      browsing cap, so the export covers everything a saved/shared filter
      would actually match, not just what's currently rendered. */
   const [exporting, setExporting] = useState(false);
+
+  // Which of STATIC_COLUMN_OPTIONS are currently shown in the results
+  // table -- per-browser preference (not shared/synced), read once on
+  // mount and persisted on every change. Defaults to everything visible
+  // (today's behavior) when nothing's saved yet or the value can't be
+  // read/parsed, so a private window or blocked storage never breaks the
+  // table, just always shows every column.
+  const [visibleStaticCols, setVisibleStaticCols] = useState<string[]>(STATIC_COLUMN_IDS);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(VISIBLE_COLUMNS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) setVisibleStaticCols(parsed.filter((v) => STATIC_COLUMN_IDS.includes(v)));
+      }
+    } catch { /* fall back to all columns visible */ }
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(visibleStaticCols)); } catch { /* per-viewer convenience only */ }
+  }, [visibleStaticCols]);
   const csvCell = (value: unknown): string => {
     const s = value == null ? '' : String(value);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -1511,11 +1610,13 @@ export default function FiltersPage() {
   // fixed list that silently omits whichever extra field they're using.
   const EXPORT_EXTRA_COLUMNS: Record<string, { label: string; getValue: (issue: any) => string }> = {
     productType:    { label: 'Product Type',    getValue: (i) => i.productType ?? '' },
+    productionTicket: { label: 'Production Ticket', getValue: (i) => i.productionTicket ?? '' },
     projectManager: { label: 'Project Manager', getValue: (i) => i.projectManager ?? '' },
     combination:    { label: 'Combination',     getValue: (i) => i.combination ?? '' },
     customerName:   { label: 'Customer Name',   getValue: (i) => i.customerName ?? '' },
     clientName:     { label: 'Client Name',     getValue: (i) => i.clientName ?? '' },
     projectPool:    { label: 'Project Pool',    getValue: (i) => i.projectPool ?? '' },
+    infraIssueType: { label: 'Infra Issue Type', getValue: (i) => i.infraIssueType ?? '' },
     dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
   };
   const handleExport = async () => {
@@ -1539,11 +1640,13 @@ export default function FiltersPage() {
       // anything was wrong. Union instead of relying on activeExtras alone.
       const fieldsWithSelectedValue = {
         productType: selProductType.length > 0,
+        productionTicket: selProductionTicket.length > 0,
         combination: !!selCombination,
-        customerName: !!selCustomerName,
-        clientName: !!selClientName,
+        customerName: selCustomerName.length > 0,
+        clientName: selClientName.length > 0,
         projectManager: selProjectManager.length > 0,
         projectPool: !!selProjectPool,
+        infraIssueType: selInfraIssueType.length > 0,
         dueDate: !!selDueDate,
       };
       const extraCols = Object.keys(EXPORT_EXTRA_COLUMNS).filter(
@@ -1554,10 +1657,25 @@ export default function FiltersPage() {
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
+      // Excel (and Google Sheets, when the CSV is imported) evaluates a cell
+      // starting with "=" as a formula regardless of CSV quoting, so
+      // =HYPERLINK(url,label) makes the Key column clickable in the
+      // exported file, opening the same ticket detail page the in-app Key
+      // link goes to -- same href construction (viewDept when a queue is
+      // selected, so the opened ticket shows this queue's own historical
+      // assignee/status snapshot, not just whoever holds it live).
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      const keyLink = (issue: any) => {
+        const key = issue.cfKey ?? issue.key;
+        const href = selQueue
+          ? `${origin}/issues/${key}?ref=filters&viewDept=${encodeURIComponent(selQueue)}`
+          : `${origin}/issues/${key}?ref=filters`;
+        return `=HYPERLINK("${href.replace(/"/g, '""')}","${String(key).replace(/"/g, '""')}")`;
+      };
       const lines = [header.map(csvCell).join(',')];
       for (const issue of list) {
         lines.push([
-          issue.cfKey ?? issue.key,
+          keyLink(issue),
           issue.type ?? '',
           issue.summary ?? '',
           issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
@@ -1638,16 +1756,44 @@ export default function FiltersPage() {
     created: !!selCreated,
     updated: !!selUpdated,
     productType: selProductType.length > 0,
+    productionTicket: selProductionTicket.length > 0,
     combination: !!selCombination,
     projectManager: selProjectManager.length > 0,
-    customerName: !!selCustomerName,
-    clientName: !!selClientName,
+    customerName: selCustomerName.length > 0,
+    clientName: selClientName.length > 0,
     projectPool: !!selProjectPool,
+    infraIssueType: selInfraIssueType.length > 0,
     dueDate: !!selDueDate,
   };
   const tableExtraCols = EXTRA_FILTER_OPTIONS
     .map((f) => f.id)
     .filter((id) => TABLE_COLUMN_DEFS[id] && (activeExtras.includes(id) || EXTRA_COLUMN_HAS_VALUE[id]));
+
+  // "Columns" used to list only the 7 fixed columns (Assignee/Status/etc)
+  // -- a field added via "More filters" (Infra Issue Type, Combination,
+  // etc.) DID already auto-show as a table column via tableExtraCols
+  // above, but had no entry here, so there was no way to see it listed or
+  // turn it back off except by removing the filter chip entirely. Merged
+  // into one combined checklist: picking any of these fields here either
+  // flips the static column's own visibility, or toggles the extra
+  // field's "More filters" chip (same effect as adding/removing it there,
+  // including clearing its value on removal via toggleExtra).
+  const columnsDropdownOptions = [
+    ...STATIC_COLUMN_OPTIONS,
+    ...EXTRA_FILTER_OPTIONS.filter((f) => TABLE_COLUMN_DEFS[f.id]).map((f) => ({ value: f.id, label: f.label })),
+  ];
+  const columnsDropdownSelected = [...visibleStaticCols, ...tableExtraCols];
+  const handleColumnsDropdownChange = (next: string[]) => {
+    const added = next.find((id) => !columnsDropdownSelected.includes(id));
+    const removed = columnsDropdownSelected.find((id) => !next.includes(id));
+    const toggledId = added ?? removed;
+    if (!toggledId) return;
+    if (STATIC_COLUMN_IDS.includes(toggledId)) {
+      setVisibleStaticCols(next.filter((id) => STATIC_COLUMN_IDS.includes(id)));
+    } else {
+      toggleExtra(toggledId);
+    }
+  };
 
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
@@ -1668,8 +1814,8 @@ export default function FiltersPage() {
     setText(''); setSelSpaces([]); setSelQueue(''); setSelAssignees([]); setSelReporters([]);
     setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
     setSelCreated(''); setSelUpdated(''); setSelDueDate('');
-    setSelDepartment(''); setSelProductType([]);
-    setSelCombination(''); setSelCustomerName(''); setSelClientName(''); setSelProjectManager([]);
+    setSelDepartment(''); setSelProductType([]); setSelProductionTicket([]);
+    setSelCombination(''); setSelCustomerName([]); setSelClientName([]); setSelProjectManager([]);
     setSelProjectPool('');
     setSelBreached('');
     setSelOverdue('');
@@ -2009,6 +2155,12 @@ export default function FiltersPage() {
                 <X size={12} /> Clear
               </button>
             )}
+            <DropBtn
+              label="Columns"
+              options={columnsDropdownOptions}
+              selected={columnsDropdownSelected}
+              onChange={handleColumnsDropdownChange}
+            />
             {can(user?.role, 'exportData') && (
               <button
                 onClick={handleExport}
@@ -2075,6 +2227,17 @@ export default function FiltersPage() {
                 <button onClick={() => toggleExtra('productType')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
+            {activeExtras.includes('productionTicket') && (
+              <div className="flex items-center gap-1">
+                <DropBtn
+                  label="Production Ticket"
+                  options={PRODUCTION_TICKET_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selProductionTicket}
+                  onChange={setSelProductionTicket}
+                />
+                <button onClick={() => toggleExtra('productionTicket')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
             {activeExtras.includes('combination') && (
               <div className="flex items-center gap-1">
                 <TextFilterBtn label="Combination" value={selCombination} onChange={setSelCombination} />
@@ -2083,13 +2246,23 @@ export default function FiltersPage() {
             )}
             {activeExtras.includes('customerName') && (
               <div className="flex items-center gap-1">
-                <TextFilterBtn label="Customer Name" value={selCustomerName} onChange={setSelCustomerName} />
+                <DropBtn
+                  label="Customer Name"
+                  options={CUSTOMER_NAME_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selCustomerName}
+                  onChange={setSelCustomerName}
+                />
                 <button onClick={() => toggleExtra('customerName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('clientName') && (
               <div className="flex items-center gap-1">
-                <TextFilterBtn label="Client Name" value={selClientName} onChange={setSelClientName} />
+                <DropBtn
+                  label="Client Name"
+                  options={CLIENT_NAME_OPTIONS.map(v => ({ value: v, label: v }))}
+                  selected={selClientName}
+                  onChange={setSelClientName}
+                />
                 <button onClick={() => toggleExtra('clientName')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
@@ -2097,6 +2270,17 @@ export default function FiltersPage() {
               <div className="flex items-center gap-1">
                 <TextFilterBtn label="Project Pool" value={selProjectPool} onChange={setSelProjectPool} />
                 <button onClick={() => toggleExtra('projectPool')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('infraIssueType') && (
+              <div className="flex items-center gap-1">
+                <DropBtn
+                  label="Infra Issue Type"
+                  options={INFRA_ISSUE_TYPES.map(v => ({ value: v, label: v }))}
+                  selected={selInfraIssueType}
+                  onChange={setSelInfraIssueType}
+                />
+                <button onClick={() => toggleExtra('infraIssueType')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('projectManager') && (
@@ -2175,7 +2359,12 @@ export default function FiltersPage() {
           <table className="table-fixed">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
-                <th className="px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24">Key</th>
+                {/* Key + Work used to be pinned to the left edge (sticky) so
+                    they stayed visible while scrolling right -- reverted per
+                    explicit request: the whole row (key included) should
+                    scroll together as one unit, not leave Key/Work frozen
+                    while the rest of the row moves underneath them. */}
+                <th className="bg-gray-50 px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-24 border-r border-gray-200">Key</th>
                 {/* Explicit width, not left to soak up whatever's left --
                     table-fixed hands 100% of any unclaimed width to the one
                     column with no width class, which at the page's widened
@@ -2194,7 +2383,7 @@ export default function FiltersPage() {
                     below already truncates with an ellipsis, so this only
                     trades off how much of a long title shows before
                     truncating, not readability of what does fit. */}
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[220px]">Work</th>
+                <th className="bg-gray-50 px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-[220px] border-r border-gray-200">Work</th>
                 {tableExtraCols.map((id) => (
                   <th key={id} className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-32">
                     {TABLE_COLUMN_DEFS[id].label}
@@ -2205,13 +2394,13 @@ export default function FiltersPage() {
                     more compact column sizing the space board view (spaces/[spaceKey]/
                     page.tsx's STATIC_COLUMNS, ~150px per text column) already uses, so
                     more of the row fits on screen before needing to scroll. */}
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>
-                <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>
-                <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-20">Time Spent</th>
+                {visibleStaticCols.includes('assignee') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>}
+                {visibleStaticCols.includes('reportedBy') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>}
+                {visibleStaticCols.includes('status') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>}
+                {visibleStaticCols.includes('priority') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>}
+                {visibleStaticCols.includes('slaBreached') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-20">SLA Breached</th>}
+                {visibleStaticCols.includes('overdue') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Overdue</th>}
+                {visibleStaticCols.includes('timeSpent') && <th className="px-2 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wide w-20">Time Spent</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -2247,7 +2436,7 @@ export default function FiltersPage() {
                   : `/issues/${issue.cfKey ?? issue.key}?ref=filters`;
                 return (
                 <tr key={issue.id || issue.key} className="group hover:bg-gray-50 transition-colors">
-                  <td className="px-4 py-2.5">
+                  <td className="bg-white group-hover:bg-gray-50 transition-colors px-4 py-2.5 border-r border-gray-100">
                     <div className="flex items-center gap-1.5">
                       <IssueTypeIcon type={issue.type || 'task'} size={15} />
                       <Link
@@ -2258,7 +2447,7 @@ export default function FiltersPage() {
                       </Link>
                     </div>
                   </td>
-                  <td className="px-2 py-2.5">
+                  <td className="bg-white group-hover:bg-gray-50 transition-colors px-2 py-2.5 border-r border-gray-100">
                     <Link
                       href={issueHref}
                       className="block truncate text-[13px] text-gray-900 hover:text-blue-600 transition-colors"
@@ -2273,6 +2462,7 @@ export default function FiltersPage() {
                       </span>
                     </td>
                   ))}
+                  {visibleStaticCols.includes('assignee') && (
                   <td className="px-2 py-2.5">
                     {issue.assignee ? (
                       <div className="flex items-center gap-1.5">
@@ -2305,6 +2495,8 @@ export default function FiltersPage() {
                       <span className="text-[11.5px] text-gray-300">Unassigned</span>
                     )}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('reportedBy') && (
                   <td className="px-2 py-2.5">
                     {issue.reporter ? (
                       <div className="flex items-center gap-1.5">
@@ -2319,6 +2511,8 @@ export default function FiltersPage() {
                       <span className="text-[11.5px] text-gray-300">—</span>
                     )}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('status') && (
                   <td className="px-2 py-2.5">
                     {(() => {
                       // Queue-scoped, same as the Assignee column right next
@@ -2370,8 +2564,28 @@ export default function FiltersPage() {
                       // department (current one first, most likely the
                       // intended match) instead of only the current/selected
                       // one.
+                      // A ticket that's genuinely, currently Resolved/Closed
+                      // (its real live status, not any department's frozen
+                      // snapshot) must never display as anything else --
+                      // confirmed for real: CF-29947/CF-29923/CF-29885 are
+                      // all live-Resolved in their current department
+                      // (Migration), but matched this exact Status filter
+                      // (Resolved unchecked, In Progress checked) only
+                      // because an OLDER department they'd already left
+                      // (Dev/Infra) still has its own stale "In Progress"
+                      // snapshot from before the handoff -- correct as a
+                      // record of what happened there, but showing it as
+                      // this row's CURRENT status read as "these are stuck
+                      // in progress" when they're actually done. Once a
+                      // ticket is really done, that wins over any
+                      // department-snapshot match, regardless of which
+                      // department's old status is why the row matched the
+                      // filter at all.
+                      const liveIsDone = issue.status?.category === 'done';
                       let matchedDeptSt: any = null;
-                      if (selQueue) {
+                      if (liveIsDone) {
+                        matchedDeptSt = null;
+                      } else if (selQueue) {
                         const key = Object.keys(rawDeptStatuses).find((k) => k.toLowerCase() === selQueue.toLowerCase());
                         const st = key ? rawDeptStatuses[key] : null;
                         if (st?.name && selStatuses.some((s) => s.trim().toLowerCase() === String(st.name).trim().toLowerCase())) {
@@ -2405,9 +2619,13 @@ export default function FiltersPage() {
                       );
                     })()}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('priority') && (
                   <td className="px-2 py-2.5">
                     <PriorityIcon priority={issue.priority} size={14} />
                   </td>
+                  )}
+                  {visibleStaticCols.includes('slaBreached') && (
                   <td className="px-2 py-2.5">
                     {issue.sla_breached == null ? (
                       // No SLA policy applies to this ticket's department at all
@@ -2418,15 +2636,17 @@ export default function FiltersPage() {
                     ) : issue.sla_breached ? (
                       <div className="flex flex-col items-start gap-0.5">
                         <span className="inline-flex items-center rounded-full bg-red-100 border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-600">Yes</span>
-                        {/* Whoever currently holds the ticket (the Assignee column)
-                            isn't necessarily who caused this -- a ticket resolved
-                            late and reassigned afterward would otherwise pin the
-                            breach on the wrong person. This is the author of the
-                            status change that actually put it in its current
-                            state, same definition the ticket detail page's own
-                            SLA panel already uses for "Resolved by". */}
+                        {/* Per explicit request: shows the ticket's actual
+                            ASSIGNEE, not whoever happened to click Resolved
+                            -- reversed from an earlier design that
+                            attributed the breach to the resolving action's
+                            author, since someone else (an admin, a
+                            handoff) closing out a ticket on the assignee's
+                            behalf is routine, and the business wants the
+                            breach pinned on whoever was actually
+                            responsible for the work. */}
                         {issue.sla_breached_by && (
-                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Author of the status change that resolved this ticket">
+                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="This ticket's assignee">
                             by {issue.sla_breached_by}
                           </span>
                         )}
@@ -2446,6 +2666,8 @@ export default function FiltersPage() {
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
                     )}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('overdue') && (
                   <td className="px-2 py-2.5">
                     {/* The ticket's own dueDate crossing "now" while still open --
                         independent of SLA Breached, which is the fact this exact
@@ -2456,6 +2678,8 @@ export default function FiltersPage() {
                       <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-400">No</span>
                     )}
                   </td>
+                  )}
+                  {visibleStaticCols.includes('timeSpent') && (
                   <td className="px-2 py-2.5 text-right">
                     <span className="text-[11.5px] text-gray-600 tabular-nums font-medium whitespace-nowrap">
                       {typeof issue.inProgressHrs === 'number' ? `${issue.inProgressHrs}h` : '—'}
@@ -2464,6 +2688,7 @@ export default function FiltersPage() {
                       )}
                     </span>
                   </td>
+                  )}
                 </tr>
                 );
               })}

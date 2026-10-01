@@ -5,6 +5,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pgPool as pool } from '@/lib/pg-pool';
 import { sendNotification } from '@/lib/notification-service';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 
@@ -24,6 +25,16 @@ async function getAppUrl(): Promise<string> {
 
 export async function POST(req: NextRequest) {
   try {
+    // No auth check existed here at all -- anyone could trigger this app's
+    // real, trusted mail infrastructure to send a "You've been invited"
+    // email to any address, with attacker-controlled firstName/lastName/
+    // invitedBy interpolated unescaped into the HTML (a spoofing/phishing
+    // vector). The actual account creation (POST /users) is correctly
+    // isAdmin-gated already; this side-effect-only mailer wasn't. Confirmed
+    // via a security audit.
+    const adminAuth = await requireAdmin(req);
+    if (!adminAuth.ok) return NextResponse.json({ error: adminAuth.error }, { status: adminAuth.status });
+
     const body = await req.json() as {
       email: string;
       firstName: string;

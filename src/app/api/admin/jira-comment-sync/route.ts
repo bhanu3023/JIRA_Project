@@ -15,11 +15,10 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
-
-const SECRET = process.env.ADMIN_BULK_SECRET || 'cf-admin-sync-2024';
 
 function normalize(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -62,9 +61,10 @@ interface BoardConfig { jiraProject: string; spaceKey: string; matchBy: 'key' | 
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
-    if (body.secret !== SECRET) return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+    const adminAuth = await requireAdmin(req);
+    if (!adminAuth.ok) return NextResponse.json({ ok: false, error: adminAuth.error }, { status: adminAuth.status });
 
+    const body = await req.json().catch(() => ({}));
     const { jiraUrl, email, apiToken, boards } = body;
     if (!jiraUrl || !email || !apiToken || !Array.isArray(boards) || boards.length === 0) {
       return NextResponse.json({ ok: false, error: 'Missing required fields' }, { status: 400 });

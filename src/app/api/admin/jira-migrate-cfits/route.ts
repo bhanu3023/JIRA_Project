@@ -13,6 +13,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -81,6 +82,13 @@ const CUSTOM_FIELDS = 'customfield_10401,customfield_10883,customfield_11380,cus
 
 export async function POST(req: NextRequest) {
   try {
+    // No auth check existed here at all -- unlike its sibling routes
+    // (fix-space-types, bulk-patch, jira-field-sync/comment-sync/link-sync,
+    // auto-link-boards, sync-board-fields), this bulk-mutation endpoint had
+    // no requireAdmin() call. Confirmed via a security audit.
+    const adminAuth = await requireAdmin(req);
+    if (!adminAuth.ok) return NextResponse.json({ ok: false, error: adminAuth.error }, { status: adminAuth.status });
+
     const body = await req.json().catch(() => ({}));
     const { jiraUrl, email, apiToken, department = 'Migration' } = body;
 

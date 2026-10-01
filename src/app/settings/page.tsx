@@ -28,7 +28,10 @@ function SyncMsPhotosButton({ onDone }: { onDone: () => void }) {
     try {
       const res = await fetch('/api/admin/sync-ms-photos', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+        },
         body: JSON.stringify({ forceAll }),
       });
       const data = await res.json();
@@ -105,8 +108,11 @@ function SyncBoardFieldsButton() {
     try {
       const res = await fetch('/api/admin/sync-board-fields', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ secret: 'cf-admin-sync-2024', jiraUrl, email, apiToken }),
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+        },
+        body: JSON.stringify({ jiraUrl, email, apiToken }),
       });
       const data = await res.json();
       if (data.ok) setResult({ totalUpdated: data.totalUpdated, boards: data.boards });
@@ -569,9 +575,9 @@ function SettingsContent() {
             </div>
             {[
               { label: 'Authentication', value: 'JWT Token' },
-              { label: 'Token Expiry', value: '7 days' },
+              { label: 'Token Expiry', value: '30 days' },
               { label: 'Password Hashing', value: 'bcrypt (10 rounds)' },
-              { label: 'CORS', value: 'Enabled (all origins)' },
+              { label: 'CORS', value: 'Same-origin only' },
             ].map((item, idx) => (
               <div key={idx} className={`flex items-center justify-between px-6 py-3.5 ${idx > 0 ? 'border-t border-gray-50' : ''}`}>
                 <span className="text-sm text-gray-600">{item.label}</span>
@@ -1999,7 +2005,10 @@ function SettingsContent() {
           const currentUser = useStore.getState().user;
           await fetch('/api/users/invite', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+            },
             body: JSON.stringify({
               email:      inviteForm.email,
               firstName:  inviteForm.firstName,
@@ -2337,7 +2346,10 @@ function SettingsContent() {
                                       const appUrl = window.location.origin;
                                       const res = await fetch('/api/users/invite', {
                                         method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
+                                        headers: {
+                                          'Content-Type': 'application/json',
+                                          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+                                        },
                                         body: JSON.stringify({
                                           email: u.email,
                                           firstName: u.firstName || '',
@@ -2574,7 +2586,10 @@ function SettingsContent() {
                   <button
                     onClick={async () => {
                       try {
-                        await fetch('/api/users/invite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        await fetch('/api/users/invite', { method: 'POST', headers: {
+                          'Content-Type': 'application/json',
+                          Authorization: `Bearer ${localStorage.getItem('jira_token') || ''}`,
+                        },
                           body: JSON.stringify({ email: u.email, firstName: u.firstName, lastName: u.lastName, role: u.role,
                             invitedBy: `${user?.firstName} ${user?.lastName}`.trim() }) });
                         setMessage(`Invite resent to ${u.email}`);

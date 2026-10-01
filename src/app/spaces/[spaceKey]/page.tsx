@@ -10,7 +10,7 @@ import { typeIcons, getInitials, getIssueStatus, getEffectiveIssueStatus, timeAg
 import CommentReactions from '@/components/ui/CommentReactions';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { trackRecentItem } from '@/lib/recent-items';
-import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
+import { PriorityIcon, getPriorityMeta, PRIORITIES, getSelectablePriorities } from '@/components/ui/PriorityIcon';
 import SpaceIcon from '@/components/ui/SpaceIcon';
 import DotLoader from '@/components/ui/DotLoader';
 import RichTextEditor from '@/components/ui/RichTextEditor';
@@ -120,7 +120,7 @@ function SpaceDetailContent() {
       : Array.isArray(rawKey)
         ? (rawKey[0] || '').toUpperCase()
         : '';
-  const { currentSpace, currentSpaceError, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion, bumpIssuesVersion } = useStore(
+  const { currentSpace, currentSpaceError, loadSpace, issues, issueTotal, loadIssues, prefetchIssues, clearIssuesCache, loading, user, issuesVersion, bumpIssuesVersion, disabledPriorities } = useStore(
     useShallow((s) => ({
       currentSpace: s.currentSpace,
       currentSpaceError: s.currentSpaceError,
@@ -134,6 +134,7 @@ function SpaceDetailContent() {
       user: s.user,
       issuesVersion: s.issuesVersion,
       bumpIssuesVersion: s.bumpIssuesVersion,
+      disabledPriorities: s.disabledPriorities,
     })),
   );
   // Declared this early (rather than down near the access-check block) because
@@ -654,8 +655,13 @@ function SpaceDetailContent() {
           // Closed tickets (service_desk boards) — the inverse of "All Tickets": only
           // resolved/done tickets. This used to link to all-requests, which has no
           // status filtering at all, so open tickets showed up under "Closed tickets".
+          // Also scoped to the current user, matching "Assigned to me" right above it
+          // in the sidebar — this used to show every closed ticket in the space
+          // regardless of assignee, so anyone viewing it saw everyone else's closed
+          // tickets too, not just their own.
           if (queueFilter === 'closed') {
             params.statusCategory = 'done';
+            if (user?.id) params.assignee = user.id;
           }
           // Unassigned queue — pass unassigned flag; dept-scoped users get filtered by dept
           if (queueFilter === 'unassigned') {
@@ -849,7 +855,10 @@ function SpaceDetailContent() {
       if (queueFilter === 'assigned' || queueFilter === 'unassigned' || queueFilter === 'my-queue') params.excludeDone = 'true';
       if (queueFilter === 'unassigned') params.unassigned = 'true';
       if (queueFilter === 'assigned' && user?.id) params.assignee = user.id;
-      if (queueFilter === 'closed') params.statusCategory = 'done';
+      if (queueFilter === 'closed') {
+        params.statusCategory = 'done';
+        if (user?.id) params.assignee = user.id;
+      }
       if (queueFilter === 'all-requests') params.limit = '50';
       prefetchIssues(params).catch(() => {});
     }, 30_000);
@@ -999,9 +1008,16 @@ function SpaceDetailContent() {
       clearIssuesCache();
       bumpIssuesVersion();
     }
-    catch (err) {
+    catch (err: any) {
       console.error(err);
       useStore.setState({ issues: prevIssues });
+      // Without this, a rejected update (e.g. "only QA can mark it resolved"
+      // -- the same origin-department rule the issue detail page enforces)
+      // just silently reverted the row with zero explanation, reading as
+      // "resolving from this list doesn't work" rather than the real,
+      // specific reason. api.request already throws the server's own
+      // message (see its `throw new Error(data.error ...)`), so surface it.
+      alert(err?.message || 'Failed to update the ticket.');
     }
     finally { setUpdating(null); }
   }, [clearIssuesCache, bumpIssuesVersion]);
@@ -1027,9 +1043,12 @@ function SpaceDetailContent() {
       } as any);
       clearIssuesCache();
       bumpIssuesVersion();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
       useStore.setState({ issues: prevIssues });
+      // Same silent-revert gap as handleInlineUpdate above, for the
+      // queue-scoped (qst_...) status path -- surface the real reason.
+      alert(err?.message || 'Failed to update the ticket.');
     }
     finally { setUpdating(null); }
   }, [clearIssuesCache, bumpIssuesVersion]);
@@ -1594,7 +1613,19 @@ function SpaceDetailContent() {
         // effect and this render check now share the exact same condition
         // (wait for customQueuesLoadedFor, then allCustomQueues.length),
         // so whichever one is correct for this space, both agree on it.
-        if (customQueuesLoadedFor !== spaceKey) {
+        // The redirect effect right above fires unconditionally whenever
+        // allCustomQueues.length === 0, regardless of this space's type --
+        // so that case is NEVER a real, permanent "no queues" state to show
+        // someone, only a brief transitional one on the way to being
+        // redirected to ?queue=all-open. Rendering the "No queues
+        // available" empty state for it anyway (as this used to) meant
+        // every visit to a queueless board's bare URL flashed that
+        // confusing message for however long the redirect took to land --
+        // confirmed for real via a direct user report ("why it is showing
+        // that queue for only a few seconds then it is showing tickets").
+        // Keep showing the spinner through that same window instead, same
+        // as while the fetch itself is still in flight.
+        if (customQueuesLoadedFor !== spaceKey || allCustomQueues.length === 0) {
           return (
             <div className="flex-1 flex items-center justify-center">
               <DotLoader className="h-64" />
@@ -3610,7 +3641,7 @@ function SpaceDetailContent() {
                         {openDropdown?.key === issue.key && openDropdown.field === 'priority' && (
                           <InlineDropdown onClose={() => setOpenDropdown(null)} anchorRect={openDropdown.rect}>
                             <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Priority</div>
-                            {PRIORITIES.map(p => (
+                            {getSelectablePriorities(disabledPriorities).map(p => (
                               <button key={p.value} onClick={() => handleInlineUpdate(issue.key, 'priority', p.value)}
                                 className="w-full flex items-center gap-2.5 px-3 py-2 text-[12.5px] hover:bg-gray-50 text-gray-700 transition-colors">
                                 <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full border"
@@ -3644,11 +3675,17 @@ function SpaceDetailContent() {
                           const queueStatusList: any[] = rowQueue?.queueStatuses || [];
                           const isQueueStatus = queueStatusList.length > 0;
                           const optionStatuses = isQueueStatus ? queueStatusList : statuses;
-                          const optionTransitions: {fromStatusId:string; toStatusId:string}[] = isQueueStatus
-                            ? (rowQueue?.queueTransitions || []).map((t: any) => ({ fromStatusId: t.fromStatusId ?? t.from, toStatusId: t.toStatusId ?? t.to }))
+                          const optionTransitions: {fromStatusId:string; toStatusId:string; name?: string}[] = isQueueStatus
+                            ? (rowQueue?.queueTransitions || []).map((t: any) => ({ fromStatusId: t.fromStatusId ?? t.from, toStatusId: t.toStatusId ?? t.to, name: t.name }))
                             : ((currentSpace as any).transitions || []);
-                          const validIds = optionTransitions.filter(t => t.fromStatusId === st.id).map(t => t.toStatusId);
+                          const validTransitionsForRow = optionTransitions.filter(t => t.fromStatusId === st.id);
+                          const validIds = validTransitionsForRow.map(t => t.toStatusId);
                           const options = validIds.length > 0 ? optionStatuses.filter(s => validIds.includes(s.id)) : optionStatuses.filter(s => s.id !== st.id);
+                          // A named transition (e.g. Migration's "Resolved" ->
+                          // "In Progress" labeled "Reopen") is a user-facing
+                          // ACTION -- matches the same primary-label treatment
+                          // the issue detail page's own status dropdown uses.
+                          const transitionNameFor = (statusId: string) => validTransitionsForRow.find(t => t.toStatusId === statusId)?.name || '';
                           return (
                             <InlineDropdown onClose={() => setOpenDropdown(null)} anchorRect={openDropdown.rect}>
                               <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100">Move to</div>
@@ -3667,6 +3704,28 @@ function SpaceDetailContent() {
                                       return;
                                     }
                                   }
+                                  // Root Cause / Fix Description must also be filled
+                                  // before Dev hands a ticket off to Migration
+                                  // specifically (explicit request) -- same two
+                                  // fields already required to resolve a Dev ticket
+                                  // above, now also required at the point Dev routes
+                                  // it onward to Migration from this board's own
+                                  // inline status dropdown (same gap already closed
+                                  // on the ticket detail page's own status dropdown).
+                                  const isDevToMigrationHandoffInline = String(ticketCurrentDept || '').trim().toLowerCase() === 'dev'
+                                    && /^(waiting\s+for|routed\s+to)\s+migration$/i.test(String(s.name || '').trim());
+                                  if (isDevToMigrationHandoffInline) {
+                                    const handoffMissing: string[] = [];
+                                    for (const f of [{ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' }]) {
+                                      const val = (issue as any)[f.key];
+                                      if (!val || String(val).trim() === '') handoffMissing.push(f.name);
+                                    }
+                                    if (handoffMissing.length > 0) {
+                                      setOpenDropdown(null);
+                                      setMissingFieldsModal(handoffMissing);
+                                      return;
+                                    }
+                                  }
                                   if (isQueueStatus) {
                                     handleInlineQueueStatusUpdate(issue.key, ticketCurrentDept, s);
                                   } else {
@@ -3674,7 +3733,7 @@ function SpaceDetailContent() {
                                   }
                                 }}
                                   className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-50 transition-colors">
-                                  {s.name}
+                                  {transitionNameFor(s.id) || s.name}
                                 </button>
                               ))}
                             </InlineDropdown>

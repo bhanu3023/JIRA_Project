@@ -436,15 +436,20 @@ export default function Header() {
                 <div className="border-t border-gray-200 py-1">
                   <button
                     onClick={async () => {
-                      // Revoke session on server before clearing local state
+                      // Revoke session on server before clearing local state --
+                      // called unconditionally now, not just when a localStorage
+                      // token exists: a cookie-based session (no token in
+                      // localStorage at all) still needs this call so the
+                      // server can clear its httpOnly cookie via Set-Cookie;
+                      // the browser sends that cookie automatically, and the
+                      // backend falls back to it when no Authorization header
+                      // is present.
                       try {
                         const token = localStorage.getItem('jira_token');
-                        if (token) {
-                          await fetch('/api/auth/logout', {
-                            method: 'POST',
-                            headers: { Authorization: `Bearer ${token}` },
-                          });
-                        }
+                        await fetch('/api/auth/logout', {
+                          method: 'POST',
+                          headers: token ? { Authorization: `Bearer ${token}` } : {},
+                        });
                       } catch {}
                       logout();
                       router.push('/auth/login');

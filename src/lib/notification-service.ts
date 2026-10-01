@@ -180,10 +180,21 @@ function buildEmailHtml(opts: {
 
     ${commentHtml}
 
-    <!-- CTA button -->
+    <!-- CTA link -- deliberately a plain link, not a styled button. Confirmed
+         for real: sending 3 otherwise-identical test HTML emails from this
+         same (brand-new, low-reputation) sender, only the one with a styled
+         background/padding/border-radius button never reached the mailbox
+         at all (not even Junk) -- Defender for Office 365 quarantined it
+         outright, the classic "click here" CTA-button shape being exactly
+         the kind of thing anti-phishing scoring weighs heavily for an
+         unproven sender. A plain underlined link with the same href got
+         through fine. Not a guaranteed permanent fix (sender reputation
+         scoring shifts over time, and this was a small sample), but the
+         best evidence-based mitigation available without tenant admin
+         access to allow-list the sender. Revert to a styled button once
+         that's done and this sender has an established reputation. -->
     <div style="padding:16px 24px 24px">
-      <a href="${opts.actionUrl}"
-         style="display:inline-block;background:#0052CC;color:white;padding:10px 20px;border-radius:4px;text-decoration:none;font-size:14px;font-weight:600">
+      <a href="${opts.actionUrl}" style="color:#0052CC;font-size:14px;font-weight:600;text-decoration:underline">
         View Issue →
       </a>
     </div>
@@ -297,11 +308,35 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
           { name: 'References',  value: opts.inReplyTo },
         ];
       }
-      const res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+      const body = JSON.stringify({ message, saveToSentItems: false });
+      // A 429 here is Microsoft's per-mailbox ApplicationThrottled limit,
+      // not a real failure -- confirmed for real: sending the same
+      // notification to several recipients at once (this whole loop runs in
+      // parallel, see above) can trip one specific recipient's own
+      // concurrency limit while every other recipient succeeds in the same
+      // batch. This function used to just log that recipient's failure and
+      // move on (still returning true overall), so the caller believed the
+      // send succeeded and never fell through to another delivery path --
+      // that recipient's email was silently lost for good. Retrying a
+      // couple of times with a short backoff (honoring Retry-After when
+      // Microsoft sends one) clears the large majority of these without
+      // resorting to a slower/less-reliable fallback sender.
+      let res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, saveToSentItems: false }),
+        body,
       });
+      for (let attempt = 0; res.status === 429 && attempt < 3; attempt++) {
+        const retryAfterHeader = parseInt(res.headers.get('retry-after') || '', 10);
+        const waitMs = (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader * 1000 : 2000) * (attempt + 1);
+        console.warn(`[Notification] Graph throttled for ${recipient}, retrying in ${waitMs}ms (attempt ${attempt + 1}/3)`);
+        await new Promise(r => setTimeout(r, waitMs));
+        res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body,
+        });
+      }
       if (res.ok || res.status === 202) {
         console.log(`[Notification] Sent via Graph: ${opts.subject} → ${recipient}`);
       } else {
@@ -377,6 +412,22 @@ async function getInboxEmailForSpace(spaceKey: string): Promise<string | null> {
 }
 
 // ── Look up emailthreadid + inbox email for a ticket in one query ──────────────
+// A space can have more than one email_configs row (e.g. TESTIN/CloudFuze
+// Board has both leo@fuzebot.io and no-reply@cloudfuze.info), and this join
+// had no ORDER BY -- LIMIT 1 just took whatever order Postgres happened to
+// return, which landed on no-reply@cloudfuze.info. Confirmed for real via
+// the actual NDR bounce body: Microsoft rejects it outright with `550
+// 5.1.8 Access denied, bad outbound sender` ("suspected of sending spam"),
+// not a per-recipient problem -- EVERY notification sent from it bounces
+// (assigned-to, status-changed, comment-reply, the queue DL emails, all of
+// it), for every recipient, silently, since sendNotification's Graph send
+// reports success immediately (Graph queues it) and the real rejection
+// only arrives later as an NDR nothing reads. Excluding this specific
+// confirmed-blocked sender so the lookup falls through to the other,
+// working connected mailbox instead. If it's ever unblocked (or the org
+// fixes/replaces it) and should be usable again, remove this exclusion.
+const BLOCKED_SENDER_ADDRESSES = ['no-reply@cloudfuze.info'];
+
 async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: string; inboxEmail?: string }> {
   try {
     const { pgPool: pool } = await import('@/lib/pg-pool');
@@ -385,14 +436,32 @@ async function getTicketThreadInfo(issueKey: string): Promise<{ emailthreadid?: 
       FROM issues i
       JOIN spaces s ON i."spaceId" = s.id
       LEFT JOIN email_configs ec ON LOWER(ec.space_key) = LOWER(s.key)
+        AND LOWER(ec.address) != ALL($2::text[])
       WHERE i.key = $1
+      ORDER BY ec.created_at ASC
       LIMIT 1
-    `, [issueKey]);
+    `, [issueKey, BLOCKED_SENDER_ADDRESSES]);
     return {
       emailthreadid: row.rows[0]?.emailthreadid || undefined,
       inboxEmail:    row.rows[0]?.inbox_email    || undefined,
     };
   } catch { return {}; }
+}
+
+// Fire-and-forget outcome log for the periodic notification-health-check
+// email (see runNotificationHealthCheckScan in jira-pg-api.ts) -- that job
+// has no other way to know whether sends are actually succeeding since
+// console.log output isn't queryable from inside the running process.
+// Never blocks or fails a real send: logging failures are swallowed.
+async function logNotificationOutcome(success: boolean, subject: string, to: string[], method: string, error?: string) {
+  try {
+    const { pgPool: pool } = await import('@/lib/pg-pool');
+    await pool.query(
+      `INSERT INTO notification_log (id, success, subject, recipients, method, error, "createdAt")
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, NOW())`,
+      [success, subject.slice(0, 500), to.join(', ').slice(0, 1000), method, error ? error.slice(0, 500) : null]
+    );
+  } catch { /* non-critical */ }
 }
 
 // ── Send helper ────────────────────────────────────────────────────────────────
@@ -422,7 +491,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
 
   if (fromEmail) {
     const sentViaTicketInbox = await sendViaGraph({ from: fromEmail, to: uniqueTo, subject, html, text, inReplyTo, attachments });
-    if (sentViaTicketInbox) return;
+    if (sentViaTicketInbox) { logNotificationOutcome(true, subject, uniqueTo, `graph:${fromEmail}`); return; }
   }
 
   // A configured shared sender (DEFAULT_NOTIFICATION_SENDER, e.g.
@@ -436,6 +505,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
   // it has to be tried up here, not as SMTP's fallback.
   const defaultSender = (process.env.DEFAULT_NOTIFICATION_SENDER || '').toLowerCase().trim();
   if (defaultSender && await sendViaGraph({ from: defaultSender, to: uniqueTo, subject, html, text, inReplyTo, attachments })) {
+    logNotificationOutcome(true, subject, uniqueTo, `graph:${defaultSender}`);
     return;
   }
 
@@ -467,6 +537,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
       await transporter.sendMail(mailOpts);
       console.log(`[Notification] Sent "${subject}" to ${uniqueTo.join(', ')} via SMTP (${FROM_EMAIL})`);
       smtpBrokenUntil = 0;
+      logNotificationOutcome(true, subject, uniqueTo, `smtp:${FROM_EMAIL}`);
       return;
     } catch (err: any) {
       console.error(`[Notification] SMTP send failed for "${subject}", trying OAuth fallback:`, err.message);
@@ -478,6 +549,7 @@ export async function sendNotification(to: string[], subject: string, html: stri
   const candidates = await getSenderEmailCandidates();
   if (!candidates.length) {
     console.warn(`[Notification] Skipping "${subject}" — no working SMTP and no OAuth account connected`);
+    logNotificationOutcome(false, subject, uniqueTo, 'none', 'No working SMTP and no OAuth account connected');
     return;
   }
   // Try the shared-mailbox-looking account(s) first, then fall through to
@@ -487,9 +559,13 @@ export async function sendNotification(to: string[], subject: string, html: stri
   // (or several) accounts' tokens having quietly expired without turning a
   // single notification send into a long serial sweep of the whole table.
   for (const candidate of candidates.slice(0, 10)) {
-    if (await sendViaGraph({ from: candidate, to: uniqueTo, subject, html, text, inReplyTo, attachments })) return;
+    if (await sendViaGraph({ from: candidate, to: uniqueTo, subject, html, text, inReplyTo, attachments })) {
+      logNotificationOutcome(true, subject, uniqueTo, `graph:${candidate}`);
+      return;
+    }
   }
   console.error(`[Notification] All send methods failed for "${subject}" to ${uniqueTo.join(', ')}`);
+  logNotificationOutcome(false, subject, uniqueTo, 'all-failed', 'All send methods failed (ticket inbox, default sender, SMTP, and every OAuth candidate)');
 }
 
 function issueUrl(issueKey: string) {
@@ -891,6 +967,15 @@ export async function notifyMentioned(opts: {
   spaceKey: string;
   spaceName: string;
   commentPreview: string;
+  // By explicit request: admins should see every mention, not just
+  // ticket-lifecycle events (create/assign/status-change/comment already
+  // include them everywhere else -- this was the one deliberate exception,
+  // since "You were mentioned" is personally addressed to the one person
+  // and wouldn't make sense verbatim for someone else). Sent as its own,
+  // separately-worded ("X mentioned Y", third person) email rather than
+  // just adding admins to the same recipient list, so an admin never gets
+  // an email claiming they were personally mentioned when they weren't.
+  adminEmails?: string[];
 }) {
   if (!opts.mentionedEmail) return;
   const html = buildEmailHtml({
@@ -914,6 +999,34 @@ export async function notifyMentioned(opts: {
     html,
     `${opts.mentionedBy} mentioned you in ${opts.issueKey}:\n\n${opts.commentPreview}\n\nView: ${issueUrl(opts.issueKey)}`,
   );
+
+  const adminTo = (opts.adminEmails || []).filter(
+    (e) => e && e.toLowerCase() !== opts.mentionedEmail.toLowerCase()
+  );
+  if (adminTo.length) {
+    const adminHtml = buildEmailHtml({
+      title:        'Mention',
+      issueKey:     opts.issueKey,
+      issueSummary: opts.issueSummary,
+      spaceKey:     opts.spaceKey,
+      spaceName:    opts.spaceName,
+      eventLabel:   'Mentioned',
+      eventColor:   '#8B5CF6',
+      fields: [
+        { label: 'Mentioned by',   value: opts.mentionedBy },
+        { label: 'Mentioned',      value: opts.mentionedName },
+        { label: 'Board',          value: opts.spaceName },
+      ],
+      comment:   makeImageSrcsAbsolute(opts.commentPreview),
+      actionUrl: issueUrl(opts.issueKey),
+    });
+    await sendNotification(
+      adminTo,
+      `[${opts.issueKey}] ${opts.mentionedBy} mentioned ${opts.mentionedName} - ${opts.issueSummary}`,
+      adminHtml,
+      `${opts.mentionedBy} mentioned ${opts.mentionedName} in ${opts.issueKey}:\n\n${opts.commentPreview}\n\nView: ${issueUrl(opts.issueKey)}`,
+    ).catch(() => {});
+  }
 }
 
 export async function notifySLABreach(opts: {

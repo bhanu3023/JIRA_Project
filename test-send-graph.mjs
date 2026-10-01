@@ -7,13 +7,13 @@
 // into the sender mailbox directly (queries it via the same Graph token
 // this app already holds).
 //
-// Usage: node test-send-graph.mjs <recipient-email>
+// Usage: node test-send-graph.mjs <recipient-email> [sender-email]
 
 import pg from 'pg';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const SENDER = 'no-reply@cloudfuze.info';
 const TO = process.argv[2];
+const SENDER = process.argv[3] || 'no-reply@cloudfuze.info';
 
 if (!TO) {
   console.error('Usage: node test-send-graph.mjs <recipient-email>');

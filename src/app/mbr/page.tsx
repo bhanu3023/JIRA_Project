@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store';
@@ -63,6 +63,18 @@ function pct(numerator: number, denominator: number): string {
   return denominator > 0 ? `${Math.round((numerator / denominator) * 100)}%` : '—';
 }
 
+// Renders a decimal-hours duration as H:MM:SS (e.g. 2.9 -> "2:54:00") for
+// the MBR per-person summary's Avg. resolution / Avg. response time columns,
+// per explicit request -- replaces the previous plain-hours / plain-minutes
+// display.
+function formatHms(hoursDecimal: number): string {
+  const totalSeconds = Math.round(hoursDecimal * 3600);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 function csvCell(value: unknown): string {
   const s = value == null ? '' : String(value);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -118,6 +130,17 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  // Guards against an earlier, slower fetch (e.g. the empty-date-range
+  // request every MBR page load fires first, which can pull 15,000+ tickets
+  // and take far longer than a subsequent narrower one) resolving AFTER a
+  // later, correctly-scoped fetch already rendered its data -- without this,
+  // that stale response's error/empty result silently overwrites the good
+  // one already on screen. Confirmed for real: the date-range filter shown
+  // in the UI matched a fast, successful request in the server logs, but the
+  // error banner was actually from an earlier unbounded request that was
+  // still in flight when the scoped one finished first.
+  const mainFetchIdRef = useRef(0);
+  const drillFetchIdRef = useRef(0);
 
   type DrillFilter = 'all' | 'resolved' | 'rb' | 'stale' | 'missing' | 'overdue' | 'noComment' | 'noScreenshot' | 'noRcaFix' | 'hasResolutionTime';
   const [drillDown, setDrillDown] = useState<{ person?: string; month?: string; filter: DrillFilter; label: string } | null>(null);
@@ -136,23 +159,37 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   };
 
   useEffect(() => {
+    const requestId = ++mainFetchIdRef.current;
     setLoading(true);
     setError(null);
     api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, person || undefined, undefined, staleDays)
-      .then((d) => { setPeople(d.people); setMonthly(d.monthly); setSummary(d.summary); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
-      .catch((err) => { setPeople([]); setMonthly([]); setTickets([]); setError(err?.message || 'Failed to load MBR data'); })
-      .finally(() => setLoading(false));
+      .then((d) => {
+        if (requestId !== mainFetchIdRef.current) return; // a newer fetch already superseded this one
+        setPeople(d.people); setMonthly(d.monthly); setSummary(d.summary); setTickets(d.tickets); setTotalMatched(d.totalMatched);
+      })
+      .catch((err) => {
+        if (requestId !== mainFetchIdRef.current) return;
+        setPeople([]); setMonthly([]); setTickets([]); setError(err?.message || 'Failed to load MBR data');
+      })
+      .finally(() => { if (requestId === mainFetchIdRef.current) setLoading(false); });
   }, [team, dateFrom, dateTo, person, staleDays]);
 
   useEffect(() => {
     if (!drillDown) return;
+    const requestId = ++drillFetchIdRef.current;
     setDrillLoading(true);
     setDrillError(null);
     const segmentable = drillDown.filter === 'all' || drillDown.filter === 'resolved';
     api.getMbrTeamData(team, dateFrom || undefined, dateTo || undefined, drillDown.person, drillDown.filter === 'all' ? undefined : drillDown.filter, undefined, segmentable ? drillSegment : undefined, drillDown.month)
-      .then((d) => { setDrillTickets(d.tickets); setDrillTotal(d.totalMatched); })
-      .catch((err) => { setDrillTickets([]); setDrillTotal(0); setDrillError(err?.message || 'Failed to load tickets'); })
-      .finally(() => setDrillLoading(false));
+      .then((d) => {
+        if (requestId !== drillFetchIdRef.current) return;
+        setDrillTickets(d.tickets); setDrillTotal(d.totalMatched);
+      })
+      .catch((err) => {
+        if (requestId !== drillFetchIdRef.current) return;
+        setDrillTickets([]); setDrillTotal(0); setDrillError(err?.message || 'Failed to load tickets');
+      })
+      .finally(() => { if (requestId === drillFetchIdRef.current) setDrillLoading(false); });
   }, [drillDown, team, dateFrom, dateTo, drillSegment]);
 
   if (loading) {
@@ -234,6 +271,16 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100">
             <h3 className="text-[14px] font-semibold text-gray-700">Monthly summary</h3>
+            {/* Makes the active scope explicit right on the table itself --
+                confirmed for real that "no filter set" (showing the last 12
+                months, the fallback when dateFrom/dateTo are both empty) got
+                mistaken for a bug, since nothing on screen said whether a
+                range was actually applied. */}
+            <p className="text-[11.5px] text-gray-400 mt-0.5">
+              {dateFrom || dateTo
+                ? `Showing ${dateFrom ? new Date(dateFrom + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'the beginning'} to ${dateTo ? new Date(dateTo + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'now'}`
+                : 'No date range selected — showing the most recent 12 months'}
+            </p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -344,7 +391,8 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Total tickets</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Resolved tickets</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Resolution SLA breached</th>
-                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Avg. resolution (hrs)</th>
+                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Avg. resolution (hr:mm:sec)</th>
+                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200" title="How long it took to move a ticket from arrival in this department into actual work (Open → In Progress)">Avg. response time (hr:mm:sec)</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Stale</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Missing details</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Overdue</th>
@@ -380,8 +428,11 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
                       {p.avgResolutionHours === null ? '—' : (
-                        <button onClick={(e) => { e.stopPropagation(); openDrill('hasResolutionTime', p.email, `Tickets with a recorded resolution time — ${p.name}`); }} className="hover:underline">{p.avgResolutionHours}</button>
+                        <button onClick={(e) => { e.stopPropagation(); openDrill('hasResolutionTime', p.email, `Tickets with a recorded resolution time — ${p.name}`); }} className="hover:underline">{formatHms(p.avgResolutionHours)}</button>
                       )}
+                    </td>
+                    <td className="px-4 py-3 text-[13px] text-gray-700">
+                      {p.avgResponseTimeHours === null || p.avgResponseTimeHours === undefined ? '—' : formatHms(p.avgResponseTimeHours)}
                     </td>
                     <td className="px-4 py-3 text-[13px] text-gray-700">
                       <button onClick={(e) => { e.stopPropagation(); openDrill('stale', p.email, `Stale tickets — ${p.name}`); }} className="hover:underline">{p.stale}</button>
@@ -450,6 +501,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Summary</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Open → In Progress, measured from arrival in this department">Response time (hrs)</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolution SLA breached</th>
                 </tr>
               </thead>
@@ -461,14 +513,31 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     </td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">
-                      {t.assignee}
-                      {t.assigneeOutsideRoster && (
-                        <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
-                      )}
-                      {t.matchedViaPersonHistory && person && (
-                        <span title={`Currently assigned to ${t.assignee} — counted here because ${people.find((p) => p.email === person)?.name || 'the selected person'} worked this ticket in this department before it moved`} className="ml-1.5 text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
-                          worked by {people.find((p) => p.email === person)?.name || 'selected person'}
-                        </span>
+                      {t.matchedViaPersonHistory && person ? (
+                        <>
+                          {people.find((p) => p.email === person)?.name || 'selected person'}
+                          {t.assignee && (
+                            <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${people.find((p) => p.email === person)?.name || 'the selected person'} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                              (now: {t.assignee})
+                            </span>
+                          )}
+                        </>
+                      ) : t.teamWorkerName ? (
+                        <>
+                          {t.teamWorkerName}
+                          {t.assignee && (
+                            <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${t.teamWorkerName} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                              (now: {t.assignee})
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {t.assignee}
+                          {t.assigneeOutsideRoster && (
+                            <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
+                          )}
+                        </>
                       )}
                     </td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.reporter}</td>
@@ -476,6 +545,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.responseTimeHours === null || t.responseTimeHours === undefined ? '—' : t.responseTimeHours}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100">
                       {t.rb === true && <span className="font-semibold text-red-600">Yes</span>}
                       {t.rb === false && <span className="font-medium text-green-600">No</span>}
@@ -540,6 +610,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Summary</th>
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Open → In Progress, measured from arrival in this department">Response time (hrs)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -550,20 +621,38 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     </td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.project}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">
-                          {t.assignee}
-                          {t.assigneeOutsideRoster && (
-                            <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
-                          )}
-                          {t.matchedViaPersonHistory && drillDown?.person && (
-                            <span title={`Currently assigned to ${t.assignee} — counted here because ${people.find((p) => p.email === drillDown.person)?.name || 'the selected person'} worked this ticket in this department before it moved`} className="ml-1.5 text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
-                              worked by {people.find((p) => p.email === drillDown.person)?.name || 'selected person'}
-                            </span>
+                          {t.matchedViaPersonHistory && drillDown?.person ? (
+                            <>
+                              {people.find((p) => p.email === drillDown.person)?.name || 'selected person'}
+                              {t.assignee && (
+                                <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${people.find((p) => p.email === drillDown.person)?.name || 'the selected person'} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                                  (now: {t.assignee})
+                                </span>
+                              )}
+                            </>
+                          ) : t.teamWorkerName ? (
+                            <>
+                              {t.teamWorkerName}
+                              {t.assignee && (
+                                <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${t.teamWorkerName} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                                  (now: {t.assignee})
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              {t.assignee}
+                              {t.assigneeOutsideRoster && (
+                                <span title="Not on this team's roster — this ticket matched via historical work in this department" className="ml-1.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">outside roster</span>
+                              )}
+                            </>
                           )}
                         </td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-600">{t.status}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.responseTimeHours === null || t.responseTimeHours === undefined ? '—' : t.responseTimeHours}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -597,6 +686,8 @@ export default function MbrPage() {
   const [downloading, setDownloading] = useState(false);
   const [sortKey, setSortKey] = useState<keyof PersonRow>('hygieneScore');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  // Same stale-response guard as TeamTab's mainFetchIdRef -- see its comment.
+  const deptFetchIdRef = useRef(0);
 
   // Redirect non-admins away
   useEffect(() => {
@@ -611,12 +702,19 @@ export default function MbrPage() {
 
   useEffect(() => {
     if (!isPrivileged || topTab !== 'department') return;
+    const requestId = ++deptFetchIdRef.current;
     setLoading(true);
     setError(null);
     api.getMbrData(department || undefined, dateFrom || undefined, dateTo || undefined, staleDays)
-      .then((d) => { setDepartments(d.departments); setPeople(d.people); setTickets(d.tickets); setTotalMatched(d.totalMatched); })
-      .catch((err) => { setDepartments([]); setPeople([]); setTickets([]); setTotalMatched(0); setError(err?.message || 'Failed to load MBR data'); })
-      .finally(() => setLoading(false));
+      .then((d) => {
+        if (requestId !== deptFetchIdRef.current) return;
+        setDepartments(d.departments); setPeople(d.people); setTickets(d.tickets); setTotalMatched(d.totalMatched);
+      })
+      .catch((err) => {
+        if (requestId !== deptFetchIdRef.current) return;
+        setDepartments([]); setPeople([]); setTickets([]); setTotalMatched(0); setError(err?.message || 'Failed to load MBR data');
+      })
+      .finally(() => { if (requestId === deptFetchIdRef.current) setLoading(false); });
   }, [isPrivileged, topTab, department, dateFrom, dateTo, staleDays]);
 
   const toggleSort = useCallback((key: keyof PersonRow) => {

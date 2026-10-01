@@ -273,6 +273,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   const [selectedSpaceKey, setSelectedSpaceKey] = useState(spaceKey);
   const [spaceMembers, setSpaceMembers]         = useState<SpaceMember[]>(members);
+  // Project Manager's option list used to be a hand-maintained hardcoded
+  // name array here that drifted from who actually holds the
+  // migration_manager role in User Management. Fetched live instead.
+  const [projectManagerOptions, setProjectManagerOptions] = useState<string[]>(['Others']);
+  useEffect(() => { api.getProjectManagerOptions().then(setProjectManagerOptions).catch(() => {}); }, []);
   // baseStatuses = the space's own full status list (fallback when the
   // selected queue has no restricted list of its own). spaceStatuses = what
   // the Status dropdown actually shows — narrowed to the selected queue's
@@ -300,6 +305,29 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [migrationSections, setMigrationSections] = useState<string[]>(() => MIGRATION_SECTION_LABELS.map(() => ''));
   const [migrationUploading, setMigrationUploading] = useState<boolean[]>(() => MIGRATION_SECTION_LABELS.map(() => false));
   const isMigrationDept = form.department.toLowerCase() === 'migration';
+  // Live "does a ticket like this already exist?" check, shown below the
+  // Summary field per explicit request -- debounced so it doesn't fire a
+  // request on every keystroke, and cancels a stale in-flight request if
+  // the user keeps typing before it resolves.
+  const [similarIssues, setSimilarIssues] = useState<Array<{ key: string; displayKey: string; summary: string; status: string; statusCategory: string; matchPercent: number; isExactMatch: boolean }>>([]);
+  const [similarLoading, setSimilarLoading] = useState(false);
+  // Distinguishes "haven't searched yet" (summary still too short) from
+  // "searched and found nothing" -- per explicit request, the latter case
+  // needs its own "no related ticket found" message, not just silence.
+  const [similarSearched, setSimilarSearched] = useState(false);
+  useEffect(() => {
+    if (!selectedSpaceKey || form.summary.trim().length < 8) { setSimilarIssues([]); setSimilarSearched(false); return; }
+    let cancelled = false;
+    setSimilarLoading(true);
+    const timer = setTimeout(() => {
+      api.getSimilarIssues(selectedSpaceKey, form.summary, form.description)
+        .then((res) => { if (!cancelled) setSimilarIssues(res.matches || []); })
+        .catch(() => { if (!cancelled) setSimilarIssues([]); })
+        .finally(() => { if (!cancelled) { setSimilarLoading(false); setSimilarSearched(true); } });
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [selectedSpaceKey, form.summary, form.description]);
+
   const [summaryError, setSummaryError] = useState(false);
   const [queueError, setQueueError]                 = useState(false);
   const [combinationError, setCombinationError]     = useState(false);
@@ -307,6 +335,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   const [projectManagerError, setProjectManagerError] = useState(false);
   const [projectPoolError, setProjectPoolError]       = useState(false);
   const [infraIssueTypeError, setInfraIssueTypeError] = useState(false);
+  // "Other" lets the reporter type an Infra issue type not in the fixed
+  // list -- tracked separately from form.infraIssueType (which holds
+  // whatever free text they type) so the <select> can stay on the "Other"
+  // option while that text doesn't match any of the real list entries.
+  const [infraIssueTypeOther, setInfraIssueTypeOther] = useState(false);
   // Admin-configured custom fields (e.g. "Project Pool") each carry their own
   // `required` flag from Settings > Custom Fields, but nothing here ever
   // read it -- the field rendered with no asterisk and Create succeeded even
@@ -670,6 +703,37 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   <p className="text-[12px] text-red-600 font-medium">Summary is required</p>
                 </div>
               )}
+              {similarLoading && (
+                <p className="text-[12px] text-gray-400 mt-1.5">Checking for similar tickets…</p>
+              )}
+              {!similarLoading && similarSearched && similarIssues.length === 0 && (
+                <p className="text-[12px] text-gray-400 mt-1.5">No related ticket found for this issue.</p>
+              )}
+              {!similarLoading && similarIssues.length > 0 && (
+                <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 overflow-hidden">
+                  <div className="px-3 py-1.5 text-[11px] font-semibold text-amber-800 uppercase tracking-wide border-b border-amber-200">
+                    Possibly related tickets
+                  </div>
+                  <div className="divide-y divide-amber-100">
+                    {similarIssues.map((m) => (
+                      <a
+                        key={m.key}
+                        href={`/issues/${m.displayKey}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 px-3 py-2 hover:bg-amber-100 transition-colors"
+                      >
+                        <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded ${m.isExactMatch ? 'bg-red-600 text-white' : 'bg-amber-200 text-amber-800'}`}>
+                          {m.isExactMatch ? '100% MATCH' : `${m.matchPercent}% match`}
+                        </span>
+                        <span className="text-[12px] font-semibold text-indigo-600 shrink-0">{m.displayKey}</span>
+                        <span className="text-[12px] text-gray-700 truncate">{m.summary}</span>
+                        <span className="text-[11px] text-gray-400 shrink-0 ml-auto">{m.status}</span>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Description */}
@@ -793,8 +857,16 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     Infra Issue Type {skipsInfraOptionalFields && !isITAdminBoard && <span className="text-red-500">*</span>}
                   </label>
                   <select
-                    value={form.infraIssueType}
-                    onChange={e => update('infraIssueType', e.target.value)}
+                    value={infraIssueTypeOther ? '__other__' : form.infraIssueType}
+                    onChange={e => {
+                      if (e.target.value === '__other__') {
+                        setInfraIssueTypeOther(true);
+                        update('infraIssueType', '');
+                      } else {
+                        setInfraIssueTypeOther(false);
+                        update('infraIssueType', e.target.value);
+                      }
+                    }}
                     className={cn(
                       "w-full rounded-lg border px-3 py-2 text-[13px] focus:outline-none focus:ring-2 bg-white",
                       infraIssueTypeError ? 'border-red-300 ring-2 ring-red-300 focus:ring-red-300' : 'border-gray-300 focus:ring-blue-500',
@@ -802,7 +874,21 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   >
                     <option value="">Select Infra Issue Type</option>
                     {INFRA_ISSUE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    <option value="__other__">Other</option>
                   </select>
+                  {infraIssueTypeOther && (
+                    <input
+                      type="text"
+                      autoFocus
+                      value={form.infraIssueType}
+                      onChange={e => update('infraIssueType', e.target.value)}
+                      placeholder="Type the Infra issue type"
+                      className={cn(
+                        "w-full rounded-lg border px-3 py-2 text-[13px] focus:outline-none focus:ring-2 bg-white mt-2",
+                        infraIssueTypeError ? 'border-red-300 ring-2 ring-red-300 focus:ring-red-300' : 'border-gray-300 focus:ring-blue-500',
+                      )}
+                    />
+                  )}
                   {infraIssueTypeError && (
                     <div className="flex items-center gap-1.5 mt-1.5">
                       <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
@@ -820,7 +906,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     <MultiSelectDropdown
                       value={form.projectManager}
                       onChange={v => update('projectManager', v)}
-                      options={['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Meghana','Others']}
+                      options={projectManagerOptions}
                       placeholder="Select project manager..."
                     />
                   </div>
@@ -930,9 +1016,29 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     // department routing whatsoever at the time), still
                     // created the ticket with current_department='Infra' and
                     // started a real Infra SLA clock for it -- IA-25 / CF-31525.
+                    //
+                    // Clearing form.department here isn't enough by itself --
+                    // spaceQueues (and the queueOptions derived from it) still
+                    // holds the OLD space's queues until the async
+                    // `custom-queues/{key}` fetch for the new space resolves.
+                    // If the old space happened to have exactly one queue
+                    // (e.g. IT Administration's sole "Infra" queue), the
+                    // auto-default effect below (queueOptions.length === 1)
+                    // fires on that stale intermediate render and immediately
+                    // re-stamps the NEW space's department with the OLD
+                    // space's queue name, before the real (possibly empty)
+                    // queue list for the new space ever loads. Confirmed for
+                    // real: switching from IT Administration to SAT_Board
+                    // left form.department = 'infra', wrongly requiring
+                    // "Infra Issue Type" on a space with no queues at all.
+                    // Clearing spaceQueues too makes queueOptions read as
+                    // empty during that window instead of stale, so the
+                    // auto-default effect can't misfire on old data.
                     setSelectedSpaceKey(e.target.value);
                     setForm(f => (f.department ? { ...f, department: '' } : f));
                     setSelectedQueueId('');
+                    setSpaceQueues([]);
+                    setInfraIssueTypeOther(false);
                   }}
                   className="w-full pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >

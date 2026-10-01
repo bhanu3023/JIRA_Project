@@ -12,6 +12,17 @@ export function getPriorityMeta(value: string) {
   return PRIORITIES.find(p => p.value === value) || PRIORITIES[2];
 }
 
+// PRIORITIES itself stays the full fixed 5 -- every existing ticket that
+// already has a since-disabled priority still needs to render its icon/
+// label/color (badges, Filters, the ticket detail sidebar). This is only
+// for the PICKERS (Create ticket, change Priority, subtask creation) that
+// let someone choose a NEW value -- those should offer only what's
+// currently enabled, per the global disabled-priorities setting.
+export function getSelectablePriorities(disabled: string[] | undefined | null) {
+  if (!disabled || !disabled.length) return PRIORITIES;
+  return PRIORITIES.filter(p => !disabled.includes(p.value));
+}
+
 // Icon fill colors — kept visually distinct but NOT used for text/badge color
 const ICON_COLORS: Record<string, string> = {
   highest: '#E11D48',

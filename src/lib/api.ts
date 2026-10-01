@@ -72,6 +72,12 @@ class ApiClient {
       res = await fetch(url, {
         ...options,
         headers,
+        // Explicit, matching the browser's own same-origin default -- the
+        // httpOnly session cookie (see setSessionCookie in jira-pg-api.ts)
+        // only authenticates the request if it's actually sent, and being
+        // explicit here means that keeps working even if API_URL is ever
+        // pointed at a different origin in some config.
+        credentials: 'same-origin',
         // No timeout here at all previously meant a stalled request (a slow
         // query under real load, a dropped connection that never errors)
         // left the caller's promise pending forever -- e.g. the issue detail
@@ -121,7 +127,20 @@ class ApiClient {
       const isLoginOrRegister =
         method === 'POST' && (endpoint === '/auth/login' || endpoint === '/auth/register');
       const errMsg = typeof data.error === 'string' ? data.error : 'Unauthorized';
-      if (!isLoginOrRegister && typeof window !== 'undefined') {
+      // Already on an /auth/* page (login/register/oauth-callback) -- never
+      // force-navigate there again. This guard didn't exist before, and
+      // relied entirely on `current === null || current === tokenUsed` to
+      // avoid redirect loops -- but a cookie-based session never has
+      // anything in localStorage at all, so `current` (this.getToken()) is
+      // now ALWAYS null, making that check pass unconditionally on every
+      // single 401. Confirmed for real: after force-invalidating every
+      // session, loadUser()'s GET /auth/me on the login page itself 401'd,
+      // triggered this same window.location.href navigation to the page
+      // already showing, which remounted the app and fired loadUser()
+      // again -- an infinite reload loop that locked every user out of
+      // logging in at all.
+      const alreadyOnAuthPage = typeof window !== 'undefined' && window.location.pathname.startsWith('/auth');
+      if (!isLoginOrRegister && !alreadyOnAuthPage && typeof window !== 'undefined') {
         const current = this.getToken();
         if (current === null || current === tokenUsed) {
           localStorage.removeItem('jira_token');
@@ -179,11 +198,60 @@ class ApiClient {
     return this.request<any>(`/my-dashboard${qs ? `?${qs}` : ''}`);
   }
 
+  // Live "does a ticket like this already exist?" check for the Create
+  // Issue modal, shown below the Summary field per explicit request.
+  getSimilarIssues(spaceKey: string, summary: string, description?: string) {
+    const params = new URLSearchParams({ spaceKey, summary });
+    if (description) params.set('description', description);
+    return this.request<{ matches: Array<{ key: string; displayKey: string; summary: string; status: string; statusCategory: string; matchPercent: number; isExactMatch: boolean }> }>(`/issues/similar?${params.toString()}`);
+  }
+
   // Users
   getUsers() { return this.request<any[]>('/users'); }
   createUser(data: any) { return this.request<any>('/users', { method: 'POST', body: JSON.stringify(data) }); }
   updateUser(id: string, data: any) { return this.request<any>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteUser(id: string) { return this.request<any>(`/users/${id}`, { method: 'DELETE' }); }
+  // The "Project Manager" custom field's option list used to be a
+  // hand-maintained hardcoded name array (Harika, Abhishek, ...), which
+  // drifted from reality -- Kiran U held the migration_manager role but was
+  // missing from it, while Sri Ram/Chandra Mouli/Sravan were listed despite
+  // no longer holding that role. Per explicit request, derives the list
+  // live from whoever currently has the migration_manager role in User
+  // Management instead, so it can never go stale again. Shared by Filters,
+  // the ticket detail page's custom-field editor, and Create Issue -- one
+  // fetch+filter instead of three independent copies.
+  async getProjectManagerOptions(): Promise<string[]> {
+    try {
+      const users = await this.getUsers();
+      const names = Array.from(new Set(
+        users
+          .filter((u: any) => u.role === 'migration_manager' && u.isActive)
+          .map((u: any) => String(u.firstName || '').trim())
+          .filter(Boolean)
+      )).sort((a, b) => a.localeCompare(b));
+      return [...names, 'Others'];
+    } catch {
+      return ['Others'];
+    }
+  }
+
+  // Every distinct non-null value a text field (Customer Name, Client Name,
+  // Combination, etc.) actually has across every space -- backs the
+  // GET /field-values endpoint that already existed server-side but wasn't
+  // wired into any picker on the Filters page for Customer Name/Client
+  // Name, which instead used a plain free-text box. That box's typed value
+  // was then matched with an EXACT string comparison server-side (same as
+  // every other field in this family), so typing anything that didn't
+  // exactly match a ticket's full, correctly-cased stored value returned
+  // zero results with no indication why -- confirmed for real via a user
+  // report ("options not showing" + "selecting it doesn't show tickets").
+  async getFieldValues(field: string): Promise<string[]> {
+    try {
+      return await this.request<string[]>(`/field-values?field=${encodeURIComponent(field)}`);
+    } catch {
+      return [];
+    }
+  }
 
   // Spaces
   getSpaces() { return this.request<any[]>('/spaces'); }
@@ -192,6 +260,12 @@ class ApiClient {
   updateSpace(key: string, data: any) { return this.request<any>(`/spaces/${key}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteSpace(key: string) { return this.request<any>(`/spaces/${key}`, { method: 'DELETE' }); }
   addSpaceMember(key: string, data: any) { return this.request<any>(`/spaces/${key}/members`, { method: 'POST', body: JSON.stringify(data) }); }
+
+  // Priority (global, app-wide -- see disabled-priorities in jira-pg-api.ts)
+  getDisabledPriorities() { return this.request<{ disabled: string[] }>('/disabled-priorities'); }
+  setDisabledPriorities(disabled: string[]) {
+    return this.request<{ ok: boolean; disabled: string[] }>('/disabled-priorities', { method: 'PUT', body: JSON.stringify({ disabled }) });
+  }
 
   // Issues
   getIssues(params: Record<string, string> = {}) {
@@ -214,6 +288,9 @@ class ApiClient {
   updateComment(commentId: string, data: { body: string }) { return this.request<any>(`/comments/${commentId}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteComment(commentId: string) { return this.request<any>(`/comments/${commentId}`, { method: 'DELETE' }); }
   toggleCommentReaction(commentId: string, emoji: string) { return this.request<any>(`/comments/${commentId}/reactions`, { method: 'POST', body: JSON.stringify({ emoji }) }); }
+  getWorklogs(key: string) { return this.request<any>(`/issues/${key}/worklogs`); }
+  addWorklog(key: string, data: { department: string; timeSpentMinutes: number; description?: string; workDate?: string }) { return this.request<any>(`/issues/${key}/worklogs`, { method: 'POST', body: JSON.stringify(data) }); }
+  deleteWorklog(id: string) { return this.request<any>(`/worklogs/${id}`, { method: 'DELETE' }); }
   resyncFromJira(key: string) { return this.request<any>(`/issues/${key}/resync-from-jira`, { method: 'POST' }); }
   addLink(key: string, data: any) { return this.request<any>(`/issues/${key}/links`, { method: 'POST', body: JSON.stringify(data) }); }
   addIssueLink(key: string, data: { targetKey: string; linkType: string }) { return this.addLink(key, data); }

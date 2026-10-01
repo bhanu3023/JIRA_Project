@@ -11,11 +11,10 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
-
-const SECRET = process.env.ADMIN_BULK_SECRET || 'cf-admin-sync-2024';
 
 function normalize(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -27,10 +26,10 @@ function rid() {
 
 export async function POST(req: NextRequest) {
   try {
+    const adminAuth = await requireAdmin(req);
+    if (!adminAuth.ok) return NextResponse.json({ ok: false, error: adminAuth.error }, { status: adminAuth.status });
+
     const body = await req.json().catch(() => ({}));
-    if (body.secret !== SECRET) {
-      return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
-    }
 
     const { jiraUrl, email, apiToken, jiraProject, spaceKey } = body;
     if (!jiraUrl || !email || !apiToken || !jiraProject || !spaceKey) {

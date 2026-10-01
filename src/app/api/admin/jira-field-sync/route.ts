@@ -18,11 +18,10 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
-
-const SECRET = process.env.ADMIN_BULK_SECRET || 'cf-admin-sync-2024';
 
 // Jira custom field IDs
 const FIELD_MAP: Record<string, string> = {
@@ -54,11 +53,10 @@ function normalize(s: string) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
-    if (body.secret !== SECRET) {
-      return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
-    }
+    const adminAuth = await requireAdmin(req);
+    if (!adminAuth.ok) return NextResponse.json({ ok: false, error: adminAuth.error }, { status: adminAuth.status });
 
+    const body = await req.json().catch(() => ({}));
     const { jiraUrl, email, apiToken, jiraProject, spaceKey, onlyMissing } = body;
     if (!jiraUrl || !email || !apiToken || !jiraProject || !spaceKey) {
       return NextResponse.json({ ok: false, error: 'Missing required fields' }, { status: 400 });

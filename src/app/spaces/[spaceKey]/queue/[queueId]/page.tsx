@@ -1,14 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import {
   ArrowLeft, Users, Clock, Plus, X, Check, Search,
   Trash2, Calendar, ChevronRight, Edit2, AlertCircle, RefreshCw, Mail, Link2, Unlink,
-  Eye, EyeOff, Wifi, WifiOff, Loader2, GitMerge, Network
+  Eye, EyeOff, Wifi, WifiOff, Loader2, GitMerge, Network, Ban, Bell
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useStore } from '@/store';
 
 type SLAGoal = { id: string; priority: string; timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' };
 type SLAPolicy = {
@@ -24,6 +25,13 @@ type CustomQueue = {
   statusIds?: string[];
   queueStatuses?: { id: string; name: string; color: string; category: string; order: number }[];
   queueTransitions?: { from: string; to: string }[];
+  // Extra recipients notified by email on every ticket action in this
+  // queue (created, status change, comment, assignment, etc.) -- on top
+  // of whoever already gets emailed (assignee/reporter/admins). Not
+  // people accounts, just plain addresses (a shared team DL, typically).
+  // By request. See getQueueNotifyEmails in jira-pg-api.ts for how this
+  // gets pulled into the actual notification send.
+  notifyEmails?: string[];
 };
 
 const ALL_PRIORITIES = ['Highest', 'High', 'Medium', 'Low', 'Lowest'];
@@ -148,6 +156,47 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
     setGoals(prev => prev.map(g => g.priority === priority ? { ...g, [field]: val } : g));
   };
 
+  // Global Priority disable/enable (see disabled-priorities in
+  // jira-pg-api.ts). Deliberately NOT scoped to this one SLA/queue --
+  // Priority is one shared field across every space, so removing it here
+  // hides it from the Priority PICKER everywhere in the app (Create
+  // ticket, the ticket detail Priority field, subtask creation, the
+  // board's inline quick-edit) -- an existing ticket that already has a
+  // now-disabled priority keeps showing it; disabling only removes it as
+  // something new or changed. Confirmed with the user before building this
+  // that "everywhere" (not just this queue) is what they actually wanted.
+  const currentUser = useStore((s) => s.user);
+  const isAdmin = currentUser?.role === 'admin';
+  // Reads from the SAME global store slice every picker reads (see
+  // PriorityDropdown.tsx, the subtask picker and the board's inline
+  // quick-edit) instead of its own separate local state -- the first
+  // version of this fetched into a local useState here, which updated
+  // this page's own display fine but left every OTHER open tab/component
+  // (most importantly the Create ticket modal) still showing whatever
+  // disabledPriorities was at THEIR last app load, since nothing told the
+  // store anything had changed. Confirmed for real: disabling Highest/
+  // Lowest here correctly showed "Hidden from Priority field" on this
+  // page, but Create Task's Priority dropdown still offered both.
+  const disabledGlobal = useStore((s) => s.disabledPriorities);
+  const loadDisabledPriorities = useStore((s) => s.loadDisabledPriorities);
+  const [priorityActionError, setPriorityActionError] = useState('');
+  useEffect(() => { loadDisabledPriorities(); }, [loadDisabledPriorities]);
+  const toggleGlobalPriority = async (priorityLabel: string) => {
+    if (!isAdmin) return;
+    const val = priorityLabel.toLowerCase();
+    const isDisabled = disabledGlobal.includes(val);
+    const next = isDisabled ? disabledGlobal.filter((v) => v !== val) : [...disabledGlobal, val];
+    setPriorityActionError('');
+    const prev = disabledGlobal;
+    useStore.setState({ disabledPriorities: next }); // optimistic, and visible to every other component immediately
+    try {
+      await api.setDisabledPriorities(next);
+    } catch (e: any) {
+      useStore.setState({ disabledPriorities: prev }); // revert -- most likely cause: trying to disable the last remaining priority
+      setPriorityActionError(e?.message || 'Could not update Priority options');
+    }
+  };
+
   const handleToggleEnabled = () => {
     const next = !enabled;
     setEnabled(next);
@@ -224,6 +273,14 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
         <div className="px-6 py-4 border-b border-gray-100">
           <h2 className="text-[14px] font-bold text-gray-900">Goals</h2>
           <p className="text-[12px] text-gray-500 mt-0.5">Work items will be checked against this list, top to bottom, and assigned a time goal based on the first matching priority.</p>
+          {isAdmin && (
+            <p className="text-[11.5px] text-blue-600 bg-blue-50 rounded-lg px-3 py-2 mt-2.5">
+              Turning a priority off here removes it from the Priority field on every ticket, in every space — not just this queue. Existing tickets already set to it are unaffected.
+            </p>
+          )}
+          {priorityActionError && (
+            <p className="text-[11.5px] text-red-600 bg-red-50 rounded-lg px-3 py-2 mt-2.5">{priorityActionError}</p>
+          )}
         </div>
         <table className="w-full">
           <thead>
@@ -231,16 +288,21 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
               <th className="text-left px-6 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Apply to work items</th>
               <th className="text-left px-6 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Calendar</th>
               <th className="text-left px-6 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Time Target</th>
+              {isAdmin && <th className="text-left px-6 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Priority field</th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
             {goals.map(goal => {
               const meta = PRIORITY_META[goal.priority] || { color: 'text-gray-500', icon: '•' };
+              const isDisabledGlobally = disabledGlobal.includes(goal.priority.toLowerCase());
               return (
-                <tr key={goal.priority} className="hover:bg-gray-50/50 transition-colors">
+                <tr key={goal.priority} className={cn('hover:bg-gray-50/50 transition-colors', isDisabledGlobally && 'opacity-50')}>
                   <td className="px-6 py-3.5">
                     <span className={cn('flex items-center gap-2 text-[13px] font-medium', meta.color)}>
                       <span className="text-[10px]">{meta.icon}</span>{goal.priority}
+                      {isDisabledGlobally && (
+                        <span className="text-[10px] font-semibold text-gray-400 bg-gray-100 rounded-full px-2 py-0.5">Hidden from Priority field</span>
+                      )}
                     </span>
                   </td>
                   <td className="px-6 py-3.5">
@@ -268,6 +330,23 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
                       </span>
                     )}
                   </td>
+                  {isAdmin && (
+                    <td className="px-6 py-3.5">
+                      <button
+                        onClick={() => toggleGlobalPriority(goal.priority)}
+                        className={cn(
+                          'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium border transition-colors',
+                          isDisabledGlobally
+                            ? 'text-emerald-700 border-emerald-200 bg-emerald-50 hover:bg-emerald-100'
+                            : 'text-red-600 border-red-200 bg-red-50 hover:bg-red-100'
+                        )}
+                        title={isDisabledGlobally ? `Restore ${goal.priority} to the Priority field app-wide` : `Remove ${goal.priority} from the Priority field app-wide`}
+                      >
+                        {isDisabledGlobally ? <Check size={12} /> : <Ban size={12} />}
+                        {isDisabledGlobally ? 'Restore' : 'Remove'}
+                      </button>
+                    </td>
+                  )}
                 </tr>
               );
             })}
@@ -276,6 +355,7 @@ function SLADetail({ policy, onBack, onSave, onDelete }: {
               <td className="px-6 py-3.5"><span className="text-[13px] font-medium text-orange-600">All remaining work items</span></td>
               <td className="px-6 py-3.5"><span className="flex items-center gap-1.5 text-[12.5px] text-gray-500"><Calendar size={13} className="text-gray-400" />24/7 Calendar (Default)</span></td>
               <td className="px-6 py-3.5"><span className="text-[13px] text-gray-300">—</span></td>
+              {isAdmin && <td className="px-6 py-3.5" />}
             </tr>
           </tbody>
         </table>
@@ -1038,10 +1118,12 @@ export default function QueueSettingsPage() {
   const searchParams = useSearchParams();
   const spaceKey = (params?.spaceKey as string || '').toUpperCase();
   const queueId = params?.queueId as string || '';
-  const initialTab = (searchParams?.get('tab') || 'people') as 'people' | 'sla' | 'rr' | 'email' | 'workflow';
+  const initialTab = (searchParams?.get('tab') || 'people') as 'people' | 'sla' | 'rr' | 'email' | 'notify' | 'workflow';
 
-  const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email' | 'workflow'>(initialTab);
+  const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email' | 'notify' | 'workflow'>(initialTab);
   const [queue, setQueue] = useState<CustomQueue | null>(null);
+  const [notifyEmailDraft, setNotifyEmailDraft] = useState('');
+  const [notifyEmailError, setNotifyEmailError] = useState('');
   const [spaceStatuses, setSpaceStatuses] = useState<{ id: string; name: string; color: string; category: string }[]>([]);
   const [allSpaces, setAllSpaces] = useState<{ key: string; name: string }[]>([]);
   const [workflowSaving, setWorkflowSaving] = useState(false);
@@ -1049,6 +1131,14 @@ export default function QueueSettingsPage() {
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [memberSearch, setMemberSearch] = useState('');
   const [showAddMember, setShowAddMember] = useState(false);
+  const addMemberInputRef = useRef<HTMLInputElement>(null);
+  // plain autoFocus makes the browser scroll the whole page to bring the
+  // input into view the instant it mounts -- confirmed for real: opening
+  // this panel visibly moved the "People & Access" header out of the
+  // viewport. preventScroll keeps the focus convenience without that jump.
+  useEffect(() => {
+    if (showAddMember) addMemberInputRef.current?.focus({ preventScroll: true });
+  }, [showAddMember]);
   const [spaceName, setSpaceName] = useState('');
   const [savedMsg, setSavedMsg] = useState('');
   const [policies, setPolicies] = useState<SLAPolicy[]>([]);
@@ -1177,6 +1267,21 @@ export default function QueueSettingsPage() {
   const removeMember  = (id: string) => { if (!queue) return; persistQueue({ ...queue, memberIds: queue.memberIds.filter(x => x !== id), suspendedIds: (queue.suspendedIds||[]).filter(x => x !== id) }); };
   const suspendMember = (id: string) => { if (!queue) return; persistQueue({ ...queue, suspendedIds: [...(queue.suspendedIds||[]), id] }); };
   const reactivate    = (id: string) => { if (!queue) return; persistQueue({ ...queue, suspendedIds: (queue.suspendedIds||[]).filter(x => x !== id) }); };
+  const addNotifyEmail = () => {
+    if (!queue) return;
+    const email = notifyEmailDraft.trim().toLowerCase();
+    if (!email) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setNotifyEmailError('Enter a valid email address'); return; }
+    const current = queue.notifyEmails || [];
+    if (current.includes(email)) { setNotifyEmailError('Already added'); return; }
+    setNotifyEmailError('');
+    persistQueue({ ...queue, notifyEmails: [...current, email] });
+    setNotifyEmailDraft('');
+  };
+  const removeNotifyEmail = (email: string) => {
+    if (!queue) return;
+    persistQueue({ ...queue, notifyEmails: (queue.notifyEmails || []).filter(e => e !== email) });
+  };
   const addMember = async (id: string) => {
     if (!queue) return;
     // If user is not in space_members yet, add them first
@@ -1186,9 +1291,14 @@ export default function QueueSettingsPage() {
         method: 'POST',
         body: JSON.stringify({ userId: id, role: 'member' }),
       }).catch(() => {});
-      // Refresh space members
-      const sp = await api.getSpace(spaceKey).catch(() => null);
-      if (sp) setSpaceMembers(sp.members || []);
+      // Update local state directly instead of a full api.getSpace()
+      // refetch -- that round-trip (on top of the POST above and the
+      // persistQueue PATCH below) was the main source of the ~3s delay
+      // reported when adding someone not yet in this space. Everything
+      // needed is already in userPool (built from allUsers/spaceMembers
+      // above), so there's no new data a refetch would actually provide.
+      const added = userPool.find(m => (m.user || m).id === id);
+      if (added) setSpaceMembers(prev => [...prev, added.user ? added : { user: added, role: 'member' }]);
     }
     persistQueue({ ...queue, memberIds: [...queue.memberIds, id] });
     setMemberSearch(''); setShowAddMember(false);
@@ -1242,6 +1352,18 @@ export default function QueueSettingsPage() {
             <Mail size={15} className={tab === 'email' ? 'text-blue-600' : 'text-gray-400'} />
             Email
           </button>
+          {/* Separate tab, not a section buried in People & Access -- moved
+              here by explicit request after a real user got stuck for
+              several rounds confusing this with the "Email" tab right above
+              (that one is inbound-only: linking a mailbox so incoming mail
+              creates tickets here) and not finding this one scrolled below
+              a 30-person member list. */}
+          <button onClick={() => setTab('notify')}
+            className={cn('flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
+              tab === 'notify' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900')}>
+            <Bell size={15} className={tab === 'notify' ? 'text-blue-600' : 'text-gray-400'} />
+            Notifications
+          </button>
           <button onClick={() => setTab('workflow')}
             className={cn('flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
               tab === 'workflow' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900')}>
@@ -1255,13 +1377,17 @@ export default function QueueSettingsPage() {
       <div className="flex-1 overflow-y-auto">
         {/* ── PEOPLE & ACCESS ── */}
         {tab === 'people' && (
-          <div className="max-w-3xl mx-auto px-8 py-8">
-            <div className="mb-6">
-              <h1 className="text-[20px] font-bold text-gray-900">People &amp; Access</h1>
-              <p className="text-[13px] text-gray-500 mt-1">Manage who has access to the <strong>{queue.name}</strong> queue.</p>
-            </div>
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-6">
-              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <div className="max-w-6xl mx-auto px-8 py-8">
+            {/* Sticky: title + the Members/Add member bar stay pinned at the
+                top of the scroll area while only the row list below scrolls
+                -- confirmed for real from a screenshot showing this header
+                scrolled fully out of view while browsing a 30-person list. */}
+            <div className="sticky top-0 z-10 bg-gray-50 pb-4">
+              <div className="mb-6">
+                <h1 className="text-[20px] font-bold text-gray-900">People &amp; Access</h1>
+                <p className="text-[13px] text-gray-500 mt-1">Manage who has access to the <strong>{queue.name}</strong> queue.</p>
+              </div>
+              <div className="relative flex items-center justify-between bg-white rounded-t-2xl border border-b-0 border-gray-200 px-6 py-4">
                 <div className="flex items-center gap-2">
                   <h2 className="text-[14px] font-semibold text-gray-800">Members</h2>
                   <span className="text-[11.5px] font-medium text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">{members.length}</span>
@@ -1270,34 +1396,40 @@ export default function QueueSettingsPage() {
                   className="flex items-center gap-1.5 px-4 py-2 text-[12.5px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors">
                   <Plus size={13} /> Add member
                 </button>
-              </div>
-              {showAddMember && (
-                <div className="px-6 py-4 border-b border-gray-100 bg-blue-50">
-                  <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 focus-within:border-blue-500">
-                    <Search size={14} className="text-gray-400" />
-                    <input autoFocus value={memberSearch} onChange={e => setMemberSearch(e.target.value)}
-                      placeholder="Search by name or email…"
-                      className="flex-1 text-[13px] outline-none text-gray-700 placeholder:text-gray-400" />
-                    <button onClick={() => { setShowAddMember(false); setMemberSearch(''); }}><X size={13} className="text-gray-400 hover:text-gray-600" /></button>
-                  </div>
-                  <div className="mt-3 space-y-1.5 max-h-48 overflow-y-auto">
-                    {nonMembers
-                      .filter(m => { const mb = m.user||m; const s = memberSearch.toLowerCase(); return !s || `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(s) || (mb.email||'').toLowerCase().includes(s); })
-                      .map(m => { const mb = m.user||m; return (
-                        <div key={mb.id} onClick={() => addMember(mb.id)}
-                          className="flex items-center gap-3 px-4 py-2.5 bg-white rounded-xl border border-gray-100 hover:border-blue-300 hover:bg-blue-50 cursor-pointer transition-colors">
-                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white ${avatarColor(mb.firstName||'')}`}>{mkInitials(mb.firstName||'',mb.lastName||'')}</div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-[13px] font-medium text-gray-800">{mb.firstName} {mb.lastName}</p>
-                            <p data-hj-suppress className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                {/* Floats over the page instead of pushing the member table
+                    down -- previously rendered inline here, so opening it
+                    shifted everything below (including the table) further
+                    down the page on every open/close. */}
+                {showAddMember && (
+                  <div className="absolute right-6 top-full mt-2 w-96 z-20 rounded-xl border border-gray-200 bg-white shadow-lg p-3">
+                    <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 focus-within:border-blue-500">
+                      <Search size={14} className="text-gray-400" />
+                      <input ref={addMemberInputRef} value={memberSearch} onChange={e => setMemberSearch(e.target.value)}
+                        placeholder="Search by name or email…"
+                        className="flex-1 text-[13px] outline-none text-gray-700 placeholder:text-gray-400" />
+                      <button onClick={() => { setShowAddMember(false); setMemberSearch(''); }}><X size={13} className="text-gray-400 hover:text-gray-600" /></button>
+                    </div>
+                    <div className="mt-3 space-y-1.5 max-h-64 overflow-y-auto">
+                      {nonMembers
+                        .filter(m => { const mb = m.user||m; const s = memberSearch.toLowerCase(); return !s || `${mb.firstName} ${mb.lastName}`.toLowerCase().includes(s) || (mb.email||'').toLowerCase().includes(s); })
+                        .map(m => { const mb = m.user||m; return (
+                          <div key={mb.id} onClick={() => addMember(mb.id)}
+                            className="flex items-center gap-3 px-4 py-2.5 bg-white rounded-xl border border-gray-100 hover:border-blue-300 hover:bg-blue-50 cursor-pointer transition-colors">
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white ${avatarColor(mb.firstName||'')}`}>{mkInitials(mb.firstName||'',mb.lastName||'')}</div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[13px] font-medium text-gray-800">{mb.firstName} {mb.lastName}</p>
+                              <p data-hj-suppress className="text-[11.5px] text-gray-400">{mb.email||''}</p>
+                            </div>
+                            <span className="text-[12px] text-blue-600 font-medium">+ Add</span>
                           </div>
-                          <span className="text-[12px] text-blue-600 font-medium">+ Add</span>
-                        </div>
-                      );})}
-                    {nonMembers.length === 0 && <p className="text-center text-[12.5px] text-gray-400 py-3">All space members are already added</p>}
+                        );})}
+                      {nonMembers.length === 0 && <p className="text-center text-[12.5px] text-gray-400 py-3">All space members are already added</p>}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
+            </div>
+            <div className="bg-white rounded-b-2xl border border-t-0 border-gray-200 overflow-hidden mb-6">
               {members.length === 0 ? (
                 <div className="flex flex-col items-center py-14 text-center">
                   <Users size={28} className="text-gray-200 mb-3" />
@@ -1353,6 +1485,64 @@ export default function QueueSettingsPage() {
                   </tbody>
                 </table>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Notifications: extra emails CC'd on every action in this queue
+            -- a shared team DL, not a person's own account. Its own tab, not
+            a section buried in People & Access, and deliberately separate
+            from the "Email" tab (that one is INBOUND-only: linking a mailbox
+            so incoming mail creates tickets here; this is OUTBOUND, for
+            actions already happening). By request -- moved to its own tab
+            after a real user got stuck several rounds confusing the two. ── */}
+        {tab === 'notify' && queue && (
+          <div className="max-w-3xl mx-auto px-8 py-8">
+            <div className="mb-6">
+              <h1 className="text-[20px] font-bold text-gray-900">Notifications</h1>
+              <p className="text-[13px] text-gray-500 mt-1">Extra emails CC'd on every action in the <strong>{queue.name}</strong> queue.</p>
+            </div>
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <Bell size={15} className="text-gray-400" />
+                  <h2 className="text-[14px] font-semibold text-gray-800">Notify by email</h2>
+                </div>
+                <p className="text-[12.5px] text-gray-500 mt-1">
+                  Add a distribution list or shared inbox to CC on every action in this queue -- ticket created, status changes, comments, assignment. On top of whoever already gets emailed (assignee, reporter, admins). No password needed -- this only ever SENDS to the address, it never logs into it.
+                </p>
+              </div>
+              <div className="px-6 py-4">
+                <div className="flex items-center gap-2">
+                  <input
+                    value={notifyEmailDraft}
+                    onChange={e => { setNotifyEmailDraft(e.target.value); setNotifyEmailError(''); }}
+                    onKeyDown={e => { if (e.key === 'Enter') addNotifyEmail(); }}
+                    placeholder="team-dl@yourcompany.com"
+                    className="flex-1 border border-gray-200 rounded-lg px-3.5 py-2 text-[13px] text-gray-800 focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                  />
+                  <button onClick={addNotifyEmail}
+                    className="flex items-center gap-1.5 px-4 py-2 text-[12.5px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors">
+                    <Plus size={13} /> Add
+                  </button>
+                </div>
+                {notifyEmailError && <p className="text-[11.5px] text-red-500 mt-1.5">{notifyEmailError}</p>}
+
+                {(queue.notifyEmails || []).length === 0 ? (
+                  <p className="text-[12.5px] text-gray-400 mt-4">No extra addresses yet -- only the assignee, reporter and admins are notified.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    {(queue.notifyEmails || []).map(email => (
+                      <span key={email} className="inline-flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-full bg-gray-100 text-[12.5px] text-gray-700">
+                        {email}
+                        <button onClick={() => removeNotifyEmail(email)} className="text-gray-400 hover:text-red-500 transition-colors">
+                          <X size={12} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}

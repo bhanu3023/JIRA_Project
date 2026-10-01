@@ -7,9 +7,13 @@ import { useStore } from '@/store';
 /**
  * /auth/oauth-callback
  *
- * Server → client bridge: the Microsoft OAuth callback (server route) redirects
- * here with ?token=<jwt>&next=<url>.  We store the token in localStorage so the
- * Zustand store picks it up, then navigate to the intended destination.
+ * Server → client bridge: the Microsoft OAuth callback (server route)
+ * already set the session as an httpOnly cookie on this redirect (no token
+ * in the URL anymore -- a raw JWT in a redirect URL ends up in browser
+ * history and often server/proxy access logs, a worse exposure than
+ * localStorage ever was). This page just confirms the cookie session is
+ * live via loadUser()/GET /auth/me, then navigates to the intended
+ * destination.
  */
 function OAuthCallbackContent() {
   const searchParams   = useSearchParams();
@@ -17,7 +21,6 @@ function OAuthCallbackContent() {
   const loadUser       = useStore((s) => s.loadUser);
 
   useEffect(() => {
-    const token     = searchParams.get('token');
     const next      = searchParams.get('next') || '/dashboard';
     const oauthErr  = searchParams.get('oauth_error');
 
@@ -26,14 +29,12 @@ function OAuthCallbackContent() {
       return;
     }
 
-    if (!token) {
-      router.replace('/auth/login?oauth_error=missing_token');
-      return;
-    }
-
-    // Store token and do a hard navigation to ensure fresh JS is loaded
-    localStorage.setItem('jira_token', token);
-    window.location.replace(next);
+    loadUser().then(() => {
+      // Hard navigation to ensure fresh JS is loaded, same as before.
+      window.location.replace(next);
+    }).catch(() => {
+      router.replace('/auth/login?oauth_error=session_not_established');
+    });
   }, [searchParams]);
 
   return (

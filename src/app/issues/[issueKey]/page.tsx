@@ -8,7 +8,7 @@ import { useStore } from '@/store';
 import { api } from '@/lib/api';
 import { typeIcons, formatDate, formatDateTime, formatJiraDateTime, timeAgo, getInitials, getEffectiveIssueStatus, resolveStatusColor, getDeptColor, buildMentionHtml } from '@/lib/utils';
 import { trackRecentItem } from '@/lib/recent-items';
-import { PriorityIcon, getPriorityMeta, PRIORITIES } from '@/components/ui/PriorityIcon';
+import { PriorityIcon, getPriorityMeta, getSelectablePriorities } from '@/components/ui/PriorityIcon';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import CommentReactions from '@/components/ui/CommentReactions';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
@@ -147,15 +147,24 @@ export default function IssueDetailPage() {
   // Normalize key: strip Jira sub-issue colon suffix (e.g. L2B-12718:1 → L2B-12718)
   const rawKey = (params.issueKey as string).toUpperCase();
   const issueKey = rawKey.includes(':') ? rawKey.split(':')[0] : rawKey;
-  const { currentIssue, currentIssueError, loadIssue, user, spaces } = useStore(
+  const { currentIssue, currentIssueError, loadIssue, user, spaces, disabledPriorities } = useStore(
     useShallow((s) => ({
       currentIssue: s.currentIssue,
       currentIssueError: s.currentIssueError,
       loadIssue: s.loadIssue,
       user: s.user,
       spaces: s.spaces,
+      disabledPriorities: s.disabledPriorities,
     })),
   );
+  const selectablePriorities = getSelectablePriorities(disabledPriorities);
+  // Project Manager's option list used to be a hand-maintained hardcoded
+  // name array here (5 separate copies) that drifted from who actually
+  // holds the migration_manager role in User Management. Fetched live
+  // instead -- see api.getProjectManagerOptions().
+  const [projectManagerOptions, setProjectManagerOptions] = useState<string[]>(['Others']);
+  useEffect(() => { api.getProjectManagerOptions().then(setProjectManagerOptions).catch(() => {}); }, []);
+
   const [commentText, setCommentText] = useState('');
   const [isInternal, setIsInternal] = useState(false);
   const [submittingComment, setSubmittingComment] = useState(false);
@@ -172,6 +181,12 @@ export default function IssueDetailPage() {
   const [isUploadingComment, setIsUploadingComment] = useState(false);
   const [isUploadingDescription, setIsUploadingDescription] = useState(false);
   const [isUploadingEditComment, setIsUploadingEditComment] = useState(false);
+  // Root Cause / Fix Description were plain <textarea> fields with no image
+  // paste/upload support at all -- switched to the same RichTextEditor used
+  // for Description/comments (which handles image paste/drag-drop/upload),
+  // by request. Shared between both fields since only one is ever being
+  // edited at a time (editingCustomField is a single value).
+  const [isUploadingCustomField, setIsUploadingCustomField] = useState(false);
   // Inline reply box -- opens directly under the comment being replied to
   // (matching Jira's own placement) instead of jumping to the main composer
   // at the top, which put the reply nowhere near the comment it referenced
@@ -190,9 +205,22 @@ export default function IssueDetailPage() {
   const [spaceStatuses, setSpaceStatuses] = useState<any[]>([]);
   const [workflowTransitions, setWorkflowTransitions] = useState<any[]>([]);
   const [spaceMembers, setSpaceMembers] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
+  const [activeTab, setActiveTab] = useState<'comments' | 'history' | 'worklog'>('comments');
+  // Per-department work log -- Jira-style "Log Work" but split by which
+  // department actually did the work, so a ticket that passed through
+  // Dev -> Migration -> Infra -> QA shows each team's own hours separately
+  // against the SAME ticket instead of one combined, unattributed total.
+  const WORKLOG_DEPARTMENTS = ['Dev', 'Migration', 'Infra', 'QA'];
+  const [worklogs, setWorklogs] = useState<any[]>([]);
+  const [worklogOpenDept, setWorklogOpenDept] = useState<string | null>(null);
+  const [worklogHours, setWorklogHours] = useState('');
+  const [worklogDesc, setWorklogDesc] = useState('');
+  const [worklogDate, setWorklogDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [worklogSubmitting, setWorklogSubmitting] = useState(false);
+  const [worklogError, setWorklogError] = useState('');
   const [detailsExpanded, setDetailsExpanded] = useState(true);
   const [slaExpanded, setSlaExpanded] = useState(true);
+  const [worklogExpanded, setWorklogExpanded] = useState(true);
   // Wider default (was 280 -- cramped enough that Priority/Due Date/Product
   // Type/etc. values wrapped awkwardly) and persisted across tickets/reloads
   // via localStorage -- previously this reset to the default every single
@@ -291,6 +319,11 @@ export default function IssueDetailPage() {
   // Client Name has 90+) — reset whenever a different field opens for editing.
   const [customFieldSearch, setCustomFieldSearch] = useState('');
   useEffect(() => { setCustomFieldSearch(''); }, [editingCustomField]);
+  // "Other" mode for select-type custom fields that opt in via allowOther
+  // (currently just Infra Issue Type) -- tracked separately from
+  // customFieldEditValue so the <select> can show "Other" selected while
+  // the actual value being typed doesn't match any real option.
+  const [customFieldOtherMode, setCustomFieldOtherMode] = useState(false);
   const [pinnedFields, setPinnedFields] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('jira_pinned_fields') || '[]'); }
     catch { return []; }
@@ -441,8 +474,45 @@ export default function IssueDetailPage() {
     loadIssue(issueKey).finally(() => setIssueLoadDone(true));
     // Load watch status
     api.getWatch(issueKey).then(r => { setWatching(r.watching); setWatchCount(r.count); }).catch(() => {});
+    loadWorklogs();
     return () => { setIssueLoadDone(false); };
   }, [issueKey, loadIssue]);
+
+  const loadWorklogs = () => {
+    api.getWorklogs(issueKey).then((rows: any) => setWorklogs(Array.isArray(rows) ? rows : [])).catch(() => {});
+  };
+
+  const handleAddWorklog = async (department: string) => {
+    setWorklogError('');
+    const hoursNum = parseFloat(worklogHours);
+    if (!hoursNum || hoursNum <= 0) { setWorklogError('Enter a valid number of hours.'); return; }
+    setWorklogSubmitting(true);
+    try {
+      await api.addWorklog(issueKey, {
+        department,
+        timeSpentMinutes: Math.round(hoursNum * 60),
+        description: worklogDesc.trim() || undefined,
+        workDate: worklogDate,
+      });
+      setWorklogHours(''); setWorklogDesc(''); setWorklogDate(new Date().toISOString().slice(0, 10));
+      setWorklogOpenDept(null);
+      loadWorklogs();
+    } catch (e: any) {
+      setWorklogError(e?.message || 'Failed to log work. Please try again.');
+    } finally {
+      setWorklogSubmitting(false);
+    }
+  };
+
+  const handleDeleteWorklog = async (id: string) => {
+    if (!confirm('Delete this worklog entry?')) return;
+    try {
+      await api.deleteWorklog(id);
+      loadWorklogs();
+    } catch (e: any) {
+      alert(e?.message || 'Failed to delete worklog entry.');
+    }
+  };
 
   // Redirect to CF key URL if issue loaded with original Jira key. Must
   // confirm currentIssue.key actually matches the URL's issueKey before
@@ -1049,6 +1119,7 @@ export default function IssueDetailPage() {
     type: 'select' | 'multiselect' | 'tags' | 'text' | 'textarea',
     options: string[] | undefined,
     editPrefix: string,
+    allowOther?: boolean,
   ) => {
     const rawVal = (issue as any)[key];
     const currentVal = Array.isArray(rawVal) ? rawVal : (rawVal || '');
@@ -1069,11 +1140,30 @@ export default function IssueDetailPage() {
               <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
                 className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
             ) : type === 'select' ? (
-              <select value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
-                className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
-                <option value="">None</option>
-                {allOptions.map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
+              <div className="flex flex-col gap-1">
+                <select
+                  value={allowOther && customFieldOtherMode ? '__other__' : customFieldEditValue}
+                  onChange={e => {
+                    if (e.target.value === '__other__') {
+                      setCustomFieldOtherMode(true);
+                      setCustomFieldEditValue('');
+                    } else {
+                      setCustomFieldOtherMode(false);
+                      setCustomFieldEditValue(e.target.value);
+                    }
+                  }}
+                  autoFocus
+                  className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none bg-white">
+                  <option value="">None</option>
+                  {allOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                  {allowOther && <option value="__other__">Other</option>}
+                </select>
+                {allowOther && customFieldOtherMode && (
+                  <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
+                    placeholder="Type a value"
+                    className="border border-blue-400 rounded px-2 py-0.5 text-[12px] focus:outline-none w-full" />
+                )}
+              </div>
             ) : type === 'tags' ? (
               <input value={customFieldEditValue} onChange={e => setCustomFieldEditValue(e.target.value)} autoFocus
                 placeholder="Comma-separated values"
@@ -1151,7 +1241,11 @@ export default function IssueDetailPage() {
             </div>
           </div>
         ) : (
-          <button onClick={() => { setEditingCustomField(editKey); setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal); }}
+          <button onClick={() => {
+            setEditingCustomField(editKey);
+            setCustomFieldEditValue(Array.isArray(currentVal) ? currentVal.join(', ') : currentVal);
+            setCustomFieldOtherMode(!!allowOther && type === 'select' && !!currentVal && !allOptions.includes(currentVal as string));
+          }}
             className="text-[13px] hover:bg-white rounded-md px-1.5 py-1 -ml-1.5 transition-colors w-full text-left">
             {displayVal
               ? <span className="text-gray-700 whitespace-pre-wrap break-words">{displayVal}</span>
@@ -1179,8 +1273,14 @@ export default function IssueDetailPage() {
   // QA gets the same full exemption as the IA space -- by request, resolving
   // a QA-queue ticket was blocking on Project Pool/Project Manager/etc. the
   // same way IA's own tickets used to before that exemption existed above.
+  // SAT_Board (SB) belongs in the same exemption as IA -- CreateIssueModal's
+  // NON_MIGRATION_SPACE_KEYS already exempts both IA and SB from these same
+  // fields at creation time (they're never shown/required there), but this
+  // resolve-time check only ever matched IA, so an SB ticket could be
+  // created with them correctly left blank and then get stuck unresolvable
+  // the moment someone tried to close it -- confirmed for real on CF-33408.
   const isMandatoryFieldsExemptDept = () => {
-    if ((issue?.spaceKey || '').toUpperCase() === 'IA') return true;
+    if (['IA', 'SB'].includes((issue?.spaceKey || '').toUpperCase())) return true;
     const dept = ((issue as any)?.current_department || '').trim().toLowerCase();
     return dept === 'qa';
   };
@@ -1242,6 +1342,27 @@ export default function IssueDetailPage() {
 
       if (missing.length > 0) {
         setMandatoryModal({ missingFields: missing, pendingStatusId: statusId, context: 'resolve' });
+        return;
+      }
+    }
+    // Root Cause / Fix Description must also be filled before Dev hands a
+    // ticket off to Migration specifically (explicit request) -- these two
+    // fields are already required to RESOLVE a Dev ticket (see
+    // getMissingCoreFields above), now also required at the exact point
+    // Dev routes it onward to Migration, not just when closing it outright.
+    // Scoped to Migration only (not every department Dev might route to),
+    // matching exactly what was asked.
+    const isDevToMigrationHandoff = ((issue as any)?.current_department || '').trim().toLowerCase() === 'dev'
+      && /^(waiting\s+for|routed\s+to)\s+migration$/i.test((targetStatus?.name || '').trim());
+    if (isDevToMigrationHandoff && !isMandatoryFieldsExemptDept()) {
+      const handoffMissing: string[] = [];
+      for (const f of [{ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' }]) {
+        const cfEntry = customFields.find(cf => cf.name?.toLowerCase() === f.name.toLowerCase());
+        const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
+        if (!val || val.toString().trim() === '') handoffMissing.push(f.name);
+      }
+      if (handoffMissing.length > 0) {
+        setMandatoryModal({ missingFields: handoffMissing, pendingStatusId: statusId, context: 'department' });
         return;
       }
     }
@@ -1465,6 +1586,13 @@ export default function IssueDetailPage() {
   // same way the Attachments list already does, since inline chips only
   // carry a filename/url, not a stored mimeType.
   const openFilePreview = (url: string, name: string) => {
+    // Per explicit request ("any type of files... should open"): this used
+    // to only recognize image/pdf/csv/xlsx/xls, defaulting every other
+    // extension (video, audio, plain text, docx, zip, ...) to generic
+    // application/octet-stream -- correctly routing to the "download it"
+    // fallback for genuinely unpreviewable types like docx/zip, but ALSO
+    // silently doing the same for video/audio/text files the preview modal
+    // can actually render natively once given the right mime.
     const mime = /\.(png|jpe?g|gif|webp|svg)$/i.test(name)
       ? `image/${name.split('.').pop()!.toLowerCase().replace('jpg', 'jpeg')}`
       : /\.pdf$/i.test(name)
@@ -1475,6 +1603,14 @@ export default function IssueDetailPage() {
       ? XLSX_MIME
       : /\.xls$/i.test(name)
       ? XLS_MIME
+      : /\.(mp4|webm|mov|m4v|ogv)$/i.test(name)
+      ? `video/${name.split('.').pop()!.toLowerCase().replace('mov', 'quicktime')}`
+      : /\.(mp3|wav|m4a|ogg)$/i.test(name)
+      ? `audio/${name.split('.').pop()!.toLowerCase()}`
+      : /\.(txt|log)$/i.test(name)
+      ? 'text/plain'
+      : /\.json$/i.test(name)
+      ? 'application/json'
       : 'application/octet-stream';
     setPreviewAttach({ url, name, mime });
   };
@@ -1636,7 +1772,14 @@ export default function IssueDetailPage() {
   // exists, show THAT queue's own frozen status here too instead of the live one.
   const viewDeptParam = searchParams?.get('viewDept') || '';
   const currentDeptForView = ((issue as any)?.current_department || '').trim();
-  const isHistoricalDeptView = !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
+  // Disabled per explicit request: always show the ticket's live current
+  // status/assignee here, regardless of which queue's link was clicked --
+  // the frozen-snapshot view (see the comment above this block for why it
+  // existed) was confusing users who expected this page to always reflect
+  // reality. The Department field alone now shows where a ticket has moved
+  // to; the queue list itself (dept_closed) still shows its own frozen
+  // per-department snapshot, unaffected by this.
+  const isHistoricalDeptView = false && !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
   // Admins can still edit the live ticket while viewing another queue's frozen
   // snapshot -- the read-only lock below exists so a regular user can't mistake
   // a historical snapshot for the live ticket and edit it by accident, not to
@@ -2368,6 +2511,16 @@ export default function IssueDetailPage() {
                       </table>
                     )}
                   </div>
+                ) : previewAttach.mime.startsWith('video/') ? (
+                  <div className="w-full h-full flex items-center justify-center p-6 bg-black">
+                    <video src={previewAttach.url} controls autoPlay={false} className="max-w-full max-h-full" />
+                  </div>
+                ) : previewAttach.mime.startsWith('audio/') ? (
+                  <div className="w-full h-full flex items-center justify-center p-6">
+                    <audio src={previewAttach.url} controls className="w-full max-w-md" />
+                  </div>
+                ) : previewAttach.mime === 'text/plain' || previewAttach.mime === 'application/json' ? (
+                  <iframe src={previewAttach.url} className="w-full h-full border-0 bg-white" title={previewAttach.name} />
                 ) : isXlsxPreview ? (
                   <div className="w-full h-full overflow-auto bg-white p-4">
                     {xlsxPreviewError ? (
@@ -2400,7 +2553,17 @@ export default function IssueDetailPage() {
                 ) : (
                   <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-gray-400">
                     <Paperclip size={28} />
-                    <p className="text-sm">No inline preview available for this file type.</p>
+                    {/* Word/PowerPoint/zip/etc. -- browsers genuinely can't
+                        render these inline no matter what headers say (that's
+                        not a framing/permission issue like the PDF/image one
+                        was, it's a real rendering-capability gap), so download
+                        is the correct outcome here, not a bug. Naming the file
+                        type explicitly (from the extension, since mimeType is
+                        often just generic octet-stream) so this doesn't read
+                        as an unexplained dead end. */}
+                    <p className="text-sm">
+                      {(previewAttach.name.split('.').pop() || '').toUpperCase() || 'This'} files can't be previewed in the browser — download it to open.
+                    </p>
                     <a href={previewAttach.url} download={previewAttach.name}
                       className="px-3 py-1.5 text-xs text-white bg-indigo-600 hover:bg-indigo-700 rounded-md transition-colors">
                       Download {previewAttach.name}
@@ -2531,13 +2694,22 @@ export default function IssueDetailPage() {
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_rootCause' ? (
                       <div className="flex flex-col gap-2">
-                        <textarea value={customFieldEditValue} onChange={e => { const words = e.target.value.trim().split(/\s+/).filter(Boolean); if (words.length <= 500 || e.target.value.length < customFieldEditValue.length) setCustomFieldEditValue(e.target.value); }} autoFocus rows={6}
-                          className="w-full border border-blue-400 rounded px-3 py-2 text-[13px] focus:outline-none resize-y" placeholder="Describe the root cause…" />
+                        <RichTextEditor
+                          value={customFieldEditValue}
+                          onChange={(html) => {
+                            const words = html.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean);
+                            if (words.length <= 500 || html.length < customFieldEditValue.length) setCustomFieldEditValue(html);
+                          }}
+                          placeholder="Describe the root cause… (paste or drag images)"
+                          minHeight="120px"
+                          members={allMembers}
+                          onUploadingChange={setIsUploadingCustomField}
+                        />
                         <div className="flex items-center justify-between">
-                          <span className="text-[11px] text-gray-400">{customFieldEditValue.trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
+                          <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button onClick={async () => { try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } }}
-                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">Save</button>
+                            <button disabled={isUploadingCustomField} onClick={async () => { try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } }}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
                           </div>
@@ -2547,7 +2719,9 @@ export default function IssueDetailPage() {
                       <button onClick={() => { setEditingCustomField('l2b_rootCause'); setCustomFieldEditValue((issue as any).rootCause || ''); }}
                         className="w-full text-left text-[13px] text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 transition-colors min-h-[32px]">
                         {(issue as any).rootCause
-                          ? <span className="whitespace-pre-wrap break-words">{(issue as any).rootCause}</span>
+                          ? (/<[a-z][\s\S]*>/i.test((issue as any).rootCause)
+                              ? <div className="[&_img]:max-w-full [&_img]:rounded [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline break-words" dangerouslySetInnerHTML={{ __html: (issue as any).rootCause }} />
+                              : <span className="whitespace-pre-wrap break-words">{(issue as any).rootCause}</span>)
                           : <span className="text-gray-400 italic">Click to add root cause…</span>}
                       </button>
                     )}
@@ -2564,13 +2738,22 @@ export default function IssueDetailPage() {
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_fixDescription' ? (
                       <div className="flex flex-col gap-2">
-                        <textarea value={customFieldEditValue} onChange={e => { const words = e.target.value.trim().split(/\s+/).filter(Boolean); if (words.length <= 500 || e.target.value.length < customFieldEditValue.length) setCustomFieldEditValue(e.target.value); }} autoFocus rows={6}
-                          className="w-full border border-blue-400 rounded px-3 py-2 text-[13px] focus:outline-none resize-y" placeholder="Describe the fix…" />
+                        <RichTextEditor
+                          value={customFieldEditValue}
+                          onChange={(html) => {
+                            const words = html.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean);
+                            if (words.length <= 500 || html.length < customFieldEditValue.length) setCustomFieldEditValue(html);
+                          }}
+                          placeholder="Describe the fix… (paste or drag images)"
+                          minHeight="120px"
+                          members={allMembers}
+                          onUploadingChange={setIsUploadingCustomField}
+                        />
                         <div className="flex items-center justify-between">
-                          <span className="text-[11px] text-gray-400">{customFieldEditValue.trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
+                          <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button onClick={async () => { try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } }}
-                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">Save</button>
+                            <button disabled={isUploadingCustomField} onClick={async () => { try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } }}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
                           </div>
@@ -2580,7 +2763,9 @@ export default function IssueDetailPage() {
                       <button onClick={() => { setEditingCustomField('l2b_fixDescription'); setCustomFieldEditValue((issue as any).fixDescription || ''); }}
                         className="w-full text-left text-[13px] text-gray-700 hover:bg-gray-50 rounded px-1 py-0.5 transition-colors min-h-[32px]">
                         {(issue as any).fixDescription
-                          ? <span className="whitespace-pre-wrap break-words">{(issue as any).fixDescription}</span>
+                          ? (/<[a-z][\s\S]*>/i.test((issue as any).fixDescription)
+                              ? <div className="[&_img]:max-w-full [&_img]:rounded [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline break-words" dangerouslySetInnerHTML={{ __html: (issue as any).fixDescription }} />
+                              : <span className="whitespace-pre-wrap break-words">{(issue as any).fixDescription}</span>)
                           : <span className="text-gray-400 italic">Click to add fix description…</span>}
                       </button>
                     )}
@@ -2600,6 +2785,10 @@ export default function IssueDetailPage() {
 <button onClick={() => setActiveTab('history')}
                 className={`px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors ${activeTab === 'history' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
                 History ({(issue.activity?.length || 0) + (issue.comments || []).filter((c: any) => c.authorName === 'System').length})
+              </button>
+              <button onClick={() => setActiveTab('worklog')}
+                className={`px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors ${activeTab === 'worklog' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                Worklog ({worklogs.length})
               </button>
             </div>
 
@@ -2936,6 +3125,102 @@ export default function IssueDetailPage() {
                 )}
               </div>
             )}
+
+            {activeTab === 'worklog' && (
+              <div className="pt-4 space-y-3">
+                {WORKLOG_DEPARTMENTS.map((dept) => {
+                  const deptLogs = worklogs.filter((w: any) => String(w.department || '').toLowerCase() === dept.toLowerCase());
+                  const totalMinutes = deptLogs.reduce((sum: number, w: any) => sum + (w.timeSpentMinutes || 0), 0);
+                  const formatMinutes = (m: number) => {
+                    const h = Math.floor(m / 60), rem = m % 60;
+                    return h && rem ? `${h}h ${rem}m` : h ? `${h}h` : `${rem}m`;
+                  };
+                  const isOpen = worklogOpenDept === dept;
+                  return (
+                    <div key={dept} className="border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[13px] font-semibold text-gray-800">{dept} Worklog</span>
+                          {totalMinutes > 0 && (
+                            <span className="text-[11px] font-medium text-gray-500 bg-white border border-gray-200 rounded px-1.5 py-0.5">
+                              {formatMinutes(totalMinutes)} logged
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => { setWorklogOpenDept(isOpen ? null : dept); setWorklogError(''); }}
+                          className="text-[12px] font-medium text-blue-600 hover:text-blue-800 transition-colors"
+                        >
+                          {isOpen ? 'Cancel' : '+ Log work'}
+                        </button>
+                      </div>
+
+                      {isOpen && (
+                        <div className="px-4 py-3 bg-blue-50/40 border-b border-gray-100 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number" min={0.1} step={0.25} placeholder="Hours"
+                              value={worklogHours} onChange={(e) => setWorklogHours(e.target.value)}
+                              className="w-24 rounded border border-gray-300 px-2 py-1.5 text-[12.5px] outline-none focus:border-blue-500"
+                            />
+                            <input
+                              type="date" value={worklogDate} onChange={(e) => setWorklogDate(e.target.value)}
+                              className="rounded border border-gray-300 px-2 py-1.5 text-[12.5px] outline-none focus:border-blue-500"
+                            />
+                          </div>
+                          <textarea
+                            placeholder="What did you work on? (optional)"
+                            value={worklogDesc} onChange={(e) => setWorklogDesc(e.target.value)}
+                            rows={2}
+                            className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-[12.5px] outline-none focus:border-blue-500 resize-none"
+                          />
+                          {worklogError && <p className="text-[12px] text-red-600">{worklogError}</p>}
+                          <button
+                            onClick={() => handleAddWorklog(dept)}
+                            disabled={worklogSubmitting}
+                            className="rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                          >
+                            {worklogSubmitting ? 'Logging…' : 'Log work'}
+                          </button>
+                        </div>
+                      )}
+
+                      {deptLogs.length === 0 ? (
+                        <p className="px-4 py-4 text-[12.5px] text-gray-400 text-center">No work logged for {dept} yet</p>
+                      ) : (
+                        <div className="divide-y divide-gray-100">
+                          {deptLogs.map((w: any) => (
+                            <div key={w.id} className="flex items-start justify-between px-4 py-2.5">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[12.5px] font-semibold text-gray-800">{w.authorName || 'Unknown'}</span>
+                                  <span className="text-[11px] font-medium text-blue-700 bg-blue-50 border border-blue-100 rounded px-1.5 py-0.5">
+                                    {formatMinutes(w.timeSpentMinutes || 0)}
+                                  </span>
+                                  <span className="text-[11px] text-gray-400">{formatJiraDateTime(w.workDate)}</span>
+                                </div>
+                                {w.description && (
+                                  <p className="text-[12px] text-gray-600 mt-0.5 whitespace-pre-wrap break-words">{w.description}</p>
+                                )}
+                              </div>
+                              {(user?.role === 'admin' || w.authorId === user?.id) && (
+                                <button
+                                  onClick={() => handleDeleteWorklog(w.id)}
+                                  className="text-gray-300 hover:text-red-500 transition-colors flex-shrink-0 ml-2"
+                                  title="Delete worklog entry"
+                                >
+                                  <X size={13} />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
 
@@ -3049,7 +3334,27 @@ export default function IssueDetailPage() {
                 // isn't manually routed still follows its parent automatically
                 // whenever the PARENT moves (see cascadeDeptToChildren), so
                 // this is only for the explicit manual override case.
-                const options: { status: any; transitionName: string }[] =
+                // Two different workflow transitions can each point at a
+                // DIFFERENT status row (different id) that happens to share
+                // the exact same display name (e.g. a queue-specific "In
+                // Progress" alongside a generic one) -- validToIds mapped
+                // each id to its own option with no regard for name
+                // collisions, so the dropdown showed the same-looking "In
+                // Progress" entry twice, indistinguishable to whoever's
+                // picking from it. Deduplicated by name (case-insensitive,
+                // first occurrence wins) since two options a user can't
+                // tell apart are confusing regardless of having different
+                // underlying ids.
+                const dedupeByStatusName = (opts: { status: any; transitionName: string }[]) => {
+                  const seen = new Set<string>();
+                  return opts.filter((o) => {
+                    const key = (o.status.name || '').trim().toLowerCase();
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                  });
+                };
+                const options: { status: any; transitionName: string }[] = dedupeByStatusName(
                   validToIds.length > 0
                     ? (validToIds
                         .map((toId: string) => {
@@ -3061,7 +3366,8 @@ export default function IssueDetailPage() {
                         .filter(o => !isCurrentStatus(o.status))
                     : spaceStatuses
                         .filter((s: any) => !isCurrentStatus(s))
-                        .map((s: any) => ({ status: s, transitionName: '' }));
+                        .map((s: any) => ({ status: s, transitionName: '' }))
+                );
 
                 return (
                   <Dropdown onClose={() => setShowStatusDropdown(false)} width="w-60" align="left-0">
@@ -3085,14 +3391,23 @@ export default function IssueDetailPage() {
                             className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-gray-50 transition-colors group"
                           >
                             <div className="flex-1 text-left">
-                              {/* Status name */}
+                              {/* A named transition (e.g. Migration's "Resolved" ->
+                                  "In Progress" labeled "Reopen") represents a
+                                  user-facing ACTION, not the raw destination
+                                  status -- show that as the primary label instead
+                                  of the status name, with the real resulting
+                                  status as a small hint underneath. Without this,
+                                  the option always showed the destination status's
+                                  own name ("In Progress") with the action name
+                                  buried as a tiny "via Reopen" sub-label, when the
+                                  whole point of naming a transition is for the
+                                  action itself to be what the user picks. */}
                               <p className="text-[13px] font-semibold text-gray-800 leading-tight">
-                                {s.name}
+                                {transitionName || s.name}
                               </p>
-                              {/* Transition name (sub-label) if different from status name */}
                               {transitionName && transitionName.toLowerCase() !== s.name.toLowerCase() && (
                                 <p className="text-[10px] text-gray-400 leading-tight mt-0.5">
-                                  via {transitionName}
+                                  → {s.name}
                                 </p>
                               )}
                             </div>
@@ -3324,7 +3639,7 @@ export default function IssueDetailPage() {
               const KNOWN_CF_OPTIONS: Record<string, string[]> = {
                 'Product Type':    ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'],
                 'Work Type':       ['New','Ongoing','Renewal','Upsell','Downgrade','Others'],
-                'Project Manager': ['Abhishek','Abhishikth','Ajay Singh','Chandra Mouli','Harika','Lakshmi Prasanna','Meghana','Raghu','Sri Ram','Sravan','Pranavi'],
+                'Project Manager': projectManagerOptions,
                 'Combination':     ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Box - Microsoft','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','MyDrive to MyDrive','My Drive - My Drive','MyDrive - MyDrive','Shared Drive- Shared Drive','Shared Drive- SharePoint','Shared Drive - Onedrive','Shared Drive - Egnyte','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Amazon S3 - SharePoint','SharePoint - Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Teams to Slack','Chat To Slack','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Drive Change','Other'],
               };
               const effectiveType = cf.fieldType || cf.type || '';
@@ -3640,7 +3955,7 @@ export default function IssueDetailPage() {
                 { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes'] },
                 { key: 'projectPool',    label: 'Project Pool',    type: 'select',      options: ['ENT', 'SMB'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','My Drive - My Drive','MyDrive - MyDrive','Shared Drive- Shared Drive','Shared Drive- SharePoint ','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','Box - Citrix','DropBox - Azure','Dropbox - Box','DropBox - Egnyte','Citrix - Citrix','Shared Drive - Egnyte','Shared Drive - Onedrive','SharePoint -  Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint ','SharePoint - Egnyte','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','Share Point - Amazon S3','Shared Drive - Amazon S3','Sharefile - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Sharefile - Azure','Egnyte - Azure','Amazon S3 - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Amazon workdocs - NFS','Slack to Slack','Chat to Chat','Teams to Teams','Meta to Chat','Meta to Viva','Meta to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Other','Amazon workdocs - Onedrive/SharePoint','MyDrive to MyDrive','ShareFile to SharePoint','ShareFile to ShareDrive','Drive Change','Box - Microsoft','Chat to Team','Teams to Slack','Chat To Slack'] },
-                { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Meghana','Others'] },
+                { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: projectManagerOptions },
                 { key: 'customerName',  label: 'Customer Name',   type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
                 { key: 'clientName',    label: 'Client Name',     type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
               ];
@@ -3669,7 +3984,7 @@ export default function IssueDetailPage() {
                 { key: 'productionTicket', label: 'Production Ticket', type: 'select', options: ['Operational Support','Code Fixes'] },
                 { key: 'projectPool',    label: 'Project Pool',    type: 'select',      options: ['ENT', 'SMB'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: ['Box - OneDrive','Box - SharePoint','Box - Teams','Box - Google Drive','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox - Google Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive to MyDrive','Shared Drive - Shared Drive','Shared Drive - Onedrive','Shared Drive - SharePoint','Egnyte - Onedrive','Egnyte - SharePoint','NFS - Onedrive','NFS - SharePoint','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Teams to Slack','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Other','Others'] },
-                { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Meghana','Others'] },
+                { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: projectManagerOptions },
                 { key: 'customerName',   label: 'Customer Name',    type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
                 { key: 'clientName',     label: 'Client Name',      type: 'multiselect', options: ['Accenture','Adobe','Airbnb','Amazon','American Airlines','Apple','AT&T','Bank of America','Best Buy','Boeing','Capital One','Cisco','Citigroup','Coca-Cola','Comcast','CVS Health','Dell','Delta Air Lines','Deloitte','Disney','eBay','ExxonMobil','Facebook','FedEx','Ford','General Electric','General Motors','Goldman Sachs','Google','HP','IBM','Intel','J.P. Morgan','Johnson & Johnson','JPMorgan Chase','KPMG','Lockheed Martin','McDonald\'s','McKinsey','Merck','MetLife','Microsoft','Morgan Stanley','Netflix','Nike','Oracle','PepsiCo','Pfizer','Procter & Gamble','Raytheon','Salesforce','Samsung','SAP','Siemens','Sony','Sprint','Target','Tesla','Texas Instruments','The Home Depot','Twitter','UnitedHealth','UPS','US Bancorp','Verizon','Visa','Walmart','Wells Fargo','Xerox','Yahoo','Other'] },
               ];
@@ -3701,17 +4016,17 @@ export default function IssueDetailPage() {
               const L1_COMBO_OPTIONS = ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','My Drive - My Drive','MyDrive - MyDrive','Shared Drive- Shared Drive','Shared Drive- SharePoint ','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','Box - Citrix','DropBox - Azure','Dropbox - Box','DropBox - Egnyte','Citrix - Citrix','Shared Drive - Egnyte','Shared Drive - Onedrive','SharePoint -  Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint ','SharePoint - Egnyte','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','Share Point - Amazon S3','Shared Drive - Amazon S3','Sharefile - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Sharefile - Azure','Egnyte - Azure','Amazon S3 - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Amazon workdocs - NFS','Slack to Slack','Chat to Chat','Teams to Teams','Meta to Chat','Meta to Viva','Meta to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Other','Amazon workdocs - Onedrive/SharePoint','MyDrive to MyDrive','ShareFile to SharePoint','ShareFile to ShareDrive','Drive Change','Box - Microsoft','Chat to Team','Teams to Slack','Chat To Slack'];
               // Exact options from Jira CFITS customfield_10883
               const L1_CLIENT_OPTIONS = ['ab-inbev','cloudfuze','MarmicFire','global-v','manypets','medifast','cms','epiq-global','computer_headquarters','groundedpackaging','nfl','realtimecloudservicesllc','capmation/aaron.salazar@capmation.com','365datacenters','icf','amputeecoalitionofamerica','concertai','xica','digantararesearchandtechnologiespvtltd','utopia','oassetmanagement','hyland','bluebeaminc','secloudexperts','tandemengineeringgroup','astoundbroadband','cadence','manhattanassociates','ovo','noahmedical','lighthouselearning','insight','roccoforte','phillipsexeteracademy','kbcadvisors','palmettotechnologygroup','convergetechnologysolutions','traditionone','tvsebike','alphabest','cheilagencynetwork','steelecanvasbasket','viasuninternal','rpmtechnologies','caseware','foundationcitizengo','curtlandryministries','nferenceinc.(pramana)','aplazame','alexandriarealeestateequitiesinc','warnermedia','atlasprimary','cuorementelab','curtlandryindustries','aresmanagement','kizantechnologies','instituteofinternationaleducation(iie)','ivyrehabnetworkinc','adventinternationalltd','exactsciencescorporation','glenno.hawbaker','barrattassetmanagementllc','aqueity','ontarionursesassociation','xavier','nationalgeographic','harvardbusinesspublishing','thirdpackettechnologies','butlercohen','alliancetechnologysolutions','Washington Post','schott','roccoforte&family','wegochemicalgroup','pilottravelcenters','aptlogix','nextiva','gearboxsoftware','nozominetworks','twelvebenefitcorporation','casepoint','jamessteelelaw','trevitherapeutics','restorixhealth','wheeleezinc','getweave','None','regala_consulting','binaryevolution','softmax','gearbox','nubius','IVYREHAB-Network-Inc.','MIG','goh-inc','bossdesigncenter','onespan','lgads','savvymoney','phoenixgamesholding','todaydentalnetwork','phillipseexeter','cheil','Chryselis','papereducation','synergygatewayverified','blackeducatordevelopment','morrisconsultinggroup','convergetechnologies','tunneltotowersfoundation','gadero','wasteprosUSA','krishservices','ForvisMazars'];
-              const l1bFields: { key: string; label: string; type: 'select' | 'multiselect' | 'tags'; options?: string[] }[] = [
+              const l1bFields: { key: string; label: string; type: 'select' | 'multiselect' | 'tags'; options?: string[]; allowOther?: boolean }[] = [
                 { key: 'productType',    label: 'Product Type',    type: 'select',      options: ['Content Migration','Message Migration','Email Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
                 { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes'] },
                 { key: 'projectPool',    label: 'Project Pool',    type: 'select',      options: ['ENT', 'SMB'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: L1_COMBO_OPTIONS },
-                { key: 'projectManager', label: 'Project Manager', type: 'multiselect', options: ['Harika','Abhishek','Ajay Singh','Abhishikth','Raghu','Lakshmi Prasanna','Sri Ram','Chandra Mouli','Sravan','Pranavi','Meghana','Others'] },
+                { key: 'projectManager', label: 'Project Manager', type: 'multiselect', options: projectManagerOptions },
                 { key: 'customerName',   label: 'Customer Name',   type: 'multiselect', options: ['Ab-Inbev','CloudFuze','CMS','Epiq_Global','EPIQ-GLOBAL','Global-V','Manypets','MarmicFire','NoahMedical','Thirdpacket'] },
                 { key: 'clientName',     label: 'Client Name',     type: 'multiselect', options: L1_CLIENT_OPTIONS },
-                { key: 'infraIssueType', label: 'Infra Issue Type', type: 'select',     options: INFRA_ISSUE_TYPES },
+                { key: 'infraIssueType', label: 'Infra Issue Type', type: 'select',     options: INFRA_ISSUE_TYPES, allowOther: true },
               ];
-              return l1bFields.map(({ key, label, type, options }) => renderCustomField(key, label, type, options, 'l1b'));
+              return l1bFields.map(({ key, label, type, options, allowOther }) => renderCustomField(key, label, type, options, 'l1b', allowOther));
             })()}
 
             {/* ── INFRABOARD Custom Fields ─────────────────────────────── */}
@@ -3750,7 +4065,7 @@ export default function IssueDetailPage() {
               const KNOWN_CF_OPTIONS: Record<string, string[]> = {
                 'Product Type':    ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'],
                 'Work Type':       ['New','Ongoing','Renewal','Upsell','Downgrade','Others'],
-                'Project Manager': ['Abhishek','Abhishikth','Ajay Singh','Chandra Mouli','Harika','Lakshmi Prasanna','Meghana','Raghu','Sri Ram','Sravan','Pranavi'],
+                'Project Manager': projectManagerOptions,
                 'Combination':     [
                   'Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Box - Microsoft',
                   'Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','Dropbox - Box','DropBox - Azure','DropBox - Egnyte',
@@ -3889,6 +4204,108 @@ export default function IssueDetailPage() {
             />
           )}
 
+          {/* Worklog Section — right sidebar, Jira-style, by explicit
+              request (the bottom Comments/History tab row wasn't being
+              found). Same four department sections as the Worklog tab,
+              sharing the exact same state/handlers -- this is just a
+              second, more visible entry point into the same feature. */}
+          <div className="h-px bg-gray-200 mx-4" />
+          <div className="px-4 py-3">
+            <button
+              onClick={() => setWorklogExpanded(v => !v)}
+              className="flex items-center gap-1.5 w-full mb-2.5 group"
+            >
+              <ChevronDown size={13} className={`transition-transform duration-150 text-gray-500 ${worklogExpanded ? '' : '-rotate-90'}`} />
+              <span className="text-[12.5px] font-semibold text-gray-700 group-hover:text-gray-900">Worklog</span>
+              {worklogs.length > 0 && (
+                <span className="text-[10.5px] text-gray-400">({worklogs.length})</span>
+              )}
+            </button>
+
+            {worklogExpanded && (
+              <div className="space-y-2">
+                {WORKLOG_DEPARTMENTS.map((dept) => {
+                  const deptLogs = worklogs.filter((w: any) => String(w.department || '').toLowerCase() === dept.toLowerCase());
+                  const totalMinutes = deptLogs.reduce((sum: number, w: any) => sum + (w.timeSpentMinutes || 0), 0);
+                  const formatMinutes = (m: number) => {
+                    const h = Math.floor(m / 60), rem = m % 60;
+                    return h && rem ? `${h}h ${rem}m` : h ? `${h}h` : `${rem}m`;
+                  };
+                  const isOpen = worklogOpenDept === dept;
+                  return (
+                    <div key={dept} className="rounded-md border border-gray-200 overflow-hidden">
+                      <div className="flex items-center justify-between px-2.5 py-1.5 bg-gray-50">
+                        <span className="text-[11.5px] font-semibold text-gray-700">{dept}</span>
+                        <div className="flex items-center gap-1.5">
+                          {totalMinutes > 0 && <span className="text-[10.5px] text-gray-500">{formatMinutes(totalMinutes)}</span>}
+                          <button
+                            onClick={() => { setWorklogOpenDept(isOpen ? null : dept); setWorklogError(''); }}
+                            className="text-[10.5px] font-medium text-blue-600 hover:text-blue-800 transition-colors"
+                          >
+                            {isOpen ? 'Cancel' : '+ Log'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {isOpen && (
+                        <div className="px-2.5 py-2 space-y-1.5 bg-blue-50/40">
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number" min={0.1} step={0.25} placeholder="Hours"
+                              value={worklogHours} onChange={(e) => setWorklogHours(e.target.value)}
+                              className="w-16 rounded border border-gray-300 px-1.5 py-1 text-[11.5px] outline-none focus:border-blue-500"
+                            />
+                            <input
+                              type="date" value={worklogDate} onChange={(e) => setWorklogDate(e.target.value)}
+                              className="flex-1 min-w-0 rounded border border-gray-300 px-1.5 py-1 text-[11px] outline-none focus:border-blue-500"
+                            />
+                          </div>
+                          <textarea
+                            placeholder="What did you work on? (optional)"
+                            value={worklogDesc} onChange={(e) => setWorklogDesc(e.target.value)}
+                            rows={2}
+                            className="w-full rounded border border-gray-300 px-2 py-1 text-[11.5px] outline-none focus:border-blue-500 resize-none"
+                          />
+                          {worklogError && <p className="text-[11px] text-red-600">{worklogError}</p>}
+                          <button
+                            onClick={() => handleAddWorklog(dept)}
+                            disabled={worklogSubmitting}
+                            className="w-full rounded bg-blue-600 px-2 py-1 text-[11.5px] font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                          >
+                            {worklogSubmitting ? 'Logging…' : 'Log work'}
+                          </button>
+                        </div>
+                      )}
+
+                      {deptLogs.length > 0 && (
+                        <div className="divide-y divide-gray-100">
+                          {deptLogs.map((w: any) => (
+                            <div key={w.id} className="flex items-start justify-between px-2.5 py-1.5">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-[11px] font-medium text-gray-700">{w.authorName || 'Unknown'}</span>
+                                  <span className="text-[10.5px] font-medium text-blue-700 bg-blue-50 border border-blue-100 rounded px-1 py-0.5">
+                                    {formatMinutes(w.timeSpentMinutes || 0)}
+                                  </span>
+                                </div>
+                                {w.description && <p className="text-[11px] text-gray-500 mt-0.5 break-words">{w.description}</p>}
+                              </div>
+                              {(user?.role === 'admin' || w.authorId === user?.id) && (
+                                <button onClick={() => handleDeleteWorklog(w.id)} className="text-gray-300 hover:text-red-500 flex-shrink-0 ml-1.5" title="Delete">
+                                  <X size={11} />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {/* Timestamps */}
           <div className="h-px bg-gray-200 mx-4" />
           <div className="px-4 py-3 space-y-1">
@@ -3968,7 +4385,7 @@ export default function IssueDetailPage() {
                       <>
                         <div className="fixed inset-0 z-[10000]" onClick={() => setSubtaskPriorityOpen(false)} />
                         <div className="absolute left-0 top-full mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-xl z-[10001] py-1 overflow-hidden">
-                          {PRIORITIES.map(p => (
+                          {selectablePriorities.map(p => (
                             <button
                               key={p.value}
                               type="button"
@@ -4249,6 +4666,26 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
     return `${s}s remaining`;
   };
 
+  // How long a department actually took to resolve a ticket, in plain
+  // words -- the SLA card already computed this exact number (elapsedMs,
+  // frozen at the real resolution moment) for the progress bar's fill
+  // percentage, but never showed it as readable text anywhere. Start/Due
+  // were the only visible times, so seeing "how long did this actually
+  // take" meant manually subtracting two timestamps yourself. Unlike
+  // fmtRemaining/fmtOverdue (a live countdown, never more than a few
+  // hours in practice) this can span many days for a slow resolution, so
+  // it rolls up into days once past 24h instead of showing "100h 30m".
+  const fmtDuration = (ms: number) => {
+    const totalMins = Math.max(0, Math.round(ms / 60000));
+    const m = totalMins % 60;
+    const totalHours = Math.floor(totalMins / 60);
+    const h = totalHours % 24;
+    const d = Math.floor(totalHours / 24);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  };
+
   const fmtOverdue = (ms: number) => {
     const totalSecs = Math.floor(Math.abs(ms) / 1000);
     const totalMins = Math.floor(totalSecs / 60);
@@ -4449,6 +4886,19 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                         <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
                       </div>
                     </div>
+                  )}
+
+                  {/* How long it actually took, in plain words -- Start/Due
+                      alone meant working this out by hand from two separate
+                      timestamps. elapsedMs is already frozen at the real
+                      resolution moment above, not still counting up against
+                      "now" the way a still-open ticket's would be. */}
+                  {isCompleted && resolvedAt && startedAt && (
+                    <p className={`text-[10.5px] mt-1.5 ${resolvedLate ? 'text-red-500' : 'text-emerald-600'}`}>
+                      Resolved in <span className="font-semibold">{fmtDuration(elapsedMs)}</span>
+                      {goalMs > 0 && !resolvedLate && ' — within the SLA goal'}
+                      {resolvedLate && ' — past the SLA goal'}
+                    </p>
                   )}
 
                   {/* Who actually resolved it -- otherwise the only name visible
