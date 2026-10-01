@@ -554,7 +554,16 @@ function DateDropBtn({
   };
 
   const handleUpdate = () => {
-    const val = encodeDateFilter(mode, wlN, wlUnit, btFrom, btTo, preset);
+    // Always passed wlN/wlUnit ("Within the last") regardless of which mode
+    // was actually selected -- encodeDateFilter's 'moreThan' branch then
+    // silently used the untouched "Within the last" value (default 7)
+    // instead of whatever was typed into the "More than" field. Confirmed
+    // for real: "Created: More than 7 days ago" never changed no matter
+    // what was typed, while "Updated" (using "Within the last") worked
+    // fine. Pass each mode's own n/unit instead.
+    const n = mode === 'moreThan' ? mtN : wlN;
+    const unit = mode === 'moreThan' ? mtUnit : wlUnit;
+    const val = encodeDateFilter(mode, n, unit, btFrom, btTo, preset);
     onChange(val);
     setOpen(false);
   };
