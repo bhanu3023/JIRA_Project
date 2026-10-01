@@ -489,8 +489,11 @@ class ApiClient {
   listKbQuestions(id: string) {
     return this.request<KbQuestion[]>(`/kb/articles/${encodeURIComponent(id)}/questions`);
   }
-  askKbQuestion(id: string, question: string) {
-    return this.request<KbQuestion>(`/kb/articles/${encodeURIComponent(id)}/questions`, { method: 'POST', body: JSON.stringify({ question }) });
+  askKbQuestion(id: string, question: string, context?: { fileId?: string | null; quote?: string | null }) {
+    return this.request<KbQuestion>(`/kb/articles/${encodeURIComponent(id)}/questions`, {
+      method: 'POST',
+      body: JSON.stringify({ question, fileId: context?.fileId || undefined, quote: context?.quote || undefined }),
+    });
   }
   answerKbQuestion(id: string, qid: string, answer: string) {
     return this.request<KbQuestion>(`/kb/articles/${encodeURIComponent(id)}/questions/${encodeURIComponent(qid)}/answer`, { method: 'PUT', body: JSON.stringify({ answer }) });
@@ -596,6 +599,9 @@ export type KbFile = { id: string; filename: string; mime: string | null; size: 
 export type KbQuestion = {
   id: string;
   question: string;
+  fileId: string | null;
+  fileName: string | null;
+  quote: string | null;
   askerId: string;
   askerName: string | null;
   createdAt: string;

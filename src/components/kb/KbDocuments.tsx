@@ -3,10 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type KbFile } from '@/lib/api';
 import { KbFileViewer, viewKindOf, type ViewKind } from '@/components/kb/KbFileViewer';
-import {
-  BookOpenText, Download, FileSpreadsheet, FileText, Image as ImageIcon, Maximize2, Minimize2, Paperclip,
-  Presentation, Trash2, Upload, X,
-} from 'lucide-react';
+import { BookOpenText, Download, FileSpreadsheet, FileText, Image as ImageIcon, Paperclip, Presentation, Trash2, Upload, X } from 'lucide-react';
 
 export function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -34,21 +31,20 @@ async function downloadFile(articleId: string, file: KbFile) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-/** Read-only list of an article's documents; each readable one opens in the page. */
-export function KbDocumentList({ articleId, files }: { articleId: string; files: KbFile[] }) {
-  // The first readable document opens straight away -- for an article that
-  // is mostly its uploaded document, that document IS the article.
-  const [openId, setOpenId] = useState<string | null>(() => files.find((f) => viewKindOf(f))?.id ?? null);
-  const [fullscreen, setFullscreen] = useState(false);
+/**
+ * Read-only list of an article's documents. Which one is open is owned by
+ * the page (so the Questions pane knows what the reader is looking at).
+ */
+export function KbDocumentList({
+  articleId, files, openId, onOpenChange,
+}: {
+  articleId: string;
+  files: KbFile[];
+  openId: string | null;
+  onOpenChange: (fileId: string | null) => void;
+}) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!fullscreen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [fullscreen]);
 
   if (files.length === 0) return null;
 
@@ -60,19 +56,18 @@ export function KbDocumentList({ articleId, files }: { articleId: string; files:
         {files.map((f) => {
           const kind = viewKindOf(f);
           const open = openId === f.id;
-          const full = open && fullscreen;
           return (
             <div
               key={f.id}
-              className={full
-                ? 'fixed inset-3 z-50 flex flex-col overflow-hidden rounded-xl border border-gray-300 bg-white shadow-2xl'
-                : 'overflow-hidden rounded-lg border border-gray-200'}
+              id={`kb-file-${f.id}`}
+              data-kb-file-id={f.id}
+              className={`scroll-mt-3 overflow-hidden rounded-lg border ${open ? 'border-blue-300 ring-1 ring-blue-100' : 'border-gray-200'}`}
             >
-              <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+              <div className={`flex flex-wrap items-center gap-2 px-3 py-2 ${open ? 'bg-blue-50/40' : ''}`}>
                 <FileIcon kind={kind} />
                 <button
                   disabled={!kind}
-                  onClick={() => { setOpenId(open ? null : f.id); setFullscreen(false); }}
+                  onClick={() => onOpenChange(open ? null : f.id)}
                   className="min-w-0 flex-1 truncate text-left text-[13px] font-medium text-gray-800 enabled:hover:text-blue-700 disabled:cursor-default"
                   title={f.filename}
                 >
@@ -81,16 +76,10 @@ export function KbDocumentList({ articleId, files }: { articleId: string; files:
                 <span className="text-[11px] text-gray-400">{formatSize(f.size)}</span>
                 {kind && (
                   <button
-                    onClick={() => { setOpenId(open ? null : f.id); setFullscreen(false); }}
-                    className={`flex items-center gap-1 rounded px-2 py-1 text-[12px] ${open ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                    onClick={() => onOpenChange(open ? null : f.id)}
+                    className={`flex items-center gap-1 rounded px-2 py-1 text-[12px] ${open ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
                   >
                     <BookOpenText size={13} /> {open ? 'Close' : 'Read'}
-                  </button>
-                )}
-                {open && (
-                  <button onClick={() => setFullscreen(!fullscreen)} title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen'}
-                    className="flex items-center gap-1 rounded px-2 py-1 text-[12px] text-gray-600 hover:bg-gray-100">
-                    {fullscreen ? <><Minimize2 size={13} /> Exit full screen</> : <><Maximize2 size={13} /> Full screen</>}
                   </button>
                 )}
                 <button
@@ -112,7 +101,7 @@ export function KbDocumentList({ articleId, files }: { articleId: string; files:
                 </p>
               )}
               {open && (
-                <div className={`border-t border-gray-200 ${full ? 'min-h-0 flex-1 overflow-auto [&>*]:!max-h-none [&_iframe]:!h-full' : ''}`}>
+                <div className="border-t border-gray-200">
                   <KbFileViewer articleId={articleId} file={f} />
                 </div>
               )}
@@ -120,7 +109,6 @@ export function KbDocumentList({ articleId, files }: { articleId: string; files:
           );
         })}
       </div>
-      {fullscreen && openId && <div className="fixed inset-0 z-40 bg-black/50" onClick={() => setFullscreen(false)} />}
     </section>
   );
 }

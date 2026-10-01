@@ -62,6 +62,12 @@ const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
     created_at TIMESTAMPTZ DEFAULT NOW()
   )`))
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS kb_questions_article_idx ON kb_questions(article_id)`))
+  // What the reader was looking at when they asked: the document open at the
+  // time and, optionally, the passage they selected.
+  .then(() => pool.query(`ALTER TABLE kb_questions
+    ADD COLUMN IF NOT EXISTS file_id TEXT,
+    ADD COLUMN IF NOT EXISTS file_name TEXT,
+    ADD COLUMN IF NOT EXISTS quote TEXT`))
   .catch((e) => { console.error('[kb] schema setup failed:', e?.message || e); });
 
 // Same row the bell in Header.tsx polls for. KB_* notifications carry the
@@ -90,6 +96,9 @@ function formatQuestion(row: any, viewerId: string, viewerCanManage: boolean) {
   return {
     id: row.id,
     question: row.question,
+    fileId: row.file_id || null,
+    fileName: row.file_name || null,
+    quote: row.quote || null,
     askerId: row.asker_id,
     askerName: row.asker_name,
     createdAt: row.created_at,
@@ -397,21 +406,34 @@ export async function handleKbApi(
       return json(rows.rows.map((r) => formatQuestion(r, userId, manager)));
     }
 
-    // POST kb/articles/:id/questions {question}
+    // POST kb/articles/:id/questions {question, fileId?, quote?}
     if (!subId && method === 'POST') {
       if (article.status !== 'published') return json({ error: 'Questions open once the article is published' }, 400);
       const body: any = await req.json().catch(() => ({}));
       const question = String(body.question || '').trim();
       if (!question) return json({ error: 'Type a question first' }, 400);
       if (question.length > MAX_QA_CHARS) return json({ error: `Questions are limited to ${MAX_QA_CHARS} characters` }, 400);
+      const quote = body.quote ? clip(String(body.quote).replace(/\s+/g, ' ').trim(), 1000) || null : null;
+      let fileId: string | null = null;
+      let fileName: string | null = null;
+      if (body.fileId) {
+        const f = (await pool.query(`SELECT id, filename FROM kb_files WHERE id = $1 AND article_id = $2`, [String(body.fileId), id])).rows[0];
+        if (f) { fileId = f.id; fileName = f.filename; }
+      }
       const askerName = displayNameOf(currentUser);
       const row = await pool.query(
-        `INSERT INTO kb_questions (id, article_id, asker_id, asker_name, question)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [rid(), id, userId, askerName, question],
+        `INSERT INTO kb_questions (id, article_id, asker_id, asker_name, question, file_id, file_name, quote)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        [rid(), id, userId, askerName, question, fileId, fileName, quote],
       );
       if (article.author_id !== userId) {
-        await notify(article.author_id, 'KB_QUESTION', `${askerName} asked a question on "${clip(article.title, 80)}"`, clip(question, 140), id);
+        await notify(
+          article.author_id,
+          'KB_QUESTION',
+          `${askerName} asked a question on "${clip(article.title, 80)}"${fileName ? ` (${clip(fileName, 40)})` : ''}`,
+          clip(question, 140),
+          id,
+        );
       }
       return json(formatQuestion(row.rows[0], userId, manager), 201);
     }

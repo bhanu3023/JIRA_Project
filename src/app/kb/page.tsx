@@ -7,8 +7,9 @@ import { api, type KbAccess, type KbArticle, type KbFile, type KbTeam } from '@/
 import { sanitizeForDisplay } from '@/lib/kb-sanitize';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import { KbDocumentEditor, KbDocumentList } from '@/components/kb/KbDocuments';
+import { viewKindOf } from '@/components/kb/KbFileViewer';
 import { KbQuestions } from '@/components/kb/KbQuestions';
-import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion } from 'lucide-react';
+import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion, Maximize2, Minimize2 } from 'lucide-react';
 
 // True when the editor HTML has something a reader would see (text or an image).
 function hasBodyContent(html: string) {
@@ -241,6 +242,26 @@ function ArticleList({ onOpen, onNew }: { onOpen: (id: string) => void; onNew: (
 }
 
 // ── Article view ─────────────────────────────────────────────────────────────
+//
+// A reading workspace: the article and its documents on the left, the
+// Questions pane on the right (each scrolls on its own, the ask box stays
+// pinned), so a reader can keep a document open and ask as they go. On
+// narrow screens the pane becomes a slide-over opened from a floating
+// button. Focus mode takes the whole workspace full screen, questions included.
+
+function useIsWide() {
+  const [wide, setWide] = useState(true);
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const update = () => setWide(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
+  return wide;
+}
+
+type SelectionAsk = { x: number; y: number; text: string; fileId: string | null };
 
 function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; onEdit: () => void }) {
   const [article, setArticle] = useState<KbArticle | null>(null);
@@ -249,13 +270,85 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  const isWide = useIsWide();
+  const [openFileId, setOpenFileId] = useState<string | null>(null);
+  const [showQuestions, setShowQuestions] = useState(true); // wide screens
+  const [drawerOpen, setDrawerOpen] = useState(false);      // narrow screens
+  const [focusMode, setFocusMode] = useState(false);
+  const [quote, setQuote] = useState<string | null>(null);
+  const [focusSignal, setFocusSignal] = useState(0);
+  const [counts, setCounts] = useState({ total: 0, open: 0 });
+  const [selectionAsk, setSelectionAsk] = useState<SelectionAsk | null>(null);
+  const readerRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     setArticle(null);
     setError(null);
-    api.getKbArticle(id).then(setArticle).catch((e) => setError(e?.message || 'Failed to load article'));
+    setQuote(null);
+    api.getKbArticle(id)
+      .then((a) => {
+        setArticle(a);
+        // The first readable document opens straight away -- for an article
+        // that is mostly its uploaded document, that document IS the article.
+        setOpenFileId((a.files || []).find((f) => viewKindOf(f))?.id ?? null);
+      })
+      .catch((e) => setError(e?.message || 'Failed to load article'));
   }, [id]);
 
+  // Arriving from a bell notification (/kb?id=...#questions): show the pane.
+  useEffect(() => {
+    if (article && window.location.hash === '#questions') {
+      if (isWide) setShowQuestions(true); else setDrawerOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [article?.id]);
+
+  useEffect(() => {
+    if (!focusMode) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !drawerOpen) setFocusMode(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focusMode, drawerOpen]);
+
   const html = useMemo(() => sanitizeForDisplay(article?.bodyHtml || ''), [article?.bodyHtml]);
+  const files = article?.files || [];
+  const contextFile = files.find((f) => f.id === openFileId) || null;
+
+  const openQuestions = () => {
+    if (isWide) setShowQuestions(true); else setDrawerOpen(true);
+    setFocusSignal((n) => n + 1);
+  };
+
+  const openFile = (fileId: string) => {
+    setOpenFileId(fileId);
+    if (!isWide) setDrawerOpen(false);
+    setTimeout(() => document.getElementById(`kb-file-${fileId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+  };
+
+  // Select text anywhere in the reader -> a floating "Ask about this" button.
+  const onReaderMouseUp = () => {
+    setTimeout(() => {
+      const sel = window.getSelection();
+      const text = sel?.toString().replace(/\s+/g, ' ').trim() || '';
+      if (!sel || sel.rangeCount === 0 || text.length < 2 || !readerRef.current) { setSelectionAsk(null); return; }
+      const range = sel.getRangeAt(0);
+      if (!readerRef.current.contains(range.commonAncestorContainer)) { setSelectionAsk(null); return; }
+      const rect = range.getBoundingClientRect();
+      const node = range.commonAncestorContainer;
+      const el = (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement) as Element | null;
+      const fileId = el?.closest('[data-kb-file-id]')?.getAttribute('data-kb-file-id') || null;
+      setSelectionAsk({ x: rect.left + rect.width / 2, y: rect.top, text: text.slice(0, 1000), fileId });
+    }, 0);
+  };
+
+  const askAboutSelection = () => {
+    if (!selectionAsk) return;
+    setQuote(selectionAsk.text);
+    if (selectionAsk.fileId) setOpenFileId(selectionAsk.fileId);
+    setSelectionAsk(null);
+    window.getSelection()?.removeAllRanges();
+    openQuestions();
+  };
 
   const remove = async () => {
     setDeleting(true);
@@ -269,62 +362,148 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
     }
   };
 
+  const questionsVisible = isWide ? showQuestions : drawerOpen;
+  const published = article?.status === 'published';
+
   return (
-    <>
-      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-white px-8 py-3">
-        <button onClick={onBack} className="flex items-center gap-1.5 text-[13px] text-gray-600 hover:text-gray-900"><ArrowLeft size={15} /> All articles</button>
-        {article?.canManage && (
-          <div className="flex flex-wrap items-center gap-2">
-            {article.status === 'draft' ? (
-              <button onClick={() => setDialog('publish')} className="rounded-lg bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700">Publish</button>
-            ) : (
-              <button onClick={() => setDialog('access')} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50"><ShieldCheck size={14} /> Manage access</button>
-            )}
-            <button onClick={onEdit} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50"><Pencil size={14} /> Edit</button>
-            {confirmDelete ? (
-              <span className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-2 py-1 text-[12px] text-red-700">
-                Delete this article?
-                <button onClick={remove} disabled={deleting} className="rounded bg-red-600 px-2 py-0.5 font-medium text-white hover:bg-red-700 disabled:opacity-50">{deleting ? 'Deleting…' : 'Delete'}</button>
-                <button onClick={() => setConfirmDelete(false)} className="rounded px-1.5 py-0.5 hover:bg-red-100">Cancel</button>
-              </span>
-            ) : (
-              <button onClick={() => setConfirmDelete(true)} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-[13px] text-red-600 hover:bg-red-50"><Trash2 size={14} /> Delete</button>
-            )}
-          </div>
+    <div className={focusMode ? 'fixed inset-0 z-50 flex flex-col bg-gray-50' : 'flex h-full min-h-0 flex-col'}>
+      {/* Toolbar */}
+      <div className="flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-gray-200 bg-white px-4 py-2.5 sm:px-6">
+        {focusMode ? (
+          <button onClick={() => setFocusMode(false)} className="flex items-center gap-1.5 text-[13px] text-gray-600 hover:text-gray-900"><Minimize2 size={15} /> Exit focus</button>
+        ) : (
+          <button onClick={onBack} className="flex items-center gap-1.5 text-[13px] text-gray-600 hover:text-gray-900"><ArrowLeft size={15} /> All articles</button>
+        )}
+        <span className="mx-1 hidden h-4 w-px bg-gray-200 sm:block" />
+        <span className="hidden min-w-0 flex-1 truncate text-[13px] font-medium text-gray-700 sm:block">{article?.title}</span>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {article?.canManage && !focusMode && (
+            <>
+              {article.status === 'draft' ? (
+                <button onClick={() => setDialog('publish')} className="rounded-lg bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700">Publish</button>
+              ) : (
+                <button onClick={() => setDialog('access')} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50"><ShieldCheck size={14} /> Manage access</button>
+              )}
+              <button onClick={onEdit} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50"><Pencil size={14} /> Edit</button>
+              {confirmDelete ? (
+                <span className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-2 py-1 text-[12px] text-red-700">
+                  Delete this article?
+                  <button onClick={remove} disabled={deleting} className="rounded bg-red-600 px-2 py-0.5 font-medium text-white hover:bg-red-700 disabled:opacity-50">{deleting ? 'Deleting…' : 'Delete'}</button>
+                  <button onClick={() => setConfirmDelete(false)} className="rounded px-1.5 py-0.5 hover:bg-red-100">Cancel</button>
+                </span>
+              ) : (
+                <button onClick={() => setConfirmDelete(true)} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-[13px] text-red-600 hover:bg-red-50"><Trash2 size={14} /> Delete</button>
+              )}
+            </>
+          )}
+          {article && (
+            <>
+              <button
+                onClick={() => (questionsVisible ? (isWide ? setShowQuestions(false) : setDrawerOpen(false)) : openQuestions())}
+                className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] ${questionsVisible ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+              >
+                <MessageCircleQuestion size={14} /> Questions
+                {counts.total > 0 && <span className="rounded-full bg-white px-1.5 text-[11px] font-semibold text-gray-700 ring-1 ring-gray-200">{counts.total}</span>}
+                {article.canManage && counts.open > 0 && <span className="h-2 w-2 rounded-full bg-amber-500" title={`${counts.open} awaiting answer`} />}
+              </button>
+              {!focusMode && (
+                <button onClick={() => setFocusMode(true)} title="Read in focus mode (full screen)" className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50">
+                  <Maximize2 size={14} /> Focus
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Workspace */}
+      <div className="flex min-h-0 flex-1">
+        <div
+          ref={readerRef}
+          onMouseUp={onReaderMouseUp}
+          onScroll={() => { if (selectionAsk) setSelectionAsk(null); }}
+          className="min-w-0 flex-1 overflow-auto px-4 py-6 sm:px-8"
+        >
+          {error && <div className="mx-auto mb-4 max-w-4xl rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-700">{error}</div>}
+          {!article && !error && (
+            <div className="flex h-40 items-center justify-center"><div className="h-7 w-7 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" /></div>
+          )}
+          {article && (
+            <article className={`mx-auto rounded-xl border border-gray-200 bg-white px-5 py-6 sm:px-8 sm:py-7 ${focusMode ? 'max-w-6xl' : 'max-w-5xl'}`}>
+              <div className="mb-2"><VisibilityBadge article={article} /></div>
+              <h1 className="text-2xl font-bold text-gray-900">{article.title}</h1>
+              <p className="mt-1 text-[12.5px] text-gray-500">
+                By {article.authorName || 'Unknown'}
+                {article.publishedAt ? ` · Published ${formatDate(article.publishedAt)}` : ''}
+                {article.updatedAt && article.updatedAt !== article.createdAt ? ` · Updated ${formatDate(article.updatedAt)}` : ''}
+              </p>
+              {published && (
+                <p className="mt-3 flex items-center gap-1.5 rounded-lg bg-blue-50/70 px-3 py-2 text-[12px] text-blue-800">
+                  <MessageCircleQuestion size={14} className="flex-shrink-0" />
+                  {article.canManage
+                    ? 'Readers can ask questions while they read. You’ll be notified and can answer from the Questions pane.'
+                    : 'Something unclear? Ask in the Questions pane while you read, or select any text and click “Ask about this”.'}
+                </p>
+              )}
+              {html && (
+                <div
+                  className="mt-6 break-words text-[14px] leading-relaxed text-[#172B4D] [&_a]:text-blue-600 [&_a]:underline [&_blockquote]:border-l-4 [&_blockquote]:border-gray-200 [&_blockquote]:pl-3 [&_blockquote]:text-gray-600 [&_code]:rounded [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_h1]:mb-2 [&_h1]:mt-5 [&_h1]:text-xl [&_h1]:font-bold [&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:mt-3 [&_h3]:font-semibold [&_img]:my-2 [&_img]:max-w-full [&_img]:rounded-md [&_li]:my-0.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-slate-100 [&_pre]:p-3 [&_table]:my-2 [&_td]:border [&_td]:border-gray-300 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-300 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc [&_ul]:pl-5"
+                  dangerouslySetInnerHTML={{ __html: html }}
+                />
+              )}
+              {!html && files.length === 0 && <p className="mt-6 text-[14px] text-gray-400">This article has no content yet.</p>}
+              <KbDocumentList articleId={article.id} files={files} openId={openFileId} onOpenChange={setOpenFileId} />
+            </article>
+          )}
+        </div>
+
+        {/* Questions: a side pane on wide screens, a slide-over on narrow ones.
+            Mounted once either way so its live refresh keeps the counts current. */}
+        {article && (
+          <aside
+            className={`${drawerOpen ? 'fixed inset-y-0 right-0 z-[60] flex w-full shadow-2xl sm:w-[420px]' : 'hidden'} lg:static lg:z-auto lg:w-[400px] lg:flex-shrink-0 lg:border-l lg:border-gray-200 lg:shadow-none xl:w-[440px] ${showQuestions ? 'lg:flex' : 'lg:hidden'}`}
+          >
+            <div className="flex min-w-0 flex-1 flex-col">
+              <KbQuestions
+                articleId={article.id}
+                published={published}
+                canAnswer={article.canManage}
+                contextFile={contextFile}
+                quote={quote}
+                onClearQuote={() => setQuote(null)}
+                onOpenFile={openFile}
+                focusSignal={focusSignal}
+                onClose={() => { if (isWide) setShowQuestions(false); else setDrawerOpen(false); }}
+                onCountsChange={(total, open) => setCounts({ total, open })}
+              />
+            </div>
+          </aside>
         )}
       </div>
 
-      <div className="flex-1 overflow-auto px-8 py-6">
-        {error && <div className="mx-auto mb-4 max-w-4xl rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-700">{error}</div>}
-        {!article && !error && (
-          <div className="flex h-40 items-center justify-center"><div className="h-7 w-7 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" /></div>
-        )}
-        {article && (
-          // Questions sit beside the article on wide screens (sticky, so they
-          // stay in reach while reading) and drop below it on narrow ones.
-          <div className="mx-auto grid max-w-7xl items-start gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
-          <article className="min-w-0 rounded-xl border border-gray-200 bg-white px-8 py-7">
-            <div className="mb-2"><VisibilityBadge article={article} /></div>
-            <h1 className="text-2xl font-bold text-gray-900">{article.title}</h1>
-            <p className="mt-1 text-[12.5px] text-gray-500">
-              By {article.authorName || 'Unknown'}
-              {article.publishedAt ? ` · Published ${formatDate(article.publishedAt)}` : ''}
-              {article.updatedAt && article.updatedAt !== article.createdAt ? ` · Updated ${formatDate(article.updatedAt)}` : ''}
-            </p>
-            <div
-              className="mt-6 break-words text-[14px] leading-relaxed text-[#172B4D] [&_a]:text-blue-600 [&_a]:underline [&_blockquote]:border-l-4 [&_blockquote]:border-gray-200 [&_blockquote]:pl-3 [&_blockquote]:text-gray-600 [&_code]:rounded [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_h1]:mb-2 [&_h1]:mt-5 [&_h1]:text-xl [&_h1]:font-bold [&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:mt-3 [&_h3]:font-semibold [&_img]:my-2 [&_img]:max-w-full [&_img]:rounded-md [&_li]:my-0.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-slate-100 [&_pre]:p-3 [&_table]:my-2 [&_td]:border [&_td]:border-gray-300 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-300 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc [&_ul]:pl-5"
-              dangerouslySetInnerHTML={{
-                __html: html || ((article.files?.length || 0) > 0 ? '' : '<p style="color:#9ca3af">This article has no content yet.</p>'),
-              }}
-            />
-            <KbDocumentList articleId={article.id} files={article.files || []} />
-          </article>
-          <aside className="lg:sticky lg:top-0">
-            <KbQuestions articleId={article.id} published={article.status === 'published'} canAnswer={article.canManage} />
-          </aside>
-          </div>
-        )}
-      </div>
+      {drawerOpen && !isWide && <div className="fixed inset-0 z-[55] bg-black/40" onClick={() => setDrawerOpen(false)} />}
+
+      {/* Floating entry point when the pane is out of view */}
+      {article && published && !questionsVisible && (
+        <button
+          onClick={openQuestions}
+          className="fixed bottom-6 right-6 z-[45] flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2.5 text-[13px] font-medium text-white shadow-lg hover:bg-blue-700"
+        >
+          <MessageCircleQuestion size={16} /> Ask a question{counts.total > 0 ? ` · ${counts.total}` : ''}
+        </button>
+      )}
+
+      {/* "Ask about this" for selected text */}
+      {selectionAsk && published && (
+        <button
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={askAboutSelection}
+          style={{ left: Math.max(70, Math.min(selectionAsk.x, window.innerWidth - 70)), top: Math.max(8, selectionAsk.y - 40) }}
+          className="fixed z-[70] flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-gray-900 px-3 py-1.5 text-[12px] font-medium text-white shadow-lg hover:bg-gray-800"
+        >
+          <MessageCircleQuestion size={13} /> Ask about this
+        </button>
+      )}
 
       {dialog && article && (
         <AccessDialog
@@ -339,7 +518,7 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 
