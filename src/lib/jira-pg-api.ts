@@ -6892,12 +6892,25 @@ async function _handleJiraPgApi(
         // viewing" -- is what this filter is supposed to mean; same queue-
         // scoping principle already applied to the Assignee/Status DISPLAY
         // columns (see assigneeOverride / getEffectiveIssueStatus's viewDept).
+        // The dept_statuses OR-branch below exists ONLY for "Routed to X"/
+        // "Waiting for X" labels (see the long comment above -- they have
+        // no real global-status equivalent to match via LOWER(s.name)).
+        // Applying it to an ORDINARY status too let a ticket that moved on
+        // and was resolved in a DIFFERENT department still match here
+        // purely because this queue's own now-stale snapshot (from before
+        // it left) happened to say e.g. "Open" -- confirmed for real on
+        // Queue: Infra + Status: Open/In Progress matching several tickets
+        // now Resolved in Migration/QA, their real global status plainly
+        // "Resolved" (LOWER(s.name) correctly excludes them on its own).
+        const statusLooksLikeRoutingForDeptExtra = statusParam.split(',').some((s2) => /^(waiting\s+for|routed\s+to)\s+/i.test(s2.trim()));
         deptExtraClauses.push(
-          `(LOWER(s.name) = ANY($${deptParamIdx}::text[])
-             OR EXISTS (
-               SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
-               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
-             ))`
+          statusLooksLikeRoutingForDeptExtra
+            ? `(LOWER(s.name) = ANY($${deptParamIdx}::text[])
+                 OR EXISTS (
+                   SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+                   WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
+                 ))`
+            : `LOWER(s.name) = ANY($${deptParamIdx}::text[])`
         );
         // Captured so deptScopeSql (built further down, after deptExtraParams'
         // own indices are all finalized) can reuse this exact same bound
@@ -7169,7 +7182,23 @@ async function _handleJiraPgApi(
       // this dept's own frozen snapshot still matches" broadening as Updated
       // above, keyed to the selected status names instead of a done-
       // category/date check.
-      const statusDeptMatchSql = statusParam && queueMembersOnlyParam && statusParamIdx !== null && !workedDeptMatchSql
+      // This broadening ("moved on, but this dept's own frozen snapshot
+      // still matches the selected status") only makes sense for a
+      // "Routed to X"/"Waiting for X" label -- that's specifically a record
+      // of a ticket having ALREADY left, which the plain current-department
+      // check can never match (see the long comment above). Applying it to
+      // an ORDINARY status too (Open/In Progress/Resolved/etc.) let a
+      // ticket that moved on and was resolved elsewhere still show up under
+      // Queue: Infra + Status: Open/In Progress purely because Infra's own
+      // stale snapshot (from before it moved away) happened to say Open —
+      // confirmed for real: CF-29589/CF-29493/CF-29644/CF-29550/CF-29592/
+      // CF-29640, all now Resolved in Migration/QA, all showing under
+      // Queue: Infra + Status: Open/In Progress with "Resolved" plainly
+      // visible in their own Status column. Gated the same way
+      // reasonClause/broadenIt's statusLooksLikeRouting already gates the
+      // sibling 'passed' exclusion a few dozen lines above.
+      const statusDeptMatchSqlLooksLikeRouting = !!statusParam && statusParam.split(',').some((s2) => /^(waiting\s+for|routed\s+to)\s+/i.test(s2.trim()));
+      const statusDeptMatchSql = statusParam && queueMembersOnlyParam && statusParamIdx !== null && !workedDeptMatchSql && statusDeptMatchSqlLooksLikeRouting
         ? `(
              (LOWER(i.current_department) = LOWER($2) ${deptDoneClause})
              OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
