@@ -3704,6 +3704,28 @@ function SpaceDetailContent() {
                                       return;
                                     }
                                   }
+                                  // Root Cause / Fix Description must also be filled
+                                  // before Dev hands a ticket off to Migration
+                                  // specifically (explicit request) -- same two
+                                  // fields already required to resolve a Dev ticket
+                                  // above, now also required at the point Dev routes
+                                  // it onward to Migration from this board's own
+                                  // inline status dropdown (same gap already closed
+                                  // on the ticket detail page's own status dropdown).
+                                  const isDevToMigrationHandoffInline = String(ticketCurrentDept || '').trim().toLowerCase() === 'dev'
+                                    && /^(waiting\s+for|routed\s+to)\s+migration$/i.test(String(s.name || '').trim());
+                                  if (isDevToMigrationHandoffInline) {
+                                    const handoffMissing: string[] = [];
+                                    for (const f of [{ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' }]) {
+                                      const val = (issue as any)[f.key];
+                                      if (!val || String(val).trim() === '') handoffMissing.push(f.name);
+                                    }
+                                    if (handoffMissing.length > 0) {
+                                      setOpenDropdown(null);
+                                      setMissingFieldsModal(handoffMissing);
+                                      return;
+                                    }
+                                  }
                                   if (isQueueStatus) {
                                     handleInlineQueueStatusUpdate(issue.key, ticketCurrentDept, s);
                                   } else {
