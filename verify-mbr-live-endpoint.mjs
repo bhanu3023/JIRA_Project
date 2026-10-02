@@ -33,7 +33,8 @@ async function main() {
   const dateFrom = '2026-01-01';
   const dateTo = '2026-12-31';
 
-  for (const team of ['migration', 'dev']) {
+  // TEAM_DEPT mapping in jira-pg-api.ts: eng -> Dev, ent/smb -> Migration.
+  for (const team of ['eng', 'ent', 'smb']) {
     const url = `http://localhost:${PORT}/api/reports/mbr-team?team=${team}&dateFrom=${dateFrom}&dateTo=${dateTo}&ticketFilter=resolved`;
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) { console.log(`${team}: HTTP ${res.status}`, await res.text().catch(() => '')); continue; }
