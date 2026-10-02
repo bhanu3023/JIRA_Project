@@ -167,15 +167,28 @@ function DeptBarChart({ data, color, fallbackHref }: { data: { dept: string; lab
       </Link>
     );
   }
+  // A handful of departments (3-4) reads fine as angled labels under each
+  // bar -- a full queue roster (confirmed for real: 37 Migration members)
+  // packed the same way into the same label band just overlapped into
+  // illegible diagonal text. Past this many bars, drop the axis labels
+  // entirely (name + count still show on hover, and every bar is already
+  // clickable through to that member's own tickets) rather than shrinking
+  // text or rotating it further, which only delays the same overlap to a
+  // slightly larger roster.
+  const isCrowded = data.length > 12;
   return (
-    <ResponsiveContainer width="100%" height={180}>
+    <ResponsiveContainer width="100%" height={isCrowded ? 220 : 180}>
       <BarChart data={data} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
         <CartesianGrid vertical={false} stroke="#F3F4F6" />
-        <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: '#6B7280' }} axisLine={false} tickLine={false} interval={0} angle={-15} textAnchor="end" height={38} />
+        {isCrowded ? (
+          <XAxis dataKey="label" tick={false} axisLine={false} tickLine={false} height={6} />
+        ) : (
+          <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: '#6B7280' }} axisLine={false} tickLine={false} interval={0} angle={-15} textAnchor="end" height={38} />
+        )}
         <YAxis tick={{ fontSize: 11, fill: '#6B7280' }} axisLine={false} tickLine={false} allowDecimals={false} />
         <Tooltip cursor={{ fill: '#F9FAFB' }} />
         <Bar
-          dataKey="count" fill={color} radius={[4, 4, 0, 0]} maxBarSize={40} cursor="pointer"
+          dataKey="count" fill={color} radius={[4, 4, 0, 0]} maxBarSize={isCrowded ? 22 : 40} cursor="pointer"
           onClick={(d: any) => { if (d?.href) router.push(d.href); }}
         />
       </BarChart>

@@ -14169,10 +14169,24 @@ async function _handleJiraPgApi(
         // "did this ticket ever belong to this queue" regardless of where it
         // sits now -- same fallback pattern the personal dashboard's
         // bySourceDept already uses below for the same column.
+        // sla_snapshot included here specifically -- without it,
+        // computeSLAInstancesPure (via primarySlaInstanceForQueue below) has
+        // no way to tell this row already has a frozen snapshot, so it falls
+        // through to its own per-row `SELECT sla_snapshot FROM issues WHERE
+        // id=$1` fallback query for every single RESOLVED ticket in this
+        // cohort (originDeptIssues, unlike deptIssues above, includes
+        // resolved tickets). Confirmed as the dominant cost of this whole
+        // endpoint for a large/active queue: the week-over-week breach-rate
+        // and per-member cohorts each loop over this same data and await
+        // that function once per ticket, so a missing column here meant one
+        // extra sequential round trip per resolved ticket, 4x over (the
+        // last-week/this-week pair in both breachRateFor and
+        // memberWeekStats) -- the actual reason the queue dashboard felt
+        // slow to load for a queue this size.
         const originDeptIssuesRes = await pool.query(
           `SELECT i.id, i.key, i.cf_key, i."assigneeId", i."spaceId", i.current_department, i.priority,
                   i."createdAt", i."resolvedAt", i.dept_sla_log, i.dept_sla_started_at,
-                  i.jira_sla_breached, i.sla_waivers,
+                  i.jira_sla_breached, i.sla_waivers, i.sla_snapshot,
                   s.name AS status_name, s.category AS status_category
            FROM issues i
            LEFT JOIN statuses s ON s.id = i."statusId"
