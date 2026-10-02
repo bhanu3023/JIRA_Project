@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import {
   Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown, ChevronRight, Calendar, BarChart3,
-  LayoutDashboard, Users, X, GitCompare,
+  Users, X, GitCompare,
 } from 'lucide-react';
 
 // 'total' is the default -- shows every member's all-time numbers with no
@@ -228,7 +228,13 @@ function QueueSelect({ label, options, value, onChange }: { label: string; optio
     <div className="relative flex-shrink-0">
       <select
         value={options.some((u) => u.id === value) ? value : ''}
-        onChange={(e) => { if (e.target.value) onChange(e.target.value); }}
+        // Previously guarded to only ever fire for a non-empty selection --
+        // the one caller back then had nowhere meaningful to go on "reset
+        // to placeholder". Now also used to switch back from one person's
+        // individual dashboard to the queue-wide overview (picking the
+        // empty placeholder option), which needs that empty-string case to
+        // actually reach the caller instead of being silently swallowed.
+        onChange={(e) => onChange(e.target.value)}
         className="appearance-none rounded-lg border border-gray-300 bg-white py-2 pl-3 pr-8 text-[13px] font-medium text-gray-700 outline-none focus:border-blue-500 disabled:opacity-50"
         disabled={options.length === 0}
       >
@@ -651,6 +657,15 @@ export default function MyDashboardPage() {
   // sent to the backend as ?viewedQueue=. Also doubles as the active
   // top-level tab key ('' = "My Dashboard").
   const [viewedQueueDept, setViewedQueueDept] = useState<string>('');
+  // UI-only: which queue's own member list the second ("User") dropdown
+  // below is scoped to -- deliberately separate from viewedQueueDept so
+  // picking a person within a queue (which switches the view away from the
+  // queue-wide dashboard to that person's own) doesn't also make the
+  // second dropdown disappear out from under them. Reset together with
+  // viewedQueueDept everywhere the tabs/tiles already do that reset, plus
+  // cleared whenever "My Dashboard" is explicitly chosen from the new
+  // unified Queue selector below.
+  const [queuePickerDept, setQueuePickerDept] = useState<string>('');
   const [dateRangeKey, setDateRangeKey] = useState<DateRangeKey>('total');
   // Bumped to the completion time of every successful fetch while a queue
   // dashboard is active (including each 10s poll tick below) — purely so
@@ -825,29 +840,6 @@ export default function MyDashboardPage() {
           viewedQueueDept trigger the queue-dashboard buttons always used;
           this is just that mechanism restyled as real underlined tabs and
           gated by role instead of isAdmin alone. */}
-      {(canViewMigrationQueue || canViewDevQueue) && (
-        <div className="flex items-center gap-5 border-b border-gray-200">
-          {[
-            { key: '', label: 'My Dashboard' },
-            ...(canViewMigrationQueue ? [{ key: 'Migration', label: 'Migration Queue Dashboard' }] : []),
-            ...(canViewDevQueue ? [{ key: 'Dev', label: 'Dev Queue Dashboard' }] : []),
-          ].map((tab) => (
-            <button
-              key={tab.key || 'my-dashboard'}
-              onClick={() => { setViewedQueueDept(tab.key); setViewedUserId(''); }}
-              className={cn(
-                'relative -mb-px flex items-center gap-1.5 pb-2.5 text-[13.5px] font-medium transition-colors',
-                viewedQueueDept === tab.key ? 'text-blue-700' : 'text-gray-500 hover:text-gray-700',
-              )}
-            >
-              {tab.key ? <LayoutDashboard size={14} /> : null}
-              {tab.label}
-              {viewedQueueDept === tab.key && <span className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-blue-600" />}
-            </button>
-          ))}
-        </div>
-      )}
-
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2 text-[22px] font-semibold text-gray-900">
@@ -862,20 +854,55 @@ export default function MyDashboardPage() {
 
         <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
           <DateRangeSelect value={dateRangeKey} onChange={setDateRangeKey} />
-          {/* Admin-only "view as another person" pickers and the standalone
-              Reports deep-links — unrelated to the queue-dashboard TABS
-              above, so these stay exactly as admin-gated as they always
-              were (not part of what this role change touches). */}
+          {/* Unified two-step picker, by explicit request -- replaces the old
+              "My Dashboard / Migration Queue Dashboard / Dev Queue
+              Dashboard" tabs plus two always-visible, separately-labeled
+              "Migration Queue"/"Dev Queue" user pickers with one Queue
+              selector, followed by a second User selector that only
+              appears once a queue is actually chosen and is scoped to that
+              queue's own members. Picking just a queue shows its queue-wide
+              dashboard (status pie chart + member count, via
+              QueueDashboardView below); picking a user within it switches
+              to that person's own personal dashboard (its own status/
+              priority pie charts further down this file) -- both views
+              already existed, this only changes how you get to them. */}
+          {(canViewMigrationQueue || canViewDevQueue) && (
+            <div className="relative flex-shrink-0">
+              <select
+                value={queuePickerDept}
+                onChange={(e) => {
+                  const dept = e.target.value;
+                  setQueuePickerDept(dept);
+                  setViewedQueueDept(dept);
+                  setViewedUserId('');
+                }}
+                className="appearance-none rounded-lg border border-gray-300 bg-white py-2 pl-3 pr-8 text-[13px] font-medium text-gray-700 outline-none focus:border-blue-500"
+              >
+                <option value="">My Dashboard</option>
+                {canViewMigrationQueue && <option value="Migration">Migration Queue</option>}
+                {canViewDevQueue && <option value="Dev">Dev Queue</option>}
+              </select>
+              <ChevronDown size={13} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            </div>
+          )}
+          {/* Admin-only "view as another person" within the selected queue --
+              appears only once a queue is picked above. Viewing an
+              individual's own dashboard stays admin-gated exactly as it
+              already was; choosing a queue alone (the aggregate view) is
+              available to whoever could already see that queue's tab. */}
+          {isAdmin && queuePickerDept && (
+            <QueueSelect
+              label={`${queuePickerDept} Queue — All users`}
+              options={queuePickerDept === 'Migration' ? queueUsers.migration : queueUsers.dev}
+              value={viewedUserId}
+              onChange={(v) => {
+                if (v) { setViewedUserId(v); setViewedQueueDept(''); }
+                else { setViewedUserId(''); setViewedQueueDept(queuePickerDept); }
+              }}
+            />
+          )}
           {isAdmin && (
             <>
-              <QueueSelect
-                label="Migration Queue" options={queueUsers.migration} value={viewedUserId}
-                onChange={(v) => { setViewedUserId(v); setViewedQueueDept(''); }}
-              />
-              <QueueSelect
-                label="Dev Queue" options={queueUsers.dev} value={viewedUserId}
-                onChange={(v) => { setViewedUserId(v); setViewedQueueDept(''); }}
-              />
               {/* These link straight to the actual Migration/Dev Resolution %,
                   SLA %, and SLA Breach % report instead of leaving that
                   undiscoverable behind Reports → a specific tab → a specific
