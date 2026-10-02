@@ -1280,7 +1280,7 @@ export default function IssueDetailPage() {
   // created with them correctly left blank and then get stuck unresolvable
   // the moment someone tried to close it -- confirmed for real on CF-33408.
   const isMandatoryFieldsExemptDept = () => {
-    if (['IA', 'SB'].includes((issue?.spaceKey || '').toUpperCase())) return true;
+    if (['IA', 'SB', 'ITS'].includes((issue?.spaceKey || '').toUpperCase())) return true;
     const dept = ((issue as any)?.current_department || '').trim().toLowerCase();
     return dept === 'qa';
   };

@@ -74,8 +74,9 @@ const MIGRATION_SECTION_LABELS = [
 // mandatory on every space in the app. IT Administration is a plain service
 // desk space with no migration concept at all, so these fields (and their
 // "required" validation) don't apply there. SAT_Board (key "SB") is the same
-// kind of non-migration board, so it gets the same exemption.
-const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB']);
+// kind of non-migration board, so it gets the same exemption. IT Support
+// (key "ITS") is the same again, by explicit request.
+const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB', 'ITS']);
 
 // IT Administration has no department/queue concept at all -- confirmed for
 // real (IA-25, twice: once via the cross-space initialDept leak fixed above,

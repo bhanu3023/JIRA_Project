@@ -450,7 +450,14 @@ function SpaceDetailContent() {
     // spaceKey is this page's own route param (this whole page is always
     // scoped to one space), not a per-issue field -- more reliable than
     // trusting the issue object to carry its own spaceKey.
-    if ((spaceKey || '').toUpperCase() === 'IA') return [];
+    // Was IA-only -- SB (SAT_Board) already gets this same exemption on the
+    // ticket detail page's own equivalent check (isMandatoryFieldsExemptDept)
+    // but was never added here, so an SB ticket created correctly without
+    // these fields could still get stuck unresolvable from this board's
+    // inline dropdown even though resolving it from its own detail page
+    // worked fine. ITS (IT Support) added now too, same non-migration
+    // service-desk exemption as IA/SB.
+    if (['IA', 'SB', 'ITS'].includes((spaceKey || '').toUpperCase())) return [];
     const dept = String(iss.current_department || '').trim().toLowerCase();
     if (dept === 'qa') return [];
     const missing: string[] = [];
