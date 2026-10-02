@@ -692,12 +692,22 @@ export default function MyDashboardPage() {
   // decides the generic case; migration_manager is layered on top for the
   // one dept-specific role that exists today. No dev-specific role exists,
   // so the Dev tab is exactly isManager -- same as the generic case.
-  const canViewMigrationQueue = isManager(user?.role) || user?.role === 'migration_manager';
-  const canViewDevQueue = isManager(user?.role);
+  // The backend's own ?viewedQueue= permission check (see the "Admin-only
+  // queue-wide view" handler in jira-pg-api.ts) already allows any
+  // admin/manager to view EVERY queue, not just Migration/Dev -- this
+  // frontend used to only ever show those two regardless, hiding Infra/QA/
+  // Pre-Sales/etc. even though viewing them already worked if you somehow
+  // got the right URL params. migration_manager is the one narrower,
+  // dept-specific role (no manager role) that can only see Migration.
+  const canViewAllQueues = isManager(user?.role);
+  const canViewMigrationOnly = !canViewAllQueues && user?.role === 'migration_manager';
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [allUsers, setAllUsers] = useState<any[]>([]);
-  const [queueUsers, setQueueUsers] = useState<{ migration: any[]; dev: any[] }>({ migration: [], dev: [] });
+  // Keyed by queue name (e.g. "Migration", "Infra", "QA") -- every queue
+  // found across every space, not just Migration/Dev.
+  const [queueUsers, setQueueUsers] = useState<Record<string, any[]>>({});
+  const [availableQueueNames, setAvailableQueueNames] = useState<string[]>([]);
   const [viewedUserId, setViewedUserId] = useState<string>('');
   // Viewing a whole queue's dashboard instead of any one person's — mutually
   // exclusive with viewedUserId (picking one always clears the other, see the
@@ -721,34 +731,52 @@ export default function MyDashboardPage() {
   // not a static label.
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
 
-  // Admin-only: group users by their custom-queue membership (Migration / Dev) across
-  // every space, instead of one unmanageable flat list of the entire organization.
+  // Admin-only: group users by their custom-queue membership across EVERY
+  // queue in every space (not just Migration/Dev), instead of one
+  // unmanageable flat list of the entire organization. Two same-named
+  // queues in different spaces (e.g. two boards each with their own "QA"
+  // queue) merge into one entry, same as Migration/Dev already did.
   useEffect(() => {
-    if (!isAdmin) return;
+    // Not admin-only -- the Queue dropdown itself (just the list of queue
+    // NAMES) needs to populate for any manager who can view a queue
+    // dashboard at all, not only true admins. Drilling into one person's
+    // individual dashboard stays admin-gated separately, further down,
+    // regardless of whether this fetch ran.
+    if (!canViewAllQueues && !canViewMigrationOnly) return;
     (async () => {
       try {
         const [usersRes, spacesRes] = await Promise.all([api.getUsers(), api.getSpaces()]);
         const usersList: any[] = Array.isArray(usersRes) ? usersRes : [];
         setAllUsers(usersList);
         const usersById = new Map(usersList.map((u: any) => [u.id, u]));
-        const migrationIds = new Set<string>();
-        const devIds = new Set<string>();
+        // Keyed by the queue's real display name (not lowercased) so the
+        // dropdown shows "Pre-Sales" rather than "pre-sales" -- first
+        // non-empty casing encountered wins, matching how a human would
+        // expect the name they actually typed to show up.
+        const idsByQueueName = new Map<string, Set<string>>();
+        const displayNameByLower = new Map<string, string>();
         await Promise.all((Array.isArray(spacesRes) ? spacesRes : []).map(async (sp: any) => {
           try {
             const queues = await api.request<any[]>(`custom-queues/${sp.key}`);
             for (const q of Array.isArray(queues) ? queues : []) {
-              const name = (q.name || '').toLowerCase();
-              const memberIds: string[] = q.memberIds || [];
-              if (name.includes('migration')) memberIds.forEach((id) => migrationIds.add(id));
-              if (name.includes('dev')) memberIds.forEach((id) => devIds.add(id));
+              const rawName = String(q.name || '').trim();
+              if (!rawName) continue;
+              const key = rawName.toLowerCase();
+              if (!displayNameByLower.has(key)) displayNameByLower.set(key, rawName);
+              const ids = idsByQueueName.get(key) ?? new Set<string>();
+              (q.memberIds || []).forEach((id: string) => ids.add(id));
+              idsByQueueName.set(key, ids);
             }
           } catch { /* space may have no custom queues */ }
         }));
         const resolve = (ids: Set<string>) => Array.from(ids).map((id) => usersById.get(id)).filter(Boolean);
-        setQueueUsers({ migration: resolve(migrationIds), dev: resolve(devIds) });
+        const byName: Record<string, any[]> = {};
+        for (const key of Array.from(idsByQueueName.keys())) byName[displayNameByLower.get(key)!] = resolve(idsByQueueName.get(key)!);
+        setQueueUsers(byName);
+        setAvailableQueueNames(Array.from(displayNameByLower.values()).sort((a, b) => a.localeCompare(b)));
       } catch { /* non-fatal — dropdowns just stay empty */ }
     })();
-  }, [isAdmin]);
+  }, [canViewAllQueues, canViewMigrationOnly]);
 
   useEffect(() => {
     let cancelled = false;
@@ -914,7 +942,7 @@ export default function MyDashboardPage() {
               to that person's own personal dashboard (its own status/
               priority pie charts further down this file) -- both views
               already existed, this only changes how you get to them. */}
-          {(canViewMigrationQueue || canViewDevQueue) && (
+          {(canViewAllQueues || canViewMigrationOnly) && (
             <div className="relative flex-shrink-0">
               <select
                 value={queuePickerDept}
@@ -927,8 +955,12 @@ export default function MyDashboardPage() {
                 className="appearance-none rounded-lg border border-gray-300 bg-white py-2 pl-3 pr-8 text-[13px] font-medium text-gray-700 outline-none focus:border-blue-500"
               >
                 <option value="">My Dashboard</option>
-                {canViewMigrationQueue && <option value="Migration">Migration Queue</option>}
-                {canViewDevQueue && <option value="Dev">Dev Queue</option>}
+                {/* Every queue found across every space, not just Migration/Dev
+                    -- migration_manager (no general manager role) still only
+                    ever sees Migration, matching the backend's own
+                    per-queue permission check exactly. */}
+                {(canViewAllQueues ? availableQueueNames : availableQueueNames.filter((n) => n.toLowerCase() === 'migration'))
+                  .map((name) => <option key={name} value={name}>{name} Queue</option>)}
               </select>
               <ChevronDown size={13} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
             </div>
@@ -941,7 +973,7 @@ export default function MyDashboardPage() {
           {isAdmin && queuePickerDept && (
             <QueueSelect
               label={`${queuePickerDept} Queue — All users`}
-              options={queuePickerDept === 'Migration' ? queueUsers.migration : queueUsers.dev}
+              options={queueUsers[queuePickerDept] || []}
               value={viewedUserId}
               onChange={(v) => {
                 if (v) { setViewedUserId(v); setViewedQueueDept(''); }
