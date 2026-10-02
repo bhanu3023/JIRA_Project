@@ -1942,10 +1942,18 @@ export default function IssueDetailPage() {
         </div>
       </div>
 
-      {/* ── Main two-column area (both scroll independently) ── */}
-      <div className="flex flex-1 overflow-hidden">
+      {/* ── Main two-column area (both scroll independently) ──
+          Real Jira stacks these vertically on mobile instead of splitting
+          them side by side -- below lg this was still a flex ROW with no
+          breakpoint at all, so on a ~375px phone the resizable sidebar
+          (200-500px wide) squeezed the actual ticket content into an
+          unusably thin sliver. flex-col below lg (content on top, sidebar
+          below, both still independently scrollable within their own
+          section); lg:flex-row restores the exact original side-by-side
+          layout, completely unchanged, at tablet/desktop widths. */}
+      <div className="flex flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
         {/* ===== LEFT: Main Content — scrollable ===== */}
-        <div className="flex-1 min-w-0 overflow-y-auto px-6 py-5 bg-[#FAFBFC]">
+        <div className="flex-1 min-w-0 px-6 py-5 bg-[#FAFBFC] lg:overflow-y-auto">
           {/* Title */}
           {editing === 'summary' ? (
             <div className="flex items-start gap-2 mb-5">
@@ -3225,8 +3233,12 @@ export default function IssueDetailPage() {
         </div>
 
         {/* ===== DRAG HANDLE ===== */}
+        {/* Only meaningful once the two panels sit side by side again (lg
+            and up) -- mouse-drag resizing between two vertically STACKED
+            panels on mobile makes no sense (there's no horizontal boundary
+            to drag), and touch has no mousedown event to begin with. */}
         <div
-          className="w-1 flex-shrink-0 cursor-col-resize hover:bg-blue-400 bg-gray-200 transition-colors relative group"
+          className="hidden w-1 flex-shrink-0 cursor-col-resize hover:bg-blue-400 bg-gray-200 transition-colors relative group lg:block"
           onMouseDown={e => {
             isDragging.current = true;
             dragStartX.current = e.clientX;
@@ -3272,7 +3284,16 @@ export default function IssueDetailPage() {
         </div>
 
         {/* ===== RIGHT SIDEBAR ===== */}
-        <div style={{ width: sidebarWidth }} className="flex-shrink-0 border-l border-[#DFE1E6] overflow-y-auto bg-[#FAFBFC]">
+        {/* The user-resizable width (sidebarWidth) only makes sense once
+            this sits beside the main content again (lg and up) -- set as a
+            CSS variable rather than directly in `style` so the lg: prefix
+            on w-[var(...)] can actually gate WHEN it applies; full-width
+            (w-full) stacked below it on mobile, same as the main content
+            column above it. */}
+        <div
+          style={{ ['--issue-sidebar-w' as string]: `${sidebarWidth}px` }}
+          className="w-full flex-shrink-0 border-t border-[#DFE1E6] overflow-y-auto bg-[#FAFBFC] lg:w-[var(--issue-sidebar-w)] lg:border-t-0 lg:border-l"
+        >
 
           {/* Status selector — Jira style */}
           <div className="px-4 pt-4 pb-3">
