@@ -1,6 +1,6 @@
 import './globals.css';
 import { Suspense } from 'react';
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Inter } from 'next/font/google';
 import Script from 'next/script';
 import RootLayoutClient from '@/components/layout/RootLayoutClient';
@@ -16,6 +16,20 @@ export const metadata: Metadata = {
   title: 'Neutara Technologies Ticketing',
   description: 'Neutara Technologies Ticketing - Unified Support Platform',
   icons: { icon: '/neutara-logo.png' },
+};
+
+// There was no viewport meta tag anywhere in the app at all -- every mobile
+// browser rendered the whole site at a fake desktop width (~980px) and
+// shrank it to fit, making everything tiny and forcing pinch-zoom to read
+// or tap anything, independent of how responsive any individual page's own
+// CSS was. This is the single prerequisite every other mobile fix in this
+// app depends on. width=device-width matches the real screen; initial
+// scale 1 with user-scalable left on (no maximumScale/userScalable:false)
+// so pinch-zoom still works for anyone who wants it -- only the broken
+// default scaling is fixed, not zoom itself taken away.
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

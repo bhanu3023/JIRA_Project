@@ -21,12 +21,13 @@ import {
   ShieldCheck,
   ChevronDown,
   X,
+  Menu,
 } from 'lucide-react';
 
 const PRIVILEGED_ROLES = ['admin'];
 
 export default function Header() {
-  const { user, logout, notifications, unreadCount, loadNotifications, markAllNotificationsRead, spaces, bumpIssuesVersion } = useStore(
+  const { user, logout, notifications, unreadCount, loadNotifications, markAllNotificationsRead, spaces, bumpIssuesVersion, toggleMobileSidebar } = useStore(
     useShallow((s) => ({
       user: s.user,
       logout: s.logout,
@@ -36,6 +37,7 @@ export default function Header() {
       markAllNotificationsRead: s.markAllNotificationsRead,
       spaces: s.spaces,
       bumpIssuesVersion: s.bumpIssuesVersion,
+      toggleMobileSidebar: s.toggleMobileSidebar,
     })),
   );
   const isPrivileged = PRIVILEGED_ROLES.includes(user?.role || '');
@@ -207,6 +209,19 @@ export default function Header() {
         the z-[9999] dropdowns elsewhere), so ordering there is unaffected.
       */}
       <header className="sticky top-0 z-40 flex h-14 items-center gap-3 border-b border-blue-900/30 bg-[#0129AC] px-5 shadow-md">
+        {/* Opens the off-canvas mobile sidebar (see Sidebar.tsx) -- the
+            sidebar's own toggle button is inside the sidebar itself, which
+            is exactly what's hidden off-screen on mobile until this opens
+            it, so there was previously no way to reach navigation at all
+            below the sm breakpoint. sm:hidden since desktop never needs
+            this (its own sidebar is always visible). */}
+        <button
+          onClick={toggleMobileSidebar}
+          className="-ml-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-blue-200 transition-colors hover:bg-white/10 hover:text-white sm:hidden"
+          aria-label="Open menu"
+        >
+          <Menu size={19} />
+        </button>
         {/* Live search bar */}
         <div ref={searchRef} className="relative flex-1 max-w-xs">
           <div className={`flex items-center gap-2 rounded border px-3 py-2 transition-all ${searchFocused ? 'border-white/40 bg-white/15' : 'border-white/10 bg-white/5'}`}>

@@ -88,6 +88,14 @@ interface AppState {
   // UI
   sidebarOpen: boolean;
   toggleSidebar: () => void;
+  // Separate from sidebarOpen (which only ever toggles the desktop sidebar
+  // between its 288px and 60px-icon-strip widths, both of which still eat
+  // real screen width) -- on mobile the sidebar is an off-canvas overlay
+  // instead, closed by default so a phone gets the full screen width for
+  // actual content, opened via a hamburger button in the header.
+  mobileSidebarOpen: boolean;
+  toggleMobileSidebar: () => void;
+  closeMobileSidebar: () => void;
   loading: boolean;
 
   // Global config
@@ -375,6 +383,9 @@ export const useStore = create<AppState>((set, get) => ({
   // UI
   sidebarOpen: true,
   toggleSidebar: () => set(s => ({ sidebarOpen: !s.sidebarOpen })),
+  mobileSidebarOpen: false,
+  toggleMobileSidebar: () => set(s => ({ mobileSidebarOpen: !s.mobileSidebarOpen })),
+  closeMobileSidebar: () => set({ mobileSidebarOpen: false }),
   loading: false,
 
   // Global config

@@ -92,8 +92,12 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
   return (
     <div className="flex h-screen overflow-hidden bg-white">
       {isAuthenticated && <Sidebar />}
+      {/* max-sm:ml-0 -- below the sm breakpoint the sidebar is an
+          off-canvas overlay (see Sidebar.tsx), not part of the layout
+          flow, so reserving 288px/60px of margin for it here just wasted
+          most of a phone's actual screen width for nothing visible. */}
       <div
-        className={`flex flex-1 flex-col overflow-hidden ${isAuthenticated && sidebarOpen ? 'ml-72' : isAuthenticated ? 'ml-[60px]' : ''}`}
+        className={`flex flex-1 flex-col overflow-hidden max-sm:ml-0 ${isAuthenticated && sidebarOpen ? 'ml-72' : isAuthenticated ? 'ml-[60px]' : ''}`}
       >
         {isAuthenticated && <Header />}
         <div className="relative flex-1 overflow-hidden">

@@ -549,10 +549,12 @@ function SoftwareSidebar({
 const PRIVILEGED_ROLES = ['admin'];
 
 export default function Sidebar() {
-  const { sidebarOpen, toggleSidebar, spaces, loadSpaces, user, currentIssue } = useStore(
+  const { sidebarOpen, toggleSidebar, mobileSidebarOpen, closeMobileSidebar, spaces, loadSpaces, user, currentIssue } = useStore(
     useShallow((s) => ({
       sidebarOpen: s.sidebarOpen,
       toggleSidebar: s.toggleSidebar,
+      mobileSidebarOpen: s.mobileSidebarOpen,
+      closeMobileSidebar: s.closeMobileSidebar,
       spaces: s.spaces,
       loadSpaces: s.loadSpaces,
       user: s.user,
@@ -617,9 +619,35 @@ export default function Sidebar() {
     loadSpaces();
   }, [loadSpaces]);
 
+  // Close the mobile drawer on every navigation -- picking a space/queue
+  // link is the normal way out of it, same as tapping the backdrop.
+  useEffect(() => {
+    closeMobileSidebar();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  // Rendered once, used by both the collapsed (w-[60px]) and expanded
+  // (w-72) <aside> below -- a translucent backdrop behind the mobile
+  // drawer, only ever visible below the sm breakpoint while it's open
+  // (hidden outright on desktop, where the sidebar is never off-canvas).
+  const mobileBackdrop = (
+    <div
+      onClick={closeMobileSidebar}
+      className={`fixed inset-0 z-30 bg-black/40 transition-opacity sm:hidden ${mobileSidebarOpen ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
+    />
+  );
+  // Below sm: off-canvas by default (-translate-x-full), slides in over
+  // the content (not pushing it -- RootLayoutClient's own content margin
+  // is max-sm:ml-0) when mobileSidebarOpen. At sm and up this resolves to
+  // translate-x-0 unconditionally, i.e. exactly the old always-visible
+  // desktop behavior, untouched.
+  const mobileTranslateClass = mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full sm:translate-x-0';
+
   if (!sidebarOpen) {
     return (
-      <aside className="fixed left-0 top-0 z-40 flex h-full w-[60px] flex-col items-center gap-1 border-r border-blue-900/20 bg-[#0129AC] py-3">
+      <>
+      {mobileBackdrop}
+      <aside className={`fixed left-0 top-0 z-40 flex h-full w-[60px] flex-col items-center gap-1 border-r border-blue-900/20 bg-[#0129AC] py-3 transition-transform duration-200 ${mobileTranslateClass}`}>
         <Link href="/dashboard" className="mb-1">
           <div className="flex h-9 w-9 items-center justify-center rounded-md bg-white/15 ring-1 ring-white/20">
             <img src="/neutara-logo.png" alt="Neutara" className="h-7 w-7 object-contain" style={{ filter: 'brightness(0) invert(1)' }} />
@@ -653,11 +681,14 @@ export default function Sidebar() {
           </Link>
         ))}
       </aside>
+      </>
     );
   }
 
   return (
-    <aside className="fixed left-0 top-0 z-40 flex h-full w-72 select-none flex-col border-r border-[#DFE1E6] bg-[#F7F8F9] shadow-sm">
+    <>
+    {mobileBackdrop}
+    <aside className={`fixed left-0 top-0 z-40 flex h-full w-72 select-none flex-col border-r border-[#DFE1E6] bg-[#F7F8F9] shadow-sm transition-transform duration-200 ${mobileTranslateClass}`}>
       <div className="flex h-14 flex-shrink-0 items-center bg-[#0129AC] px-4">
         <Link href="/dashboard" className="flex min-w-0 flex-1 items-center gap-2.5">
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md bg-white/15">
@@ -831,6 +862,7 @@ export default function Sidebar() {
 
         </nav>
     </aside>
+    </>
   );
 }
 
