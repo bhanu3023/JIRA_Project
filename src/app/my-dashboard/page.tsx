@@ -266,6 +266,35 @@ function DateRangeSelect({ value, onChange }: { value: DateRangeKey; onChange: (
   );
 }
 
+/** Collapsible group wrapper, by explicit request -- the dashboard packed
+ * 7 stat tiles + 4 donut charts + up to 4 bar-chart tiles + a ticket-journey
+ * list all into one continuous, always-expanded stack, reported as too
+ * cluttered. Groups the donut row and the activity/trends row into their
+ * own labeled, collapsible sections (same chevron-toggle pattern the ticket
+ * detail page's own SLA/Worklog sidebar sections already use) instead of
+ * removing any of the underlying data -- everything's still one click away,
+ * just not all competing for attention on first load. The stat tile row
+ * itself stays outside any Section (the "glance" numbers, not a group to
+ * tuck away). */
+function Section({ title, subtitle, defaultOpen = true, children }: { title: string; subtitle?: string; defaultOpen?: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+      >
+        <div className="min-w-0">
+          <h3 className="text-[13.5px] font-semibold text-gray-800">{title}</h3>
+          {subtitle && <p className="truncate text-[11.5px] text-gray-500">{subtitle}</p>}
+        </div>
+        <ChevronDown size={15} className={cn('flex-shrink-0 text-gray-400 transition-transform duration-150', open ? '' : '-rotate-90')} />
+      </button>
+      {open && <div className="space-y-3 border-t border-gray-100 px-4 pb-4 pt-3">{children}</div>}
+    </div>
+  );
+}
+
 /* ─── small "Synced" indicator for the queue dashboard's 10s live poll below
  * — ticks its own "Xs ago" label every second (so it visibly counts up
  * between polls instead of sitting static) and flashes green for a moment
@@ -440,6 +469,7 @@ function QueueDashboardView({ data, dateRangeLabel, lastSyncedAt }: { data: any;
               never lumped into one "open" bucket). Same Donut component, same
               usage, as the personal dashboard's "My Tickets by Status" below,
               just scoped to the whole department instead of one user. */}
+          <Section title="Ticket Breakdown" subtitle={`All ${summary.totalQueueTickets || 0} current tickets in this queue`}>
           <Card title={`${dept} Tickets by Status`} subtitle={`All ${summary.totalQueueTickets || 0} current tickets in this queue`}>
             <Donut data={statusDonutData} fallbackHref={queueFallbackHref} />
           </Card>
@@ -450,8 +480,12 @@ function QueueDashboardView({ data, dateRangeLabel, lastSyncedAt }: { data: any;
           <Card title={`${dept} Tickets by Member`} subtitle="Current tickets held by each queue member">
             <DeptBarChart data={userWiseBarData} color="#3B82F6" fallbackHref={queueFallbackHref} />
           </Card>
+          </Section>
 
-          {/* Week-over-week graphs */}
+          {/* Week-over-week graphs -- grouped into a collapsed-by-default
+              Section, by explicit request (too much on screen at once):
+              secondary trend detail, not the first thing worth seeing. */}
+          <Section title="Trends — Week over Week" subtitle="Last 7 days vs the 7 days before" defaultOpen={false}>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             <Card title="SLA Breach Rate — Week over Week" subtitle="Last 7 days vs the 7 days before">
               <DeptBarChart data={slaBreachRateBarData} color="#EF4444" fallbackHref={queueBreachedHref} />
@@ -472,6 +506,7 @@ function QueueDashboardView({ data, dateRangeLabel, lastSyncedAt }: { data: any;
               height={Math.max(200, memberWorkloadData.length * 12)}
             />
           </Card>
+          </Section>
         </>
       )}
 
@@ -971,6 +1006,7 @@ export default function MyDashboardPage() {
       </div>
 
       {/* Donut row */}
+      <Section title="Ticket Breakdown" subtitle="Status, priority, and SLA standing">
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-4 lg:items-stretch">
         <Card title="My Tickets by Status"><Donut data={statusDonutData} fallbackHref={myAssignedFallback} /></Card>
         <Card title="My Tickets by Priority"><Donut data={priorityDonutData} fallbackHref={myAssignedFallback} /></Card>
@@ -979,12 +1015,16 @@ export default function MyDashboardPage() {
           <Donut data={slaComplianceDonutData} centerLabel={`${data.slaCompliancePct ?? 100}%`} centerSub="Compliance" fallbackHref={myAssignedFallback} />
         </Card>
       </div>
+      </Section>
 
       {/* Bar charts row — when the journey has nothing to show, its compact empty
           state joins this row as a 4th tile instead of sitting alone as a giant
           full-width strip with a one-line message and huge blank space either side.
           Once there's real journey data (which needs the extra width to lay out
-          department rows), it gets its own full-width section below instead. */}
+          department rows), it gets its own full-width section below instead.
+          Grouped with the journey list into one collapsed-by-default Section --
+          secondary, drill-down detail rather than the first thing worth seeing. */}
+      <Section title="Activity & Department Trends" subtitle={dateRangeLabel} defaultOpen={false}>
       <div className={cn('grid grid-cols-1 gap-3', journey.length === 0 ? 'lg:grid-cols-4' : 'lg:grid-cols-3')}>
         <Card title="Tickets Moved to Other Departments (By Me)" subtitle={dateRangeLabel}>
           <DeptBarChart data={barDataFor(movedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#3B82F6" fallbackHref={myAssignedFallback} />
@@ -1040,6 +1080,7 @@ export default function MyDashboardPage() {
           </div>
         </Card>
       )}
+      </Section>
       </>
       )}
     </div>
