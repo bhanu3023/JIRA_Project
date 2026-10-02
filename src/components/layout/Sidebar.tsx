@@ -48,7 +48,6 @@ import {
   Activity,
   Share2,
   BarChart2,
-  FileWarning,
   Route,
   ArrowUpRight,
   UserX,
@@ -639,7 +638,6 @@ export default function Sidebar() {
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
           { href: '/kb', icon: <BookOpen size={16} />, match: pathname.startsWith('/kb') },
           ...(canSeeMbr ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
-          ...(isPrivileged ? [{ href: '/file-health', icon: <FileWarning size={16} />, match: pathname === '/file-health' }] : []),
         ].map((item, i) => (
           <Link
             key={i}
@@ -696,9 +694,6 @@ export default function Sidebar() {
             <GlobalNavItem href="/kb" icon={<BookOpen size={15} />} label="KB Articles" active={pathname.startsWith('/kb')} />
             {canSeeMbr && (
               <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
-            )}
-            {isPrivileged && (
-              <GlobalNavItem href="/file-health" icon={<FileWarning size={15} />} label="File Health" active={pathname === '/file-health'} />
             )}
           </div>
 

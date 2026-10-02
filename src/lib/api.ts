@@ -501,10 +501,6 @@ class ApiClient {
   deleteKbQuestion(id: string, qid: string) {
     return this.request<{ ok: boolean }>(`/kb/articles/${encodeURIComponent(id)}/questions/${encodeURIComponent(qid)}`, { method: 'DELETE' });
   }
-  getFileHealth() {
-    return this.request<{ totalChecked: number; missingCount: number; missing: Array<{ ticketKey: string; filename: string; url: string; source: string }> }>('/admin/file-health');
-  }
-
   // Custom Fields
   getCustomFields() { return this.request<any[]>('/custom-fields'); }
   createCustomField(data: any) { return this.request<any>('/custom-fields', { method: 'POST', body: JSON.stringify(data) }); }
