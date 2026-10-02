@@ -5575,7 +5575,15 @@ async function _handleJiraPgApi(
             slaPolicies,
             false
           );
-          slaBreached = instances.length ? instances.some((x: any) => x.isBreached) : (typeof r.jira_sla_breached === 'boolean' && r.jira_sla_breached);
+          // Same cross-department attribution fix as the mbr-team/
+          // mbr-department tabs -- instances mixes r.dept_name's own
+          // instance(s) with one frozen instance per OTHER department this
+          // ticket ever visited, each deptName-tagged; counting ANY breach
+          // in the whole array attributed another department's historical
+          // breach to this one.
+          slaBreached = instances.length
+            ? instances.some((x: any) => (!x.deptName || x.deptName.toLowerCase() === String(r.dept_name || '').toLowerCase()) && x.isBreached)
+            : (typeof r.jira_sla_breached === 'boolean' && r.jira_sla_breached);
         } else if (typeof r.jira_sla_breached === 'boolean') {
           slaBreached = r.jira_sla_breached;
         }
@@ -5686,7 +5694,15 @@ async function _handleJiraPgApi(
           { ...row, current_department: dept, status: { name: row.status_name, category: row.status_category } },
           slaPolicies, false
         );
-        const breached = instances.length ? instances.some((x: any) => x.isBreached) : !!row.jira_sla_breached;
+        // Same cross-department attribution fix as the mbr-team/
+        // mbr-department tabs -- instances mixes dept's own instance(s)
+        // with one frozen instance per OTHER department this ticket ever
+        // visited, each deptName-tagged; counting ANY breach in the whole
+        // array attributed another department's historical breach to this
+        // queue's own tile.
+        const breached = instances.length
+          ? instances.some((x: any) => (!x.deptName || x.deptName.toLowerCase() === String(dept || '').toLowerCase()) && x.isBreached)
+          : !!row.jira_sla_breached;
         if (breached) slaBreachedCount++;
       }
 
@@ -12591,7 +12607,18 @@ async function _handleJiraPgApi(
         slaPoliciesBySpace[r.spaceId] || [],
         false
       );
-      const breached = instances.length ? instances.some((x: any) => x.isBreached) : !!r.jira_sla_breached;
+      // instances mixes r.dept's own instance(s) with one frozen,
+      // already-paused instance per OTHER department this ticket ever
+      // visited (deptName-tagged) -- counting ANY breach in the whole
+      // array attributed a different department's own historical breach
+      // (e.g. Dev's) to r.dept here. Confirmed for real: Migration-side
+      // breaches showing under Dev and vice versa in MBR. Only count an
+      // instance whose deptName is empty (space-wide policy, implicitly
+      // r.dept since that's what was passed as current_department above)
+      // or actually matches r.dept.
+      const breached = instances.length
+        ? instances.some((x: any) => (!x.deptName || x.deptName.toLowerCase() === String(r.dept || '').toLowerCase()) && x.isBreached)
+        : !!r.jira_sla_breached;
       slaBreachedByIssue[r.id] = breached;
       if (breached) slaBreachedByDept[r.dept] = (slaBreachedByDept[r.dept] || 0) + 1;
     }
@@ -13514,8 +13541,23 @@ async function _handleJiraPgApi(
       // would otherwise get counted as a Dev breach here using its live
       // Migration SLA state. A ticket breached in Migration is Migration's
       // breach, not this team's, regardless of where it started.
+      //
+      // The `instances` array itself ALSO mixes departments: besides the
+      // current department's own instance(s), it includes one frozen,
+      // already-paused instance per OTHER department this ticket ever
+      // visited (see computeSLAInstancesPure's historicalInstances, each
+      // tagged with that department's own name via deptName). The dept
+      // gate above only confirms the ticket is CURRENTLY in this team --
+      // `.some(isBreached)` across the whole array still let a historical
+      // instance from a DIFFERENT department (e.g. Dev's own breach on a
+      // ticket now sitting in Migration) get attributed to THIS team.
+      // Confirmed for real: Migration-side breaches showing under Dev and
+      // vice versa in this exact MBR tab. Only count an instance toward
+      // this team if it's actually this team's own (deptName null/empty =
+      // a space-wide policy, implicitly the current department, which the
+      // gate above already confirmed matches).
       const breached = String(row.current_department || '').toLowerCase() === dept.toLowerCase()
-        && instances.some((x: any) => x.isBreached);
+        && instances.some((x: any) => (!x.deptName || x.deptName.toLowerCase() === dept.toLowerCase()) && x.isBreached);
       slaById.set(row.id, breached);
 
       const emails = new Set<string>(workedRosterByIssue[row.id] || []);
