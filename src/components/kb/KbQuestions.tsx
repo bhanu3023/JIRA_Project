@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api, type KbFile, type KbQuestion } from '@/lib/api';
+import { toEditable, toStored, type KbMention } from '@/lib/kb-mentions';
+import { KbMentionInput, KbMentionText } from '@/components/kb/KbMentionInput';
 import { CheckCircle2, FileText, MessageCircleQuestion, Quote, Send, Trash2, X } from 'lucide-react';
 
 const MAX_CHARS = 4000;
@@ -23,26 +25,35 @@ function timeAgo(d: string | null) {
 }
 
 function QuestionItem({
-  articleId, q, canAnswer, onChange, onDelete, onOpenFile,
+  articleId, q, published, onChange, onDelete, onOpenFile,
 }: {
   articleId: string;
   q: KbQuestion;
-  canAnswer: boolean;
+  published: boolean;
   onChange: (q: KbQuestion) => void;
   onDelete: (id: string) => void;
   onOpenFile: (fileId: string) => void;
 }) {
   const [answering, setAnswering] = useState(false);
-  const [draft, setDraft] = useState(q.answer || '');
+  const [draft, setDraft] = useState('');
+  const [draftMentions, setDraftMentions] = useState<KbMention[]>([]);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const canAnswer = published && q.canAnswer;
+
+  const startAnswering = () => {
+    const editable = toEditable(q.answer);
+    setDraft(editable.text);
+    setDraftMentions(editable.mentions);
+    setAnswering(true);
+  };
 
   const submitAnswer = async () => {
     if (!draft.trim()) return;
     setBusy(true); setError(null);
     try {
-      onChange(await api.answerKbQuestion(articleId, q.id, draft.trim()));
+      onChange(await api.answerKbQuestion(articleId, q.id, toStored(draft.trim(), draftMentions)));
       setAnswering(false);
     } catch (e: any) {
       setError(e?.message || 'Failed to save answer');
@@ -80,7 +91,7 @@ function QuestionItem({
           {q.quote && (
             <blockquote className="mt-1 border-l-2 border-blue-300 bg-blue-50/50 py-0.5 pl-2 text-[12px] italic text-gray-600">“{q.quote}”</blockquote>
           )}
-          <p className="mt-1 whitespace-pre-wrap break-words text-[13px] text-gray-800">{q.question}</p>
+          <KbMentionText text={q.question} className="mt-1 whitespace-pre-wrap break-words text-[13px] text-gray-800" />
 
           {q.answer && !answering && (
             <div className="mt-2 rounded-lg border border-green-100 bg-green-50/60 px-3 py-2">
@@ -89,24 +100,27 @@ function QuestionItem({
                 <span className="font-semibold text-gray-800">{q.answeredByName || 'Author'}</span>
                 <span className="text-gray-400">answered {timeAgo(q.answeredAt)}</span>
               </div>
-              <p className="mt-0.5 whitespace-pre-wrap break-words text-[13px] text-gray-800">{q.answer}</p>
+              <KbMentionText text={q.answer} className="mt-0.5 whitespace-pre-wrap break-words text-[13px] text-gray-800" />
             </div>
           )}
 
           {answering && (
             <div className="mt-2">
-              <textarea
+              <KbMentionInput
+                articleId={articleId}
                 value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                onChange={setDraft}
+                mentions={draftMentions}
+                onMentionsChange={setDraftMentions}
                 onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitAnswer(); } }}
                 maxLength={MAX_CHARS}
                 rows={3}
                 autoFocus
-                placeholder="Write your answer (Ctrl+Enter to post)"
+                placeholder="Write your answer. Type @ to mention someone (Ctrl+Enter to post)"
                 className="w-full resize-y rounded-lg border border-gray-300 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <div className="mt-1.5 flex justify-end gap-2">
-                <button onClick={() => { setAnswering(false); setDraft(q.answer || ''); }} className="rounded-lg px-2.5 py-1 text-[12px] text-gray-600 hover:bg-gray-100">Cancel</button>
+                <button onClick={() => setAnswering(false)} className="rounded-lg px-2.5 py-1 text-[12px] text-gray-600 hover:bg-gray-100">Cancel</button>
                 <button onClick={submitAnswer} disabled={busy || !draft.trim()} className="rounded-lg bg-blue-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">
                   {busy ? 'Saving…' : q.answer ? 'Save answer' : 'Post answer'}
                 </button>
@@ -119,7 +133,7 @@ function QuestionItem({
           {!answering && (canAnswer || q.canDelete) && (
             <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[12px]">
               {canAnswer && (
-                <button onClick={() => { setDraft(q.answer || ''); setAnswering(true); }} className="font-medium text-blue-600 hover:text-blue-800">
+                <button onClick={startAnswering} className="font-medium text-blue-600 hover:text-blue-800">
                   {q.answer ? 'Edit answer' : 'Answer'}
                 </button>
               )}
@@ -167,6 +181,7 @@ export function KbQuestions({
 }) {
   const [questions, setQuestions] = useState<KbQuestion[] | null>(null);
   const [text, setText] = useState('');
+  const [mentions, setMentions] = useState<KbMention[]>([]);
   const [attachDoc, setAttachDoc] = useState(true);
   const [filter, setFilter] = useState<Filter>('all');
   const [busy, setBusy] = useState(false);
@@ -202,12 +217,13 @@ export function KbQuestions({
     if (!text.trim() || busy) return;
     setBusy(true); setError(null);
     try {
-      const q = await api.askKbQuestion(articleId, text.trim(), {
+      const q = await api.askKbQuestion(articleId, toStored(text.trim(), mentions), {
         fileId: attachDoc ? contextFile?.id : null,
         quote,
       });
       setQuestions((prev) => [...(prev || []), q]);
       setText('');
+      setMentions([]);
       onClearQuote();
       setFilter('all');
       requestAnimationFrame(() => listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' }));
@@ -276,7 +292,7 @@ export function KbQuestions({
                 key={q.id}
                 articleId={articleId}
                 q={q}
-                canAnswer={canAnswer}
+                published={published}
                 onOpenFile={onOpenFile}
                 onChange={(updated) => setQuestions((prev) => (prev || []).map((x) => (x.id === updated.id ? updated : x)))}
                 onDelete={(qid) => setQuestions((prev) => (prev || []).filter((x) => x.id !== qid))}
@@ -310,15 +326,19 @@ export function KbQuestions({
               </div>
             )}
             <div className="flex items-end gap-2">
-              <textarea
+              <KbMentionInput
                 ref={inputRef}
+                articleId={articleId}
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={setText}
+                mentions={mentions}
+                onMentionsChange={setMentions}
+                dropUp
                 onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); ask(); } }}
                 maxLength={MAX_CHARS}
                 rows={2}
-                placeholder={canAnswer ? 'Add a note or question for readers…' : 'Ask the author a question…'}
-                className="max-h-40 min-h-[44px] flex-1 resize-y rounded-lg border border-gray-300 bg-white px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder={canAnswer ? 'Add a note or question for readers… (@ to mention)' : 'Ask a question… type @ to mention someone'}
+                className="block max-h-40 min-h-[44px] w-full resize-y rounded-lg border border-gray-300 bg-white px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <button
                 onClick={ask}
@@ -331,7 +351,9 @@ export function KbQuestions({
             </div>
             {error && <p className="mt-1 text-[12px] text-red-600">{error}</p>}
             <p className="mt-1 text-[11px] text-gray-400">
-              {canAnswer ? 'Everyone who can read this article sees the questions and answers.' : 'The author is notified. Everyone who can read this article sees the answer.'}
+              {canAnswer
+                ? 'Everyone who can read this sees the questions, and anyone can answer.'
+                : 'The author and anyone you @mention are notified. Anyone who can read this can answer.'}
             </p>
           </>
         ) : (

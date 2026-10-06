@@ -495,6 +495,10 @@ class ApiClient {
       body: JSON.stringify({ question, fileId: context?.fileId || undefined, quote: context?.quote || undefined }),
     });
   }
+  // People who can read the article, for @mention suggestions.
+  searchKbPeople(id: string, q: string, signal?: AbortSignal) {
+    return this.request<KbPerson[]>(`/kb/articles/${encodeURIComponent(id)}/people?q=${encodeURIComponent(q)}`, { signal });
+  }
   answerKbQuestion(id: string, qid: string, answer: string) {
     return this.request<KbQuestion>(`/kb/articles/${encodeURIComponent(id)}/questions/${encodeURIComponent(qid)}/answer`, { method: 'PUT', body: JSON.stringify({ answer }) });
   }
@@ -609,6 +613,9 @@ export type KbQuestion = {
   answeredByName: string | null;
   answeredAt: string | null;
   canDelete: boolean;
+  /** Viewer may post (or, if answered, edit) the answer. */
+  canAnswer: boolean;
 };
+export type KbPerson = { id: string; name: string; email: string };
 
 export const api = new ApiClient();

@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pgPool as pool } from '@/lib/pg-pool';
 import { db } from '@/lib/db';
+import { mentionedIds, plainMentions } from '@/lib/kb-mentions';
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_QA_CHARS = 4000;
@@ -76,7 +77,7 @@ const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
 
 // Same row the bell in Header.tsx polls for. KB_* notifications carry the
 // article id in issueKey; Header routes those to /kb instead of /issues.
-async function notify(userId: string, type: 'KB_QUESTION' | 'KB_ANSWER', title: string, message: string, articleId: string) {
+async function notify(userId: string, type: 'KB_QUESTION' | 'KB_ANSWER' | 'KB_MENTION', title: string, message: string, articleId: string) {
   if (!userId) return;
   try {
     await db.notification.create({ data: { userId, type, title, message, issueKey: articleId } });
@@ -96,6 +97,13 @@ function formatFile(row: any) {
   return { id: row.id, filename: row.filename, mime: row.mime, size: Number(row.size || 0), createdAt: row.created_at };
 }
 
+// Anyone who can read the article may answer an open question. Once answered,
+// only whoever wrote that answer, the author, or an admin can change it, so one
+// reader can't overwrite another's answer.
+function canEditAnswer(row: any, viewerId: string, viewerCanManage: boolean) {
+  return viewerCanManage || !row.answer || row.answered_by_id === viewerId;
+}
+
 function formatQuestion(row: any, viewerId: string, viewerCanManage: boolean) {
   return {
     id: row.id,
@@ -111,6 +119,7 @@ function formatQuestion(row: any, viewerId: string, viewerCanManage: boolean) {
     answeredByName: row.answered_by_name,
     answeredAt: row.answered_at,
     canDelete: viewerCanManage || row.asker_id === viewerId,
+    canAnswer: canEditAnswer(row, viewerId, viewerCanManage),
   };
 }
 
@@ -153,6 +162,44 @@ async function loadTeams(): Promise<Map<string, Team>> {
 async function getUserTeamKeys(userId: string): Promise<string[]> {
   const teams = await loadTeams();
   return Array.from(teams.values()).filter((t) => t.memberIds.has(userId)).map((t) => t.key);
+}
+
+// Same rule as canRead inside handleKbApi, for some other user.
+function userCanRead(article: any, user: { id: string; role?: string | null }, teams: Map<string, Team>) {
+  if (user.role === 'admin' || article.author_id === user.id) return true;
+  if (article.status !== 'published') return false;
+  if (article.visibility === 'org') return true;
+  return (article.teams || []).some((k: string) => teams.get(k)?.memberIds.has(user.id));
+}
+
+// Notifies everyone newly @mentioned in `text` (compared with `previous`, so
+// editing an answer doesn't re-notify). Mentions of people who can't read the
+// article are ignored -- the link would only show them "not found".
+async function notifyMentions(
+  article: any,
+  text: string,
+  previous: string | null,
+  actor: { id: string; name: string },
+  where: 'question' | 'answer',
+  alreadyNotified: string[] = [],
+) {
+  const before = mentionedIds(previous);
+  const ids = Array.from(mentionedIds(text)).filter((id) => id !== actor.id && !before.has(id) && !alreadyNotified.includes(id));
+  if (!ids.length) return;
+  const [users, teams] = await Promise.all([
+    db.user.findMany({ where: { id: { in: ids }, isActive: true }, select: { id: true, role: true } }),
+    loadTeams(),
+  ]);
+  for (const u of users) {
+    if (!userCanRead(article, u, teams)) continue;
+    await notify(
+      u.id,
+      'KB_MENTION',
+      `${actor.name} mentioned you in ${where === 'question' ? 'a question' : 'an answer'} on "${clip(article.title, 80)}"`,
+      clip(plainMentions(text), 140),
+      article.id,
+    );
+  }
 }
 
 // ── HTML sanitizing ──────────────────────────────────────────────────────────
@@ -321,7 +368,8 @@ export async function handleKbApi(
   // kb/articles/:id/(publish|access)
   // kb/articles/:id/files[/:fileId]
   // kb/articles/:id/questions[/:qid[/answer]]
-  const m = path.match(/^kb\/articles\/([^/]+)(?:\/(publish|access|files|questions)(?:\/([^/]+)(?:\/(answer))?)?)?$/);
+  // kb/articles/:id/people?q=
+  const m = path.match(/^kb\/articles\/([^/]+)(?:\/(publish|access|files|questions|people)(?:\/([^/]+)(?:\/(answer))?)?)?$/);
   if (!m) return json({ error: 'Not found' }, 404);
   const id = m[1];
   const action = m[2] || null;
@@ -341,6 +389,33 @@ export async function handleKbApi(
     const files = await pool.query(`SELECT * FROM kb_files WHERE article_id = $1 ORDER BY created_at`, [id]);
     return json({ ...formatArticle(article, await loadTeams(), manager, true), files: files.rows.map(formatFile) });
   }
+
+  // ── People to @mention ───────────────────────────────────────────────────
+  // GET kb/articles/:id/people?q= -- any reader. Only people who can read this
+  // article are suggested, so a mention always leads somewhere they can open.
+  if (action === 'people' && !subId && method === 'GET') {
+    const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+    const [users, teams] = await Promise.all([
+      db.user.findMany({
+        where: { isActive: true },
+        select: { id: true, firstName: true, lastName: true, displayName: true, email: true, role: true, avatarUrl: true },
+      }),
+      loadTeams(),
+    ]);
+    const matches = users
+      .filter((u) => u.id !== userId && userCanRead(article, u, teams))
+      .map((u) => ({ id: u.id, name: displayNameOf(u), email: u.email }))
+      .filter((u) => !q || u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q))
+      .sort((a, b) => {
+        // Names that start with what was typed come first.
+        const as = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const bs = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        return as - bs || a.name.localeCompare(b.name);
+      })
+      .slice(0, 8);
+    return json(matches);
+  }
+  if (action === 'people') return json({ error: 'Method not allowed' }, 405);
 
   // ── Files ────────────────────────────────────────────────────────────────
   if (action === 'files') {
@@ -441,10 +516,12 @@ export async function handleKbApi(
           article.author_id,
           'KB_QUESTION',
           `${askerName} asked a question on "${clip(article.title, 80)}"${fileName ? ` (${clip(fileName, 40)})` : ''}`,
-          clip(question, 140),
+          clip(plainMentions(question), 140),
           id,
         );
       }
+      // The author already got the "asked a question" notification above.
+      await notifyMentions(article, question, null, { id: userId, name: askerName }, 'question', [article.author_id]);
       return json(formatQuestion(row.rows[0], userId, manager), 201);
     }
 
@@ -452,9 +529,12 @@ export async function handleKbApi(
     const q = (await pool.query(`SELECT * FROM kb_questions WHERE id = $1 AND article_id = $2`, [subId, id])).rows[0];
     if (!q) return json({ error: 'Question not found' }, 404);
 
-    // PUT kb/articles/:id/questions/:qid/answer {answer} -- author or admin
+    // PUT kb/articles/:id/questions/:qid/answer {answer} -- any reader; see canEditAnswer
     if (subAction === 'answer' && method === 'PUT') {
-      if (!manager) return json({ error: 'Only the author or an admin can answer' }, 403);
+      if (article.status !== 'published') return json({ error: 'Answers open once the article is published' }, 400);
+      if (!canEditAnswer(q, userId, manager)) {
+        return json({ error: 'Only the person who answered, the author, or an admin can change this answer' }, 403);
+      }
       const body: any = await req.json().catch(() => ({}));
       const answer = String(body.answer || '').trim();
       if (!answer) return json({ error: 'Type an answer first' }, 400);
@@ -466,15 +546,30 @@ export async function handleKbApi(
          WHERE id = $1 RETURNING *`,
         [subId, answer, userId, answererName],
       );
+      const notified: string[] = [];
       if (q.asker_id !== userId) {
+        notified.push(q.asker_id);
         await notify(
           q.asker_id,
           'KB_ANSWER',
           `${answererName} ${firstAnswer ? 'answered' : 'updated the answer to'} your question on "${clip(article.title, 80)}"`,
-          clip(answer, 140),
+          clip(plainMentions(answer), 140),
           id,
         );
       }
+      // Now that readers answer too, let the author know what's being said
+      // about their article.
+      if (firstAnswer && article.author_id !== userId && article.author_id !== q.asker_id) {
+        notified.push(article.author_id);
+        await notify(
+          article.author_id,
+          'KB_ANSWER',
+          `${answererName} answered ${q.asker_name || 'a reader'}'s question on "${clip(article.title, 80)}"`,
+          clip(plainMentions(answer), 140),
+          id,
+        );
+      }
+      await notifyMentions(article, answer, q.answer, { id: userId, name: answererName }, 'answer', notified);
       return json(formatQuestion(row.rows[0], userId, manager));
     }
 
