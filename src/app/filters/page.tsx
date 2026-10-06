@@ -2331,6 +2331,29 @@ export default function FiltersPage() {
             )}
           </div>
         )}
+        {/* Created+Updated together require BOTH to match the same ticket
+            (an intersection, not "either one"), by explicit earlier request.
+            That's correct, but easy to get burned by for an older/migrated
+            ticket -- its real last-activity date can land anywhere, often
+            much later than when it was created, so a narrow range applied
+            to both fields can hide a ticket that's genuinely from the
+            period you're looking for. Confirmed for real: a ticket created
+            in Feb 2026 whose only later touch was a bulk Jira-side action
+            in May 2026 is invisible to "Created: Feb, Updated: Feb"
+            even though it's exactly the ticket that search is trying to
+            find. Surfacing this explicitly here (once, when both are
+            active) rather than leaving people to rediscover it by getting
+            zero results. */}
+        {selCreated && selUpdated && (
+          <div className="flex items-start gap-2 px-4 py-2 bg-amber-50 border-b border-amber-100 text-[11.5px] text-amber-800">
+            <Filter size={13} className="mt-0.5 flex-shrink-0" />
+            <span>
+              Created and Updated both have to match the same ticket. For an older ticket, its real last-activity date
+              can be much later than when it was created -- if you're searching for tickets from a specific period
+              (e.g. a migration batch), try <strong>Created alone</strong> instead of combining it with Updated.
+            </span>
+          </div>
+        )}
       </div>}
 
       {/* ── Results table (only on All Work tab) ── */}
