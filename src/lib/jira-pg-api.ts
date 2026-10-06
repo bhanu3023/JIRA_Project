@@ -6971,6 +6971,18 @@ async function _handleJiraPgApi(
       // logic further down can know exactly which people the Assignee filter
       // selected -- see its use there for why.
       let historyAssigneeFilterIds: string[] | null = null;
+      // True when an Assignee filter was actually submitted in this branch but
+      // resolved to zero real user ids (every selected id is stale/orphaned --
+      // e.g. a queue's memberIds array still listing someone removed/renamed
+      // since). Without this, historyAssigneeIdx/assigneeScopeSql below simply
+      // stayed null exactly as if no Assignee filter had been given at all, so
+      // deptDeptMatchSql silently fell back to the UNRESTRICTED deptScopeSql --
+      // matching every ticket in the department instead of zero. Confirmed for
+      // real: 4 orphaned Migration memberIds (pg_8g68kcrard and others, none
+      // present in `users`) each returned the full 552-ticket department list
+      // when "selected" as the sole assignee, identical regardless of which
+      // one was picked.
+      let assigneeFilterForcedEmpty = false;
       // Assignee, under a "Worked" date filter, means "who did the work" --
       // folded into workedRangeSql below as a w.user_id check -- not "who
       // currently owns the ticket". A ticket worked in this dept and then
@@ -7005,6 +7017,8 @@ async function _handleJiraPgApi(
           historyAssigneeFilterIds = resolvedIds;
           deptExtraParams.push(resolvedIds);
           deptParamIdx++;
+        } else {
+          assigneeFilterForcedEmpty = true;
         }
       } else if (assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
@@ -7443,9 +7457,11 @@ async function _handleJiraPgApi(
             )
           )`
         : null;
-      const deptDeptMatchSql = assigneeScopeSql
-        ? `(${deptScopeSql}) AND ${assigneeScopeSql}`
-        : deptScopeSql;
+      const deptDeptMatchSql = assigneeFilterForcedEmpty
+        ? '1=0'
+        : assigneeScopeSql
+          ? `(${deptScopeSql}) AND ${assigneeScopeSql}`
+          : deptScopeSql;
 
       // Needed even when needsSlaPrefilter is set: the SLA-filtered case can no
       // longer skip this "wasted" count query (as it used to, since deptTotal
