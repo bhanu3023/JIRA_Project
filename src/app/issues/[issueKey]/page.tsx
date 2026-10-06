@@ -1772,24 +1772,32 @@ export default function IssueDetailPage() {
   // exists, show THAT queue's own frozen status here too instead of the live one.
   const viewDeptParam = searchParams?.get('viewDept') || '';
   const currentDeptForView = ((issue as any)?.current_department || '').trim();
-  // Disabled per explicit request: always show the ticket's live current
-  // status/assignee here, regardless of which queue's link was clicked --
-  // the frozen-snapshot view (see the comment above this block for why it
-  // existed) was confusing users who expected this page to always reflect
-  // reality. The Department field alone now shows where a ticket has moved
-  // to; the queue list itself (dept_closed) still shows its own frozen
-  // per-department snapshot, unaffected by this.
-  const isHistoricalDeptView = false && !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
+  const isHistoricalDeptViewBase = !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
+  // Status stays disabled per the original explicit request: always show the
+  // ticket's live current status here, regardless of which queue's link was
+  // clicked -- the frozen-status view was confusing users who expected this
+  // page to always reflect reality. The Department field alone now shows
+  // where a ticket has moved to; the queue list itself (dept_closed) still
+  // shows its own frozen per-department status snapshot, unaffected by this.
+  const isHistoricalDeptViewForStatus = false && isHistoricalDeptViewBase;
+  // Assignee re-enabled per explicit follow-up request, scoped to Assignee
+  // only (Status stays live, above) -- confirmed real case: CF-33282, worked
+  // by Bhuvana Mosra in QA then routed to Dev/reassigned to Hemadasu Kantam;
+  // opening it via QA's own board/"Worked on" list (which already correctly
+  // shows Bhuvana) landed on this page showing Hemadasu instead, contradicting
+  // the queue list it was just opened from.
+  const isHistoricalDeptViewForAssignee = isHistoricalDeptViewBase;
   // Admins can still edit the live ticket while viewing another queue's frozen
   // snapshot -- the read-only lock below exists so a regular user can't mistake
   // a historical snapshot for the live ticket and edit it by accident, not to
   // block someone who needs to fix the ticket regardless of which queue they
   // opened it from. The "Showing X's own..." banners stay visible either way,
   // so an editing admin still sees they're looking at a historical snapshot.
-  const isHistoricalDeptLocked = isHistoricalDeptView && user?.role !== 'admin';
+  const isHistoricalDeptView = isHistoricalDeptViewForAssignee;
+  const isHistoricalDeptLocked = isHistoricalDeptViewForAssignee && user?.role !== 'admin';
   const historicalDeptStatuses: Record<string, any> = (issue as any)?.dept_statuses || {};
   const historicalStatusKey = Object.keys(historicalDeptStatuses).find(k => k.toLowerCase() === viewDeptParam.toLowerCase());
-  const historicalStatusSnap = isHistoricalDeptView && historicalStatusKey ? historicalDeptStatuses[historicalStatusKey] : null;
+  const historicalStatusSnap = isHistoricalDeptViewForStatus && historicalStatusKey ? historicalDeptStatuses[historicalStatusKey] : null;
   const displayStat = historicalStatusSnap
     ? { id: historicalStatusSnap.id, name: historicalStatusSnap.name, color: resolveStatusColor(historicalStatusSnap), category: historicalStatusSnap.category }
     : issueStat;

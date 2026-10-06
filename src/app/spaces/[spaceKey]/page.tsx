@@ -3048,6 +3048,20 @@ function SpaceDetailContent() {
               const slaLog = issue.dept_sla_log || {};
               const deptKey = Object.keys(slaLog).find(k => k.toLowerCase() === (issue.dept_name || '').toLowerCase()) || issue.dept_name;
               const elapsedMs: number = slaLog[deptKey]?.elapsed_ms || 0;
+              // issue.assignee_name is never actually sent by the API (only the
+              // `assignee` object is) -- this column read a field that was always
+              // undefined, so "Worked on" showed every single row as Unassigned
+              // regardless of who actually worked it. This list exists specifically
+              // to show who worked a ticket IN THIS QUEUE's department, so use this
+              // dept's own dept_assignees snapshot first (frozen at the moment it
+              // left this dept, or kept live if it's still here), falling back to
+              // the ticket's current live assignee only when no snapshot exists.
+              const workedDeptMap: Record<string, any> = issue.dept_assignees || {};
+              const workedSnapKey = Object.keys(workedDeptMap).find((k) => k.toLowerCase() === deptParam.toLowerCase());
+              const workedAssignee = workedSnapKey ? workedDeptMap[workedSnapKey] : issue.assignee;
+              const workedAssigneeName = workedAssignee
+                ? (workedAssignee.displayName || `${workedAssignee.firstName || ''} ${workedAssignee.lastName || ''}`.trim())
+                : '';
               const fmtMs = (ms: number) => {
                 if (!ms || ms < 60000) return ms > 0 ? `${Math.floor(ms / 1000)}s` : '—';
                 const h = Math.floor(ms / 3600000);
@@ -3078,7 +3092,7 @@ function SpaceDetailContent() {
                   })()}
                 </span>
                 <span className="text-[12px] text-gray-600 truncate">
-                  {issue.assignee_name?.trim() || <span className="text-gray-400 italic">Unassigned</span>}
+                  {workedAssigneeName || <span className="text-gray-400 italic">Unassigned</span>}
                 </span>
                 <span className="text-[12px] font-medium text-amber-700">{fmtMs(elapsedMs)}</span>
                 <span className="text-[11.5px] text-gray-400">
@@ -3225,8 +3239,15 @@ function SpaceDetailContent() {
                     className="bg-white rounded-xl border border-gray-150 shadow-sm hover:shadow-md hover:border-blue-200 transition-all cursor-pointer group"
                     // New tab, same reasoning as the table/grid view's own
                     // click handler above -- leaving a filtered list behind
-                    // intact instead of losing it on the way back.
-                    onClick={() => { window.open(`/issues/${issue.cfKey ?? issue.key}`, '_blank'); }}>
+                    // intact instead of losing it on the way back. viewDept
+                    // (when this board is scoped to a specific queue) tells the
+                    // detail page which department's own dept_assignees
+                    // snapshot to show instead of the ticket's current live
+                    // global assignee -- same mechanism the "Worked on" list's
+                    // own links already used; this card view just never passed
+                    // it, so a card opened from e.g. QA's own board still showed
+                    // whoever currently holds the ticket in a DIFFERENT dept.
+                    onClick={() => { window.open(`/issues/${issue.cfKey ?? issue.key}${deptParam ? `?viewDept=${encodeURIComponent(deptParam)}` : ''}`, '_blank'); }}>
                     {/* Card top row */}
                     <div className="flex items-start gap-3 px-4 pt-4 pb-3">
                       {/* Main content */}
@@ -3542,8 +3563,12 @@ function SpaceDetailContent() {
                   // the URL, so a fresh mount after Back restores the
                   // defaults). Opening in a new tab instead means the
                   // original, filtered tab is never navigated away from at
-                  // all -- nothing to lose.
-                  onClick={() => { window.open(`/issues/${issue.cfKey ?? issue.key}`, '_blank'); }}>
+                  // all -- nothing to lose. viewDept (when this board is
+                  // scoped to a specific queue) tells the detail page which
+                  // department's own dept_assignees snapshot to show instead
+                  // of the ticket's current live global assignee -- same
+                  // mechanism the "Worked on" list's own links already used.
+                  onClick={() => { window.open(`/issues/${issue.cfKey ?? issue.key}${deptParam ? `?viewDept=${encodeURIComponent(deptParam)}` : ''}`, '_blank'); }}>
 
                   {/* Checkbox (admin only) */}
                   <div className="flex items-center justify-center" onClick={isAdmin ? (e => toggleRow(e, issue.id)) : undefined}>
@@ -3596,9 +3621,19 @@ function SpaceDetailContent() {
                     );
 
                     if (id === 'assignee') {
-                    // Dept-aware assignee: when dept filter active, show that dept's assignee
+                    // Dept-aware assignee: when dept filter active, show that dept's assignee.
+                    // deptParam (the actual queue board being viewed, e.g. "QA" from the
+                    // sidebar/?dept=QA) takes priority over mySpaceDept (the VIEWER's own
+                    // department) -- previously this fell back to mySpaceDept regardless of
+                    // which queue was open, so a ticket handed QA -> Dev showed its Dev
+                    // assignee even on QA's own board, UNLESS the viewer's personal
+                    // department happened to also be QA. Confirmed for real: CF-33282,
+                    // worked by Bhuvana Mosra (QA) then routed to Dev (now assigned to
+                    // Hemadasu Kantam) -- QA's own "All Tickets" board showed Hemadasu's
+                    // name instead of Bhuvana's for any viewer whose own department wasn't
+                    // QA, even though dept_assignees.QA correctly has Bhuvana on file.
                     const deptMap: Record<string, any> = (issue as any).dept_assignees || {};
-                    const activeDept = deptFilter || (queueFilter === 'my-dept' ? mySpaceDept : mySpaceDept);
+                    const activeDept = deptParam || deptFilter || mySpaceDept;
                     // Previously hardcoded to always show the viewer's OWN name for every row
                     // in "Assigned to me" (on the theory that every row is "theirs" for this
                     // view, current or historical) -- but that silently hid the ticket's REAL
