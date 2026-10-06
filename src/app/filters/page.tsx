@@ -1653,7 +1653,7 @@ export default function FiltersPage() {
         (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
       );
       const header = [
-        'Key', 'Type', 'Summary', 'Assignee', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'SLA Breached Dept', 'Overdue', 'Department',
+        'Key', 'Type', 'Summary', 'Assignee', 'Worked By', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'SLA Breached Dept', 'Overdue', 'Department',
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
@@ -1679,6 +1679,18 @@ export default function FiltersPage() {
           issue.type ?? '',
           issue.summary ?? '',
           issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
+          // Independent of the Assignee column above (which can legitimately
+          // show a historical worker's name, or just the current owner's,
+          // depending on whether an Assignee filter is active -- see its own
+          // comment on current_department below) -- this always lists every
+          // real worker this queue recorded for the row, current owner or
+          // not, specifically so filtering THIS column in Excel afterward
+          // gives the same result as filtering Assignee in the app, instead
+          // of silently disagreeing with it. Only populated on a Queue-
+          // scoped export (dept-scoped branch); empty on the general "All
+          // Work" tab with no Queue selected, which has no single
+          // department's worked-on ledger to draw from.
+          issue.workedByNames ?? '',
           issue.reporter ? `${issue.reporter.firstName || ''} ${issue.reporter.lastName || ''}`.trim() : '',
           // Same queue-scoped effective status the on-screen table shows --
           // exporting the raw issue.status?.name here could show a

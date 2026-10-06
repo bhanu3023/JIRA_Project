@@ -7790,6 +7790,47 @@ async function _handleJiraPgApi(
             }
           } catch { /* fall through to the existing snapshot/reporter logic below */ }
         }
+        // "Worked By" -- ALWAYS computed (not gated on an Assignee filter
+        // being active, unlike filteredWorkerByIssue above), listing every
+        // real worker this dept's queue recorded for each row, independent
+        // of who currently holds it. Exists specifically so the Assignee
+        // FILTER and an exported file's own column-filtering can never
+        // silently disagree again: filtering Assignee:X in the app can
+        // match a ticket purely through X's historical work here even
+        // though someone else now owns it (see the long comment two blocks
+        // up) -- the exported Assignee column correctly shows the current
+        // owner for the general/unfiltered case, but that means re-
+        // filtering that SAME column in Excel afterward can never recover
+        // who else genuinely worked it. Confirmed for real: Queue: Dev +
+        // Assignee: Pragati Pandey matched 70 tickets (6 of them only
+        // through her own worked-on record, now owned by someone else) --
+        // exporting the UNFILTERED Dev queue and filtering Excel's own
+        // Assignee column by her name found only 64, with no way to see
+        // the other 6 at all. This column gives Excel something it CAN
+        // correctly filter on for that case: every name here who has a
+        // real (non-'passed') worked-on record for this dept, regardless
+        // of current ownership.
+        let workedByNamesByIssue: Record<string, string> = {};
+        if (rows.rows.length) {
+          try {
+            const issueIds = rows.rows.map((r: any) => r.id);
+            const allWorkedRows = await pool.query(
+              `SELECT DISTINCT w.issue_id, w.user_id, u."firstName", u."lastName"
+               FROM user_worked_on_tickets w
+               JOIN users u ON u.id = w.user_id
+               WHERE w.issue_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'`,
+              [issueIds, deptParam]
+            );
+            const namesByIssue: Record<string, string[]> = {};
+            for (const wr of allWorkedRows.rows) {
+              const name = `${wr.firstName || ''} ${wr.lastName || ''}`.trim() || wr.user_id;
+              (namesByIssue[wr.issue_id] ??= []).push(name);
+            }
+            for (const [issueId, names] of Object.entries(namesByIssue)) {
+              workedByNamesByIssue[issueId] = Array.from(new Set(names)).sort().join(', ');
+            }
+          } catch { /* leave workedByNamesByIssue empty -- non-critical column */ }
+        }
         enrichedIssues = rows.rows.map((row: any) => {
           // "Queue: Infra" + a "Worked" date filter is asking "who from Infra
           // worked this while it sat here" -- but the row's assignee_id/name
@@ -7955,6 +7996,7 @@ async function _handleJiraPgApi(
           jira_assignee_name: row.jira_assignee_name || null,
           jira_reporter_name: row.jira_reporter_name || null,
           space: { key: row.space_key || spaceKey },
+          workedByNames: workedByNamesByIssue[row.id] || '',
         }), assigneeIsHistorical, movedAwayFromQueue,
         // See the long comment on true_assignee in the non-dept branch above
         // -- same reasoning, but here the override being bypassed is this
