@@ -216,14 +216,12 @@ export default function IssueDetailPage() {
   const [spaceStatuses, setSpaceStatuses] = useState<any[]>([]);
   const [workflowTransitions, setWorkflowTransitions] = useState<any[]>([]);
   const [spaceMembers, setSpaceMembers] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<'comments' | 'history' | 'worklog'>('comments');
-  // Per-department work log -- Jira-style "Log Work" but split by which
-  // department actually did the work, so a ticket that passed through
-  // Dev -> Migration -> Infra -> QA shows each team's own hours separately
-  // against the SAME ticket instead of one combined, unattributed total.
-  const WORKLOG_DEPARTMENTS = ['Dev', 'Migration', 'Infra', 'QA'];
+  const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
+  // Single combined work log against the whole ticket, matching real Jira --
+  // department is still recorded on each entry (backend requires it) but is
+  // derived from the ticket's current department rather than picked by the user.
   const [worklogs, setWorklogs] = useState<any[]>([]);
-  const [worklogOpenDept, setWorklogOpenDept] = useState<string | null>(null);
+  const [worklogFormOpen, setWorklogFormOpen] = useState(false);
   const [worklogHours, setWorklogHours] = useState('');
   const [worklogDesc, setWorklogDesc] = useState('');
   const [worklogDate, setWorklogDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -493,20 +491,20 @@ export default function IssueDetailPage() {
     api.getWorklogs(issueKey).then((rows: any) => setWorklogs(Array.isArray(rows) ? rows : [])).catch(() => {});
   };
 
-  const handleAddWorklog = async (department: string) => {
+  const handleAddWorklog = async () => {
     setWorklogError('');
     const hoursNum = parseFloat(worklogHours);
     if (!hoursNum || hoursNum <= 0) { setWorklogError('Enter a valid number of hours.'); return; }
     setWorklogSubmitting(true);
     try {
       await api.addWorklog(issueKey, {
-        department,
+        department: (issue as any)?.current_department || '',
         timeSpentMinutes: Math.round(hoursNum * 60),
         description: worklogDesc.trim() || undefined,
         workDate: worklogDate,
       });
       setWorklogHours(''); setWorklogDesc(''); setWorklogDate(new Date().toISOString().slice(0, 10));
-      setWorklogOpenDept(null);
+      setWorklogFormOpen(false);
       loadWorklogs();
     } catch (e: any) {
       setWorklogError(e?.message || 'Failed to log work. Please try again.');
@@ -2816,7 +2814,10 @@ export default function IssueDetailPage() {
             </div>
           )}
 
-          {/* Tabs: Comments / Activity / History */}
+          {/* Tabs: Comments / History -- Worklog's own tab was removed per
+              explicit request (it duplicated the sidebar section below,
+              which is the one place it now lives, matching real Jira's own
+              single "Log work" placement). */}
           <div className="mt-6">
             <div className="flex items-center border-b border-gray-200">
               <button onClick={() => setActiveTab('comments')}
@@ -2826,10 +2827,6 @@ export default function IssueDetailPage() {
 <button onClick={() => setActiveTab('history')}
                 className={`px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors ${activeTab === 'history' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
                 History ({(issue.activity?.length || 0) + (issue.comments || []).filter((c: any) => c.authorName === 'System').length})
-              </button>
-              <button onClick={() => setActiveTab('worklog')}
-                className={`px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors ${activeTab === 'worklog' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-                Worklog ({worklogs.length})
               </button>
             </div>
 
@@ -3167,101 +3164,6 @@ export default function IssueDetailPage() {
               </div>
             )}
 
-            {activeTab === 'worklog' && (
-              <div className="pt-4 space-y-3">
-                {WORKLOG_DEPARTMENTS.map((dept) => {
-                  const deptLogs = worklogs.filter((w: any) => String(w.department || '').toLowerCase() === dept.toLowerCase());
-                  const totalMinutes = deptLogs.reduce((sum: number, w: any) => sum + (w.timeSpentMinutes || 0), 0);
-                  const formatMinutes = (m: number) => {
-                    const h = Math.floor(m / 60), rem = m % 60;
-                    return h && rem ? `${h}h ${rem}m` : h ? `${h}h` : `${rem}m`;
-                  };
-                  const isOpen = worklogOpenDept === dept;
-                  return (
-                    <div key={dept} className="border border-gray-200 rounded-lg overflow-hidden">
-                      <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
-                        <div className="flex items-center gap-2">
-                          <span className="text-[13px] font-semibold text-gray-800">{dept} Worklog</span>
-                          {totalMinutes > 0 && (
-                            <span className="text-[11px] font-medium text-gray-500 bg-white border border-gray-200 rounded px-1.5 py-0.5">
-                              {formatMinutes(totalMinutes)} logged
-                            </span>
-                          )}
-                        </div>
-                        <button
-                          onClick={() => { setWorklogOpenDept(isOpen ? null : dept); setWorklogError(''); }}
-                          className="text-[12px] font-medium text-blue-600 hover:text-blue-800 transition-colors"
-                        >
-                          {isOpen ? 'Cancel' : '+ Log work'}
-                        </button>
-                      </div>
-
-                      {isOpen && (
-                        <div className="px-4 py-3 bg-blue-50/40 border-b border-gray-100 space-y-2">
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="number" min={0.1} step={0.25} placeholder="Hours"
-                              value={worklogHours} onChange={(e) => setWorklogHours(e.target.value)}
-                              className="w-24 rounded border border-gray-300 px-2 py-1.5 text-[12.5px] outline-none focus:border-blue-500"
-                            />
-                            <input
-                              type="date" value={worklogDate} onChange={(e) => setWorklogDate(e.target.value)}
-                              className="rounded border border-gray-300 px-2 py-1.5 text-[12.5px] outline-none focus:border-blue-500"
-                            />
-                          </div>
-                          <textarea
-                            placeholder="What did you work on? (optional)"
-                            value={worklogDesc} onChange={(e) => setWorklogDesc(e.target.value)}
-                            rows={2}
-                            className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-[12.5px] outline-none focus:border-blue-500 resize-none"
-                          />
-                          {worklogError && <p className="text-[12px] text-red-600">{worklogError}</p>}
-                          <button
-                            onClick={() => handleAddWorklog(dept)}
-                            disabled={worklogSubmitting}
-                            className="rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                          >
-                            {worklogSubmitting ? 'Logging…' : 'Log work'}
-                          </button>
-                        </div>
-                      )}
-
-                      {deptLogs.length === 0 ? (
-                        <p className="px-4 py-4 text-[12.5px] text-gray-400 text-center">No work logged for {dept} yet</p>
-                      ) : (
-                        <div className="divide-y divide-gray-100">
-                          {deptLogs.map((w: any) => (
-                            <div key={w.id} className="flex items-start justify-between px-4 py-2.5">
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[12.5px] font-semibold text-gray-800">{w.authorName || 'Unknown'}</span>
-                                  <span className="text-[11px] font-medium text-blue-700 bg-blue-50 border border-blue-100 rounded px-1.5 py-0.5">
-                                    {formatMinutes(w.timeSpentMinutes || 0)}
-                                  </span>
-                                  <span className="text-[11px] text-gray-400">{formatJiraDateTime(w.workDate)}</span>
-                                </div>
-                                {w.description && (
-                                  <p className="text-[12px] text-gray-600 mt-0.5 whitespace-pre-wrap break-words">{w.description}</p>
-                                )}
-                              </div>
-                              {(user?.role === 'admin' || w.authorId === user?.id) && (
-                                <button
-                                  onClick={() => handleDeleteWorklog(w.id)}
-                                  className="text-gray-300 hover:text-red-500 transition-colors flex-shrink-0 ml-2"
-                                  title="Delete worklog entry"
-                                >
-                                  <X size={13} />
-                                </button>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           </div>
         </div>
 
@@ -4258,11 +4160,9 @@ export default function IssueDetailPage() {
             />
           )}
 
-          {/* Worklog Section — right sidebar, Jira-style, by explicit
-              request (the bottom Comments/History tab row wasn't being
-              found). Same four department sections as the Worklog tab,
-              sharing the exact same state/handlers -- this is just a
-              second, more visible entry point into the same feature. */}
+          {/* Worklog Section — right sidebar, Jira-style. Single combined
+              log against the whole ticket (matches real Jira), not split
+              per department, per explicit request. */}
           <div className="h-px bg-gray-200 mx-4" />
           <div className="px-4 py-3">
             <button
@@ -4276,88 +4176,84 @@ export default function IssueDetailPage() {
               )}
             </button>
 
-            {worklogExpanded && (
-              <div className="space-y-2">
-                {WORKLOG_DEPARTMENTS.map((dept) => {
-                  const deptLogs = worklogs.filter((w: any) => String(w.department || '').toLowerCase() === dept.toLowerCase());
-                  const totalMinutes = deptLogs.reduce((sum: number, w: any) => sum + (w.timeSpentMinutes || 0), 0);
-                  const formatMinutes = (m: number) => {
-                    const h = Math.floor(m / 60), rem = m % 60;
-                    return h && rem ? `${h}h ${rem}m` : h ? `${h}h` : `${rem}m`;
-                  };
-                  const isOpen = worklogOpenDept === dept;
-                  return (
-                    <div key={dept} className="rounded-md border border-gray-200 overflow-hidden">
-                      <div className="flex items-center justify-between px-2.5 py-1.5 bg-gray-50">
-                        <span className="text-[11.5px] font-semibold text-gray-700">{dept}</span>
-                        <div className="flex items-center gap-1.5">
-                          {totalMinutes > 0 && <span className="text-[10.5px] text-gray-500">{formatMinutes(totalMinutes)}</span>}
-                          <button
-                            onClick={() => { setWorklogOpenDept(isOpen ? null : dept); setWorklogError(''); }}
-                            className="text-[10.5px] font-medium text-blue-600 hover:text-blue-800 transition-colors"
-                          >
-                            {isOpen ? 'Cancel' : '+ Log'}
-                          </button>
-                        </div>
+            {worklogExpanded && (() => {
+              const totalMinutes = worklogs.reduce((sum: number, w: any) => sum + (w.timeSpentMinutes || 0), 0);
+              const formatMinutes = (m: number) => {
+                const h = Math.floor(m / 60), rem = m % 60;
+                return h && rem ? `${h}h ${rem}m` : h ? `${h}h` : `${rem}m`;
+              };
+              return (
+                <div className="rounded-md border border-gray-200 overflow-hidden">
+                  <div className="flex items-center justify-between px-2.5 py-1.5 bg-gray-50">
+                    {totalMinutes > 0
+                      ? <span className="text-[10.5px] text-gray-500">{formatMinutes(totalMinutes)} logged</span>
+                      : <span className="text-[10.5px] text-gray-400">No time logged yet</span>}
+                    <button
+                      onClick={() => { setWorklogFormOpen(v => !v); setWorklogError(''); }}
+                      className="text-[10.5px] font-medium text-blue-600 hover:text-blue-800 transition-colors"
+                    >
+                      {worklogFormOpen ? 'Cancel' : '+ Log work'}
+                    </button>
+                  </div>
+
+                  {worklogFormOpen && (
+                    <div className="px-2.5 py-2 space-y-1.5 bg-blue-50/40">
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number" min={0.1} step={0.25} placeholder="Hours"
+                          value={worklogHours} onChange={(e) => setWorklogHours(e.target.value)}
+                          className="w-16 rounded border border-gray-300 px-1.5 py-1 text-[11.5px] outline-none focus:border-blue-500"
+                        />
+                        <input
+                          type="date" value={worklogDate} onChange={(e) => setWorklogDate(e.target.value)}
+                          className="flex-1 min-w-0 rounded border border-gray-300 px-1.5 py-1 text-[11px] outline-none focus:border-blue-500"
+                        />
                       </div>
-
-                      {isOpen && (
-                        <div className="px-2.5 py-2 space-y-1.5 bg-blue-50/40">
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="number" min={0.1} step={0.25} placeholder="Hours"
-                              value={worklogHours} onChange={(e) => setWorklogHours(e.target.value)}
-                              className="w-16 rounded border border-gray-300 px-1.5 py-1 text-[11.5px] outline-none focus:border-blue-500"
-                            />
-                            <input
-                              type="date" value={worklogDate} onChange={(e) => setWorklogDate(e.target.value)}
-                              className="flex-1 min-w-0 rounded border border-gray-300 px-1.5 py-1 text-[11px] outline-none focus:border-blue-500"
-                            />
-                          </div>
-                          <textarea
-                            placeholder="What did you work on? (optional)"
-                            value={worklogDesc} onChange={(e) => setWorklogDesc(e.target.value)}
-                            rows={2}
-                            className="w-full rounded border border-gray-300 px-2 py-1 text-[11.5px] outline-none focus:border-blue-500 resize-none"
-                          />
-                          {worklogError && <p className="text-[11px] text-red-600">{worklogError}</p>}
-                          <button
-                            onClick={() => handleAddWorklog(dept)}
-                            disabled={worklogSubmitting}
-                            className="w-full rounded bg-blue-600 px-2 py-1 text-[11.5px] font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                          >
-                            {worklogSubmitting ? 'Logging…' : 'Log work'}
-                          </button>
-                        </div>
-                      )}
-
-                      {deptLogs.length > 0 && (
-                        <div className="divide-y divide-gray-100">
-                          {deptLogs.map((w: any) => (
-                            <div key={w.id} className="flex items-start justify-between px-2.5 py-1.5">
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className="text-[11px] font-medium text-gray-700">{w.authorName || 'Unknown'}</span>
-                                  <span className="text-[10.5px] font-medium text-blue-700 bg-blue-50 border border-blue-100 rounded px-1 py-0.5">
-                                    {formatMinutes(w.timeSpentMinutes || 0)}
-                                  </span>
-                                </div>
-                                {w.description && <p className="text-[11px] text-gray-500 mt-0.5 break-words">{w.description}</p>}
-                              </div>
-                              {(user?.role === 'admin' || w.authorId === user?.id) && (
-                                <button onClick={() => handleDeleteWorklog(w.id)} className="text-gray-300 hover:text-red-500 flex-shrink-0 ml-1.5" title="Delete">
-                                  <X size={11} />
-                                </button>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                      <textarea
+                        placeholder="What did you work on? (optional)"
+                        value={worklogDesc} onChange={(e) => setWorklogDesc(e.target.value)}
+                        rows={2}
+                        className="w-full rounded border border-gray-300 px-2 py-1 text-[11.5px] outline-none focus:border-blue-500 resize-none"
+                      />
+                      {worklogError && <p className="text-[11px] text-red-600">{worklogError}</p>}
+                      <button
+                        onClick={() => handleAddWorklog()}
+                        disabled={worklogSubmitting}
+                        className="w-full rounded bg-blue-600 px-2 py-1 text-[11.5px] font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                      >
+                        {worklogSubmitting ? 'Logging…' : 'Log work'}
+                      </button>
                     </div>
-                  );
-                })}
-              </div>
-            )}
+                  )}
+
+                  {worklogs.length === 0 ? (
+                    <p className="px-2.5 py-3 text-[11px] text-gray-400 text-center">No work logged yet</p>
+                  ) : (
+                    <div className="divide-y divide-gray-100">
+                      {worklogs.map((w: any) => (
+                        <div key={w.id} className="flex items-start justify-between px-2.5 py-1.5">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[11px] font-medium text-gray-700">{w.authorName || 'Unknown'}</span>
+                              <span className="text-[10.5px] font-medium text-blue-700 bg-blue-50 border border-blue-100 rounded px-1 py-0.5">
+                                {formatMinutes(w.timeSpentMinutes || 0)}
+                              </span>
+                              <span className="text-[10.5px] text-gray-400">{formatJiraDateTime(w.workDate)}</span>
+                            </div>
+                            {w.description && <p className="text-[11px] text-gray-500 mt-0.5 break-words">{w.description}</p>}
+                          </div>
+                          {(user?.role === 'admin' || w.authorId === user?.id) && (
+                            <button onClick={() => handleDeleteWorklog(w.id)} className="text-gray-300 hover:text-red-500 flex-shrink-0 ml-1.5" title="Delete">
+                              <X size={11} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Timestamps */}
