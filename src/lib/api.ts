@@ -425,15 +425,15 @@ class ApiClient {
   getKbTeams() {
     return this.request<KbTeam[]>('/kb/teams');
   }
-  listKbArticles(scope: 'all' | 'mine' | 'drafts' = 'all', q?: string) {
-    const params = new URLSearchParams({ scope });
+  listKbArticles(kind: KbKind, scope: 'all' | 'mine' | 'drafts' = 'all', q?: string) {
+    const params = new URLSearchParams({ kind, scope });
     if (q) params.set('q', q);
     return this.request<KbArticle[]>(`/kb/articles?${params}`);
   }
   getKbArticle(id: string) {
     return this.request<KbArticle>(`/kb/articles/${encodeURIComponent(id)}`);
   }
-  createKbArticle(data: { title: string; bodyHtml: string }) {
+  createKbArticle(data: { title: string; bodyHtml: string; kind: KbKind }) {
     return this.request<KbArticle>('/kb/articles', { method: 'POST', body: JSON.stringify(data) });
   }
   updateKbArticle(id: string, data: { title?: string; bodyHtml?: string }) {
@@ -572,8 +572,11 @@ class ApiClient {
 
 export type KbTeam = { key: string; name: string; memberCount: number };
 export type KbAccess = { visibility: 'org' | 'teams'; teams: string[] };
+// 'kb' = KB article, 'release' = release note. Same features, separate lists.
+export type KbKind = 'kb' | 'release';
 export type KbArticle = {
   id: string;
+  kind: KbKind;
   title: string;
   bodyHtml?: string;
   excerpt?: string;

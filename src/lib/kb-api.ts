@@ -68,6 +68,10 @@ const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
     ADD COLUMN IF NOT EXISTS file_id TEXT,
     ADD COLUMN IF NOT EXISTS file_name TEXT,
     ADD COLUMN IF NOT EXISTS quote TEXT`))
+  // Release notes are KB articles with kind = 'release': same drafts, access,
+  // documents and questions, just listed separately.
+  .then(() => pool.query(`ALTER TABLE kb_articles ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'kb'`))
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS kb_articles_kind_idx ON kb_articles(kind)`))
   .catch((e) => { console.error('[kb] schema setup failed:', e?.message || e); });
 
 // Same row the bell in Header.tsx polls for. KB_* notifications carry the
@@ -108,6 +112,10 @@ function formatQuestion(row: any, viewerId: string, viewerCanManage: boolean) {
     answeredAt: row.answered_at,
     canDelete: viewerCanManage || row.asker_id === viewerId,
   };
+}
+
+function parseKind(value: unknown): 'kb' | 'release' {
+  return value === 'release' ? 'release' : 'kb';
 }
 
 function json(data: unknown, status = 200) {
@@ -185,6 +193,7 @@ function formatArticle(row: any, teams: Map<string, Team>, canManage: boolean, i
   const teamKeys: string[] = row.teams || [];
   return {
     id: row.id,
+    kind: parseKind(row.kind),
     title: row.title,
     ...(includeBody ? { bodyHtml: row.body_html } : { excerpt: excerptOf(row.body_html) }),
     status: row.status,
@@ -260,7 +269,7 @@ export async function handleKbApi(
     );
   }
 
-  // GET kb/articles?q=&scope=all|mine|drafts
+  // GET kb/articles?kind=kb|release&q=&scope=all|mine|drafts
   if (path === 'kb/articles' && method === 'GET') {
     const scope = url.searchParams.get('scope') || 'all';
     const q = (url.searchParams.get('q') || '').trim();
@@ -268,6 +277,7 @@ export async function handleKbApi(
     const where: string[] = [];
     const params: any[] = [];
     const p = (v: any) => { params.push(v); return `$${params.length}`; };
+    where.push(`a.kind = ${p(parseKind(url.searchParams.get('kind')))}`);
 
     if (scope === 'drafts') {
       where.push(`status = 'draft'`);
@@ -300,9 +310,9 @@ export async function handleKbApi(
     if (!title) return json({ error: 'Title is required' }, 400);
     const id = rid();
     const row = await pool.query(
-      `INSERT INTO kb_articles (id, title, body_html, author_id, author_name)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [id, title.slice(0, 300), sanitizeKbHtml(String(body.bodyHtml || '')), userId, displayNameOf(currentUser)],
+      `INSERT INTO kb_articles (id, kind, title, body_html, author_id, author_name)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [id, parseKind(body.kind), title.slice(0, 300), sanitizeKbHtml(String(body.bodyHtml || '')), userId, displayNameOf(currentUser)],
     );
     return json(formatArticle(row.rows[0], await loadTeams(), true, true), 201);
   }

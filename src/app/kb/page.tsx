@@ -3,25 +3,48 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useStore } from '@/store';
-import { api, type KbAccess, type KbArticle, type KbFile, type KbTeam } from '@/lib/api';
+import { api, type KbAccess, type KbArticle, type KbFile, type KbKind, type KbTeam } from '@/lib/api';
 import { sanitizeForDisplay } from '@/lib/kb-sanitize';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import { KbDocumentEditor, KbDocumentList, FileIcon, downloadFile } from '@/components/kb/KbDocuments';
 import { KbFileViewer, viewKindOf } from '@/components/kb/KbFileViewer';
 import { KbQuestions } from '@/components/kb/KbQuestions';
-import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion, Maximize2, Minimize2, Download } from 'lucide-react';
+import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion, Maximize2, Minimize2, Download, Megaphone } from 'lucide-react';
 
 // True when the editor HTML has something a reader would see (text or an image).
 function hasBodyContent(html: string) {
   return /<img\b/i.test(html) || html.replace(/<[^>]+>/g, '').replace(/&nbsp;|​/g, '').trim().length > 0;
 }
 
+// KB articles and release notes share every feature; only the wording and the
+// list they appear in differ.
+const KINDS: Record<KbKind, { title: string; one: string; many: string }> = {
+  kb: { title: 'KB Articles', one: 'article', many: 'articles' },
+  release: { title: 'Release Notes', one: 'release note', many: 'release notes' },
+};
+const KIND_ORDER: KbKind[] = ['kb', 'release'];
+
+function kindOf(value: string | null | undefined): KbKind {
+  return value === 'release' ? 'release' : 'kb';
+}
+
+function listHref(kind: KbKind) {
+  return kind === 'release' ? '/kb?type=release' : '/kb';
+}
+
+function KindIcon({ kind, size }: { kind: KbKind; size: number }) {
+  return kind === 'release' ? <Megaphone size={size} /> : <BookOpen size={size} />;
+}
+
 type Scope = 'all' | 'mine' | 'drafts';
-const SCOPES: { id: Scope; label: string }[] = [
-  { id: 'all', label: 'All articles' },
-  { id: 'mine', label: 'My articles' },
-  { id: 'drafts', label: 'Drafts' },
-];
+function scopesFor(kind: KbKind): { id: Scope; label: string }[] {
+  const { many } = KINDS[kind];
+  return [
+    { id: 'all', label: `All ${many}` },
+    { id: 'mine', label: `My ${many}` },
+    { id: 'drafts', label: 'Drafts' },
+  ];
+}
 
 function formatDate(d: string | null | undefined) {
   if (!d) return '';
@@ -45,9 +68,10 @@ function VisibilityBadge({ article }: { article: KbArticle }) {
 // ── Publish / Manage access dialog ───────────────────────────────────────────
 
 function AccessDialog({
-  mode, initial, onCancel, onConfirm,
+  mode, kind, initial, onCancel, onConfirm,
 }: {
   mode: 'publish' | 'access';
+  kind: KbKind;
   initial?: KbAccess;
   onCancel: () => void;
   onConfirm: (access: KbAccess) => Promise<void>;
@@ -89,11 +113,11 @@ function AccessDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
       <div className="w-full max-w-md rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
-          <h2 className="text-[15px] font-semibold text-gray-800">{mode === 'publish' ? 'Publish article' : 'Manage access'}</h2>
+          <h2 className="text-[15px] font-semibold text-gray-800">{mode === 'publish' ? `Publish ${KINDS[kind].one}` : 'Manage access'}</h2>
           <button onClick={onCancel} className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"><X size={16} /></button>
         </div>
         <div className="space-y-3 px-5 py-4">
-          <p className="text-[13px] text-gray-600">Who should be able to read this article?</p>
+          <p className="text-[13px] text-gray-600">Who should be able to read this {KINDS[kind].one}?</p>
           <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${visibility === 'org' ? 'border-blue-500 bg-blue-50/50' : 'border-gray-200'}`}>
             <input type="radio" className="mt-0.5" checked={visibility === 'org'} onChange={() => setVisibility('org')} />
             <span>
@@ -152,7 +176,13 @@ function AccessDialog({
 
 // ── Article list ─────────────────────────────────────────────────────────────
 
-function ArticleList({ onOpen, onNew }: { onOpen: (id: string) => void; onNew: () => void }) {
+function ArticleList({ kind, onKindChange, onOpen, onNew }: {
+  kind: KbKind;
+  onKindChange: (kind: KbKind) => void;
+  onOpen: (id: string) => void;
+  onNew: () => void;
+}) {
+  const { one, many } = KINDS[kind];
   const [scope, setScope] = useState<Scope>('all');
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -168,23 +198,33 @@ function ArticleList({ onOpen, onNew }: { onOpen: (id: string) => void; onNew: (
   useEffect(() => {
     setLoading(true);
     setError(null);
-    api.listKbArticles(scope, debounced || undefined)
-      .then(setArticles)
-      .catch((e) => { setArticles([]); setError(e?.message || 'Failed to load articles'); })
-      .finally(() => setLoading(false));
-  }, [scope, debounced]);
+    // Ignore a response that lands after the user has switched lists.
+    let stale = false;
+    api.listKbArticles(kind, scope, debounced || undefined)
+      .then((rows) => { if (!stale) setArticles(rows); })
+      .catch((e) => { if (!stale) { setArticles([]); setError(e?.message || `Failed to load ${many}`); } })
+      .finally(() => { if (!stale) setLoading(false); });
+    return () => { stale = true; };
+  }, [kind, scope, debounced, many]);
 
   return (
     <>
-      <div className="flex flex-shrink-0 items-center justify-between border-b border-gray-200 bg-white px-8 py-4">
-        <h1 className="flex items-center gap-2 text-xl font-bold text-gray-800"><BookOpen size={20} /> KB Articles</h1>
+      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-white px-8 py-4">
+        <div className="flex items-center gap-1 rounded-lg bg-gray-100 p-1">
+          {KIND_ORDER.map((k) => (
+            <button key={k} onClick={() => onKindChange(k)}
+              className={`flex items-center gap-2 rounded-md px-3.5 py-1.5 text-[15px] font-semibold transition-colors ${k === kind ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+              <KindIcon kind={k} size={17} /> {KINDS[k].title}
+            </button>
+          ))}
+        </div>
         <button onClick={onNew} className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-[13px] font-medium text-white hover:bg-blue-700">
-          <Plus size={15} /> New article
+          <Plus size={15} /> New {one}
         </button>
       </div>
       <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-white px-8">
         <div className="flex gap-1">
-          {SCOPES.map((s) => (
+          {scopesFor(kind).map((s) => (
             <button key={s.id} onClick={() => setScope(s.id)}
               className={`border-b-2 px-4 py-3 text-[13px] transition-colors ${scope === s.id ? 'border-blue-600 font-semibold text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
               {s.label}
@@ -196,7 +236,7 @@ function ArticleList({ onOpen, onNew }: { onOpen: (id: string) => void; onNew: (
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search articles"
+            placeholder={`Search ${many}`}
             className="w-full rounded-lg border border-gray-300 py-1.5 pl-8 pr-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
@@ -210,9 +250,13 @@ function ArticleList({ onOpen, onNew }: { onOpen: (id: string) => void; onNew: (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center">
             <FileText size={28} className="mb-2 text-gray-300" />
             <p className="text-[14px] font-medium text-gray-700">
-              {debounced ? 'No articles match your search' : scope === 'drafts' ? 'No drafts' : 'No articles yet'}
+              {debounced ? `No ${many} match your search` : scope === 'drafts' ? 'No drafts' : `No ${many} yet`}
             </p>
-            {!debounced && <p className="mt-1 text-[13px] text-gray-500">Share what you know: write the first article.</p>}
+            {!debounced && (
+              <p className="mt-1 text-[13px] text-gray-500">
+                {kind === 'release' ? 'Let everyone know what shipped: write the first release note.' : 'Share what you know: write the first article.'}
+              </p>
+            )}
           </div>
         ) : (
           <div className="grid gap-3">
@@ -284,7 +328,7 @@ function readStoredWidth() {
 
 const ARTICLE_BODY_CLASS = 'break-words text-[14px] leading-relaxed text-[#172B4D] [&_a]:text-blue-600 [&_a]:underline [&_blockquote]:border-l-4 [&_blockquote]:border-gray-200 [&_blockquote]:pl-3 [&_blockquote]:text-gray-600 [&_code]:rounded [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_h1]:mb-2 [&_h1]:mt-5 [&_h1]:text-xl [&_h1]:font-bold [&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:mt-3 [&_h3]:font-semibold [&_img]:my-2 [&_img]:max-w-full [&_img]:rounded-md [&_li]:my-0.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-slate-100 [&_pre]:p-3 [&_table]:my-2 [&_td]:border [&_td]:border-gray-300 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-300 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc [&_ul]:pl-5';
 
-function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; onEdit: () => void }) {
+function ArticleView({ id, onBack, onEdit }: { id: string; onBack: (kind: KbKind) => void; onEdit: () => void }) {
   const [article, setArticle] = useState<KbArticle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<'publish' | 'access' | null>(null);
@@ -401,7 +445,7 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
     setDeleting(true);
     try {
       await api.deleteKbArticle(id);
-      onBack();
+      onBack(kind);
     } catch (e: any) {
       setError(e?.message || 'Failed to delete');
       setDeleting(false);
@@ -418,6 +462,7 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
 
   const questionsVisible = isWide ? showQuestions : drawerOpen;
   const published = article?.status === 'published';
+  const kind = kindOf(article?.kind);
   const meta = article
     ? `By ${article.authorName || 'Unknown'}${article.publishedAt ? ` · ${formatDate(article.publishedAt)}` : ''}`
     : '';
@@ -429,7 +474,7 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
         {focusMode ? (
           <button onClick={() => setFocusMode(false)} className="flex flex-shrink-0 items-center gap-1.5 text-[13px] text-gray-600 hover:text-gray-900"><Minimize2 size={15} /> Exit focus</button>
         ) : (
-          <button onClick={onBack} className="flex flex-shrink-0 items-center gap-1.5 text-[13px] text-gray-600 hover:text-gray-900"><ArrowLeft size={15} /> All articles</button>
+          <button onClick={() => onBack(kind)} className="flex flex-shrink-0 items-center gap-1.5 text-[13px] text-gray-600 hover:text-gray-900"><ArrowLeft size={15} /> All {KINDS[kind].many}</button>
         )}
         <span className="mx-1 hidden h-4 w-px flex-shrink-0 bg-gray-200 sm:block" />
         <div className="hidden min-w-0 flex-1 items-baseline gap-2 sm:flex">
@@ -536,7 +581,12 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
           {article && !docFile && (
             <div className="min-h-0 flex-1 overflow-auto px-4 py-6 sm:px-8">
               <article className="mx-auto max-w-4xl rounded-xl border border-gray-200 bg-white px-5 py-6 sm:px-8 sm:py-7">
-                <div className="mb-2"><VisibilityBadge article={article} /></div>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  {kind === 'release' && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-0.5 text-[11px] font-medium text-purple-700"><Megaphone size={11} /> Release note</span>
+                  )}
+                  <VisibilityBadge article={article} />
+                </div>
                 <h1 className="text-2xl font-bold text-gray-900">{article.title}</h1>
                 <p className="mt-1 text-[12.5px] text-gray-500">
                   {meta}
@@ -551,7 +601,7 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
                   </p>
                 )}
                 {html && <div className={`mt-6 ${ARTICLE_BODY_CLASS}`} dangerouslySetInnerHTML={{ __html: html }} />}
-                {!html && files.length === 0 && <p className="mt-6 text-[14px] text-gray-400">This article has no content yet.</p>}
+                {!html && files.length === 0 && <p className="mt-6 text-[14px] text-gray-400">This {KINDS[kind].one} has no content yet.</p>}
                 <KbDocumentList articleId={article.id} files={files} openId={openFileId} onOpenChange={setOpenFileId} />
               </article>
             </div>
@@ -625,6 +675,7 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
       {dialog && article && (
         <AccessDialog
           mode={dialog}
+          kind={kind}
           initial={dialog === 'access' ? { visibility: article.visibility, teams: article.teams.map((t) => t.key) } : undefined}
           onCancel={() => setDialog(null)}
           onConfirm={async (access) => {
@@ -641,8 +692,14 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: () => void; o
 
 // ── Editor ───────────────────────────────────────────────────────────────────
 
-function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (id: string) => void; onCancel: () => void }) {
+function ArticleEditor({ id, newKind = 'kb', onDone, onCancel }: {
+  id: string | null;
+  newKind?: KbKind; // what to create when id is null
+  onDone: (id: string) => void;
+  onCancel: () => void;
+}) {
   const [articleId, setArticleId] = useState<string | null>(id);
+  const [kind, setKind] = useState<KbKind>(newKind);
   const [status, setStatus] = useState<'draft' | 'published'>('draft');
   const [title, setTitle] = useState('');
   const [bodyHtml, setBodyHtml] = useState('');
@@ -660,7 +717,7 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
     api.getKbArticle(id)
       .then((a) => {
         if (!a.canManage) { onDone(a.id); return; }
-        setTitle(a.title); setBodyHtml(a.bodyHtml || ''); setFiles(a.files || []); setStatus(a.status); setLoaded(true);
+        setTitle(a.title); setBodyHtml(a.bodyHtml || ''); setFiles(a.files || []); setStatus(a.status); setKind(kindOf(a.kind)); setLoaded(true);
       })
       .catch((e) => { setError(e?.message || 'Failed to load article'); setLoaded(true); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -679,7 +736,7 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
       try {
         const saved = articleId
           ? await api.updateKbArticle(articleId, { title, bodyHtml })
-          : await api.createKbArticle({ title, bodyHtml });
+          : await api.createKbArticle({ title, bodyHtml, kind });
         setArticleId(saved.id);
         return saved.id;
       } catch (e: any) {
@@ -701,7 +758,7 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
   return (
     <>
       <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-white px-8 py-3">
-        <button onClick={onCancel} className="flex items-center gap-1.5 text-[13px] text-gray-600 hover:text-gray-900"><ArrowLeft size={15} /> {id ? 'Back to article' : 'All articles'}</button>
+        <button onClick={onCancel} className="flex items-center gap-1.5 text-[13px] text-gray-600 hover:text-gray-900"><ArrowLeft size={15} /> {id ? `Back to ${KINDS[kind].one}` : `All ${KINDS[kind].many}`}</button>
         <div className="flex items-center gap-2">
           {notice && <span className="text-[12px] text-green-600">{notice}</span>}
           {status === 'draft' ? (
@@ -745,14 +802,16 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
               <input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="Article title"
+                placeholder={kind === 'release' ? 'Release note title, e.g. Version 4.2 – October 2026' : 'Article title'}
                 maxLength={300}
                 className="mb-4 w-full border-0 border-b border-gray-200 pb-2 text-2xl font-bold text-gray-900 placeholder:text-gray-300 focus:border-blue-500 focus:outline-none"
               />
               <RichTextEditor
                 value={bodyHtml}
                 onChange={setBodyHtml}
-                placeholder="Write the article: steps, screenshots, links… (optional if you upload a document below)"
+                placeholder={kind === 'release'
+                  ? 'What changed: new features, improvements, fixes… (optional if you upload a document below)'
+                  : 'Write the article: steps, screenshots, links… (optional if you upload a document below)'}
                 minHeight="300px"
                 onUploadingChange={setUploading}
               />
@@ -773,6 +832,7 @@ function ArticleEditor({ id, onDone, onCancel }: { id: string | null; onDone: (i
       {publishOpen && articleId && (
         <AccessDialog
           mode="publish"
+          kind={kind}
           onCancel={() => setPublishOpen(false)}
           onConfirm={async (access) => {
             await api.publishKbArticle(articleId, access);
@@ -793,18 +853,28 @@ function KbInner() {
   const id = params.get('id');
   const editing = params.get('edit') === '1';
   const creating = params.get('new') === '1';
+  // Which list: /kb is KB articles, /kb?type=release is release notes.
+  const kind = kindOf(params.get('type'));
+  const typeParam = kind === 'release' ? '&type=release' : '';
 
   if (!user) return null;
 
   let content;
   if (creating) {
-    content = <ArticleEditor key="new" id={null} onDone={(newId) => router.replace(`/kb?id=${newId}`)} onCancel={() => router.push('/kb')} />;
+    content = <ArticleEditor key={`new-${kind}`} id={null} newKind={kind} onDone={(newId) => router.replace(`/kb?id=${newId}`)} onCancel={() => router.push(listHref(kind))} />;
   } else if (id && editing) {
     content = <ArticleEditor key={`edit-${id}`} id={id} onDone={(doneId) => router.replace(`/kb?id=${doneId}`)} onCancel={() => router.push(`/kb?id=${id}`)} />;
   } else if (id) {
-    content = <ArticleView id={id} onBack={() => router.push('/kb')} onEdit={() => router.push(`/kb?id=${id}&edit=1`)} />;
+    content = <ArticleView id={id} onBack={(k) => router.push(listHref(k))} onEdit={() => router.push(`/kb?id=${id}&edit=1`)} />;
   } else {
-    content = <ArticleList onOpen={(aid) => router.push(`/kb?id=${aid}`)} onNew={() => router.push('/kb?new=1')} />;
+    content = (
+      <ArticleList
+        kind={kind}
+        onKindChange={(k) => router.replace(listHref(k))}
+        onOpen={(aid) => router.push(`/kb?id=${aid}`)}
+        onNew={() => router.push(`/kb?new=1${typeParam}`)}
+      />
+    );
   }
 
   return <div className="flex h-full min-h-0 flex-col overflow-auto bg-gray-50">{content}</div>;
