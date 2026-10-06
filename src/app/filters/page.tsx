@@ -2165,7 +2165,12 @@ export default function FiltersPage() {
               <button
                 onClick={handleExport}
                 disabled={exporting || issues.length === 0}
-                className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-[12.5px] font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+                // min-w fits "Exporting…" (the wider of the two labels) so
+                // toggling the label doesn't change this button's own width --
+                // in a flex-wrap toolbar (see Row 1 above), a width change on
+                // any one button can shift where the whole row wraps,
+                // visible as the toolbar jumping the moment Export is clicked.
+                className="flex items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-[12.5px] font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[92px]"
               >
                 <Download size={13} /> {exporting ? 'Exporting…' : 'Export'}
               </button>
@@ -2337,7 +2342,18 @@ export default function FiltersPage() {
           </p>
         </div>
 
-        {loadingIssues ? (
+        {loadingIssues && issues.length === 0 ? (
+          // Only shown on a genuine cold start (no rows to show yet at all) --
+          // previously fired on EVERY filter change regardless of whether
+          // there were already rows on screen, collapsing the whole table
+          // down to this ~80px spinner and then snapping back to full height
+          // the moment the refetch finished. With a long results list that
+          // happened on every single filter click, reading as the page
+          // visibly "shaking" with each interaction. Now a refetch with
+          // existing rows already on screen keeps showing them (slightly
+          // dimmed below, see the table wrapper's opacity) instead of
+          // collapsing the page, and only the "Loading…" label up in the
+          // header changes.
           <DotLoader className="py-20" />
         ) : issues.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -2355,7 +2371,7 @@ export default function FiltersPage() {
           // by scrolling. Adding fields via "More filters" pushes the
           // table well past 1800px, so those columns were being cut off
           // entirely, not just off-screen.
-          <div className="overflow-x-auto">
+          <div className={`overflow-x-auto transition-opacity ${loadingIssues ? 'opacity-50' : 'opacity-100'}`}>
           <table className="table-fixed">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
