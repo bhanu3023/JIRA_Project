@@ -170,6 +170,8 @@ export default function IssueDetailPage() {
   const [submittingComment, setSubmittingComment] = useState(false);
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editingCommentText, setEditingCommentText] = useState('');
+  const [submittingEditComment, setSubmittingEditComment] = useState(false);
+  const [editCommentError, setEditCommentError] = useState('');
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
@@ -1012,6 +1014,29 @@ export default function IssueDetailPage() {
       }
     }
     finally { setSubmittingComment(false); }
+  };
+
+  // Unlike handleAddComment, this used to be an inline async onClick with no
+  // try/catch and no in-flight state at all -- a transient failure (network
+  // blip, a slow request) threw an unhandled rejection, left the edit box
+  // open with no feedback, and nothing stopped the button from being clicked
+  // again mid-request. Reported as "comment save doesn't work on the first
+  // click" -- it silently failed the first time with zero visible sign
+  // anything had gone wrong, so the natural next move was to click again.
+  const handleSaveEditComment = async (commentId: string) => {
+    if (!editingCommentText.trim() || isUploadingEditComment || submittingEditComment) return;
+    setEditCommentError('');
+    setSubmittingEditComment(true);
+    try {
+      await api.updateComment(commentId, { body: editingCommentText });
+      setEditingCommentId(null);
+      loadIssue(issueKey);
+    } catch (err: any) {
+      console.error(err);
+      setEditCommentError(err?.message || 'Failed to save comment. Please try again.');
+    } finally {
+      setSubmittingEditComment(false);
+    }
   };
 
   // Optimistic toggle, then reconcile with the server's actual reactions map
@@ -2896,19 +2921,15 @@ export default function IssueDetailPage() {
                             members={allMembers}
                             onUploadingChange={setIsUploadingEditComment}
                           />
+                          {editCommentError && <p className="text-[11px] text-red-600 mt-1">{editCommentError}</p>}
                           <div className="flex gap-2 mt-1.5">
                             <button
-                              onClick={async () => {
-                                if (!editingCommentText.trim() || isUploadingEditComment) return;
-                                await api.updateComment(comment.id, { body: editingCommentText });
-                                setEditingCommentId(null);
-                                loadIssue(issueKey);
-                              }}
-                              disabled={isUploadingEditComment}
+                              onClick={() => handleSaveEditComment(comment.id)}
+                              disabled={isUploadingEditComment || submittingEditComment}
                               className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                            >{isUploadingEditComment ? 'Uploading…' : 'Save'}</button>
+                            >{isUploadingEditComment ? 'Uploading…' : submittingEditComment ? 'Saving…' : 'Save'}</button>
                             <button
-                              onClick={() => setEditingCommentId(null)}
+                              onClick={() => { setEditingCommentId(null); setEditCommentError(''); }}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100"
                             >Cancel</button>
                           </div>
@@ -2952,7 +2973,7 @@ export default function IssueDetailPage() {
                             </button>
                             <span className="text-gray-300 text-[11px]">·</span>
                             <button
-                              onClick={() => { setEditingCommentId(comment.id); setEditingCommentText(comment.body); }}
+                              onClick={() => { setEditingCommentId(comment.id); setEditingCommentText(comment.body); setEditCommentError(''); }}
                               className="text-[11px] text-gray-400 hover:text-blue-600 flex items-center gap-0.5 transition-colors"
                             >
                               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
