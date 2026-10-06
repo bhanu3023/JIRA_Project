@@ -24,12 +24,12 @@ async function main() {
   for (const key of KEYS) {
     const id = idByKey.get(key);
     const { rows: worked } = await pool.query(`
-      SELECT dept, reason, user_id, "createdAt"
-      FROM user_worked_on_tickets WHERE issue_id = $1 ORDER BY "createdAt" ASC
+      SELECT dept, reason, user_id, worked_at
+      FROM user_worked_on_tickets WHERE issue_id = $1 ORDER BY worked_at ASC
     `, [id]);
     console.log(`\n${key} worked-on records:`);
     for (const w of worked) {
-      console.log(`  dept="${w.dept}" reason=${w.reason} user_id=${w.user_id}${w.user_id === PRAGATI_ID ? '  <-- PRAGATI' : ''} at=${w.createdAt?.toISOString?.()}`);
+      console.log(`  dept="${w.dept}" reason=${w.reason} user_id=${w.user_id}${w.user_id === PRAGATI_ID ? '  <-- PRAGATI' : ''} at=${w.worked_at?.toISOString?.()}`);
     }
   }
 
