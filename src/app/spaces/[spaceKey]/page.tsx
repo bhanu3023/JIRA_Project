@@ -187,6 +187,37 @@ function SpaceDetailContent() {
     const t = setTimeout(() => setDebouncedSearch(search), 350);
     return () => clearTimeout(t);
   }, [search]);
+
+  // Round-trips `filters`/`search` through the URL (?qf=/?qs=), same fix
+  // already applied to the main Filters page for the identical gap: this
+  // component's own useState doesn't survive a fresh mount (e.g. Back from
+  // a ticket opened in the SAME tab, or any other navigation away and
+  // back), so without this every filter picked here silently reset to
+  // empty on return. New-tab ticket links (see the row click handlers
+  // below) sidestep this for the single most common case, but a plain
+  // Back/forward or a different in-app navigation still remounts this
+  // page, so the underlying state itself needs to survive that too.
+  const hydratedFiltersFromUrlRef = useRef(false);
+  useEffect(() => {
+    const qf = searchParams?.get('qf');
+    const qs = searchParams?.get('qs');
+    if (qf) { try { setFilters(JSON.parse(decodeURIComponent(qf))); } catch {} }
+    if (qs) setSearch(qs);
+    hydratedFiltersFromUrlRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    // Skip the first write: it would fire with the pre-hydration
+    // (still-empty) state from the initial render, before the effect
+    // above has applied whatever was actually in the URL, and blow away a
+    // qf/qs param that was just about to be read.
+    if (!hydratedFiltersFromUrlRef.current) return;
+    const qp = new URLSearchParams(searchParams?.toString() || '');
+    if (Object.keys(filters).length) qp.set('qf', encodeURIComponent(JSON.stringify(filters))); else qp.delete('qf');
+    if (search.trim()) qp.set('qs', search.trim()); else qp.delete('qs');
+    router.replace(`?${qp.toString()}`, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters, search]);
   const [closedIssues, setClosedIssues] = useState<any[]>([]);
   const [closedIssuesPage, setClosedIssuesPage] = useState(1);
   const [closedIssuesHasMore, setClosedIssuesHasMore] = useState(false);
@@ -3030,6 +3061,7 @@ function SpaceDetailContent() {
               // dept_statuses above) instead of the ticket's current live global
               // state if it's since moved to a different department.
               <a key={issue.id} href={`/issues/${issue.cfKey ?? issue.key}?viewDept=${encodeURIComponent(deptParam)}`}
+                target="_blank" rel="noopener noreferrer"
                 className="grid px-4 py-3 border-b border-gray-100 hover:bg-blue-50 transition-colors cursor-pointer items-center"
                 style={{ gridTemplateColumns: '110px minmax(200px,1fr) 140px 140px 110px 110px' }}>
                 <span className="text-[12px] font-semibold text-blue-600 font-mono">{issue.cfKey ?? issue.key}</span>
@@ -3191,7 +3223,10 @@ function SpaceDetailContent() {
                 return (
                   <div key={issue.id}
                     className="bg-white rounded-xl border border-gray-150 shadow-sm hover:shadow-md hover:border-blue-200 transition-all cursor-pointer group"
-                    onClick={() => { router.push(`/issues/${issue.cfKey ?? issue.key}`); }}>
+                    // New tab, same reasoning as the table/grid view's own
+                    // click handler above -- leaving a filtered list behind
+                    // intact instead of losing it on the way back.
+                    onClick={() => { window.open(`/issues/${issue.cfKey ?? issue.key}`, '_blank'); }}>
                     {/* Card top row */}
                     <div className="flex items-start gap-3 px-4 pt-4 pb-3">
                       {/* Main content */}
@@ -3499,13 +3534,16 @@ function SpaceDetailContent() {
                     ${isUpdating ? 'opacity-50' : ''}
                     ${isSelected ? 'bg-blue-50' : 'bg-[#FAFBFC] hover:bg-gray-50'}`}
                   style={{ gridTemplateColumns: gridCols }}
-                  onClick={(e) => {
-                    if (e.ctrlKey || e.metaKey) {
-                      window.open(`/issues/${issue.cfKey ?? issue.key}`, '_blank');
-                    } else {
-                      router.push(`/issues/${issue.cfKey ?? issue.key}`);
-                    }
-                  }}>
+                  // Always a new tab now, by explicit request -- was same-tab
+                  // on a plain click (ctrl/cmd+click was the only way to get a
+                  // new tab), which meant leaving a filtered list to open a
+                  // single ticket lost that filter state on the way back
+                  // (filters here are plain component state, not synced to
+                  // the URL, so a fresh mount after Back restores the
+                  // defaults). Opening in a new tab instead means the
+                  // original, filtered tab is never navigated away from at
+                  // all -- nothing to lose.
+                  onClick={() => { window.open(`/issues/${issue.cfKey ?? issue.key}`, '_blank'); }}>
 
                   {/* Checkbox (admin only) */}
                   <div className="flex items-center justify-center" onClick={isAdmin ? (e => toggleRow(e, issue.id)) : undefined}>
