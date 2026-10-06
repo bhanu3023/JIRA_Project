@@ -1806,6 +1806,20 @@ export default function IssueDetailPage() {
   // so an editing admin still sees they're looking at a historical snapshot.
   const isHistoricalDeptView = isHistoricalDeptViewForAssignee;
   const isHistoricalDeptLocked = isHistoricalDeptViewForAssignee && user?.role !== 'admin';
+  // Status-specific counterparts to the two above -- isHistoricalDeptView/
+  // isHistoricalDeptLocked got reused for the Status banner and status
+  // button's own read-only lock further down, which meant a ticket opened
+  // via a queue link whose ASSIGNEE differs from current (isHistoricalDeptView
+  // true) locked and mislabeled the STATUS button too, even though Status
+  // always shows live (isHistoricalDeptViewForStatus is permanently false,
+  // above). Confirmed for real: CF-33879, opened via ?viewDept=QA, showed
+  // "Showing QA's own status" on a status badge that was actually already
+  // live/current, AND made the status button itself non-clickable for a
+  // non-admin -- the live status value was right, the banner text and the
+  // lock were both wrong. Always false/unlocked, matching
+  // isHistoricalDeptViewForStatus.
+  const isHistoricalDeptViewForStatusDisplay = isHistoricalDeptViewForStatus;
+  const isHistoricalDeptLockedForStatus = isHistoricalDeptViewForStatus && user?.role !== 'admin';
   const historicalDeptStatuses: Record<string, any> = (issue as any)?.dept_statuses || {};
   const historicalStatusKey = Object.keys(historicalDeptStatuses).find(k => k.toLowerCase() === viewDeptParam.toLowerCase());
   const historicalStatusSnap = isHistoricalDeptViewForStatus && historicalStatusKey ? historicalDeptStatuses[historicalStatusKey] : null;
@@ -3317,7 +3331,7 @@ export default function IssueDetailPage() {
           {/* Status selector — Jira style */}
           <div className="px-4 pt-4 pb-3">
             <p className="text-[11px] font-semibold text-[#6B778C] uppercase tracking-widest mb-2">Status</p>
-            {isHistoricalDeptView && (
+            {isHistoricalDeptViewForStatusDisplay && (
               <p className="text-[10.5px] text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mb-2">
                 Showing {viewDeptParam}'s own status — this ticket has since moved to {currentDeptForView || 'another queue'}.
               </p>
@@ -3327,10 +3341,10 @@ export default function IssueDetailPage() {
                   Read-only (not editable) while showing another queue's frozen
                   historical snapshot instead of the ticket's live status. */}
               <button
-                onClick={() => canEdit && !isHistoricalDeptLocked && setShowStatusDropdown(v => !v)}
-                disabled={!canEdit || isHistoricalDeptLocked}
-                title={isHistoricalDeptLocked ? `Historical status as last seen in ${viewDeptParam}` : canEdit ? undefined : 'This ticket has moved to another queue — only that queue can change its status'}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-bold uppercase tracking-wide transition-all select-none ${canEdit && !isHistoricalDeptLocked ? 'hover:brightness-95' : 'cursor-not-allowed opacity-70'}`}
+                onClick={() => canEdit && !isHistoricalDeptLockedForStatus && setShowStatusDropdown(v => !v)}
+                disabled={!canEdit || isHistoricalDeptLockedForStatus}
+                title={isHistoricalDeptLockedForStatus ? `Historical status as last seen in ${viewDeptParam}` : canEdit ? undefined : 'This ticket has moved to another queue — only that queue can change its status'}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-bold uppercase tracking-wide transition-all select-none ${canEdit && !isHistoricalDeptLockedForStatus ? 'hover:brightness-95' : 'cursor-not-allowed opacity-70'}`}
                 style={{
                   backgroundColor: displayStat.color + '25',
                   color: displayStat.color,
@@ -3338,7 +3352,7 @@ export default function IssueDetailPage() {
                 }}
               >
                 {displayStat.name}
-                {canEdit && !isHistoricalDeptLocked && <ChevronDown size={11} strokeWidth={2.5} />}
+                {canEdit && !isHistoricalDeptLockedForStatus && <ChevronDown size={11} strokeWidth={2.5} />}
               </button>
 
               {showStatusDropdown && (() => {
