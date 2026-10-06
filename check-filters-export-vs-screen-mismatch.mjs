@@ -39,7 +39,7 @@ async function main() {
   console.log(`Using assignee ${assigneeId} (${cand[0].cnt} Dev tickets created in Sep per raw DB count)\n`);
 
   const baseParams = {
-    spaceKeys: 'TESTIN', dept: 'Dev', queueMembersOnly: 'true',
+    spaceKey: 'TESTIN', dept: 'Dev', queueMembersOnly: 'true',
     assignees: assigneeId,
     createdRange: 'between:2026-09-01:2026-09-30',
     updatedRange: 'between:2026-09-01:2026-09-30',
@@ -49,8 +49,10 @@ async function main() {
   for (const [label, limit] of [['screen-like (limit=100, page=1)', '100'], ['export-like (limit=2000, page=1)', '2000']]) {
     const qs = new URLSearchParams({ ...baseParams, page: '1', limit });
     const res = await fetch(`http://localhost:${PORT}/api/issues?${qs.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
-    const data = await res.json();
-    console.log(`[${label}] total=${data.total}, returned rows=${(data.issues || []).length}`);
+    const text = await res.text();
+    let data; try { data = JSON.parse(text); } catch { data = null; }
+    console.log(`[${label}] HTTP ${res.status}, total=${data?.total}, returned rows=${(data?.issues || []).length}`);
+    if (!res.ok || data?.error) console.log(`  Raw response: ${text.slice(0, 500)}`);
   }
 
   await pool.end();
