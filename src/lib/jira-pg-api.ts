@@ -2187,18 +2187,24 @@ async function computePausedDeptSLA(
     // Prefer dept-specific SLA policy, fall back to space-wide
     const policy = slaPolicies.find((p: any) => p.dept_name?.toLowerCase() === dept.toLowerCase()) || slaPolicies[0];
     let goalDurationMs = 8 * 60 * 60 * 1000;
+    // Same "explicit 0 means this priority tier was removed" fix as
+    // computeSLAInstancesPure -- see its own comment for why. Returns null
+    // (no SLA data for this dept/ticket) rather than a bogus 0-duration
+    // result.
     const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
     for (const goal of goals) {
       if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
         const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
-        if (row?.timeValue) {
+        if (row && row.timeValue !== undefined && row.timeValue !== null && row.timeValue !== '') {
           const val = parseFloat(row.timeValue);
+          if (val === 0) return null;
           const unit = (row.timeUnit || 'hours').toLowerCase();
           goalDurationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
           break;
         }
       } else if (goal.timeValue) {
         const val = parseFloat(goal.timeValue);
+        if (val === 0) return null;
         const unit = (goal.timeUnit || 'hours').toLowerCase();
         goalDurationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
         break;
@@ -2562,23 +2568,40 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         ? new Date((issue as any).dept_sla_started_at).getTime()
         : (issue.createdAt ? new Date(issue.createdAt).getTime() : Date.now());
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
+      // A priorityRow that EXISTS for this priority but whose value is
+      // explicitly 0 means this priority tier was deliberately removed
+      // from SLA tracking for this policy (confirmed for real: Migration
+      // and Dev's "Time to Resolution" policies both still list Highest
+      // -- and Dev also Lowest -- as 0h rows after those tiers were
+      // removed, rather than the row itself being deleted). Distinct from
+      // no matching row existing at all, which falls through to the 8h
+      // default below (a genuinely unconfigured priority, not a removed
+      // one). Previously this still computed a real "0h goal" SLA --
+      // dueTime collapsing to the same instant as startedAt (or earlier,
+      // once resolved/multi-visit), showing as permanently, instantly
+      // breached no matter what. A removed priority tier should mean no
+      // SLA tracking for it at all, not a broken always-breached one.
+      let isPriorityRemoved = false;
       const goals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
       for (const goal of goals) {
         if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
           const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
-          if (row?.timeValue) {
+          if (row && row.timeValue !== undefined && row.timeValue !== null && row.timeValue !== '') {
             const val = parseFloat(row.timeValue);
+            if (val === 0) { isPriorityRemoved = true; break; }
             const unit = (row.timeUnit || 'hours').toLowerCase();
             durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
             break;
           }
         } else if (goal.timeValue) {
           const val = parseFloat(goal.timeValue);
+          if (val === 0) { isPriorityRemoved = true; break; }
           const unit = (goal.timeUnit || 'hours').toLowerCase();
           durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
           break;
         }
       }
+      if (isPriorityRemoved) return null;
       const historicalOverrideMs = getHistoricalOverrideDurationMs(issueDept, priority, periodStartMs);
       if (historicalOverrideMs !== null) durationMs = historicalOverrideMs;
 
@@ -2691,7 +2714,7 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         waivedAt: waiver?.waivedAt || null,
         waivedReason: waiver?.reason || null,
       };
-    });
+    }).filter((inst): inst is NonNullable<typeof inst> => inst !== null);
 
     // A department the ticket used to be in, before being routed onward
     // (e.g. Migration -> Dev), still has its own dept_sla_log entry --
@@ -2723,23 +2746,30 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
       }
       for (const policy of Array.from(newestByName.values())) {
         let histDurationMs = 8 * 60 * 60 * 1000;
+        // Same "explicit 0 means this priority tier was removed, skip this
+        // instance entirely" fix as the current-department branch above --
+        // see its own comment for why.
+        let histIsPriorityRemoved = false;
         const histGoals: any[] = Array.isArray(policy.goals) ? policy.goals : [];
         for (const goal of histGoals) {
           if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
             const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
-            if (row?.timeValue) {
+            if (row && row.timeValue !== undefined && row.timeValue !== null && row.timeValue !== '') {
               const val = parseFloat(row.timeValue);
+              if (val === 0) { histIsPriorityRemoved = true; break; }
               const unit = (row.timeUnit || 'hours').toLowerCase();
               histDurationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
               break;
             }
           } else if (goal.timeValue) {
             const val = parseFloat(goal.timeValue);
+            if (val === 0) { histIsPriorityRemoved = true; break; }
             const unit = (goal.timeUnit || 'hours').toLowerCase();
             histDurationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
             break;
           }
         }
+        if (histIsPriorityRemoved) continue;
         const histStartedAt = histEntry.started_at ? new Date(histEntry.started_at).toISOString() : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
         const histOverrideMs = getHistoricalOverrideDurationMs(histDeptKey, priority, new Date(histStartedAt).getTime());
         if (histOverrideMs !== null) histDurationMs = histOverrideMs;
@@ -3379,22 +3409,28 @@ function computeSlaBreachedAndOverdue(
           : [];
         if (pauseStatuses.includes(currentStatusName)) continue; // paused — clock stopped
         let durationMs = 8 * 60 * 60 * 1000; // default 8h, same fallback as computeIssueSLAsFromDb
+        // Same "explicit 0 means this priority tier was removed, skip it"
+        // fix as computeSLAInstancesPure -- see its own comment for why.
+        let priorityRemoved = false;
         for (const goal of (policy.goals || [])) {
           if (goal.isPriorityGroup && Array.isArray(goal.priorityRows)) {
             const row = goal.priorityRows.find((r: any) => r.priority?.toLowerCase() === priority);
-            if (row?.timeValue) {
+            if (row && row.timeValue !== undefined && row.timeValue !== null && row.timeValue !== '') {
               const val = parseFloat(row.timeValue);
+              if (val === 0) { priorityRemoved = true; break; }
               const unit = (row.timeUnit || 'hours').toLowerCase();
               durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
               break;
             }
           } else if (goal.timeValue) {
             const val = parseFloat(goal.timeValue);
+            if (val === 0) { priorityRemoved = true; break; }
             const unit = (goal.timeUnit || 'hours').toLowerCase();
             durationMs = unit === 'minutes' ? val * 60_000 : unit === 'days' ? val * 86_400_000 : val * 3_600_000;
             break;
           }
         }
+        if (priorityRemoved) continue;
         const overrideMs = getHistoricalOverrideDurationMs(dept, priority, new Date(slaStartedAt).getTime());
         if (overrideMs !== null) durationMs = overrideMs;
         // dept_sla_started_at resets to NOW() on every department handoff,
