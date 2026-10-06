@@ -6289,7 +6289,25 @@ async function _handleJiraPgApi(
       }
     }
     applyMultiField(workTypeParam,       'workType');
-    applyMultiField(productTypeParam,    'productType');
+    // Product Type, like Project Manager above, can be stored as several
+    // values joined together on one ticket (e.g. "Message Migration, Email
+    // Migration" when a ticket genuinely spans both) -- applyMultiField's
+    // exact/IN match against the WHOLE stored string never matches a single
+    // selected option against a combined value, so picking "Email Migration"
+    // alone silently dropped every ticket where it's one of several product
+    // types. Confirmed for real: Queue: Dev, Created/Updated Sep 2026 --
+    // selecting every known Product Type option still dropped 7 real
+    // tickets (CF-33406, CF-33366, CF-33199, CF-32993, CF-32978, CF-30766,
+    // CF-30670), each with a comma-combined productType value. Same
+    // "contains" per-selected-value OR-group fix as projectManager.
+    if (productTypeParam) {
+      const vals = productTypeParam.split(',').map(v => v.trim()).filter(Boolean);
+      if (vals.length) {
+        const ptOr: any[] = vals.map((v) => ({ productType: { contains: v, mode: 'insensitive' as const } }));
+        if (!where.AND) where.AND = [];
+        (where.AND as any[]).push({ OR: ptOr });
+      }
+    }
     applyMultiField(productionTicketParam, 'productionTicket');
     applyMultiField(combinationParam,    'combination');
     applyMultiField(projectPoolParam,    'projectPool');
@@ -6547,8 +6565,19 @@ async function _handleJiraPgApi(
               sentParamIdx++;
             }
           }
+          // Product Type can be a comma-combined multi-value string on one
+          // ticket (e.g. "Message Migration, Email Migration") -- same class
+          // of bug as the dept-scoped branch's own fix above, see its
+          // comment. ILIKE-contains per selected value instead of exact/IN.
+          if (productTypeParam) {
+            const ptVals = productTypeParam.split(',').map((v) => v.trim()).filter(Boolean);
+            if (ptVals.length) {
+              sentExtraClauses.push(`i."productType" ILIKE ANY($${sentParamIdx}::text[])`);
+              sentExtraParams.push(ptVals.map((v) => `%${v}%`));
+              sentParamIdx++;
+            }
+          }
           const sentSimpleTextFields: [string | null, string][] = [
-            [productTypeParam, 'productType'],
             [combinationParam, 'combination'],
             [projectPoolParam, 'projectPool'],
             [workTypeParam, 'workType'],
@@ -7115,15 +7144,31 @@ async function _handleJiraPgApi(
           deptParamIdx++;
         }
       }
-      // The custom text-field filters (Product Type, Combination, etc.) were never
-      // layered into this dept-scoped branch at all — every per-department queue view
+      // Product Type, unlike the other DB-driven-dropdown fields below, can be
+      // stored as several values joined together on one ticket (e.g. "Message
+      // Migration, Email Migration" when a ticket genuinely spans both) -- an
+      // exact/IN match against the WHOLE stored string never matches a single
+      // selected option against a combined value, same class of bug as
+      // Project Manager above. Confirmed for real: Queue: Dev, Created/Updated
+      // Sep 2026 -- selecting every known Product Type option still dropped 7
+      // real tickets (CF-33406, CF-33366, CF-33199, CF-32993, CF-32978,
+      // CF-30766, CF-30670), each with a comma-combined productType value.
+      if (productTypeParam) {
+        const ptVals = productTypeParam.split(',').map((v) => v.trim()).filter(Boolean);
+        if (ptVals.length) {
+          deptExtraClauses.push(`i."productType" ILIKE ANY($${deptParamIdx}::text[])`);
+          deptExtraParams.push(ptVals.map((v) => `%${v}%`));
+          deptParamIdx++;
+        }
+      }
+      // The custom text-field filters (Combination, etc.) were never layered
+      // into this dept-scoped branch at all — every per-department queue view
       // (Dev, Migration, QA, Infra, ...) runs through here, so selecting any of these
       // filters while viewing a department queue silently had zero effect on the
-      // results, no matter which value was picked. Exact/IN match, same as
-      // applyMultiField in the general (non-dept) branch — these values come from a
-      // DB-driven dropdown so they match exactly.
+      // results, no matter which value was picked. Exact/IN match -- these
+      // values come from a DB-driven dropdown so they match exactly (Product
+      // Type is the one exception, handled separately above).
       const deptSimpleTextFields: [string | null, string][] = [
-        [productTypeParam, 'productType'],
         [productionTicketParam, 'productionTicket'],
         [combinationParam, 'combination'],
         [projectPoolParam, 'projectPool'],
