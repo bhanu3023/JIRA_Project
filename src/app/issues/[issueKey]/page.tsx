@@ -187,6 +187,17 @@ export default function IssueDetailPage() {
   // by request. Shared between both fields since only one is ever being
   // edited at a time (editingCustomField is a single value).
   const [isUploadingCustomField, setIsUploadingCustomField] = useState(false);
+  // Root Cause/Fix Description Save buttons were only disabled during an
+  // in-progress IMAGE upload (isUploadingCustomField), never during the
+  // save request itself -- a rapid double-click (or an impatient repeat
+  // click while the first save+reload round-trip was still in flight,
+  // with nothing visibly confirming it had started) could fire several
+  // independent PATCH requests for the identical content, each one
+  // triggering its own "Updated by X" notification email. Confirmed for
+  // real on CF-33692: root cause saved 3 times with the identical value
+  // within 2.4 seconds, and the ticket's assignee got ~18-27 duplicate
+  // "Updated by Pragati Pandey" emails in two short bursts.
+  const [savingCustomField, setSavingCustomField] = useState(false);
   // Inline reply box -- opens directly under the comment being replied to
   // (matching Jira's own placement) instead of jumping to the main composer
   // at the top, which put the reply nowhere near the comment it referenced
@@ -2724,8 +2735,8 @@ export default function IssueDetailPage() {
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button disabled={isUploadingCustomField} onClick={async () => { try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } }}
-                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : 'Save'}</button>
+                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField) return; setSavingCustomField(true); try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : savingCustomField ? 'Saving…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
                           </div>
@@ -2768,8 +2779,8 @@ export default function IssueDetailPage() {
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button disabled={isUploadingCustomField} onClick={async () => { try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } }}
-                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : 'Save'}</button>
+                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField) return; setSavingCustomField(true); try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
+                              className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : savingCustomField ? 'Saving…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
                           </div>

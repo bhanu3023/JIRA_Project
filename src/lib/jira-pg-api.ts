@@ -292,6 +292,28 @@ function touchLastSeen(userId: string | null) {
   _lastSeenThrottle.set(userId, now);
   pool.query(`UPDATE users SET "lastSeenAt" = NOW() WHERE id = $1`, [userId]).catch(() => {});
 }
+
+// Defense-in-depth against the issue PATCH endpoint's "general update"
+// notifyIssueUpdated call firing repeatedly for what should be a single
+// edit -- the real fix is the frontend disabling its Save button while a
+// save is already in flight (rapid double-clicks on Root Cause/Fix
+// Description could otherwise fire several independent PATCH requests for
+// the identical content before the first one's response closed the
+// editor), but this catches any OTHER way duplicate requests might still
+// slip through (a second browser tab, a network-level retry, etc.).
+// Confirmed for real: CF-33692's assignee got ~18-27 duplicate "Updated
+// by Pragati Pandey" emails in two few-second bursts from what was
+// really 1-2 genuine edits. 10s is comfortably longer than any such
+// duplicate-request burst observed, while still well under the gap
+// between two genuinely separate edits in normal use.
+const _updateNotifyThrottle = new Map<string, number>();
+function shouldSendUpdateNotification(issueId: string): boolean {
+  const now = Date.now();
+  const last = _updateNotifyThrottle.get(issueId) || 0;
+  if (now - last < 10_000) return false;
+  _updateNotifyThrottle.set(issueId, now);
+  return true;
+}
 // POST /search's exact-match branch looks up an issue's subtasks by
 // parentKey (added alongside its linked-work-items lookup) -- that column
 // had no index at all, so on a large production issues table every search
@@ -11303,16 +11325,21 @@ async function _handleJiraPgApi(
         changes.push({ field: 'Fix Description', from: String((issue as any).fixDescription || ''), to: String(body.fixDescription || '') });
       if (changes.length > 0) {
         const { ids: updateAdminIds, emails: updateAdminEmails } = await getAllAdminRecipients(issue.spaceId);
-        notifyIssueUpdated({
-          ...issueForNotif,
-          updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
-          changes,
-          adminEmails: [
-            ...updateAdminEmails,
-            ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey),
-            ...(await getQueueNotifyEmails(issueForNotif.spaceKey, currentDeptForNotif)),
-          ],
-        }).catch(() => {});
+        // Email only when outside the per-ticket cooldown (see
+        // shouldSendUpdateNotification) -- in-app notifications stay
+        // unthrottled since those are cheap and don't spam an inbox.
+        if (shouldSendUpdateNotification(issue.id)) {
+          notifyIssueUpdated({
+            ...issueForNotif,
+            updatedBy: userId ? await db.user.findUnique({ where: { id: userId } }) : null,
+            changes,
+            adminEmails: [
+              ...updateAdminEmails,
+              ...getExtraSpaceNotifyEmails(issueForNotif.spaceKey),
+              ...(await getQueueNotifyEmails(issueForNotif.spaceKey, currentDeptForNotif)),
+            ],
+          }).catch(() => {});
+        }
         // In-app: notify assignee + reporter + admins + watchers
         await notifyUsers(
           [updated.assigneeId, updated.reporterId, ...updateAdminIds],
