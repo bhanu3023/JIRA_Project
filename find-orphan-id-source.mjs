@@ -14,14 +14,14 @@ async function main() {
     'ar_99238a2f89449b526e269a64',
   ]);
 
-  const { rows } = await pool.query(`SELECT id, "spaceKey", config FROM custom_queues`);
+  const { rows } = await pool.query(`SELECT space_key, queues FROM custom_queues`);
   for (const row of rows) {
-    const queues = row.config?.queues || [];
+    const queues = row.queues || [];
     for (const q of queues) {
       const memberIds = q.memberIds || [];
       const hits = memberIds.filter((id) => suspectIds.has(id));
       if (hits.length) {
-        console.log(`custom_queues.id=${row.id} spaceKey=${row.spaceKey} queue.name=${q.name} queue.dept=${q.dept || q.department}`);
+        console.log(`custom_queues.space_key=${row.space_key} queue.name=${q.name} queue.dept=${q.dept || q.department}`);
         console.log(`  orphaned memberIds found: ${JSON.stringify(hits)}`);
         console.log(`  total memberIds in this queue: ${memberIds.length}`);
       }
