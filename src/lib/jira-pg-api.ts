@@ -6884,6 +6884,11 @@ async function _handleJiraPgApi(
       // at (null if no status filter is active) -- set below, reused by
       // deptScopeSql further down instead of duplicating that same array.
       let statusParamIdx: number | null = null;
+      // Bound parameter index for JUST the "Routed to X"/"Waiting for X"
+      // labels among the selected statuses (null if none were selected) --
+      // see its use below for why this has to be a SEPARATE array from
+      // statusParamIdx's full selected-names list.
+      let statusRoutingOnlyParamIdx: number | null = null;
       // "Queue" filter on the main /filters page (opt-in via queueMembersOnly) --
       // restricts to tickets whose assignee is an actual configured member of
       // this department's queue, instead of every ticket merely labeled with
@@ -7107,23 +7112,43 @@ async function _handleJiraPgApi(
         // Queue: Infra + Status: Open/In Progress matching several tickets
         // now Resolved in Migration/QA, their real global status plainly
         // "Resolved" (LOWER(s.name) correctly excludes them on its own).
-        const statusLooksLikeRoutingForDeptExtra = statusParam.split(',').some((s2) => /^(waiting\s+for|routed\s+to)\s+/i.test(s2.trim()));
-        deptExtraClauses.push(
-          statusLooksLikeRoutingForDeptExtra
-            ? `(LOWER(s.name) = ANY($${deptParamIdx}::text[])
-                 OR EXISTS (
-                   SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
-                   WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${deptParamIdx}::text[])
-                 ))`
-            : `LOWER(s.name) = ANY($${deptParamIdx}::text[])`
-        );
+        const statusNamesForDeptExtra = statusParam.split(',').map((s2) => s2.trim().toLowerCase());
+        const routingOnlyStatusNamesForDeptExtra = statusNamesForDeptExtra.filter((s2) => /^(waiting\s+for|routed\s+to)\s+/i.test(s2));
+        const statusLooksLikeRoutingForDeptExtra = routingOnlyStatusNamesForDeptExtra.length > 0;
         // Captured so deptScopeSql (built further down, after deptExtraParams'
         // own indices are all finalized) can reuse this exact same bound
         // parameter -- the array of selected status names -- for its own
         // broadening, instead of needing a second copy of it.
         statusParamIdx = deptParamIdx;
-        deptExtraParams.push(statusParam.split(',').map((s2) => s2.trim().toLowerCase()));
+        deptExtraParams.push(statusNamesForDeptExtra);
         deptParamIdx++;
+        // The dept_statuses EXISTS branch below has to check ONLY the
+        // routing-labeled names, not the full selected-names array -- using
+        // the full array let an ORDINARY status selected ALONGSIDE a routing
+        // one (e.g. Status: Open, In Progress, Routed to Infra together)
+        // match via this dept's own now-stale "Open" snapshot for a ticket
+        // that's since moved on and was resolved in a DIFFERENT department,
+        // reintroducing the exact CF-29589-class bug the comment above this
+        // block describes as already fixed -- it only stayed fixed as long
+        // as no routing label was selected at all. Confirmed for real: Queue:
+        // Infra + Status: Open, In Progress = 4 (correct); adding "Routed to
+        // Infra" to that SAME selection jumped it to 31, even though
+        // "Routed to Infra" selected alone matches 0 tickets -- the extra 27
+        // were ordinary-status matches riding along on the full array.
+        if (statusLooksLikeRoutingForDeptExtra) {
+          statusRoutingOnlyParamIdx = deptParamIdx;
+          deptExtraParams.push(routingOnlyStatusNamesForDeptExtra);
+          deptParamIdx++;
+        }
+        deptExtraClauses.push(
+          statusLooksLikeRoutingForDeptExtra
+            ? `(LOWER(s.name) = ANY($${statusParamIdx}::text[])
+                 OR EXISTS (
+                   SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+                   WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${statusRoutingOnlyParamIdx}::text[])
+                 ))`
+            : `LOWER(s.name) = ANY($${statusParamIdx}::text[])`
+        );
       }
       if (projectManagerParam) {
         // Same "contains any selected name" match as the general branch — a ticket's
@@ -7423,13 +7448,19 @@ async function _handleJiraPgApi(
       // visible in their own Status column. Gated the same way
       // reasonClause/broadenIt's statusLooksLikeRouting already gates the
       // sibling 'passed' exclusion a few dozen lines above.
-      const statusDeptMatchSqlLooksLikeRouting = !!statusParam && statusParam.split(',').some((s2) => /^(waiting\s+for|routed\s+to)\s+/i.test(s2.trim()));
-      const statusDeptMatchSql = statusParam && queueMembersOnlyParam && statusParamIdx !== null && !workedDeptMatchSql && statusDeptMatchSqlLooksLikeRouting
+      const statusDeptMatchSqlLooksLikeRouting = statusRoutingOnlyParamIdx !== null;
+      // Same routing-only-names fix as the deptExtraClauses status check
+      // above (see its comment) -- this EXISTS also has to check only the
+      // routing-labeled names, not the full selected-names array, or an
+      // ordinary status selected alongside a routing one re-broadens this
+      // dept SCOPE itself (not just the status match) to include tickets
+      // that moved on and were resolved in a different department.
+      const statusDeptMatchSql = statusParam && queueMembersOnlyParam && !workedDeptMatchSql && statusDeptMatchSqlLooksLikeRouting
         ? `(
              (LOWER(i.current_department) = LOWER($2) ${deptDoneClause})
              OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
                SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
-               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${statusParamIdx}::text[])
+               WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'name') = ANY($${statusRoutingOnlyParamIdx}::text[])
              ))
            )`
         : null;
