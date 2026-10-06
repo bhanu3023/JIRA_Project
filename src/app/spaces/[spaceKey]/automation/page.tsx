@@ -184,7 +184,8 @@ export default function AutomationPage() {
                   )}
                   {action.type === 'set_priority' && (
                     <select value={action.priority} onChange={e => { const a = [...form.actions]; a[i].priority = e.target.value; setForm(f => ({ ...f, actions: a })); }} className="input-field">
-                      {['highest', 'high', 'medium', 'low', 'lowest'].map(p => <option key={p} value={p}>{p}</option>)}
+                      {/* Highest removed per explicit request -- see filters/page.tsx's own PRIORITIES comment. */}
+                      {['high', 'medium', 'low', 'lowest'].map(p => <option key={p} value={p}>{p}</option>)}
                     </select>
                   )}
                 </div>

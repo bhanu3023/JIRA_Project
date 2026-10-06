@@ -183,7 +183,8 @@ export default function AllIssuesPage() {
               </select>
               <select value={priorityFilter} onChange={e => setPriorityFilter(e.target.value)} className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-[12.5px] text-gray-700 outline-none focus:ring-2 focus:ring-blue-500">
                 <option value="">All Priority</option>
-                {['highest', 'high', 'medium', 'low', 'lowest'].map(p => <option key={p} value={p} className="capitalize">{p}</option>)}
+                {/* Highest removed per explicit request -- see filters/page.tsx's own PRIORITIES comment. */}
+                {['high', 'medium', 'low', 'lowest'].map(p => <option key={p} value={p} className="capitalize">{p}</option>)}
               </select>
               {(spaceFilter || typeFilter || priorityFilter || statusFilter) && (
                 <button onClick={() => { setSpaceFilter(''); setTypeFilter(''); setPriorityFilter(''); setStatusFilter(''); }} className="px-3 py-2 rounded-lg text-[12.5px] text-red-600 hover:bg-red-50 border border-red-200 transition-colors">

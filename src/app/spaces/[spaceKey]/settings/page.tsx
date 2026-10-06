@@ -80,7 +80,9 @@ interface SLAItem {
 
 const CALENDARS = ['24/7 Calendar (Default)', 'Sample 9-5 Calendar', 'Business Hours (9-5 Mon-Fri)'];
 const TIME_UNITS = ['minutes', 'hours', 'days'];
-const PRIORITIES_LIST = ['highest', 'high', 'medium', 'low', 'lowest'];
+// Highest removed per explicit request -- every ticket that had it was
+// bulk-converted to High, system-wide.
+const PRIORITIES_LIST = ['high', 'medium', 'low', 'lowest'];
 
 const DEFAULT_SLAS: SLAItem[] = [
   {
@@ -95,8 +97,8 @@ const DEFAULT_SLAS: SLAItem[] = [
         timeValue: '',
         timeUnit: 'hours',
         isPriorityGroup: true,
+        // Highest removed per explicit request.
         priorityRows: [
-          { priority: 'highest', calendar: '24/7 Calendar (Default)', timeValue: '4',  timeUnit: 'hours' },
           { priority: 'high',    calendar: '24/7 Calendar (Default)', timeValue: '8',  timeUnit: 'hours' },
           { priority: 'medium',  calendar: '24/7 Calendar (Default)', timeValue: '16', timeUnit: 'hours' },
           { priority: 'low',     calendar: '24/7 Calendar (Default)', timeValue: '24', timeUnit: 'hours' },
@@ -129,8 +131,8 @@ const DEFAULT_SLAS: SLAItem[] = [
         timeValue: '',
         timeUnit: 'hours',
         isPriorityGroup: true,
+        // Highest removed per explicit request.
         priorityRows: [
-          { priority: 'highest', calendar: '24/7 Calendar (Default)', timeValue: '6',  timeUnit: 'hours' },
           { priority: 'high',    calendar: '24/7 Calendar (Default)', timeValue: '8',  timeUnit: 'hours' },
           { priority: 'medium',  calendar: '24/7 Calendar (Default)', timeValue: '24', timeUnit: 'hours' },
           { priority: 'low',     calendar: '24/7 Calendar (Default)', timeValue: '48', timeUnit: 'hours' },
@@ -1013,8 +1015,8 @@ function CreateSLAModal({ onClose, onCreate }: { onClose: () => void; onCreate: 
         timeValue: '',
         timeUnit: 'hours',
         isPriorityGroup: true,
+        // Highest removed per explicit request.
         priorityRows: [
-          { priority: 'highest', calendar: '24/7 Calendar (Default)', timeValue: '4',  timeUnit: 'hours' },
           { priority: 'high',    calendar: '24/7 Calendar (Default)', timeValue: '8',  timeUnit: 'hours' },
           { priority: 'medium',  calendar: '24/7 Calendar (Default)', timeValue: '24', timeUnit: 'hours' },
           { priority: 'low',     calendar: '24/7 Calendar (Default)', timeValue: '48', timeUnit: 'hours' },

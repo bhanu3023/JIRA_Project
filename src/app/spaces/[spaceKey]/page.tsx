@@ -2103,10 +2103,13 @@ function SpaceDetailContent() {
         });
         const maxStatus = Math.max(...statusData.map(([, v]) => v.count), 1);
 
-        // Priority distribution
-        const PRIORITY_ORDER = ['highest','high','medium','low','lowest'];
-        const PRIORITY_COLORS: Record<string,string> = { highest:'#EF4444', high:'#F97316', medium:'#F59E0B', low:'#64748B', lowest:'#94A3B8' };
-        const priorityMap: Record<string, number> = { highest:0, high:0, medium:0, low:0, lowest:0 };
+        // Priority distribution -- Highest removed per explicit request
+        // (every ticket that had it was bulk-converted to High); the map
+        // below still tolerates a stray 'highest' value by simply not
+        // counting it anywhere, rather than throwing.
+        const PRIORITY_ORDER = ['high','medium','low','lowest'];
+        const PRIORITY_COLORS: Record<string,string> = { high:'#F97316', medium:'#F59E0B', low:'#64748B', lowest:'#94A3B8' };
+        const priorityMap: Record<string, number> = { high:0, medium:0, low:0, lowest:0 };
         for (const issue of allIssues) {
           const p = (issue.priority || 'medium').toLowerCase();
           if (p in priorityMap) priorityMap[p]++;

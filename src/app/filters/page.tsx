@@ -40,7 +40,10 @@ const ISSUE_TYPES = ['bug', 'task', 'subtask'];
 const TYPE_LABELS: Record<string, string> = {
   bug: 'Bug', task: 'Task', subtask: 'Subtask',
 };
-const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'];
+// Highest removed per explicit request -- every ticket that had it was
+// bulk-converted to High (3,146 confirmed system-wide), and it's no
+// longer offered anywhere a priority can be picked.
+const PRIORITIES = ['high', 'medium', 'low', 'lowest'];
 // Was a hand-maintained hardcoded name list here (and in CreateIssueModal.tsx /
 // issues/[issueKey]/page.tsx) that drifted from reality -- a real
 // migration_manager-role user (Kiran U) was missing from it, while others

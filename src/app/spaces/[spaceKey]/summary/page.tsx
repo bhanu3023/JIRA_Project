@@ -35,9 +35,10 @@ const STATUS_CATEGORY_LABELS: Record<string, string> = {
   done:        'Done',
 };
 
-const PRIORITY_ORDER = ['highest', 'high', 'medium', 'low', 'lowest'];
+// Highest removed per explicit request -- every ticket that had it was
+// bulk-converted to High.
+const PRIORITY_ORDER = ['high', 'medium', 'low', 'lowest'];
 const PRIORITY_COLORS: Record<string, string> = {
-  highest: '#E11D48',
   high:    '#D97706',
   medium:  '#7C3AED',
   low:     '#0891B2',
