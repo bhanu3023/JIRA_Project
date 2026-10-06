@@ -2433,7 +2433,31 @@ export default function FiltersPage() {
                     more compact column sizing the space board view (spaces/[spaceKey]/
                     page.tsx's STATIC_COLUMNS, ~150px per text column) already uses, so
                     more of the row fits on screen before needing to scroll. */}
-                {visibleStaticCols.includes('assignee') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Assignee</th>}
+                {visibleStaticCols.includes('assignee') && (
+                  <th
+                    className={`px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36 ${selAssignees.length ? 'cursor-help' : ''}`}
+                    // Only shown while an Assignee filter is active -- that's
+                    // the one case where this column can show someone OTHER
+                    // than the ticket's current owner. A selected Assignee
+                    // also credits a ticket to someone who genuinely worked
+                    // it and later handed it off, not just whoever holds it
+                    // now -- by design, so a person doesn't lose credit for
+                    // real work just because they moved the ticket along.
+                    // That means this column, exported or on screen, can
+                    // show a different name than you'd get by filtering the
+                    // SAME column again afterward in Excel (which only ever
+                    // sees each row's current owner, with no way to know
+                    // about that earlier work) -- confirmed for real:
+                    // Assignee: Pragati Pandey matched 70 tickets, 6 of them
+                    // via real work she did before handing off, so Excel's
+                    // own column filter on an export taken WITHOUT this
+                    // filter applied found only 64. Filtering by Assignee in
+                    // the app BEFORE exporting avoids the mismatch entirely.
+                    title={selAssignees.length ? 'Can include someone credited for real work they did on a ticket before handing it off, not only its current owner -- filter by Assignee here (not in Excel afterward) for an export that matches this count exactly.' : undefined}
+                  >
+                    Assignee
+                  </th>
+                )}
                 {visibleStaticCols.includes('reportedBy') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-36">Reported By</th>}
                 {visibleStaticCols.includes('status') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-28">Status</th>}
                 {visibleStaticCols.includes('priority') && <th className="px-2 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wide w-16">Priority</th>}
