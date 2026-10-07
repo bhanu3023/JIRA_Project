@@ -95,6 +95,30 @@ function fmtSlaOverBy(ms: number): string {
   return '<1m';
 }
 
+// Worklog "Time spent" entry, matching real Jira's own log-work field: a
+// single free-text box like "2h 30m" / "1d 4h" / "45m" rather than a
+// decimal-hours-only number spinner, which had no way to enter minutes at
+// all. 1d = 8h and 1w = 5d, Jira's own defaults. A bare number with no unit
+// (e.g. "2") is still accepted and treated as hours, matching what the old
+// plain-hours input used to take, so existing muscle memory keeps working.
+const TIME_SPENT_RE = /(\d+(?:\.\d+)?)\s*(w|d|h|m)/gi;
+function parseTimeSpent(input: string): number | null {
+  const trimmed = input.trim().toLowerCase();
+  if (!trimmed) return null;
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.round(parseFloat(trimmed) * 60);
+  const unitMinutes: Record<string, number> = { w: 5 * 8 * 60, d: 8 * 60, h: 60, m: 1 };
+  let totalMinutes = 0;
+  let matched = false;
+  let m: RegExpExecArray | null;
+  TIME_SPENT_RE.lastIndex = 0;
+  while ((m = TIME_SPENT_RE.exec(trimmed))) {
+    matched = true;
+    totalMinutes += parseFloat(m[1]) * unitMinutes[m[2]];
+  }
+  if (!matched || totalMinutes <= 0) return null;
+  return Math.round(totalMinutes);
+}
+
 // A bare URL typed as plain text (e.g. "Server - https://qarelease...") only
 // ever got auto-linked when the whole description/comment had literally no
 // HTML tags at all — but content saved from the rich text editor always has
@@ -495,13 +519,13 @@ export default function IssueDetailPage() {
 
   const handleAddWorklog = async () => {
     setWorklogError('');
-    const hoursNum = parseFloat(worklogHours);
-    if (!hoursNum || hoursNum <= 0) { setWorklogError('Enter a valid number of hours.'); return; }
+    const minutes = parseTimeSpent(worklogHours);
+    if (!minutes) { setWorklogError('Enter a valid time spent, e.g. 2h 30m.'); return; }
     setWorklogSubmitting(true);
     try {
       await api.addWorklog(issueKey, {
         department: (issue as any)?.current_department || '',
-        timeSpentMinutes: Math.round(hoursNum * 60),
+        timeSpentMinutes: minutes,
         description: worklogDesc.trim() || undefined,
         workDate: worklogDate,
       });
@@ -4219,15 +4243,20 @@ export default function IssueDetailPage() {
 
                   {worklogFormOpen && (
                     <div className="px-2.5 py-2 space-y-1.5 bg-blue-50/40">
-                      <div className="flex items-center gap-1.5">
+                      <div>
+                        <label className="block text-[10px] font-medium text-gray-500 mb-0.5">Time spent</label>
                         <input
-                          type="number" min={0.1} step={0.25} placeholder="Hours"
+                          type="text" placeholder="e.g. 2h 30m"
                           value={worklogHours} onChange={(e) => setWorklogHours(e.target.value)}
-                          className="w-16 rounded border border-gray-300 px-1.5 py-1 text-[11.5px] outline-none focus:border-blue-500"
+                          className="w-full rounded border border-gray-300 px-1.5 py-1 text-[11.5px] outline-none focus:border-blue-500"
                         />
+                        <p className="text-[10px] text-gray-400 mt-0.5">Use w, d, h, m — e.g. 1d 4h, 2h 30m, 45m</p>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-medium text-gray-500 mb-0.5">Date</label>
                         <input
                           type="date" value={worklogDate} onChange={(e) => setWorklogDate(e.target.value)}
-                          className="flex-1 min-w-0 rounded border border-gray-300 px-1.5 py-1 text-[11px] outline-none focus:border-blue-500"
+                          className="w-full rounded border border-gray-300 px-1.5 py-1 text-[11px] outline-none focus:border-blue-500"
                         />
                       </div>
                       <textarea
