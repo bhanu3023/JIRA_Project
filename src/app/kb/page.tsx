@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useStore } from '@/store';
 import { api, type KbAccess, type KbArticle, type KbFile, type KbKind, type KbTeam } from '@/lib/api';
 import { sanitizeForDisplay } from '@/lib/kb-sanitize';
+import { KB_TEMPLATES, hasTemplatePlaceholders } from '@/lib/kb-templates';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import { KbDocumentEditor, KbDocumentList, FileIcon, downloadFile } from '@/components/kb/KbDocuments';
 import { KbFileViewer, viewKindOf } from '@/components/kb/KbFileViewer';
@@ -702,7 +703,8 @@ function ArticleEditor({ id, newKind = 'kb', onDone, onCancel }: {
   const [kind, setKind] = useState<KbKind>(newKind);
   const [status, setStatus] = useState<'draft' | 'published'>('draft');
   const [title, setTitle] = useState('');
-  const [bodyHtml, setBodyHtml] = useState('');
+  // A new article or release note opens with its template filled in.
+  const [bodyHtml, setBodyHtml] = useState(id ? '' : KB_TEMPLATES[newKind]);
   const [loaded, setLoaded] = useState(!id);
   const [uploading, setUploading] = useState(false);
   const [docsUploading, setDocsUploading] = useState(false);
@@ -752,8 +754,12 @@ function ArticleEditor({ id, newKind = 'kb', onDone, onCancel }: {
   };
 
   const busy = saving || uploading || docsUploading;
+  const template = KB_TEMPLATES[kind];
+  const untouchedTemplate = bodyHtml === template;
+  const placeholdersLeft = !untouchedTemplate && hasTemplatePlaceholders(bodyHtml);
   // Written text is optional: an article can be just its uploaded documents.
-  const hasContent = hasBodyContent(bodyHtml) || files.length > 0;
+  // The template on its own doesn't count as content.
+  const hasContent = (hasBodyContent(bodyHtml) && !untouchedTemplate) || files.length > 0;
 
   return (
     <>
@@ -806,6 +812,22 @@ function ArticleEditor({ id, newKind = 'kb', onDone, onCancel }: {
                 maxLength={300}
                 className="mb-4 w-full border-0 border-b border-gray-200 pb-2 text-2xl font-bold text-gray-900 placeholder:text-gray-300 focus:border-blue-500 focus:outline-none"
               />
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[12px]">
+                <span className="text-gray-500">
+                  {untouchedTemplate
+                    ? `Template: replace the [bracketed] parts and delete sections that don't apply.`
+                    : placeholdersLeft
+                      ? <span className="text-amber-700">Some [bracketed] template text hasn&apos;t been replaced yet.</span>
+                      : null}
+                </span>
+                {untouchedTemplate ? (
+                  <button onClick={() => setBodyHtml('')} className="rounded-md px-2 py-1 text-gray-600 hover:bg-gray-100">Start blank</button>
+                ) : !hasBodyContent(bodyHtml) ? (
+                  <button onClick={() => setBodyHtml(template)} className="rounded-md px-2 py-1 font-medium text-blue-600 hover:bg-blue-50">
+                    Use {KINDS[kind].one} template
+                  </button>
+                ) : null}
+              </div>
               <RichTextEditor
                 value={bodyHtml}
                 onChange={setBodyHtml}
