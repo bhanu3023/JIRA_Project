@@ -77,6 +77,28 @@ export default function WorklogPage() {
 
   const totalMinutes = useMemo(() => filteredRows.reduce((sum, r) => sum + (r.timeSpentMinutes || 0), 0), [filteredRows]);
 
+  // Grouped by ticket rather than one long flat chronological list, so two
+  // entries against the SAME ticket (e.g. one person logs time, the ticket
+  // moves to another queue, a different person logs more) sit together
+  // with a per-ticket subtotal -- exactly how Jira's own per-issue Work Log
+  // tab reads, just rolled up across every ticket here.
+  const groupedByTicket = useMemo(() => {
+    const map = new Map<string, { issueKey: string; issueSummary: string; spaceKey: string; spaceName: string; entries: WorklogRow[]; totalMinutes: number }>();
+    for (const r of filteredRows) {
+      let g = map.get(r.issueKey);
+      if (!g) {
+        g = { issueKey: r.issueKey, issueSummary: r.issueSummary, spaceKey: r.spaceKey, spaceName: r.spaceName, entries: [], totalMinutes: 0 };
+        map.set(r.issueKey, g);
+      }
+      g.entries.push(r);
+      g.totalMinutes += r.timeSpentMinutes || 0;
+    }
+    const groups = Array.from(map.values());
+    for (const g of groups) g.entries.sort((a, b) => new Date(b.workDate).getTime() - new Date(a.workDate).getTime());
+    groups.sort((a, b) => new Date(b.entries[0].workDate).getTime() - new Date(a.entries[0].workDate).getTime());
+    return groups;
+  }, [filteredRows]);
+
   return (
     <div className="flex flex-col h-full min-h-0 overflow-auto bg-gray-50">
       {/* Header */}
@@ -153,50 +175,46 @@ export default function WorklogPage() {
           </div>
         </div>
 
-        {/* Table */}
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          {loading ? (
-            <p className="px-5 py-8 text-center text-[13px] text-gray-400">Loading…</p>
-          ) : error ? (
-            <p className="px-5 py-8 text-center text-[13px] text-red-500">{error}</p>
-          ) : filteredRows.length === 0 ? (
-            <p className="px-5 py-8 text-center text-[13px] text-gray-400">No work logged in this range.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left">
-                <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</th>
-                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Ticket</th>
-                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Space</th>
-                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Department</th>
-                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Logged by</th>
-                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Time spent</th>
-                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Description</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {filteredRows.map((r) => (
-                    <tr key={r.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-2.5 text-[12.5px] text-gray-500 whitespace-nowrap">
-                        {new Date(r.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                      </td>
-                      <td className="px-4 py-2.5 text-[12.5px] whitespace-nowrap">
-                        <Link href={`/issues/${r.issueKey}`} target="_blank" rel="noopener noreferrer" className="font-semibold text-blue-600 hover:underline">{r.issueKey}</Link>
-                        <p className="text-[11.5px] text-gray-400 truncate max-w-[220px]">{r.issueSummary}</p>
-                      </td>
-                      <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{r.spaceName || r.spaceKey}</td>
-                      <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{r.department}</td>
-                      <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{r.authorName || 'Unknown'}</td>
-                      <td className="px-4 py-2.5 text-[12.5px] font-semibold text-gray-800 whitespace-nowrap">{formatMinutes(r.timeSpentMinutes || 0)}</td>
-                      <td className="px-4 py-2.5 text-[12.5px] text-gray-500 max-w-[320px] truncate">{r.description || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+        {/* Grouped by ticket */}
+        {loading ? (
+          <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">Loading…</div>
+        ) : error ? (
+          <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-red-500">{error}</div>
+        ) : groupedByTicket.length === 0 ? (
+          <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">No work logged in this range.</div>
+        ) : (
+          <div className="space-y-3">
+            {groupedByTicket.map((g) => (
+              <div key={g.issueKey} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+                  <div className="min-w-0">
+                    <Link href={`/issues/${g.issueKey}`} target="_blank" rel="noopener noreferrer" className="font-semibold text-blue-600 hover:underline text-[13px]">{g.issueKey}</Link>
+                    <span className="text-[12.5px] text-gray-500 ml-2 truncate">{g.issueSummary}</span>
+                  </div>
+                  <div className="flex items-center gap-3 flex-shrink-0 ml-3">
+                    <span className="text-[11.5px] text-gray-400">{g.spaceName || g.spaceKey}</span>
+                    <span className="text-[12.5px] font-semibold text-gray-800">{formatMinutes(g.totalMinutes)} total</span>
+                  </div>
+                </div>
+                <table className="w-full text-left">
+                  <tbody className="divide-y divide-gray-100">
+                    {g.entries.map((r) => (
+                      <tr key={r.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-2 text-[12.5px] text-gray-600 whitespace-nowrap w-[150px]">{r.authorName || 'Unknown'}</td>
+                        <td className="px-4 py-2 text-[12.5px] text-gray-500 whitespace-nowrap w-[110px]">{r.department}</td>
+                        <td className="px-4 py-2 text-[12.5px] text-gray-400 whitespace-nowrap w-[120px]">
+                          {new Date(r.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                        </td>
+                        <td className="px-4 py-2 text-[12.5px] font-semibold text-gray-800 whitespace-nowrap w-[80px]">{formatMinutes(r.timeSpentMinutes || 0)}</td>
+                        <td className="px-4 py-2 text-[12.5px] text-gray-500 truncate">{r.description || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

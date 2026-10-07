@@ -11938,11 +11938,18 @@ async function _handleJiraPgApi(
     );
     return json(rows.rows);
   }
-  // POST issues/:key/worklogs -- log time against ONE department. Only a
-  // member of that department's own queue (or an admin/manager) may log
-  // work under it -- a Dev team member logging hours under "Migration"
-  // would misattribute whose work it actually was, the whole reason this
-  // is split per-department instead of one shared log.
+  // POST issues/:key/worklogs -- log time against the ticket. `department`
+  // is just metadata snapshotting which queue the ticket was in at the
+  // moment this entry was logged (so a ticket that moved Dev -> Migration
+  // shows each entry's own department, never rewritten after the fact) --
+  // it used to also gate WHO could log the entry (queue membership
+  // required), a leftover from the old per-department-tabs design. Real
+  // Jira has no such restriction at all: anyone who can see the issue can
+  // log work against it. That gate also silently 403'd a legitimate entry
+  // whenever the logging user wasn't a listed member of the ticket's
+  // *current* queue -- e.g. logging time after a ticket had already moved
+  // on to a different team -- so it's dropped; canAccessIssue (below) is
+  // the only gate now, same as comments.
   if (issueWorklogs && method === 'POST') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     const key = await resolveCfKey(issueWorklogs[1].toUpperCase());
@@ -11958,19 +11965,6 @@ async function _handleJiraPgApi(
     const timeSpentMinutes = Math.round(Number(body.timeSpentMinutes));
     if (!Number.isFinite(timeSpentMinutes) || timeSpentMinutes <= 0) {
       return json({ error: 'Time spent must be a positive number' }, 400);
-    }
-    if (!isAdmin && !isManager(currentUser?.role)) {
-      const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(issue.space?.key || '').toUpperCase()]);
-      const queues: any[] = cq.rows[0]?.queues || [];
-      const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === department.toLowerCase());
-      const isMember = Array.isArray(q?.memberIds) && q.memberIds.includes(userId);
-      if (q && !isMember) {
-        return json({ error: `You're not a member of the ${department} queue.` }, 403);
-      }
-      // A department with no configured queue at all (q undefined) has no
-      // roster to check against -- fall through and allow it, same
-      // "no config = no restriction" fallback the DL/notification and
-      // queue-membership checks elsewhere in this file already use.
     }
     const authorUser = await getCachedUser(userId);
     const id = rid();
