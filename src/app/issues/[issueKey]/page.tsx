@@ -4192,22 +4192,10 @@ export default function IssueDetailPage() {
             })()}
           </div>
 
-          {/* SLA Section — Jira style */}
-          {issue.sla && issue.sla.length > 0 && (
-            <SlaPanel
-              issue={issue}
-              slaExpanded={slaExpanded}
-              setSlaExpanded={setSlaExpanded}
-              user={user}
-              slaWaiverBusyId={slaWaiverBusyId}
-              handleSlaWaiver={handleSlaWaiver}
-              viewDept={viewDeptParam}
-            />
-          )}
-
           {/* Worklog Section — right sidebar, Jira-style. Single combined
               log against the whole ticket (matches real Jira), not split
-              per department, per explicit request. */}
+              per department, per explicit request. Placed above SLAs per
+              explicit request. */}
           <div className="h-px bg-gray-200 mx-4" />
           <div className="px-4 py-3">
             <button
@@ -4305,6 +4293,19 @@ export default function IssueDetailPage() {
               );
             })()}
           </div>
+
+          {/* SLA Section — Jira style */}
+          {issue.sla && issue.sla.length > 0 && (
+            <SlaPanel
+              issue={issue}
+              slaExpanded={slaExpanded}
+              setSlaExpanded={setSlaExpanded}
+              user={user}
+              slaWaiverBusyId={slaWaiverBusyId}
+              handleSlaWaiver={handleSlaWaiver}
+              viewDept={viewDeptParam}
+            />
+          )}
 
           {/* Timestamps */}
           <div className="h-px bg-gray-200 mx-4" />
