@@ -89,7 +89,17 @@ export default function NavigationLoader() {
   if (!loading) return null;
 
   return (
-    <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-white/70 backdrop-blur-[2px]">
+    // Was bg-white/70 + backdrop-blur-[2px] -- translucent enough that the
+    // PREVIOUS page's own text/table-header/empty-state content still read
+    // clearly through it, and the blur smeared that leftover content rather
+    // than hiding it, reading as a half-loaded, broken page (reported for
+    // real: switching queues showed "No issues found" ghosting behind the
+    // spinner). Matches the content area's own background (#FAFBFC, see
+    // RootLayoutClient's <main>) at near-full opacity instead, so the old
+    // page is fully covered the instant this shows -- a clean "loading",
+    // not a blurry one. Fades in rather than popping, since it's now opaque
+    // enough that an instant appearance would read as a flash/flicker.
+    <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-[#FAFBFC]/95 animate-navloader-fade-in">
       <DotLoader />
     </div>
   );

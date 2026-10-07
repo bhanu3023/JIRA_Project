@@ -178,8 +178,13 @@ function SpaceDetailContent() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  // Component-local fetch state — never gets stuck because cleanup always resets it
-  const [isFetching, setIsFetching] = useState(false);
+  // Component-local fetch state — never gets stuck because cleanup always
+  // resets it. Starts true (not false): the fetch effect below only calls
+  // setIsFetching(true) once it actually runs, which is AFTER the first
+  // paint -- starting false let that first paint briefly show "No issues
+  // found" (issues defaults to []) before the effect had a chance to flip
+  // this, a one-frame empty-state flash on every fresh mount.
+  const [isFetching, setIsFetching] = useState(true);
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
