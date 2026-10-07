@@ -11992,13 +11992,11 @@ async function _handleJiraPgApi(
   }
 
   // GET /worklogs -- cross-ticket worklog report, Jira's own "Logged work"
-  // view. Open to every user (not admin-gated), but a non-admin only sees
-  // entries for tickets they can actually reach themselves -- a space
-  // they're a member of, a ticket they reported/are assigned to, or their
-  // own logged entries -- never someone else's hours on a ticket in a
-  // space they have no access to at all.
+  // view. Admin-only -- a regular user never sees another person's logged
+  // hours across every space here, by explicit request.
   if (path === 'worklogs' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
+    if (!isAdmin) return json({ error: 'Admin access required' }, 403);
     const qs = url.searchParams;
     const from = qs.get('from');
     const to = qs.get('to');
@@ -12007,15 +12005,6 @@ async function _handleJiraPgApi(
     const conditions: string[] = [];
     const params: any[] = [];
     let n = 1;
-    if (!isAdmin) {
-      conditions.push(`(
-        sp.id IN (SELECT "spaceId" FROM space_members WHERE "userId" = $${n})
-        OR iss."reporterId" = $${n}
-        OR iss."assigneeId" = $${n}
-        OR wl."authorId" = $${n}
-      )`);
-      params.push(userId); n++;
-    }
     if (from) { conditions.push(`wl."workDate" >= $${n}`); params.push(new Date(from)); n++; }
     if (to) { conditions.push(`wl."workDate" <= $${n}`); params.push(new Date(to)); n++; }
     if (authorFilter) { conditions.push(`wl."authorId" = $${n}`); params.push(authorFilter); n++; }
