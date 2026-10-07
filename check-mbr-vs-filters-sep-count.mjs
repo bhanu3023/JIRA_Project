@@ -70,7 +70,13 @@ async function main() {
     return new Set((data.issues || []).map((i) => i.id));
   }
 
-  const between = `between:${DATE_FROM},${DATE_TO}`;
+  // Colon-separated ("between:FROM:TO"), matching parseDateRange's actual
+  // split(':') parsing exactly -- NOT comma-separated, which this script's
+  // first version used by mistake and which silently produced an Invalid
+  // Date (from=NaN), making every single Filters-side query below match
+  // zero tickets regardless of department or range. Confirmed by checking
+  // the Filters page's own construction of this param (buildCustomRange).
+  const between = `between:${DATE_FROM}:${DATE_TO}`;
 
   console.log(`\n=== Filters "Queue: Dev", ${SPACE_KEY}, ${DATE_FROM} to ${DATE_TO} ===`);
   console.log('createdRange only:', await filtersTotal('Dev', { createdRange: between }));
