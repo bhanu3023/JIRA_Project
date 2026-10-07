@@ -5995,6 +5995,14 @@ async function _handleJiraPgApi(
     // together with a dept filter, since that table's dept column is what
     // scopes it; only applied in the dept-scoped branch below.
     const workedRange   = url.searchParams.get('workedRange');
+    // Due Date and Resolved date -- the Filters page's UI/URL round-trip for
+    // both already existed (dueDateRange has shipped in the "More filters"
+    // bar for a while), but neither param was ever actually read here, so
+    // picking either silently filtered nothing at all. Fixed alongside
+    // adding Resolved date, since both are the same "one more date column"
+    // shape as createdRange/updatedRange above.
+    const dueDateRange  = url.searchParams.get('dueDateRange');
+    const resolvedRange = url.searchParams.get('resolvedRange');
     // Opt-in: attaches inProgressHrs (hours actually spent in an "In
     // Progress"-type status, not total ticket age) to every returned issue --
     // requires an extra issue_history query, so only paid by callers that
@@ -6320,6 +6328,14 @@ async function _handleJiraPgApi(
     } else if (updatedRange) {
       const { from, to } = parseDateRange(updatedRange);
       where.updatedAt = { gte: from, lte: to };
+    }
+    if (dueDateRange) {
+      const { from, to } = parseDateRange(dueDateRange);
+      where.dueDate = { gte: from, lte: to };
+    }
+    if (resolvedRange) {
+      const { from, to } = parseDateRange(resolvedRange);
+      where.resolvedAt = { gte: from, lte: to };
     }
 
     // Custom text field filters Ã¢â‚¬â€ support comma-separated multi-select values
@@ -7339,6 +7355,20 @@ async function _handleJiraPgApi(
       } else if (updatedRange) {
         const { from, to } = parseDateRange(updatedRange);
         deptExtraClauses.push(`i."updatedAt" >= $${deptParamIdx} AND i."updatedAt" <= $${deptParamIdx + 1}`);
+        deptExtraParams.push(from, to);
+        deptParamIdx += 2;
+      }
+      // Due Date and Resolved date -- same "never actually wired into this
+      // dept-scoped branch" gap as the general branch above.
+      if (dueDateRange) {
+        const { from, to } = parseDateRange(dueDateRange);
+        deptExtraClauses.push(`i."dueDate" >= $${deptParamIdx} AND i."dueDate" <= $${deptParamIdx + 1}`);
+        deptExtraParams.push(from, to);
+        deptParamIdx += 2;
+      }
+      if (resolvedRange) {
+        const { from, to } = parseDateRange(resolvedRange);
+        deptExtraClauses.push(`i."resolvedAt" >= $${deptParamIdx} AND i."resolvedAt" <= $${deptParamIdx + 1}`);
         deptExtraParams.push(from, to);
         deptParamIdx += 2;
       }

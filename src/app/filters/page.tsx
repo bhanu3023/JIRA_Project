@@ -761,6 +761,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'worked',         label: 'Worked',          group: 'Date' },
   { id: 'dueDate',        label: 'Due Date',        group: 'Date' },
+  { id: 'resolved',       label: 'Resolved date',   group: 'Date' },
 ];
 
 /* ─── Simple text filter button ─── */
@@ -1082,6 +1083,7 @@ export default function FiltersPage() {
   // Due Date already is.
   const [selWorked, setSelWorked]         = useState('');
   const [selDueDate, setSelDueDate]       = useState('');
+  const [selResolved, setSelResolved]     = useState('');
   const [selDepartment, setSelDepartment] = useState('');
   const [selProductType, setSelProductType] = useState<string[]>([]);
   const [selProductionTicket, setSelProductionTicket] = useState<string[]>([]);
@@ -1145,15 +1147,18 @@ export default function FiltersPage() {
   // backend support was simply unreachable -- there was no way to ever
   // send both params at once. Due Date has no such union support on the
   // backend, so it stays exclusive with both.
-  const DATE_GROUP_KEYS = ['created', 'updated', 'worked', 'dueDate'];
-  // Worked stands apart from created/updated/dueDate: none of those three
-  // may combine with it (same reasoning as dueDate's existing isolation).
-  const EXCLUSIVE_DATE_KEYS = ['worked', 'dueDate'];
+  const DATE_GROUP_KEYS = ['created', 'updated', 'worked', 'dueDate', 'resolved'];
+  // Worked/Due Date/Resolved date stand apart from created/updated: none of
+  // these may combine with each other (same reasoning as dueDate's existing
+  // isolation -- each changes what the date column itself means, rather
+  // than narrowing the same created/updated window further).
+  const EXCLUSIVE_DATE_KEYS = ['worked', 'dueDate', 'resolved'];
   const clearExtraValue = (key: string) => {
     if (key === 'created')        setSelCreated('');
     if (key === 'updated')        setSelUpdated('');
     if (key === 'worked')         setSelWorked('');
     if (key === 'dueDate')        setSelDueDate('');
+    if (key === 'resolved')       setSelResolved('');
     if (key === 'reporter')       setSelReporters([]);
     if (key === 'priority')       setSelPriorities([]);
     if (key === 'department')     setSelDepartment('');
@@ -1249,6 +1254,7 @@ export default function FiltersPage() {
     const rUpdated         = urlParams?.get('rUpdated');
     const rWorked          = urlParams?.get('rWorked');
     const rDueDate         = urlParams?.get('rDueDate');
+    const rResolved        = urlParams?.get('rResolved');
     const rDepartment      = urlParams?.get('rDepartment');
     const rProductType     = urlParams?.get('rProductType');
     const rProductionTicket = urlParams?.get('rProductionTicket');
@@ -1274,6 +1280,7 @@ export default function FiltersPage() {
     if (rUpdated) setSelUpdated(rUpdated);
     if (rWorked) setSelWorked(rWorked);
     if (rDueDate) setSelDueDate(rDueDate);
+    if (rResolved) setSelResolved(rResolved);
     if (rDepartment) setSelDepartment(rDepartment);
     if (rProductType) setSelProductType(rProductType.split(','));
     if (rProductionTicket) setSelProductionTicket(rProductionTicket.split(','));
@@ -1299,7 +1306,7 @@ export default function FiltersPage() {
       rProductType && 'productType', rProductionTicket && 'productionTicket', rCombination && 'combination', rCustomerName && 'customerName',
       rClientName && 'clientName', rProjectManager && 'projectManager', rProjectPool && 'projectPool',
       rInfraIssueType && 'infraIssueType',
-      rWorked && 'worked', rDueDate && 'dueDate',
+      rWorked && 'worked', rDueDate && 'dueDate', rResolved && 'resolved',
     ].filter(Boolean) as string[];
     if (rExtras || impliedExtras.length) {
       setActiveExtras(Array.from(new Set([...(rExtras ? rExtras.split(',') : []), ...impliedExtras])));
@@ -1329,6 +1336,7 @@ export default function FiltersPage() {
     if (selUpdated) p.rUpdated = selUpdated;
     if (selWorked) p.rWorked = selWorked;
     if (selDueDate) p.rDueDate = selDueDate;
+    if (selResolved) p.rResolved = selResolved;
     if (selDepartment) p.rDepartment = selDepartment;
     if (selProductType.length) p.rProductType = selProductType.join(',');
     if (selProductionTicket.length) p.rProductionTicket = selProductionTicket.join(',');
@@ -1343,7 +1351,7 @@ export default function FiltersPage() {
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selResolved, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1401,7 +1409,7 @@ export default function FiltersPage() {
   const hasCriteria = Boolean(
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
-    selCreated || selUpdated || selWorked || selDueDate || selDepartment ||
+    selCreated || selUpdated || selWorked || selDueDate || selResolved || selDepartment ||
     selProductType.length || selProductionTicket.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selInfraIssueType.length || selBreached || selOverdue,
   );
 
@@ -1485,6 +1493,7 @@ export default function FiltersPage() {
         // scope by. Sending it in either case would silently do nothing.
         if (selWorked && selQueue && selAssignees.length) params.workedRange = selWorked;
         if (selDueDate) params.dueDateRange = selDueDate;
+        if (selResolved) params.resolvedRange = selResolved;
 
         // Hours actually spent in an "In Progress"-type status per ticket --
         // needs an extra issue_history query on the backend, so opt-in rather
@@ -1510,7 +1519,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selResolved, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy.
      Short (150ms) debounce -- NOT the old flat 400ms, which made every
@@ -1621,6 +1630,7 @@ export default function FiltersPage() {
     projectPool:    { label: 'Project Pool',    getValue: (i) => i.projectPool ?? '' },
     infraIssueType: { label: 'Infra Issue Type', getValue: (i) => i.infraIssueType ?? '' },
     dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
+    resolved:       { label: 'Resolved date',   getValue: (i) => i.resolvedAt ?? '' },
   };
   const handleExport = async () => {
     setExporting(true);
@@ -1651,6 +1661,7 @@ export default function FiltersPage() {
         projectPool: !!selProjectPool,
         infraIssueType: selInfraIssueType.length > 0,
         dueDate: !!selDueDate,
+        resolved: !!selResolved,
       };
       const extraCols = Object.keys(EXPORT_EXTRA_COLUMNS).filter(
         (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
@@ -1779,6 +1790,7 @@ export default function FiltersPage() {
     projectPool: !!selProjectPool,
     infraIssueType: selInfraIssueType.length > 0,
     dueDate: !!selDueDate,
+    resolved: !!selResolved,
   };
   const tableExtraCols = EXTRA_FILTER_OPTIONS
     .map((f) => f.id)
@@ -1828,7 +1840,7 @@ export default function FiltersPage() {
   const clearAll = () => {
     setText(''); setSelSpaces([]); setSelQueue(''); setSelAssignees([]); setSelReporters([]);
     setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
-    setSelCreated(''); setSelUpdated(''); setSelDueDate('');
+    setSelCreated(''); setSelUpdated(''); setSelDueDate(''); setSelResolved('');
     setSelDepartment(''); setSelProductType([]); setSelProductionTicket([]);
     setSelCombination(''); setSelCustomerName([]); setSelClientName([]); setSelProjectManager([]);
     setSelProjectPool('');
@@ -1850,14 +1862,20 @@ export default function FiltersPage() {
     setSelPriorities(c.priorities || []);
     const cr = (c as any).createdRange || '';
     const ur = (c as any).updatedRange || '';
+    const ddr = (c as any).dueDateRange || '';
+    const rr = (c as any).resolvedRange || '';
     setSelCreated(cr);
     setSelUpdated(ur);
+    setSelDueDate(ddr);
+    setSelResolved(rr);
     // auto-show bar buttons for any criteria that have values
     const extras: string[] = [];
     if ((c as any).reporters?.length) extras.push('reporter');
     if (c.priorities?.length)         extras.push('priority');
     if (cr)                           extras.push('created');
     if (ur)                           extras.push('updated');
+    if (ddr)                          extras.push('dueDate');
+    if (rr)                           extras.push('resolved');
     setActiveExtras(extras);
     setActiveFilterId(f.id);
     setShowSavedPanel(false);
@@ -1876,7 +1894,7 @@ export default function FiltersPage() {
     if (activeFilterId === id) clearAll();
   };
 
-  const currentCriteria: FilterCriteria & { reporters?: string[]; createdRange?: string; updatedRange?: string; workedRange?: string } = {
+  const currentCriteria: FilterCriteria & { reporters?: string[]; createdRange?: string; updatedRange?: string; workedRange?: string; dueDateRange?: string; resolvedRange?: string } = {
     ...(text.trim() ? { text: text.trim() } : {}),
     ...(selSpaces.length ? { spaces: selSpaces } : {}),
     ...(selQueue ? { queue: selQueue } : {}),
@@ -1888,6 +1906,8 @@ export default function FiltersPage() {
     ...(selCreated ? { createdRange: selCreated } : {}),
     ...(selUpdated ? { updatedRange: selUpdated } : {}),
     ...(selWorked && selQueue && selAssignees.length ? { workedRange: selWorked } : {}),
+    ...(selDueDate ? { dueDateRange: selDueDate } : {}),
+    ...(selResolved ? { resolvedRange: selResolved } : {}),
   };
 
   // Helper: member name by ID
@@ -2342,6 +2362,12 @@ export default function FiltersPage() {
               <div className="flex items-center gap-1">
                 <DateDropBtn label="Due Date" selected={selDueDate} onChange={setSelDueDate} />
                 <button onClick={() => toggleExtra('dueDate')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('resolved') && (
+              <div className="flex items-center gap-1">
+                <DateDropBtn label="Resolved date" selected={selResolved} onChange={setSelResolved} />
+                <button onClick={() => toggleExtra('resolved')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
           </div>
