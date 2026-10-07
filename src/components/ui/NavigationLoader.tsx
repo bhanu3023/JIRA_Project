@@ -89,17 +89,17 @@ export default function NavigationLoader() {
   if (!loading) return null;
 
   return (
-    // Was bg-white/70 + backdrop-blur-[2px] -- translucent enough that the
-    // PREVIOUS page's own text/table-header/empty-state content still read
-    // clearly through it, and the blur smeared that leftover content rather
-    // than hiding it, reading as a half-loaded, broken page (reported for
-    // real: switching queues showed "No issues found" ghosting behind the
-    // spinner). Matches the content area's own background (#FAFBFC, see
-    // RootLayoutClient's <main>) at near-full opacity instead, so the old
-    // page is fully covered the instant this shows -- a clean "loading",
-    // not a blurry one. Fades in rather than popping, since it's now opaque
-    // enough that an instant appearance would read as a flash/flicker.
-    <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-[#FAFBFC]/95 animate-navloader-fade-in">
+    // Was bg-white/70 + backdrop-blur-[2px], then bg-[#FAFBFC]/95 -- both
+    // still translucent enough (the second one just barely) that the
+    // PREVIOUS page's own text/table rows/empty-state content kept reading
+    // through it, visible for real on a bright display even at 95% opacity.
+    // Fully solid now (no alpha channel at all), matching the content
+    // area's own background (#FAFBFC, see RootLayoutClient's <main>) --
+    // the old page is completely hidden the instant this shows, the same
+    // clean "solid background + centered spinner" every other loading
+    // state in the app already uses (e.g. KB Articles' own loading view),
+    // by explicit request that this one match them.
+    <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-[#FAFBFC] animate-navloader-fade-in">
       <DotLoader />
     </div>
   );
