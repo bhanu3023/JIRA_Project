@@ -11991,6 +11991,50 @@ async function _handleJiraPgApi(
     return json(result.rows[0]);
   }
 
+  // GET /worklogs -- cross-ticket worklog report, Jira's own "Logged work"
+  // view. Open to every user (not admin-gated), but a non-admin only sees
+  // entries for tickets they can actually reach themselves -- a space
+  // they're a member of, a ticket they reported/are assigned to, or their
+  // own logged entries -- never someone else's hours on a ticket in a
+  // space they have no access to at all.
+  if (path === 'worklogs' && method === 'GET') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const qs = url.searchParams;
+    const from = qs.get('from');
+    const to = qs.get('to');
+    const authorFilter = qs.get('userId');
+    const spaceKeyFilter = qs.get('spaceKey');
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let n = 1;
+    if (!isAdmin) {
+      conditions.push(`(
+        sp.id IN (SELECT "spaceId" FROM space_members WHERE "userId" = $${n})
+        OR iss."reporterId" = $${n}
+        OR iss."assigneeId" = $${n}
+        OR wl."authorId" = $${n}
+      )`);
+      params.push(userId); n++;
+    }
+    if (from) { conditions.push(`wl."workDate" >= $${n}`); params.push(new Date(from)); n++; }
+    if (to) { conditions.push(`wl."workDate" <= $${n}`); params.push(new Date(to)); n++; }
+    if (authorFilter) { conditions.push(`wl."authorId" = $${n}`); params.push(authorFilter); n++; }
+    if (spaceKeyFilter) { conditions.push(`sp.key = $${n}`); params.push(spaceKeyFilter.toUpperCase()); n++; }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const rows = await pool.query(
+      `SELECT wl.id, wl.department, wl."timeSpentMinutes", wl.description, wl."workDate", wl."authorId", wl."authorName", wl."authorEmail", wl."createdAt",
+              iss.key AS "issueKey", iss.summary AS "issueSummary", sp.key AS "spaceKey", sp.name AS "spaceName"
+       FROM issue_worklogs wl
+       JOIN issues iss ON iss.id = wl."issueId"
+       JOIN spaces sp ON sp.id = iss."spaceId"
+       ${where}
+       ORDER BY wl."workDate" DESC, wl."createdAt" DESC
+       LIMIT 2000`,
+      params
+    );
+    return json(rows.rows);
+  }
+
   // DELETE worklogs/:id -- the entry's own author, or an admin, only.
   const worklogById = path.match(/^worklogs\/([^/]+)$/);
   if (worklogById && method === 'DELETE') {
