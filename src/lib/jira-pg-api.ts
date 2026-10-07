@@ -7040,7 +7040,16 @@ async function _handleJiraPgApi(
           // confirmed for real on CF-32901 (Migration -> Dev): Migration's own
           // dept_statuses snapshot plainly says "Routed to Dev", but its current
           // assignee is now a Dev team member, so memberClause alone excluded it.
-          const broadenIt = (createdRange || updatedRange || statusParam) && queueMembersOnlyParam;
+          // dueDateRange/resolvedRange added to this trigger alongside
+          // createdRange/updatedRange/statusParam -- missed when those two
+          // filters were first wired up, which silently re-excluded a
+          // resolved ticket the instant its final assignee was no longer a
+          // configured member of this queue (or it had since moved
+          // departments), the exact same gap already fixed here once for
+          // Created/Updated/Status. Confirmed for real: Queue: Migration +
+          // Resolved date: Sep 2026 undercounted resolved tickets for
+          // exactly this reason.
+          const broadenIt = (createdRange || updatedRange || dueDateRange || resolvedRange || statusParam) && queueMembersOnlyParam;
           // reason != 'passed': a 'passed' row only means someone in this dept
           // routed the ticket onward (or was auto-credited as the assignee at
           // the time of a move with no assignee yet) -- not that they did any
@@ -7515,7 +7524,15 @@ async function _handleJiraPgApi(
       // above), "Updated" means activity, not completion -- a genuine
       // worked-on row for this dept is on its own enough evidence the ticket
       // belongs here, done or not.
-      const updatedDeptMatchSql = updatedRange && queueMembersOnlyParam && !workedDeptMatchSql
+      // Resolved date / Due Date share this exact same gap as Updated did --
+      // both are "some timestamp column landing in range, regardless of
+      // which department the ticket sits in NOW" filters, same as Updated,
+      // so they get the identical broadening (a ticket resolved by this
+      // dept and later routed on still belongs to it, same reasoning as the
+      // long comment above). Confirmed for real: Queue: Migration +
+      // Resolved date: Sep 2026 undercounted resolved tickets for exactly
+      // this reason before this was added.
+      const updatedDeptMatchSql = (updatedRange || resolvedRange || dueDateRange) && queueMembersOnlyParam && !workedDeptMatchSql
         ? `(
              (LOWER(i.current_department) = LOWER($2) ${deptDoneClause})
              OR (LOWER(i.current_department) != LOWER($2) AND (
