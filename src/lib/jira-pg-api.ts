@@ -7326,24 +7326,29 @@ async function _handleJiraPgApi(
       // were likewise only ever wired into the general Prisma branch — picking any
       // of these while viewing a department queue showed "0 issues" even for tickets
       // created that same day.
-      // Created + Updated active together was switched to a union here (OR
-      // instead of two separate AND clauses) to avoid dropping a ticket
-      // created in one window but only updated in the other. Reverted back
-      // to requiring both per explicit request: confirmed for real that
-      // "Created: More than 1 day ago" (matching nearly every ticket ever
-      // created) unioned with "Updated: Within last 1 day" swamped the
-      // result with thousands of tickets the Created side alone already
-      // matched, once the separately-fixed "More than" date filter bug let
-      // that combination actually get typed. Note this only restricts the
-      // date COLUMNS themselves -- deptScopeSql's own union of origin/
-      // updated/status-based department-membership broadening (further
-      // down) is a different, still-intentional concern and is unaffected.
+      // Created + Updated active together here means "touched" (created OR
+      // updated in the window) -- a UNION, not an intersection -- so this
+      // Queue-scoped view can actually reproduce MBR's own date-range
+      // semantics (reports/mbr and reports/mbr-team apply one range to
+      // createdAt OR updatedAt, with no separate Created/Updated toggle of
+      // their own). Confirmed for real: Queue: Dev + Created & Updated both
+      // active for Sep 2026 landed on 576 (intersection) while MBR's
+      // Customer Engineering tab -- same roster, same month, same
+      // department -- showed 694; recomputing as a union here matches it
+      // exactly (694 = 694), with zero other discrepancy once the two
+      // pages apply the same definition. This was a union once before and
+      // got reverted to an intersection per an earlier explicit request
+      // (swamping on an unscoped "Created: More than 1 day ago" + "Updated:
+      // Within last 1 day" combo) -- that complaint was about the general,
+      // NOT queue-scoped, branch further up this file (still an
+      // intersection, untouched here); a Queue filter already bounds the
+      // result set to that department's own tickets, so the same swamping
+      // risk doesn't apply here the way it did unscoped.
       if (createdRange && updatedRange) {
         const created = parseDateRange(createdRange);
         const updated = parseDateRange(updatedRange);
         deptExtraClauses.push(
-          `(i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1})`,
-          `(i."updatedAt" >= $${deptParamIdx + 2} AND i."updatedAt" <= $${deptParamIdx + 3})`
+          `((i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}) OR (i."updatedAt" >= $${deptParamIdx + 2} AND i."updatedAt" <= $${deptParamIdx + 3}))`
         );
         deptExtraParams.push(created.from, created.to, updated.from, updated.to);
         deptParamIdx += 4;

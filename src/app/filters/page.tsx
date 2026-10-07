@@ -2372,20 +2372,34 @@ export default function FiltersPage() {
             )}
           </div>
         )}
-        {/* Created+Updated together require BOTH to match the same ticket
-            (an intersection, not "either one"), by explicit earlier request.
-            That's correct, but easy to get burned by for an older/migrated
-            ticket -- its real last-activity date can land anywhere, often
-            much later than when it was created, so a narrow range applied
-            to both fields can hide a ticket that's genuinely from the
-            period you're looking for. Confirmed for real: a ticket created
-            in Feb 2026 whose only later touch was a bulk Jira-side action
-            in May 2026 is invisible to "Created: Feb, Updated: Feb"
-            even though it's exactly the ticket that search is trying to
-            find. Surfacing this explicitly here (once, when both are
-            active) rather than leaving people to rediscover it by getting
-            zero results. */}
-        {selCreated && selUpdated && (
+        {/* Created+Updated together mean different things depending on
+            whether a single Queue is also selected:
+            - Queue scoped (selQueue + exactly one space, i.e. params.dept
+              actually gets sent -- see buildFilterParams): a UNION
+              (created OR updated in range), matching MBR's own "touched"
+              date-range semantics exactly (reports/mbr and mbr-team apply
+              one range to createdAt OR updatedAt, no separate toggle).
+              Confirmed for real: Queue: Dev + Sep 2026 landed on 694 this
+              way, exactly matching MBR's Customer Engineering tab for the
+              identical scope.
+            - Not queue-scoped: an INTERSECTION (both have to match the
+              same ticket), kept exactly as before per that earlier
+              explicit request -- confirmed for real that unioning an
+              unscoped "Created: More than 1 day ago" with "Updated: Within
+              last 1 day" swamped the result with thousands of tickets the
+              Created side alone already matched. A Queue filter already
+              bounds the result set to one department, so that swamping
+              risk doesn't apply there the way it did unscoped. */}
+        {selCreated && selUpdated && selQueue && selSpaces.length === 1 && (
+          <div className="flex items-start gap-2 px-4 py-2 bg-blue-50 border-b border-blue-100 text-[11.5px] text-blue-800">
+            <Filter size={13} className="mt-0.5 flex-shrink-0" />
+            <span>
+              Created and Updated are combined as "either one" within this queue (matches MBR's own date-range
+              behavior for the same department) -- a ticket only touched in one of the two still counts.
+            </span>
+          </div>
+        )}
+        {selCreated && selUpdated && !(selQueue && selSpaces.length === 1) && (
           <div className="flex items-start gap-2 px-4 py-2 bg-amber-50 border-b border-amber-100 text-[11.5px] text-amber-800">
             <Filter size={13} className="mt-0.5 flex-shrink-0" />
             <span>
