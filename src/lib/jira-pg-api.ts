@@ -13181,22 +13181,46 @@ async function _handleJiraPgApi(
       infra: [
         'gururaj.bhimrao@cloudfuze.com', 'hymavathi@cloudfuze.com', 'pavan@cloudfuze.com', 'bala.raviteja@cloudfuze.com',
       ],
+      // Re-synced against the live Migration queue (confirmed for real via a
+      // direct roster diff): 8 live queue members were missing from this
+      // list entirely (their tickets invisible to both ENT and SMB), and 3
+      // people kept here were no longer on the live queue at all. For each
+      // of the 8, checked their own historical Migration tickets'
+      // projectPool value (ENT/SMB is recorded per-TICKET, just never
+      // aggregated per-person anywhere) to place them correctly rather than
+      // guessing: ambika.patil/meghana.chowdada/nithish.bunne/
+      // sanjana.nerella were 97-100% SMB across their own tickets;
+      // vainateya.rasala was 98.6% ENT. bharath.tummaganti and
+      // jyoshitha.dhannapaneni have ZERO Migration tickets ever assigned --
+      // no data signal either way, left off both lists rather than guessed;
+      // revisit once either actually has ticket history. kiran.ummenthala
+      // also has zero Migration tickets and is already on the QA list
+      // above -- left off here too, she reads as QA-only despite being a
+      // configured Migration queue member for some other (access-level,
+      // cross-training) reason unrelated to doing Migration ticket work.
+      // The 3 removed (lakshmi.prasanna, abhishikth.yenugula,
+      // raghu.yellani) keep their past tickets in real ticket history --
+      // this only stops NEW/ongoing tickets from being mis-attributed to
+      // them, same tradeoff eng/qa/infra's live-roster lookup already
+      // accepts (past months shift if queue membership changes).
       ent: [
         'abhishek.sakala@cloudfuze.com', 'arun@cloudfuze.com', 'chaitanya.gupta@cloudfuze.com', 'chandra.mouli@cloudfuze.com',
         'davidraj.dumpala@cloudfuze.com', 'ganesh.kondameedi@cloudfuze.com', 'harshith.kaduluri@cloudfuze.com', 'lakshmareddy@cloudfuze.com',
-        'lakshmi.prasanna@cloudfuze.com', 'manoj.bathula@cloudfuze.com', 'pallavi.kosuvaripalli@cloudfuze.com', 'pranavi@cloudfuze.com',
+        'manoj.bathula@cloudfuze.com', 'pallavi.kosuvaripalli@cloudfuze.com', 'pranavi@cloudfuze.com',
         // Confirmed real, active migration_engineer account (created
         // 2026-08-28, 16 assigned tickets, 22 worked-on rows) that was
         // missing from this hand-maintained list entirely -- her tickets
         // were invisible in MBR's Migration ENT tab until this was added.
         'tanmai.arangi@cloudfuze.com',
+        'vainateya.rasala@cloudfuze.com',
       ],
       smb: [
-        'abhishikth.yenugula@cloudfuze.com', 'ajay.singh@cloudfuze.com', 'ramana.reddy@cloudfuze.com', 'amulya.anapuram@cloudfuze.com',
+        'ajay.singh@cloudfuze.com', 'ramana.reddy@cloudfuze.com', 'amulya.anapuram@cloudfuze.com',
         'dathu.kaluvala@cloudfuze.com', 'habeebunnisa.begum@cloudfuze.com', 'harika.velidi@cloudfuze.com', 'meena.lakshmi@cloudfuze.com',
-        'neelima.krotta@cloudfuze.com', 'raghu.yellani@cloudfuze.com', 'ranadeep.muddam@cloudfuze.com', 'ravi.hemanth@cloudfuze.com',
+        'neelima.krotta@cloudfuze.com', 'ranadeep.muddam@cloudfuze.com', 'ravi.hemanth@cloudfuze.com',
         'saikumar.kustapuram@cloudfuze.com', 'siva.kota@cloudfuze.com', 'sravan.kesaram@cloudfuze.com', 'sriram.ramakrishnan@cloudfuze.com',
         'swaroop@cloudfuze.com', 'vijendar.burgula@cloudfuze.com', 'vineetha.yenti@cloudfuze.com',
+        'ambika.patil@cloudfuze.com', 'meghana.chowdada@cloudfuze.com', 'nithish.bunne@cloudfuze.com', 'sanjana.nerella@cloudfuze.com',
       ],
     };
 
