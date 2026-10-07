@@ -15,6 +15,7 @@ import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 import { handleKbApi } from '@/lib/kb-api';
+import { handleSavedFiltersApi } from '@/lib/saved-filters-api';
 import sanitizeHtml from 'sanitize-html';
 
 // Rich-text HTML (comment bodies, issue descriptions/root cause/fix
@@ -3672,7 +3673,12 @@ function formatIssue(issue: any) {
 // Ã¢â€â‚¬Ã¢â€â‚¬ Date range parser (same logic as mock) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function parseDateRange(range: string): { from: Date; to: Date } {
   const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  // IST midnight, not the server process's local midnight -- the container
+  // runs in UTC, which shifted "Today"/"Yesterday"/"Last N days" by 5.5h
+  // against the IST calendar day users mean (the "between:" branch below
+  // was already anchored to IST for the same reason).
+  const istToday = new Date(now.getTime() + 330 * 60_000).toISOString().slice(0, 10);
+  const startOfToday = new Date(`${istToday}T00:00:00+05:30`);
 
   if (range.startsWith('withinLast:')) {
     const [, ns, unit] = range.split(':');
@@ -5033,6 +5039,13 @@ async function _handleJiraPgApi(
     if (kbRes) return kbRes;
   }
 
+  // Saved filters (filters/...) -- stored in Postgres, see saved-filters-api.ts.
+  // Used to fall through to jira-dev-mock.ts's in-memory list.
+  if (userId && (path === 'filters' || path.startsWith('filters/'))) {
+    const filtersRes = await handleSavedFiltersApi(req, path, method, { userId, currentUser, isAdmin });
+    if (filtersRes) return filtersRes;
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ Stats Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   if (path === 'stats' && method === 'GET') {
@@ -6074,6 +6087,30 @@ async function _handleJiraPgApi(
     const manageClientParam   = url.searchParams.get('manageClientName');
     const customerPlanParam   = url.searchParams.get('customerPlan');
     const infraIssueTypeParam = url.searchParams.get('infraIssueType');
+    // Multi-select values were comma-joined, which split a value that itself
+    // contains a comma ("Acme, Inc.") into two values that never match. The
+    // Filters page now joins with "|||" and says so via multiSep=pipe; older
+    // links and other callers without the flag keep the comma behaviour.
+    // projectManager has always used "|||".
+    const multiSep = url.searchParams.get('multiSep') === 'pipe' ? '|||' : ',';
+    const splitMulti = (param: string | null): string[] =>
+      param ? param.split(multiSep).map((v) => v.trim()).filter(Boolean) : [];
+    // A ticket can store several Product Types / Project Managers in one
+    // field ("Message Migration, Email Migration"). A selected value has to
+    // match one whole item of that list -- substring matching made "UI"
+    // match anything containing "ui" and "Kiran" match every Kiran.
+    // Same rule for both query branches: Prisma conditions here, SQL below.
+    const listItemPrismaOr = (field: string, v: string) => [
+      { [field]: { equals: v, mode: 'insensitive' as const } },
+      { [field]: { startsWith: `${v},`, mode: 'insensitive' as const } },
+      { [field]: { endsWith: `,${v}`, mode: 'insensitive' as const } },
+      { [field]: { endsWith: `, ${v}`, mode: 'insensitive' as const } },
+      { [field]: { contains: `,${v},`, mode: 'insensitive' as const } },
+      { [field]: { contains: `, ${v},`, mode: 'insensitive' as const } },
+    ];
+    // SQL equivalent: split the stored value on commas and compare items.
+    const listItemSql = (col: string, paramIdx: number) =>
+      `EXISTS (SELECT 1 FROM unnest(string_to_array(COALESCE(i."${col}", ''), ',')) item WHERE LOWER(TRIM(item)) = ANY($${paramIdx}::text[]))`;
 
     // Build Prisma WHERE
     const where: Record<string, unknown> = {};
@@ -6167,18 +6204,18 @@ async function _handleJiraPgApi(
       // selected (includeHistory, gated on selQueue in the frontend); the
       // request here is for it to just always apply whenever an Assignee
       // filter is active, Queue selected or not.
-      // reason != 'passed' -- a 'passed' row only means this person routed/
-      // reassigned the ticket onward, not that they did real work on it
-      // (same guard every other user_worked_on_tickets join in this file
-      // applies). Missing it here meant filtering Assignee by someone who
-      // only ever handed a ticket off to someone else still surfaced that
-      // ticket and showed THEIR name as Assignee, same false-positive
-      // already confirmed and fixed elsewhere for Ravi Srivastava/CF-30614.
+      // 'passed' rows count too, by explicit decision: Assignee on the
+      // Filters page means "owner or past worker", and a 'passed' row is
+      // exactly what's left when someone held the ticket in their
+      // department and it was then routed on (e.g. a Dev engineer works a
+      // Migration-raised ticket and sends it back -- the routing move writes
+      // their Dev record as 'passed'). Excluding them hid those tickets.
+      // Same rule as the Queue-scoped branch below (FILTERS_WORKED_REASON_SQL).
       const workedRows = userIds.length
         ? await pool.query(
             `SELECT DISTINCT ON (w.issue_id) w.issue_id, u.id, u."firstName", u."lastName", u.email, u."avatarUrl"
              FROM user_worked_on_tickets w JOIN users u ON u.id = w.user_id
-             WHERE w.user_id = ANY($1::text[]) AND w.reason != 'passed'
+             WHERE w.user_id = ANY($1::text[])
              ORDER BY w.issue_id, w.worked_at DESC`,
             [userIds]
           )
@@ -6243,11 +6280,17 @@ async function _handleJiraPgApi(
       // checks EVERY department's own dept_statuses entry for a match --
       // "does ANY department's snapshot on this ticket say this" is the
       // sensible reading for a filter with no queue context.
+      // Only "Routed to X"/"Waiting for X" labels are matched against
+      // dept_statuses -- an ordinary status (Open, In Progress, ...) matches
+      // the ticket's real current status only. Matching every department's
+      // snapshot let a ticket resolved elsewhere still show under "Open"
+      // because some department's stale snapshot said so (the Queue-scoped
+      // branch already applies this same routing-only rule).
       let deptStatusMatchIds: string[] = [];
       try {
         const scopedSpaceIds = typeof where.spaceId === 'string' ? [where.spaceId] : ((where.spaceId as any)?.in || []);
-        if (scopedSpaceIds.length) {
-          const lowerNames = names.map((n) => n.toLowerCase());
+        const lowerNames = names.map((n) => n.toLowerCase()).filter((n) => /^(waiting\s+for|routed\s+to)\s+/i.test(n));
+        if (scopedSpaceIds.length && lowerNames.length) {
           const deptMatchRows = await pool.query(
             `SELECT i.id, ds.k AS dept, ds.v AS status_obj FROM issues i, jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
              WHERE i."spaceId" = ANY($1::text[]) AND LOWER(ds.v->>'name') = ANY($2::text[])`,
@@ -6307,21 +6350,19 @@ async function _handleJiraPgApi(
       ]);
     }
 
-    // Date range filters -- Created+Updated together used to be a union
-    // (everything created in that window, plus everything updated in that
-    // window) rather than requiring both on the same ticket, specifically
-    // to avoid dropping a ticket created in one window but only updated in
-    // the other. Reverted back to an intersection per explicit request:
-    // confirmed for real that "Created: More than 1 day ago" (matching
-    // nearly every ticket ever created) unioned with "Updated: Within last
-    // 1 day" swamped the result with thousands of unrelated tickets the
-    // Created side alone already matched, once the "More than" date filter
-    // bug (separately fixed) let that combination actually get typed.
+    // Created + Updated together = created in its window OR updated in its
+    // window -- the same union the Queue-scoped branch below (and MBR)
+    // uses, by explicit decision, so the two Filters views agree. The old
+    // reason for an intersection here ("More than N ago" matching nearly
+    // everything) no longer applies: that option is now a bounded
+    // "Exactly N ago" window.
     if (createdRange && updatedRange) {
       const created = parseDateRange(createdRange);
       const updated = parseDateRange(updatedRange);
-      where.createdAt = { gte: created.from, lte: created.to };
-      where.updatedAt = { gte: updated.from, lte: updated.to };
+      addOrGroup([
+        { createdAt: { gte: created.from, lte: created.to } },
+        { updatedAt: { gte: updated.from, lte: updated.to } },
+      ]);
     } else if (createdRange) {
       const { from, to } = parseDateRange(createdRange);
       where.createdAt = { gte: from, lte: to };
@@ -6342,7 +6383,7 @@ async function _handleJiraPgApi(
     // Values come from DB dropdown so they match exactly (no case transform needed)
     const applyMultiField = (param: string | null, field: string) => {
       if (!param) return;
-      const vals = param.split(',').map(v => v.trim()).filter(Boolean);
+      const vals = splitMulti(param);
       if (vals.length === 0) return;
       // Single value: exact match; multiple values: IN clause (match any)
       (where as any)[field] = vals.length === 1 ? vals[0] : { in: vals };
@@ -6354,7 +6395,7 @@ async function _handleJiraPgApi(
     // Name's own filter, just below, still only matches clientName) since
     // that's what was actually asked for.
     if (customerNameParam) {
-      const vals = customerNameParam.split(',').map(v => v.trim()).filter(Boolean);
+      const vals = splitMulti(customerNameParam);
       if (vals.length) {
         addOrGroup([
           { customerName: vals.length === 1 ? vals[0] : { in: vals } },
@@ -6363,18 +6404,16 @@ async function _handleJiraPgApi(
       }
     }
     applyMultiField(clientNameParam,     'clientName');
-    // Project Manager filter checkboxes are individual people (the same fixed list
-    // the ticket's own Project Manager field picks from), but a ticket's stored
-    // value can be several of them joined together (e.g. "Abhishikth, Abhishek"
-    // when both are picked) — so this has to be a "contains" match per selected
-    // name, not an exact/IN match against the whole stored string, or picking
-    // "Abhishek" alone would miss every ticket where he's one of several PMs.
-    // Selections are joined with "|||" (not ",") since a name list can itself
-    // contain a comma.
+    // Project Manager filter checkboxes are individual people, but a ticket's
+    // stored value can be several of them joined together (e.g. "Abhishikth,
+    // Abhishek" when both are picked) -- so each selected name matches one
+    // whole item of that list (listItemPrismaOr), not the whole string and
+    // not any substring. Selections are joined with "|||" (not ",") since a
+    // name list can itself contain a comma.
     if (projectManagerParam) {
       const vals = projectManagerParam.split('|||').map(v => v.trim()).filter(Boolean);
       if (vals.length) {
-        const pmOr: any[] = vals.map((v) => ({ projectManager: { contains: v, mode: 'insensitive' as const } }));
+        const pmOr: any[] = vals.flatMap((v) => listItemPrismaOr('projectManager', v));
         // "Others" also catches a ticket with no PM set at all -- see the
         // matching comment on the dept-scoped branch below for why.
         if (vals.some((v) => v.toLowerCase() === 'others')) {
@@ -6395,11 +6434,11 @@ async function _handleJiraPgApi(
     // selecting every known Product Type option still dropped 7 real
     // tickets (CF-33406, CF-33366, CF-33199, CF-32993, CF-32978, CF-30766,
     // CF-30670), each with a comma-combined productType value. Same
-    // "contains" per-selected-value OR-group fix as projectManager.
+    // whole-list-item match as projectManager.
     if (productTypeParam) {
-      const vals = productTypeParam.split(',').map(v => v.trim()).filter(Boolean);
+      const vals = splitMulti(productTypeParam);
       if (vals.length) {
-        const ptOr: any[] = vals.map((v) => ({ productType: { contains: v, mode: 'insensitive' as const } }));
+        const ptOr: any[] = vals.flatMap((v) => listItemPrismaOr('productType', v));
         if (!where.AND) where.AND = [];
         (where.AND as any[]).push({ OR: ptOr });
       }
@@ -6462,7 +6501,7 @@ async function _handleJiraPgApi(
           },
           // See the matching orderBy just below (the non-prefilter branch)
           // for why category:'desc' -- same reasoning, same fix.
-          orderBy: [{ status: { category: 'desc' } }, { createdAt: 'desc' }],
+          orderBy: [{ status: { category: 'desc' } }, { createdAt: 'desc' }, { id: 'desc' }],
           take: Math.min(candidateCount, SLA_PREFILTER_CAP),
         });
         total = issues.length; // placeholder -- corrected after breach filtering below
@@ -6492,7 +6531,7 @@ async function _handleJiraPgApi(
             // equivalent done-last ordering without rewriting this whole
             // branch to raw SQL. If a new category is ever introduced that
             // sorts before 'done' alphabetically, this would need revisiting.
-            orderBy: [{ status: { category: 'desc' } }, { createdAt: 'desc' }],
+            orderBy: [{ status: { category: 'desc' } }, { createdAt: 'desc' }, { id: 'desc' }],
             skip: (page - 1) * limit,
             take: limit,
           }),
@@ -6953,12 +6992,27 @@ async function _handleJiraPgApi(
         const fallback = await db.space.findUnique({ where: { key: spaceKey }, select: { id: true } });
         if (fallback) { allSpaceIds = [fallback.id]; spaceKeyMap[fallback.id] = spaceKey; }
       }
+      // The Filters page's Queue view (queueMembersOnly) had no space-
+      // membership check at all, unlike its non-Queue branch above -- a
+      // non-member could read any space's queue by putting its key in the
+      // URL. Same rule as that branch: non-admins must belong to the space.
+      // Limited to queueMembersOnly so the department board pages keep their
+      // own existing access rules (isUserAuthorizedForDeptQueue).
+      if (!isAdmin && url.searchParams.get('queueMembersOnly') === 'true' && allSpaceIds.length) {
+        const membership = userId
+          ? await db.spaceMember.findFirst({ where: { userId, spaceId: allSpaceIds[0] }, select: { id: true } })
+          : null;
+        if (!membership) allSpaceIds = [];
+      }
 
       const deptExcludeDone = excludeDone;
+      // Searches description too, same columns as the non-Queue branch.
+      // Wildcards typed by the user (% and _) are escaped so they match
+      // literally instead of acting as LIKE patterns.
       const deptSearchClause = searchQ
-        ? `AND (LOWER(i.summary) LIKE LOWER($3) OR LOWER(i.key) LIKE LOWER($3) OR LOWER(COALESCE(i.cf_key,'')) LIKE LOWER($3))`
+        ? `AND (i.summary ILIKE $3 OR i.key ILIKE $3 OR COALESCE(i.cf_key,'') ILIKE $3 OR COALESCE(i.description,'') ILIKE $3)`
         : '';
-      const deptSearchParam = searchQ ? `%${searchQ.trim()}%` : null;
+      const deptSearchParam = searchQ ? `%${searchQ.trim().replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
 
       // This dept-scoped branch used to ignore every other active filter (assignee,
       // reporter, type, priority, status) — fine for the plain per-department queue
@@ -7083,8 +7137,17 @@ async function _handleJiraPgApi(
           // exclusion when the selected status actually looks like one of
           // these routing labels; an ordinary status pick (e.g. "In
           // Progress") keeps the normal real-work-only semantics.
-          const statusLooksLikeRouting = !!statusParam && statusParam.split(',').some((s2) => /^(waiting\s+for|routed\s+to)\s+/i.test(s2.trim()));
-          const reasonClause = statusLooksLikeRouting ? '' : ` AND w4.reason != 'passed'`;
+          //
+          // Superseded by explicit decision: 'passed' rows now always count
+          // here. A queue member who held the ticket in this department and
+          // routed it on (e.g. a Dev engineer sending a Migration-raised
+          // ticket back) is recorded ONLY as 'passed' for this department --
+          // the status change that does the routing credits the department
+          // the ticket lands in, not this one. Excluding 'passed' therefore
+          // dropped exactly those tickets (Queue: Dev + Created/Updated Sep).
+          // workedByMemberSql still limits this to this queue's own members.
+          // Filters can now count more than MBR, which still excludes 'passed'.
+          const reasonClause = '';
           deptExtraClauses.push(
             broadenIt
               ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)${reasonClause}${workedByMemberSql}))`
@@ -7140,7 +7203,11 @@ async function _handleJiraPgApi(
       } else if (workedRange && assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         workedAssigneeIds = await resolveUserIds(ids);
-      } else if ((includeHistoryParam || (updatedRange && queueMembersOnlyParam)) && assignees) {
+      } else if ((includeHistoryParam || queueMembersOnlyParam) && assignees) {
+        // Filters page (queueMembersOnly): always "owner or past worker",
+        // whatever date filter is active -- by explicit decision, so the
+        // Assignee filter means the same thing in every combination instead
+        // of switching to strict ownership when only Created was set.
         // Explicitly reversing the earlier "Queue + Assignee means current
         // ownership only" decision for the Updated filter specifically, per
         // direct request -- confirmed understanding that this reintroduces
@@ -7269,8 +7336,8 @@ async function _handleJiraPgApi(
           // invisible to this filter no matter what.
           const hasOthers = pmVals.some((v) => v.toLowerCase() === 'others');
           const nullClause = hasOthers ? ` OR i."projectManager" IS NULL OR i."projectManager" = ''` : '';
-          deptExtraClauses.push(`(i."projectManager" ILIKE ANY($${deptParamIdx}::text[])${nullClause})`);
-          deptExtraParams.push(pmVals.map((v) => `%${v}%`));
+          deptExtraClauses.push(`(${listItemSql('projectManager', deptParamIdx)}${nullClause})`);
+          deptExtraParams.push(pmVals.map((v) => v.toLowerCase()));
           deptParamIdx++;
         }
       }
@@ -7284,10 +7351,10 @@ async function _handleJiraPgApi(
       // real tickets (CF-33406, CF-33366, CF-33199, CF-32993, CF-32978,
       // CF-30766, CF-30670), each with a comma-combined productType value.
       if (productTypeParam) {
-        const ptVals = productTypeParam.split(',').map((v) => v.trim()).filter(Boolean);
+        const ptVals = splitMulti(productTypeParam);
         if (ptVals.length) {
-          deptExtraClauses.push(`i."productType" ILIKE ANY($${deptParamIdx}::text[])`);
-          deptExtraParams.push(ptVals.map((v) => `%${v}%`));
+          deptExtraClauses.push(listItemSql('productType', deptParamIdx));
+          deptExtraParams.push(ptVals.map((v) => v.toLowerCase()));
           deptParamIdx++;
         }
       }
@@ -7313,7 +7380,7 @@ async function _handleJiraPgApi(
       ];
       for (const [param, col] of deptSimpleTextFields) {
         if (!param) continue;
-        const vals = param.split(',').map((v) => v.trim()).filter(Boolean);
+        const vals = splitMulti(param);
         if (!vals.length) continue;
         deptExtraClauses.push(`i."${col}" = ANY($${deptParamIdx}::text[])`);
         deptExtraParams.push(vals);
@@ -7324,7 +7391,7 @@ async function _handleJiraPgApi(
       // equals the same value (same reasoning as the general branch's own
       // fix, see its comment there).
       if (customerNameParam) {
-        const vals = customerNameParam.split(',').map((v) => v.trim()).filter(Boolean);
+        const vals = splitMulti(customerNameParam);
         if (vals.length) {
           deptExtraClauses.push(`(i."customerName" = ANY($${deptParamIdx}::text[]) OR i."clientName" = ANY($${deptParamIdx}::text[]))`);
           deptExtraParams.push(vals);
@@ -7496,7 +7563,7 @@ async function _handleJiraPgApi(
              )) = LOWER($2)
              OR EXISTS (
                SELECT 1 FROM user_worked_on_tickets w
-               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${originWorkedByMemberSql}
+               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${originWorkedByMemberSql}
              )
            )`
         : null;
@@ -7542,7 +7609,7 @@ async function _handleJiraPgApi(
                )
                OR EXISTS (
                  SELECT 1 FROM user_worked_on_tickets w
-                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${originWorkedByMemberSql}
+                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${originWorkedByMemberSql}
                )
              ))
            )`
@@ -7597,16 +7664,12 @@ async function _handleJiraPgApi(
            )`
         : null;
       // originDeptMatchSql/updatedDeptMatchSql/memberClause's broadenIt above
-      // all exclude reason = 'passed' now -- a 'passed' row only means someone
-      // in this dept routed the ticket onward (or was auto-credited as the
-      // assignee at the time of a move with no assignee yet), not that they
-      // did real work; it's deleted outright once real work follows (see the
-      // DELETE ... WHERE reason='passed' elsewhere in this file). Confirmed
-      // for real: 8 Migration/Infra tickets were counted under Queue: Dev +
-      // Updated: Aug purely because their only Dev record was a 'passed'
-      // hand-off, which is exactly the class of false positive already fixed
-      // in reports/mbr-team's own rosterMatchSql/deptMatchSql (see their
-      // comment re: Shiva Amuda) -- this brings Filters in line with that.
+      // used to exclude reason = 'passed' to match MBR's rosterMatchSql. That
+      // was reversed by explicit decision: a 'passed' row by one of this
+      // queue's own members (originWorkedByMemberSql / workedByMemberSql) is
+      // how a ticket the member held here and then routed on is recorded,
+      // and those tickets belong in this queue's results. MBR still excludes
+      // them, so Filters can now count more than MBR for the same scope.
       // Department-scope (which of the three modes above decides "does this
       // ticket belong to dept $2") and assignee-scope (does the selected
       // person match, optionally including their historical work here) are
@@ -7656,12 +7719,17 @@ async function _handleJiraPgApi(
       // department to match here too (same rule MBR's per-person count
       // already used) fixes it without touching the OTHER branch below,
       // which already correctly requires the record be THIS person's own.
+      // On the Filters page (queueMembersOnly) a 'passed' row counts as this
+      // person's work here -- it's the record left when they held the ticket
+      // in this department and it was routed on (Assignee = "owner or past
+      // worker", by explicit decision). Other callers keep excluding it.
+      const assigneeHistoryReasonSql = queueMembersOnlyParam ? '' : ` AND w.reason != 'passed'`;
       const assigneeScopeSql = historyAssigneeIdx
         ? `(
             (i."assigneeId" = ANY($${historyAssigneeIdx}::text[]) AND LOWER(i.current_department) = LOWER($2))
             OR EXISTS (
               SELECT 1 FROM user_worked_on_tickets w
-              WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'
+              WHERE w.issue_id = i.id AND w.user_id = ANY($${historyAssigneeIdx}::text[]) AND LOWER(w.dept) = LOWER($2)${assigneeHistoryReasonSql}
             )
           )`
         : null;
@@ -7734,7 +7802,7 @@ async function _handleJiraPgApi(
                AND ${deptDeptMatchSql}
              ${deptSearchClause}
              ${deptExtraSql}
-             ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC
+             ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC, i.id DESC
              LIMIT $${lightCapIdx}`,
             lightParams
           );
@@ -7753,8 +7821,10 @@ async function _handleJiraPgApi(
           for (const r of lightRows.rows) {
             const shaped = { ...r, status: r.status_name ? { name: r.status_name, category: r.status_category } : null };
             const { slaBreached, overdue } = computeSlaBreachedAndOverdue(shaped, deptParam, policiesBySpaceLight, nowMsLight);
+            // "No" = has an SLA and didn't breach it. A ticket with no SLA
+            // policy at all (null, shown as "-") is neither Yes nor No.
             const matchesSla = !(slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no')
-              || (slaBreachedParamEarly === 'yes' ? !!slaBreached : !slaBreached);
+              || (slaBreachedParamEarly === 'yes' ? !!slaBreached : slaBreached === false);
             const matchesOverdue = !(overdueParamEarly === 'yes' || overdueParamEarly === 'no')
               || (overdueParamEarly === 'yes' ? overdue : !overdue);
             if (matchesSla && matchesOverdue) matchingIds.push(r.id);
@@ -7786,7 +7856,7 @@ async function _handleJiraPgApi(
                  LEFT JOIN users a ON i."assigneeId" = a.id
                  LEFT JOIN users r ON i."reporterId" = r.id
                  WHERE i.id = ANY($1::text[])
-                 ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC`,
+                 ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC, i.id DESC`,
                 [pageIds]
               )
             : { rows: [] };
@@ -7826,7 +7896,7 @@ async function _handleJiraPgApi(
              AND ${deptDeptMatchSql}
            ${deptSearchClause}
            ${deptExtraSql}
-           ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC
+           ORDER BY (CASE WHEN s.category = 'done' THEN 1 ELSE 0 END), i."createdAt" DESC, i.id DESC
            LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
           rowParams
         );
@@ -8123,10 +8193,15 @@ async function _handleJiraPgApi(
         const { slaBreached, overdue } = computeSlaBreachedAndOverdue(i, deptParam, policiesBySpace, nowMs);
         return { ...i, sla_breached: slaBreached, overdue };
       });
-      if (slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no') {
-        enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParamEarly === 'yes' ? i.sla_breached : !i.sla_breached);
+      // Skipped when the dept branch's prefilter pass already chose exactly
+      // these rows (prefilteredTotal set): re-checking them here with a
+      // slightly later nowMs could drop a ticket that crossed its deadline
+      // in between, leaving the page short while total still counted it.
+      if (prefilteredTotal == null && (slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no')) {
+        // "No" = has an SLA and didn't breach it (null = no SLA policy).
+        enrichedIssues = enrichedIssues.filter((i: any) => slaBreachedParamEarly === 'yes' ? i.sla_breached : i.sla_breached === false);
       }
-      if (overdueParamEarly === 'yes' || overdueParamEarly === 'no') {
+      if (prefilteredTotal == null && (overdueParamEarly === 'yes' || overdueParamEarly === 'no')) {
         enrichedIssues = enrichedIssues.filter((i: any) => overdueParamEarly === 'yes' ? i.overdue : !i.overdue);
       }
       if (needsSlaPrefilter) {

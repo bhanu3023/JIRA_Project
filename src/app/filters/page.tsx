@@ -20,14 +20,43 @@ import { can } from '@/lib/permissions';
 import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
 
 /* ─── types ─── */
+// Everything a saved filter can hold. Every filter on the page has a key
+// here -- a field missing from this list is silently dropped on save.
 interface FilterCriteria {
   spaces?: string[];
   queue?: string;
   assignees?: string[];
+  reporters?: string[];
   types?: string[];
   statuses?: string[];
   priorities?: string[];
   text?: string;
+  createdRange?: string;
+  updatedRange?: string;
+  workedRange?: string;
+  dueDateRange?: string;
+  resolvedRange?: string;
+  department?: string;
+  productType?: string[];
+  productionTicket?: string[];
+  combination?: string;
+  customerName?: string[];
+  clientName?: string[];
+  projectManager?: string[];
+  projectPool?: string;
+  infraIssueType?: string[];
+  slaBreached?: 'yes' | 'no';
+  overdue?: 'yes' | 'no';
+  extras?: string[];
+}
+
+// Multi-select text values (Customer Name, Product Type, ...) go into the URL
+// and the API joined with "|||", so a value that contains a comma ("Acme,
+// Inc.") stays one value. The URL marks this with rSep=pipe (the API with
+// multiSep=pipe); links written before that used commas and still parse.
+const MULTI_SEP = '|||';
+function splitMultiParam(value: string, pipe: boolean): string[] {
+  return value.split(pipe ? MULTI_SEP : ',').map((v) => v.trim()).filter(Boolean);
 }
 interface SavedFilter {
   id: string; name: string; criteria: FilterCriteria;
@@ -501,12 +530,17 @@ function decodeDateLabel(val: string): string {
 }
 
 /** Today's date as YYYY-MM-DD for default */
+// Local calendar date -- toISOString() is UTC, which gave yesterday's date
+// before 05:30 IST.
+function localDateStr(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateStr(new Date());
 }
 function daysAgoStr(n: number) {
   const d = new Date(); d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+  return localDateStr(d);
 }
 
 /* ─── Jira-style Date dropdown (Within last / More than / Between / In range) ─── */
@@ -1282,14 +1316,15 @@ export default function FiltersPage() {
     if (rDueDate) setSelDueDate(rDueDate);
     if (rResolved) setSelResolved(rResolved);
     if (rDepartment) setSelDepartment(rDepartment);
-    if (rProductType) setSelProductType(rProductType.split(','));
-    if (rProductionTicket) setSelProductionTicket(rProductionTicket.split(','));
+    const pipeSep = urlParams?.get('rSep') === 'pipe';
+    if (rProductType) setSelProductType(splitMultiParam(rProductType, pipeSep));
+    if (rProductionTicket) setSelProductionTicket(splitMultiParam(rProductionTicket, pipeSep));
     if (rCombination) setSelCombination(rCombination);
-    if (rCustomerName) setSelCustomerName(rCustomerName.split(','));
-    if (rClientName) setSelClientName(rClientName.split(','));
+    if (rCustomerName) setSelCustomerName(splitMultiParam(rCustomerName, pipeSep));
+    if (rClientName) setSelClientName(splitMultiParam(rClientName, pipeSep));
     if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
     if (rProjectPool) setSelProjectPool(rProjectPool);
-    if (rInfraIssueType) setSelInfraIssueType(rInfraIssueType.split(','));
+    if (rInfraIssueType) setSelInfraIssueType(splitMultiParam(rInfraIssueType, pipeSep));
     if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
     if (rOverdue === 'yes' || rOverdue === 'no') setSelOverdue(rOverdue);
     if (rQ) setText(rQ);
@@ -1338,14 +1373,15 @@ export default function FiltersPage() {
     if (selDueDate) p.rDueDate = selDueDate;
     if (selResolved) p.rResolved = selResolved;
     if (selDepartment) p.rDepartment = selDepartment;
-    if (selProductType.length) p.rProductType = selProductType.join(',');
-    if (selProductionTicket.length) p.rProductionTicket = selProductionTicket.join(',');
+    if (selProductType.length) p.rProductType = selProductType.join(MULTI_SEP);
+    if (selProductionTicket.length) p.rProductionTicket = selProductionTicket.join(MULTI_SEP);
     if (selCombination) p.rCombination = selCombination;
-    if (selCustomerName.length) p.rCustomerName = selCustomerName.join(',');
-    if (selClientName.length) p.rClientName = selClientName.join(',');
+    if (selCustomerName.length) p.rCustomerName = selCustomerName.join(MULTI_SEP);
+    if (selClientName.length) p.rClientName = selClientName.join(MULTI_SEP);
     if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
     if (selProjectPool) p.rProjectPool = selProjectPool;
-    if (selInfraIssueType.length) p.rInfraIssueType = selInfraIssueType.join(',');
+    if (selInfraIssueType.length) p.rInfraIssueType = selInfraIssueType.join(MULTI_SEP);
+    if (p.rProductType || p.rProductionTicket || p.rCustomerName || p.rClientName || p.rInfraIssueType) p.rSep = 'pipe';
     if (selBreached) p.rBreached = selBreached;
     if (selOverdue) p.rOverdue = selOverdue;
     if (text.trim()) p.rQ = text.trim();
@@ -1367,30 +1403,19 @@ export default function FiltersPage() {
   const filteredSpacesForStatus = selSpaces.length > 0
     ? spaces.filter((sp: any) => selSpaces.includes(sp.key))
     : spaces;
-  // "waiting for X" entries kept for backward compatibility with any space
-  // whose real statuses table still literally has one (distinct from the
-  // dept_statuses virtual routing labels this session renamed to "Routed to
-  // X") -- but this hardcoded list never included the new "routed to X"
-  // names at all, so even a real status genuinely named "Routed to Dev"
-  // would be silently filtered out of the dropdown regardless of any
-  // backend/data fix. Confirmed for real: the Status dropdown kept showing
-  // "Waiting for Dev"/"Waiting for Migration"/"Waiting for Infra" no matter
-  // what got fixed elsewhere, because this allowlist -- not ticket data or
-  // queue config -- is what actually gates this dropdown's options.
-  const ALLOWED_STATUSES = new Set([
-    'open', 'in progress', 'resolved',
-    'waiting for dev', 'waiting for migration', 'waiting for qa', 'waiting for infra',
-    'routed to dev', 'routed to migration', 'routed to qa', 'routed to infra',
-  ]);
+  // Every status the selected spaces actually have -- a fixed allowlist used
+  // to gate this list, which hid any other real status (it could never be
+  // picked at all). Keyed case-insensitively so "Open"/"open" across spaces
+  // show once; the server matches status names case-insensitively anyway.
   const availableStatuses: { value: string; label: string }[] = Array.from(
     new Map([
       ...filteredSpacesForStatus
         .flatMap((sp: any) => (sp.statuses || []))
-        .filter((s: any) => ALLOWED_STATUSES.has((s.name || '').toLowerCase()))
-        .map((s: any) => [s.name, { value: s.name, label: s.name, order: s.order ?? 0 }] as const),
+        .filter((s: any) => (s.name || '').trim())
+        .map((s: any) => [(s.name as string).toLowerCase(), { value: s.name, label: s.name, order: s.order ?? 0 }] as const),
       // Merged in on top -- the selected queue's own "Routed to X" set, only
       // ever meaningful once a specific queue is chosen (see queueStatusOptions above).
-      ...queueStatusOptions.map((s) => [s.value, { ...s, order: 99 }] as const),
+      ...queueStatusOptions.map((s) => [s.value.toLowerCase(), { ...s, order: 99 }] as const),
     ]).values()
   )
     .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
@@ -1454,20 +1479,11 @@ export default function FiltersPage() {
 
         if (selAssignees.length) {
           params.assignees = Array.from(new Set(selAssignees.flatMap(expandMember))).join(',');
-          // Queue + Assignee means "who currently holds this ticket in this
-          // dept" -- NOT "who has ever worked it here". includeHistory used
-          // to be forced on for every Queue+Assignee combination (to surface
-          // a ticket someone resolved here but which has since moved on and
-          // been reassigned elsewhere), but that made it the unconditional
-          // default rather than an opt-in view, and confirmed for real: Ravi
-          // Srivastava's Dev queue showed dozens of Migration/QA/Pre-Sales
-          // tickets under his name that he'd genuinely worked once but had
-          // long since been reassigned away from, with nothing to suggest he
-          // wasn't still the current owner. Plain current-assignee matching
-          // (the `assignees` param alone, no includeHistory) is what this
-          // combination should mean by default now -- see workedRange
-          // (the "Worked" date-filter mode) for the still-available
-          // deliberate "who did the work" view.
+          // Assignee = "owner or past worker" in every combination, with or
+          // without a Queue (decided explicitly): the current owner, plus
+          // tickets the person held or worked and handed on. The server
+          // applies this for Filters requests (queueMembersOnly in the Queue
+          // branch, the default broadening in the other).
         }
 
         if (selReporters.length) {
@@ -1501,17 +1517,20 @@ export default function FiltersPage() {
         params.includeTimeSpent = 'true';
 
         // Extra text/field filters
+        // Multi-value text fields are "|||"-joined (see MULTI_SEP) so a value
+        // containing a comma isn't split in two on the server.
+        params.multiSep = 'pipe';
         if (selDepartment)     params.department     = selDepartment;
-        if (selProductType.length) params.productType = selProductType.join(',');
-        if (selProductionTicket.length) params.productionTicket = selProductionTicket.join(',');
+        if (selProductType.length) params.productType = selProductType.join(MULTI_SEP);
+        if (selProductionTicket.length) params.productionTicket = selProductionTicket.join(MULTI_SEP);
         if (selCombination)    params.combination    = selCombination;
-        if (selCustomerName.length) params.customerName = selCustomerName.join(',');
-        if (selClientName.length)   params.clientName   = selClientName.join(',');
+        if (selCustomerName.length) params.customerName = selCustomerName.join(MULTI_SEP);
+        if (selClientName.length)   params.clientName   = selClientName.join(MULTI_SEP);
         // Joined with a delimiter that won't collide with commas already inside a
         // stored value (e.g. "Abhishikth, Abhishek" naming two people as one value).
         if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
         if (selProjectPool)    params.projectPool    = selProjectPool;
-        if (selInfraIssueType.length) params.infraIssueType = selInfraIssueType.join(',');
+        if (selInfraIssueType.length) params.infraIssueType = selInfraIssueType.join(MULTI_SEP);
         if (selBreached) params.slaBreached = selBreached;
         if (selOverdue) params.overdue = selOverdue;
 
@@ -1635,10 +1654,20 @@ export default function FiltersPage() {
   const handleExport = async () => {
     setExporting(true);
     try {
-      const EXPORT_LIMIT = 2000; // server's own hard cap (Math.min(2000, ...) in the issues list handler)
-      const params = { ...buildFilterParams(), page: '1', limit: String(EXPORT_LIMIT) };
-      const { issues: rows, total: matchedTotal } = await api.getIssues(params);
-      const list = rows as any[];
+      // The server returns at most 2000 rows per request, so page through
+      // until everything matching is fetched (it used to stop at the first
+      // 2000). EXPORT_MAX is a safety ceiling for a runaway filter.
+      const PAGE_LIMIT = 2000;
+      const EXPORT_MAX = 50000;
+      const baseParams = buildFilterParams();
+      const list: any[] = [];
+      let matchedTotal = 0;
+      for (let p = 1; ; p++) {
+        const { issues: rows, total } = await api.getIssues({ ...baseParams, page: String(p), limit: String(PAGE_LIMIT) });
+        matchedTotal = total;
+        list.push(...(rows as any[]));
+        if ((rows as any[]).length < PAGE_LIMIT || list.length >= total || list.length >= EXPORT_MAX) break;
+      }
       // Which extra fields actually have a selected value right now -- a
       // field the user is genuinely filtering on must show up as a column
       // even if activeExtras (the "More filters" chip-visibility list,
@@ -1741,8 +1770,8 @@ export default function FiltersPage() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      if (matchedTotal > EXPORT_LIMIT) {
-        alert(`Exported the first ${EXPORT_LIMIT.toLocaleString()} of ${matchedTotal.toLocaleString()} matching issues. Narrow your filters to export everything.`);
+      if (matchedTotal > list.length) {
+        alert(`Exported the first ${list.length.toLocaleString()} of ${matchedTotal.toLocaleString()} matching issues. Narrow your filters to export everything.`);
       }
     } catch {
       alert('Export failed. Please try again.');
@@ -1825,8 +1854,8 @@ export default function FiltersPage() {
   // When space selection changes, drop any selected statuses that no longer exist in the new scope
   useEffect(() => {
     if (selStatuses.length === 0) return;
-    const validNames = new Set(availableStatuses.map((s) => s.value));
-    const stillValid = selStatuses.filter((s) => validNames.has(s));
+    const validNames = new Set(availableStatuses.map((s) => s.value.toLowerCase()));
+    const stillValid = selStatuses.filter((s) => validNames.has(s.toLowerCase()));
     if (stillValid.length !== selStatuses.length) setSelStatuses(stillValid);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selSpaces]);
@@ -1837,46 +1866,58 @@ export default function FiltersPage() {
   };
   useEffect(() => { loadSavedFilters(); }, []);
 
+  // Sets EVERY filter from a criteria object -- anything the object doesn't
+  // mention is reset, so applying a saved filter (or clearing) never leaves
+  // an earlier selection silently applied on top. Clear all, applying a
+  // saved filter, and currentCriteria below must all cover the same fields
+  // as FilterCriteria; a field missing from any one of them is how filters
+  // used to survive "Clear all" or get dropped from saved filters.
+  const applyCriteria = (c: FilterCriteria) => {
+    setText(c.text || '');
+    setSelSpaces(c.spaces || []);
+    setSelQueue(c.queue || '');
+    setSelAssignees(c.assignees || []);
+    setSelReporters(c.reporters || []);
+    setSelTypes(c.types || []);
+    setSelStatuses(c.statuses || []);
+    setSelPriorities(c.priorities || []);
+    setSelCreated(c.createdRange || '');
+    setSelUpdated(c.updatedRange || '');
+    setSelWorked(c.workedRange || '');
+    setSelDueDate(c.dueDateRange || '');
+    setSelResolved(c.resolvedRange || '');
+    setSelDepartment(c.department || '');
+    setSelProductType(c.productType || []);
+    setSelProductionTicket(c.productionTicket || []);
+    setSelCombination(c.combination || '');
+    setSelCustomerName(c.customerName || []);
+    setSelClientName(c.clientName || []);
+    setSelProjectManager(c.projectManager || []);
+    setSelProjectPool(c.projectPool || '');
+    setSelInfraIssueType(c.infraIssueType || []);
+    setSelBreached(c.slaBreached || '');
+    setSelOverdue(c.overdue || '');
+    // Show the bar button of every field that has a value, plus whatever
+    // was visible when it was saved.
+    const implied: [boolean, string][] = [
+      [!!c.reporters?.length, 'reporter'], [!!c.priorities?.length, 'priority'],
+      [!!c.createdRange, 'created'], [!!c.updatedRange, 'updated'], [!!c.workedRange, 'worked'],
+      [!!c.dueDateRange, 'dueDate'], [!!c.resolvedRange, 'resolved'], [!!c.department, 'department'],
+      [!!c.productType?.length, 'productType'], [!!c.productionTicket?.length, 'productionTicket'],
+      [!!c.combination, 'combination'], [!!c.customerName?.length, 'customerName'],
+      [!!c.clientName?.length, 'clientName'], [!!c.projectManager?.length, 'projectManager'],
+      [!!c.projectPool, 'projectPool'], [!!c.infraIssueType?.length, 'infraIssueType'],
+    ];
+    setActiveExtras(Array.from(new Set([...(c.extras || []), ...implied.filter(([on]) => on).map(([, k]) => k)])));
+  };
+
   const clearAll = () => {
-    setText(''); setSelSpaces([]); setSelQueue(''); setSelAssignees([]); setSelReporters([]);
-    setSelTypes([]); setSelStatuses([]); setSelPriorities([]);
-    setSelCreated(''); setSelUpdated(''); setSelDueDate(''); setSelResolved('');
-    setSelDepartment(''); setSelProductType([]); setSelProductionTicket([]);
-    setSelCombination(''); setSelCustomerName([]); setSelClientName([]); setSelProjectManager([]);
-    setSelProjectPool('');
-    setSelBreached('');
-    setSelOverdue('');
-    setActiveExtras([]);
+    applyCriteria({});
     setActiveFilterId(null);
   };
 
   const applyFilter = (f: SavedFilter) => {
-    const c = f.criteria || {};
-    setText(c.text || '');
-    setSelSpaces(c.spaces || []);
-    setSelQueue((c as any).queue || '');
-    setSelAssignees(c.assignees || []);
-    setSelReporters((c as any).reporters || []);
-    setSelTypes(c.types || []);
-    setSelStatuses(c.statuses || []);
-    setSelPriorities(c.priorities || []);
-    const cr = (c as any).createdRange || '';
-    const ur = (c as any).updatedRange || '';
-    const ddr = (c as any).dueDateRange || '';
-    const rr = (c as any).resolvedRange || '';
-    setSelCreated(cr);
-    setSelUpdated(ur);
-    setSelDueDate(ddr);
-    setSelResolved(rr);
-    // auto-show bar buttons for any criteria that have values
-    const extras: string[] = [];
-    if ((c as any).reporters?.length) extras.push('reporter');
-    if (c.priorities?.length)         extras.push('priority');
-    if (cr)                           extras.push('created');
-    if (ur)                           extras.push('updated');
-    if (ddr)                          extras.push('dueDate');
-    if (rr)                           extras.push('resolved');
-    setActiveExtras(extras);
+    applyCriteria(f.criteria || {});
     setActiveFilterId(f.id);
     setShowSavedPanel(false);
   };
@@ -1894,7 +1935,8 @@ export default function FiltersPage() {
     if (activeFilterId === id) clearAll();
   };
 
-  const currentCriteria: FilterCriteria & { reporters?: string[]; createdRange?: string; updatedRange?: string; workedRange?: string; dueDateRange?: string; resolvedRange?: string } = {
+  // What "Save filter" stores -- every field, see applyCriteria above.
+  const currentCriteria: FilterCriteria = {
     ...(text.trim() ? { text: text.trim() } : {}),
     ...(selSpaces.length ? { spaces: selSpaces } : {}),
     ...(selQueue ? { queue: selQueue } : {}),
@@ -1905,9 +1947,21 @@ export default function FiltersPage() {
     ...(selPriorities.length ? { priorities: selPriorities } : {}),
     ...(selCreated ? { createdRange: selCreated } : {}),
     ...(selUpdated ? { updatedRange: selUpdated } : {}),
-    ...(selWorked && selQueue && selAssignees.length ? { workedRange: selWorked } : {}),
+    ...(selWorked ? { workedRange: selWorked } : {}),
     ...(selDueDate ? { dueDateRange: selDueDate } : {}),
     ...(selResolved ? { resolvedRange: selResolved } : {}),
+    ...(selDepartment ? { department: selDepartment } : {}),
+    ...(selProductType.length ? { productType: selProductType } : {}),
+    ...(selProductionTicket.length ? { productionTicket: selProductionTicket } : {}),
+    ...(selCombination ? { combination: selCombination } : {}),
+    ...(selCustomerName.length ? { customerName: selCustomerName } : {}),
+    ...(selClientName.length ? { clientName: selClientName } : {}),
+    ...(selProjectManager.length ? { projectManager: selProjectManager } : {}),
+    ...(selProjectPool ? { projectPool: selProjectPool } : {}),
+    ...(selInfraIssueType.length ? { infraIssueType: selInfraIssueType } : {}),
+    ...(selBreached ? { slaBreached: selBreached } : {}),
+    ...(selOverdue ? { overdue: selOverdue } : {}),
+    ...(activeExtras.length ? { extras: activeExtras } : {}),
   };
 
   // Helper: member name by ID
@@ -2372,40 +2426,36 @@ export default function FiltersPage() {
             )}
           </div>
         )}
-        {/* Created+Updated together mean different things depending on
-            whether a single Queue is also selected:
-            - Queue scoped (selQueue + exactly one space, i.e. params.dept
-              actually gets sent -- see buildFilterParams): a UNION
-              (created OR updated in range), matching MBR's own "touched"
-              date-range semantics exactly (reports/mbr and mbr-team apply
-              one range to createdAt OR updatedAt, no separate toggle).
-              Confirmed for real: Queue: Dev + Sep 2026 landed on 694 this
-              way, exactly matching MBR's Customer Engineering tab for the
-              identical scope.
-            - Not queue-scoped: an INTERSECTION (both have to match the
-              same ticket), kept exactly as before per that earlier
-              explicit request -- confirmed for real that unioning an
-              unscoped "Created: More than 1 day ago" with "Updated: Within
-              last 1 day" swamped the result with thousands of tickets the
-              Created side alone already matched. A Queue filter already
-              bounds the result set to one department, so that swamping
-              risk doesn't apply there the way it did unscoped. */}
-        {selCreated && selUpdated && selQueue && selSpaces.length === 1 && (
+        {/* Created+Updated together = created in range OR updated in range,
+            with or without a Queue (the server applies the same union in
+            both branches). */}
+        {selCreated && selUpdated && (
           <div className="flex items-start gap-2 px-4 py-2 bg-blue-50 border-b border-blue-100 text-[11.5px] text-blue-800">
             <Filter size={13} className="mt-0.5 flex-shrink-0" />
             <span>
-              Created and Updated are combined as "either one" within this queue (matches MBR's own date-range
-              behavior for the same department) -- a ticket only touched in one of the two still counts.
+              Created and Updated are combined as <strong>either one</strong>: a ticket created in its range, or
+              updated in its range, is included.
             </span>
           </div>
         )}
-        {selCreated && selUpdated && !(selQueue && selSpaces.length === 1) && (
+        {/* Filters the server can't apply in the current combination --
+            shown instead of silently doing nothing (buildFilterParams only
+            sends a Queue with exactly one space, and Worked only with a
+            Queue and an Assignee). */}
+        {selQueue && selSpaces.length !== 1 && (
           <div className="flex items-start gap-2 px-4 py-2 bg-amber-50 border-b border-amber-100 text-[11.5px] text-amber-800">
             <Filter size={13} className="mt-0.5 flex-shrink-0" />
             <span>
-              Created and Updated both have to match the same ticket. For an older ticket, its real last-activity date
-              can be much later than when it was created -- if you're searching for tickets from a specific period
-              (e.g. a migration batch), try <strong>Created alone</strong> instead of combining it with Updated.
+              <strong>Queue: {selQueue}</strong> isn&apos;t applied, because a queue only works with exactly one space selected.
+              Select a single space, or remove the queue.
+            </span>
+          </div>
+        )}
+        {selWorked && !(selQueue && selSpaces.length === 1 && selAssignees.length > 0) && (
+          <div className="flex items-start gap-2 px-4 py-2 bg-amber-50 border-b border-amber-100 text-[11.5px] text-amber-800">
+            <Filter size={13} className="mt-0.5 flex-shrink-0" />
+            <span>
+              <strong>Worked</strong> isn&apos;t applied: it needs a Queue (with one space) and an Assignee selected.
             </span>
           </div>
         )}
