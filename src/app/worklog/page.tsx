@@ -182,10 +182,10 @@ export default function WorklogPage() {
                         {new Date(r.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
                       </td>
                       <td className="px-4 py-2.5 text-[12.5px] whitespace-nowrap">
-                        <Link href={`/issues/${r.issueKey}`} className="font-semibold text-blue-600 hover:underline">{r.issueKey}</Link>
+                        <Link href={`/issues/${r.issueKey}`} target="_blank" rel="noopener noreferrer" className="font-semibold text-blue-600 hover:underline">{r.issueKey}</Link>
                         <p className="text-[11.5px] text-gray-400 truncate max-w-[220px]">{r.issueSummary}</p>
                       </td>
-                      <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{r.spaceKey}</td>
+                      <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{r.spaceName || r.spaceKey}</td>
                       <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{r.department}</td>
                       <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{r.authorName || 'Unknown'}</td>
                       <td className="px-4 py-2.5 text-[12.5px] font-semibold text-gray-800 whitespace-nowrap">{formatMinutes(r.timeSpentMinutes || 0)}</td>
