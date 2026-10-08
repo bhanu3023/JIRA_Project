@@ -25,18 +25,18 @@ async function main() {
   const ids = issueRows.map((r) => r.id);
 
   const { rows } = await pool.query(`
-    SELECT w.issue_id, w.dept, w.reason, wu.email AS worker_email, w.created_at
+    SELECT w.issue_id, w.dept, w.reason, wu.email AS worker_email, w.worked_at
     FROM user_worked_on_tickets w
     LEFT JOIN users wu ON wu.id = w.user_id
     WHERE w.issue_id = ANY($1::text[])
-    ORDER BY w.issue_id, w.created_at ASC
+    ORDER BY w.issue_id, w.worked_at ASC
   `, [ids]);
 
   console.log(`=== user_worked_on_tickets rows for the 20 gap tickets ===\n`);
   let lastId = null;
   for (const r of rows) {
     if (r.issue_id !== lastId) { console.log(`\n${idToKey[r.issue_id]}:`); lastId = r.issue_id; }
-    console.log(`  dept=${r.dept} reason=${r.reason} worker=${r.worker_email || 'null'} at=${r.created_at?.toISOString?.()}`);
+    console.log(`  dept=${r.dept} reason=${r.reason} worker=${r.worker_email || 'null'} at=${r.worked_at?.toISOString?.()}`);
   }
 
   const DEV_ROSTER = [
