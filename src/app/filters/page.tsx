@@ -1608,6 +1608,7 @@ export default function FiltersPage() {
      browsing cap, so the export covers everything a saved/shared filter
      would actually match, not just what's currently rendered. */
   const [exporting, setExporting] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   // Which of STATIC_COLUMN_OPTIONS are currently shown in the results
   // table -- per-browser preference (not shared/synced), read once on
@@ -1651,7 +1652,15 @@ export default function FiltersPage() {
     dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
     resolved:       { label: 'Resolved date',   getValue: (i) => i.resolvedAt ?? '' },
   };
-  const handleExport = async () => {
+  // 'ticket': one row per ticket (its single displayed assignee).
+  // 'person': one row per person per ticket -- everyone the Assignee filter
+  // would match the ticket for (owner in the queue + anyone who worked or
+  // held it there, issue.workedBy). A ticket's Assignee column can only hold
+  // one name, so filtering an unfiltered per-ticket export by a person in
+  // Excel undercounts anyone who wasn't that one name (Queue: Migration +
+  // Updated: Sep -- Lakshma Reddy: 65 in the app, 47 in Excel). Filtering
+  // the Person column of this mode gives the app's count.
+  const handleExport = async (mode: 'ticket' | 'person' = 'ticket') => {
     setExporting(true);
     try {
       // The server returns at most 2000 rows per request, so page through
@@ -1696,7 +1705,7 @@ export default function FiltersPage() {
         (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
       );
       const header = [
-        'Key', 'Type', 'Summary', 'Assignee', 'Worked By', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'SLA Breached Dept', 'Overdue', 'Department',
+        'Key', ...(mode === 'person' ? ['Person'] : []), 'Type', 'Summary', 'Assignee', 'Worked By', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'SLA Breached Dept', 'Overdue', 'Department',
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
@@ -1716,12 +1725,21 @@ export default function FiltersPage() {
         return `=HYPERLINK("${href.replace(/"/g, '""')}","${String(key).replace(/"/g, '""')}")`;
       };
       const lines = [header.map(csvCell).join(',')];
-      for (const issue of list) {
+      const assigneeName = (issue: any) =>
+        issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned';
+      // Person mode: one line per person in issue.workedBy (only sent for a
+      // Queue view); a ticket with no such list falls back to its assignee.
+      const peopleFor = (issue: any): string[] =>
+        mode === 'person'
+          ? (Array.isArray(issue.workedBy) && issue.workedBy.length ? issue.workedBy.map((p: any) => p.name) : [assigneeName(issue)])
+          : [''];
+      for (const issue of list) for (const person of peopleFor(issue)) {
         lines.push([
           keyLink(issue),
+          ...(mode === 'person' ? [person] : []),
           issue.type ?? '',
           issue.summary ?? '',
-          issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned',
+          assigneeName(issue),
           // Independent of the Assignee column above (which can legitimately
           // show a historical worker's name, or just the current owner's,
           // depending on whether an Assignee filter is active -- see its own
@@ -1765,7 +1783,7 @@ export default function FiltersPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `filtered-issues-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `filtered-issues${mode === 'person' ? '-by-person' : ''}-${new Date().toISOString().slice(0, 10)}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -2251,8 +2269,9 @@ export default function FiltersPage() {
               onChange={handleColumnsDropdownChange}
             />
             {can(user?.role, 'exportData') && (
+              <div className="relative">
               <button
-                onClick={handleExport}
+                onClick={() => setExportMenuOpen((o) => !o)}
                 disabled={exporting || issues.length === 0}
                 // min-w fits "Exporting…" (the wider of the two labels) so
                 // toggling the label doesn't change this button's own width --
@@ -2261,8 +2280,32 @@ export default function FiltersPage() {
                 // visible as the toolbar jumping the moment Export is clicked.
                 className="flex items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-[12.5px] font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[92px]"
               >
-                <Download size={13} /> {exporting ? 'Exporting…' : 'Export'}
+                <Download size={13} /> {exporting ? 'Exporting…' : 'Export'} <ChevronDown size={12} className="text-gray-400" />
               </button>
+              {exportMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setExportMenuOpen(false)} />
+                  <div className="absolute right-0 top-full z-50 mt-1 w-72 rounded-lg border border-gray-200 bg-white py-1 shadow-xl">
+                    <button
+                      onClick={() => { setExportMenuOpen(false); handleExport('ticket'); }}
+                      className="block w-full px-3 py-2 text-left hover:bg-gray-50"
+                    >
+                      <span className="block text-[12.5px] font-medium text-gray-800">One row per ticket</span>
+                      <span className="block text-[11.5px] text-gray-500">Each ticket once, with its assignee.</span>
+                    </button>
+                    <button
+                      onClick={() => { setExportMenuOpen(false); handleExport('person'); }}
+                      className="block w-full px-3 py-2 text-left hover:bg-gray-50"
+                    >
+                      <span className="block text-[12.5px] font-medium text-gray-800">One row per person</span>
+                      <span className="block text-[11.5px] text-gray-500">
+                        A ticket appears once for each person who owned or worked it in the queue. Filter the Person column in Excel to get the same counts as the Assignee filter here.
+                      </span>
+                    </button>
+                  </div>
+                </>
+              )}
+              </div>
             )}
             <button
               onClick={() => { setEditingFilter(null); setShowSaveModal(true); }}

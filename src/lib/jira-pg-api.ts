@@ -8044,6 +8044,8 @@ async function _handleJiraPgApi(
         // By was filtered by her name -- it left out tickets she currently
         // owns with no worked-on row yet, and her hand-off ('passed') rows.
         let workedByNamesByIssue: Record<string, string> = {};
+        // Same people as a list -- used by the export's one-row-per-person mode.
+        const workedByListByIssue: Record<string, { id: string; name: string }[]> = {};
         if (rows.rows.length) {
           try {
             const issueIds = rows.rows.map((r: any) => r.id);
@@ -8054,20 +8056,23 @@ async function _handleJiraPgApi(
                WHERE w.issue_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2)${assigneeHistoryReasonSql}`,
               [issueIds, deptParam]
             );
-            const namesByIssue: Record<string, string[]> = {};
+            // Keyed by user id so one person is listed once per ticket.
+            const peopleByIssue: Record<string, Map<string, string>> = {};
             for (const wr of allWorkedRows.rows) {
               const name = `${wr.firstName || ''} ${wr.lastName || ''}`.trim() || wr.user_id;
-              (namesByIssue[wr.issue_id] ??= []).push(name);
+              (peopleByIssue[wr.issue_id] ??= new Map()).set(wr.user_id, name);
             }
             if (queueMembersOnlyParam) {
               for (const row of rows.rows) {
                 if (row.assignee_id && String(row.current_department || '').toLowerCase() === deptParam.toLowerCase()) {
-                  (namesByIssue[row.id] ??= []).push(String(row.assignee_name || '').trim() || row.assignee_id);
+                  (peopleByIssue[row.id] ??= new Map()).set(row.assignee_id, String(row.assignee_name || '').trim() || row.assignee_id);
                 }
               }
             }
-            for (const [issueId, names] of Object.entries(namesByIssue)) {
-              workedByNamesByIssue[issueId] = Array.from(new Set(names)).sort().join(', ');
+            for (const [issueId, people] of Object.entries(peopleByIssue)) {
+              const list = Array.from(people, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+              workedByListByIssue[issueId] = list;
+              workedByNamesByIssue[issueId] = list.map((p) => p.name).join(', ');
             }
           } catch { /* leave workedByNamesByIssue empty -- non-critical column */ }
         }
@@ -8266,8 +8271,12 @@ async function _handleJiraPgApi(
           jira_assignee_name: row.jira_assignee_name || null,
           jira_reporter_name: row.jira_reporter_name || null,
           space: { key: row.space_key || spaceKey },
-          workedByNames: workedByNamesByIssue[row.id] || '',
         }), assigneeIsHistorical, movedAwayFromQueue,
+        // Outside formatIssue on purpose: formatIssue builds its result from
+        // a fixed field list and silently dropped workedByNames when it was
+        // passed in there, so the export's Worked By column was always empty.
+        workedByNames: workedByNamesByIssue[row.id] || '',
+        workedBy: workedByListByIssue[row.id] || [],
         // See the long comment on true_assignee in the non-dept branch above
         // -- same reasoning, but here the override being bypassed is this
         // branch's own assigneeOverride (queue-historical snapshot /
