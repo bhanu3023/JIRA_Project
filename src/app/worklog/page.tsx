@@ -77,10 +77,53 @@ export default function WorklogPage() {
     if (deptFilter && !deptOptions.includes(deptFilter)) setDeptFilter('');
   }, [deptOptions, deptFilter]);
 
+  // Queue filter means "logged by one of THIS queue's own configured
+  // members" -- by explicit request, after seeing Dev-team people's
+  // cross-team entries under Migration (the entry's own Department tag was
+  // accurate, but reads as wrong here: this view is about the Migration
+  // TEAM's logged work, not every entry that happened to touch a Migration
+  // ticket). Different from how the main ticket Queue filter works
+  // elsewhere (tag-based, by separate explicit decision) -- Worklog's
+  // "who logged this" framing is person-centric in a way ticket counts
+  // aren't. Rosters fetched per space actually present in the loaded rows
+  // (a worklog entry's own spaceKey), not just the current Space filter,
+  // so "All spaces" + a Queue filter still resolves each entry against the
+  // right board's own queue config.
+  const [deptRosters, setDeptRosters] = useState<Record<string, Set<string>>>({});
+  useEffect(() => {
+    if (!deptFilter) return;
+    const spaceKeys = Array.from(new Set(rows.map((r) => r.spaceKey).filter(Boolean)));
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(spaceKeys.map(async (sk) => {
+        const cacheKey = `${sk}::${deptFilter.toLowerCase()}`;
+        if (deptRosters[cacheKey]) return [cacheKey, deptRosters[cacheKey]] as const;
+        try {
+          const queues = await api.request<any[]>(`custom-queues/${sk}`);
+          const q = (queues || []).find((qq: any) => String(qq.name || '').toLowerCase() === deptFilter.toLowerCase());
+          return [cacheKey, new Set<string>(Array.isArray(q?.memberIds) ? q.memberIds : [])] as const;
+        } catch {
+          return [cacheKey, new Set<string>()] as const;
+        }
+      }));
+      if (cancelled) return;
+      setDeptRosters((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deptFilter, rows]);
+
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((r) => {
-      if (deptFilter && r.department !== deptFilter) return false;
+      if (deptFilter) {
+        if (r.department !== deptFilter) return false;
+        const roster = deptRosters[`${r.spaceKey}::${deptFilter.toLowerCase()}`];
+        // Roster not loaded yet, or this dept has no configured queue at
+        // all (roster undefined vs empty Set) -- don't hide everything
+        // while mid-fetch or for a dept with no roster to check against.
+        if (roster && roster.size > 0 && r.authorId && !roster.has(r.authorId)) return false;
+      }
       if (!q) return true;
       return (
         r.issueKey.toLowerCase().includes(q) ||
@@ -89,7 +132,7 @@ export default function WorklogPage() {
         (r.description || '').toLowerCase().includes(q)
       );
     });
-  }, [rows, search, deptFilter]);
+  }, [rows, search, deptFilter, deptRosters]);
 
   const totalMinutes = useMemo(() => filteredRows.reduce((sum, r) => sum + (r.timeSpentMinutes || 0), 0), [filteredRows]);
 
