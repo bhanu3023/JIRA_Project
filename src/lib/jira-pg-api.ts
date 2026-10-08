@@ -14270,8 +14270,20 @@ async function _handleJiraPgApi(
     // gap above). Duplicating a current_department check here would narrow
     // ENT+SMB's combined scope below what deptMatchSql (and so Filters)
     // actually counts.
+    // "AND COALESCE(array_length($2::text[], 1), 0) >= 0" is a deliberate
+    // no-op (always true -- array_length of anything, including an empty
+    // array, is never negative) purely to keep $2 referenced in this query's
+    // text. MIGRATION_POOL_CASE_SQL above doesn't use $1/$2 at all (every
+    // roster it needs is already inlined as a literal), so without this the
+    // ent/smb queries stopped referencing $2 anywhere at all while
+    // baseParams/summaryParams/etc. still pass it positionally -- confirmed
+    // for real: "bind message supplies 2 parameters, but prepared statement
+    // requires 1", a hard 500 on the Migration ENT/SMB tabs the moment this
+    // shipped. node-pg's bind protocol errors on an unreferenced bound
+    // parameter; it doesn't just silently ignore it the way a plain SQL
+    // client might.
     const rosterMatchSql = (team === 'ent' || team === 'smb')
-      ? `${MIGRATION_POOL_CASE_SQL} = '${team}'`
+      ? `${MIGRATION_POOL_CASE_SQL} = '${team}' AND COALESCE(array_length($2::text[], 1), 0) >= 0`
       : `(
       EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
       OR EXISTS (
