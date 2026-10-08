@@ -13961,6 +13961,28 @@ async function _handleJiraPgApi(
         }
       } catch { /* fall back to the fixed TEAM_ROSTER list above if this lookup fails */ }
     }
+    // Migration's FULL live queue roster (not the ENT/SMB split) -- needed
+    // for deptMatchSql's "was this worked on by Migration at all" check
+    // below. Confirmed for real this is the right middle ground: restricting
+    // that check to TEAM_ROSTER.ent/.smb specifically undercounted (missed
+    // genuine Migration work by someone not yet classified into either
+    // hardcoded list), while removing the restriction entirely overcounted
+    // (pulled in a Dev/QA/Infra person's unrelated brief pass-through that
+    // Filters' own equivalent broadening -- restricted to Migration's own
+    // live queue membership -- never counted either).
+    let migrationLiveRoster: string[] = [];
+    if (team === 'ent' || team === 'smb') {
+      try {
+        const cqm = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = 'TESTIN'`);
+        const queuesm: any[] = cqm.rows[0]?.queues || [];
+        const qm = queuesm.find((qq: any) => String(qq.name || '').toLowerCase() === 'migration');
+        const memberIdsm: string[] = Array.isArray(qm?.memberIds) ? qm.memberIds : [];
+        if (memberIdsm.length) {
+          const memberRowsm = await pool.query(`SELECT email FROM users WHERE id = ANY($1::text[]) AND email IS NOT NULL`, [memberIdsm]);
+          migrationLiveRoster = memberRowsm.rows.map((r: any) => String(r.email).toLowerCase()).filter(Boolean);
+        }
+      } catch { /* leave empty -- the worked-on check below just matches nothing extra */ }
+    }
 
     const dateFrom = url.searchParams.get('dateFrom') || '';
     const dateTo   = url.searchParams.get('dateTo') || '';
@@ -14129,28 +14151,33 @@ async function _handleJiraPgApi(
     // what makes a Migration ticket's ENT/SMB classification (via
     // rosterMatchSql's MIGRATION_POOL_CASE_SQL above) match Filters exactly
     // by construction.
-    // The worked-on branch here is deliberately NOT restricted to $2 (ENT's
-    // or SMB's own roster) for ent/smb, unlike every other use of this
-    // pattern in this handler -- confirmed for real: CF-29311/29330/29557/
-    // 29358/29323 (current dept now QA/Dev/Infra, started in Migration, no
-    // projectPool) all have a genuine Migration worked-on record, but logged
-    // by someone outside BOTH TEAM_ROSTER.ent and TEAM_ROSTER.smb (a QA/Dev/
-    // Infra person who briefly touched Migration). Filters' own broadening
-    // isn't restricted to just ENT+SMB's hardcoded lists either -- it checks
-    // against Migration's full LIVE queue roster. Restricting the check here
-    // made ENT+SMB's union undercount Filters by exactly these 5 tickets.
-    // Safe to drop entirely rather than widen to the live Migration roster:
-    // MIGRATION_POOL_CASE_SQL (rosterMatchSql above) already independently
-    // and exhaustively classifies every ticket this matches into exactly one
-    // of ent/smb (projectPool, then roster, then a stable hash fallback), so
-    // widening who merely COUNTS as "touched Migration" here can only
-    // recover missing tickets, never reintroduce double-counting.
+    // The worked-on branch here is restricted to migrationLiveRoster
+    // (Migration's own FULL live queue roster, fetched above) for ent/smb --
+    // NOT $2 (ENT's or SMB's own hardcoded split), and NOT unrestricted
+    // either. Both of those were tried and confirmed wrong for real, for Sep
+    // 2026: restricted to TEAM_ROSTER.ent/.smb specifically, ENT+SMB's union
+    // undercounted Filters by exactly 5 tickets (CF-29311/29330/29557/29358/
+    // 29323 -- genuine Migration work by someone not yet classified into
+    // either hardcoded list). Fully unrestricted, it overcounted Filters by
+    // exactly 6 (CF-29321/29317/30698/33042/29619/33136 came back) -- a
+    // completely unrelated Dev/QA/Infra person's brief pass-through that
+    // Filters' own broadening (itself restricted to Migration's live queue
+    // membership) never counted. migrationLiveRoster is the one roster that
+    // matches what Filters actually checks. Inlined as a literal array
+    // (fetched once above, not user input) rather than a new bind param --
+    // see MIGRATION_POOL_CASE_SQL's own comment for why that's preferred in
+    // this handler. MIGRATION_POOL_CASE_SQL (rosterMatchSql above) still
+    // independently and exhaustively classifies every ticket this matches
+    // into exactly one of ent/smb, so this only ever decides whether a
+    // ticket counts for Migration's scope AT ALL -- never which side it
+    // lands on.
+    const migrationLiveRosterLiteral = `ARRAY[${migrationLiveRoster.map((e) => `'${e.replace(/'/g, "''")}'`).join(',') || `'__none__'`}]::text[]`;
     const deptMatchSql = (team === 'ent' || team === 'smb')
       ? `(
       LOWER(i.current_department) = LOWER($1)
       OR EXISTS (
-        SELECT 1 FROM user_worked_on_tickets w
-        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1)
+        SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
+        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND LOWER(wu.email) = ANY(${migrationLiveRosterLiteral})
       )
     )`
       : `(
