@@ -14135,6 +14135,24 @@ async function _handleJiraPgApi(
     // ticket can show under BOTH tabs (there's no way to know which of the
     // two it would have gone to), same as a genuinely-worked-by-both-teams
     // ticket already legitimately can.
+    //
+    // Last branch (`OR current_department = $1` unconditionally, no assignee
+    // check at all): Filters' own "Queue: X" was permanently redefined
+    // app-wide, by explicit decision, to mean "every ticket CURRENTLY TAGGED
+    // X" -- not just tickets held by X's configured roster members (see
+    // memberClause's own matching OR branch and its surrounding comment).
+    // That redefinition only ever reached Filters' memberClause -- this
+    // function's own rosterMatchSql was never updated to match, so a ticket
+    // tagged Dev but assigned to someone outside the Customer Engineering
+    // roster (or tagged Migration but assigned to someone outside both
+    // ENT and SMB) counted in Filters' Queue: Dev/Migration but was
+    // invisible to this tab -- exactly the MBR-vs-Filters count gap
+    // reported for real, for both Dev/Customer Engineering and Migration
+    // ENT+SMB, for Sep 2026. For ent/smb this can now ALSO double-count an
+    // assigned-but-outside-both-rosters Migration ticket across both tabs,
+    // same accepted tradeoff the unassigned case above already lives with
+    // -- there's no way to know which of the two it "belongs" to, and
+    // Filters itself has no ENT/SMB split to disambiguate against either.
     const rosterMatchSql = `(
       EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
       OR EXISTS (
@@ -14142,6 +14160,7 @@ async function _handleJiraPgApi(
         WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND w4.reason != 'passed' AND LOWER(wu4.email) = ANY($2::text[])
       )
       OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($1))
+      OR LOWER(i.current_department) = LOWER($1)
     )`;
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
