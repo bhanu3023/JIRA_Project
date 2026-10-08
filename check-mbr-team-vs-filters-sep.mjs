@@ -42,9 +42,14 @@ async function main() {
 
   // Filters' dept-scoped count -- same "touched in range" semantics (createdAt
   // OR updatedAt), using the between: date-range format Filters itself sends.
+  // Real param names confirmed from jira-pg-api.ts: `dept` (not `department`)
+  // triggers the dept-scoped branch, and `queueMembersOnly=true` is what
+  // actually engages memberClause (the Queue: X semantics) -- the first
+  // version of this script used `department=` (silently ignored, a no-op)
+  // and both totals came back identical as a result.
   const dateParam = `between:${DATE_FROM}:${DATE_TO}`;
-  const devFilters = await get(`/issues?spaceKey=TESTIN&department=Dev&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`);
-  const migrationFilters = await get(`/issues?spaceKey=TESTIN&department=Migration&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`);
+  const devFilters = await get(`/issues?spaceKey=TESTIN&dept=Dev&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`);
+  const migrationFilters = await get(`/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`);
 
   console.log(`=== Sep 2026 (${DATE_FROM} to ${DATE_TO}) ===\n`);
   console.log('MBR team=eng summary:', JSON.stringify(engMbr.summary));
