@@ -7048,6 +7048,30 @@ async function _handleJiraPgApi(
       // Assigned to me), where "All Tickets" is expected to mean literally
       // every ticket in the department, not just its configured members.
       const queueMembersOnlyParam = url.searchParams.get('queueMembersOnly') === 'true';
+      // Resolved early (once) so memberClause below can OR in whichever
+      // specific person(s) an explicit Assignee filter named, regardless of
+      // whether they're a configured member of this queue's roster -- an
+      // explicit Assignee pick already fully identifies who to show, so a
+      // "must also be on the roster" check on top of it is redundant at
+      // best and silently wrong at worst. Confirmed for real: Queue: Dev +
+      // Assignee: Guru M (423 tickets genuinely assigneeId=Guru AND
+      // current_department=Dev, but Guru was never formally added to Dev's
+      // queue roster) returned only 4. A prior attempt fixed this by
+      // conditionally SKIPPING memberClause's own push into deptExtraClauses
+      // whenever assignees was set -- reverted after it broke the common
+      // case (Queue: Dev + Assignee for an ACTUAL roster member started
+      // returning 0 instead of 1000+, confirmed live) by changing the SHAPE
+      // of the WHERE clause and, per investigation, likely tipping Postgres
+      // into a worse query plan for high-volume cases, silently swallowed
+      // by the row-fetch block's unlogged catch further down. This version
+      // instead ADDS an OR branch to memberClause -- the push stays
+      // unconditional, the clause's overall shape is unchanged, and the
+      // result set can only grow, never shrink, for anyone already matching
+      // today (provably safe, not just reasoned about). Reused by the
+      // historyAssigneeIdx block further down instead of re-resolving.
+      const earlyResolvedAssigneeIds = (queueMembersOnlyParam && !workedRange && !unassignedOnly && assignees)
+        ? await resolveUserIds(assignees.split(',').map((x) => x.trim()).filter(Boolean))
+        : [];
       if (queueMembersOnlyParam && !workedRange) {
         try {
           const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
@@ -7060,6 +7084,7 @@ async function _handleJiraPgApi(
           // reference this exact same bound parameter instead of needing one of
           // their own.
           if (memberIds.length) deptMemberIdsParamIdx = deptParamIdx;
+          const explicitAssigneeParamIdx = memberIds.length ? deptParamIdx + 1 : deptParamIdx;
           // OR (assigneeId IS NULL AND currently in this dept): an UNASSIGNED
           // ticket sitting right now in the exact department being queried has
           // no "wrong person" to narrow against -- nobody's credited with it at
@@ -7071,7 +7096,11 @@ async function _handleJiraPgApi(
           // Confirmed for real: CF-29619 -- current_department = 'Migration',
           // unassigned, updated inside the selected range -- silently missing
           // from Queue: Migration + Updated: Aug with zero other explanation.
-          const memberClause = `(${memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0'} OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($2)))`;
+          // OR assigneeId = ANY(earlyResolvedAssigneeIds): see the long
+          // comment above earlyResolvedAssigneeIds' own declaration -- an
+          // explicitly-selected Assignee's own current ticket counts here
+          // regardless of configured roster membership.
+          const memberClause = `(${memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0'} OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($2))${earlyResolvedAssigneeIds.length ? ` OR i."assigneeId" = ANY($${explicitAssigneeParamIdx}::text[])` : ''})`;
           // Same gap as origin/updated matching had, one layer up: this
           // membership check runs unconditionally whenever queueMembersOnly is
           // set, even when Created/Updated has already broadened department
@@ -7148,25 +7177,17 @@ async function _handleJiraPgApi(
           // workedByMemberSql still limits this to this queue's own members.
           // Filters can now count more than MBR, which still excludes 'passed'.
           const reasonClause = '';
-          // REVERTED: tried skipping this whole clause when an explicit
-          // Assignee filter is active (to fix Queue: Dev + Assignee: Guru M
-          // returning 4 instead of 423 -- he's not in Dev's configured
-          // memberIds). That broke the common case instead: Queue: Dev +
-          // Assignee for an ACTUAL Dev queue member (Pragati, Ravi, etc.)
-          // started returning 0, confirmed for real right after deploy.
-          // Something about skipping memberClause's own presence in
-          // deptExtraSql breaks a downstream assumption this code makes
-          // elsewhere (not yet isolated) -- needs server-log-level
-          // investigation before trying again, not another blind attempt.
-          // Back to always applying memberClause for now; Guru-M-style
-          // non-roster assignees stay under-matched until this gets a
-          // properly diagnosed fix.
+          // This push stays unconditional -- see earlyResolvedAssigneeIds'
+          // own comment above for why an earlier attempt that conditionally
+          // SKIPPED this push (instead of OR-ing into memberClause the way
+          // it does now) caused a real regression and was reverted.
           deptExtraClauses.push(
             broadenIt
               ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)${reasonClause}${workedByMemberSql}))`
               : memberClause
           );
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
+          if (earlyResolvedAssigneeIds.length) { deptExtraParams.push(earlyResolvedAssigneeIds); deptParamIdx++; }
         } catch { /* ignore -- no restriction if lookup fails */ }
       }
       // When includeHistoryParam is set, the assignee match is folded into
@@ -8175,7 +8196,25 @@ async function _handleJiraPgApi(
         // Assignee-filter match) rather than the worked-on one.
         true_assignee: row.assignee_id ? { id: row.assignee_id, firstName: (row.assignee_name||'').split(' ')[0], lastName: (row.assignee_name||'').split(' ').slice(1).join(' '), displayName: row.assignee_name || '', email: row.assignee_email, avatarUrl: avatarRef(row.assignee_id, row.assignee_avatar) } : null };
         });
-      } catch { /* keep Prisma results as fallback */ }
+      } catch (err) {
+        // This block covers the dept-scoped raw SQL fetch AND its full
+        // per-row enrichment (worked-by lookups, SLA prefilter, assignee
+        // overrides, etc.) -- ~400 lines, several of its own queries. Any
+        // failure anywhere in it used to be silently swallowed with zero
+        // logging, falling back to whatever `issues`/`total` already held --
+        // which for every dept-scoped request is the general (non-dept)
+        // Prisma branch's own untouched defaults ([] / 0), since that
+        // branch is skipped entirely whenever `dept` is set (see
+        // deptParamEarly above). A failure here was therefore
+        // indistinguishable from "this person/queue genuinely has zero
+        // tickets" -- confirmed as the likely mechanism behind a live
+        // regression (Queue: Dev + Assignee for a real, high-ticket-volume
+        // member returning 0 with nothing in the logs to explain why) that
+        // took a full static code trace to even suspect, instead of one
+        // grep of the logs. Logging now so the next failure here is
+        // diagnosable in seconds.
+        console.error('[dept row-fetch/enrichment failed]', err);
+      }
     }
 
     // Breached field — live Yes/No: No by default (just created, nothing overdue),
