@@ -3744,7 +3744,24 @@ function parseDateRange(range: string): { from: Date; to: Date } {
     case '7d': { const f = new Date(startOfToday); f.setDate(f.getDate() - 7); return { from: f, to: now }; }
     case '30d': { const f = new Date(startOfToday); f.setDate(f.getDate() - 30); return { from: f, to: now }; }
     case '90d': { const f = new Date(startOfToday); f.setDate(f.getDate() - 90); return { from: f, to: now }; }
-    default: return { from: new Date(0), to: now };
+    default:
+      // Was `{ from: new Date(0), to: now }` -- "from the beginning of
+      // time", i.e. every ticket ever, with zero restriction and zero
+      // indication anything was wrong. This format has genuinely changed
+      // more than once in this file's own history (between:FROM,TO ->
+      // between:FROM:TO, moreThan's open-ended-vs-bounded redefinition) --
+      // a Saved Filter (or a bookmarked/shared URL) created before any such
+      // change carries a string that no longer matches a single case
+      // above, and used to silently show every ticket in the system
+      // instead of the narrow range someone actually saved. Matching
+      // NOTHING instead is the much safer failure mode: a filter that
+      // suddenly shows 0 results is immediately, visibly wrong and gets
+      // reported; one that silently shows everything looks like it's
+      // working and erodes trust in every other number on the page.
+      // Logged so a real occurrence is diagnosable instead of a repeat of
+      // today's multi-hour "why is this count wrong" investigation.
+      console.error('[parseDateRange] unrecognized date range value, matching zero tickets instead of everything:', JSON.stringify(range));
+      return { from: now, to: new Date(0) };
   }
 }
 
