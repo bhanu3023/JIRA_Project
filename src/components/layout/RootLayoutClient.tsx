@@ -9,6 +9,7 @@ import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
 import DotLoader from '@/components/ui/DotLoader';
 import NavigationLoader from '@/components/ui/NavigationLoader';
+import ChunkErrorReloader from '@/components/layout/ChunkErrorReloader';
 
 export default function RootLayoutClient({ children }: { children: React.ReactNode }) {
   const { user, isAuthenticated, initializing, loadUser, sidebarOpen, loadDisabledPriorities } = useStore(
@@ -78,19 +79,23 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
   }, [initializing, isAuthenticated, isAuthPage, router]);
 
   if (isAuthPage) {
-    return <main className="min-h-screen bg-white">{children}</main>;
+    return <><ChunkErrorReloader /><main className="min-h-screen bg-white">{children}</main></>;
   }
 
   if (initializing || (!isAuthenticated && !isAuthPage)) {
     return (
-      <div className="flex h-screen items-center justify-center bg-white">
-        <DotLoader />
-      </div>
+      <>
+        <ChunkErrorReloader />
+        <div className="flex h-screen items-center justify-center bg-white">
+          <DotLoader />
+        </div>
+      </>
     );
   }
 
   return (
     <div className="flex h-screen overflow-hidden bg-white">
+      <ChunkErrorReloader />
       {isAuthenticated && <Sidebar />}
       {/* max-sm:ml-0 -- below the sm breakpoint the sidebar is an
           off-canvas overlay (see Sidebar.tsx), not part of the layout
