@@ -8071,6 +8071,25 @@ async function _handleJiraPgApi(
             }
           } catch { /* leave workedByNamesByIssue empty -- non-critical column */ }
         }
+        // dept_assignees snapshots store the person's name as it was spelled
+        // when the ticket left this dept. Showing that stored text made the
+        // same person appear under two slightly different names (snapshot vs
+        // live users row) -- identical-looking on screen, but two separate
+        // values in Excel's filter list, so filtering the export by one of
+        // them missed the other's rows. Use the person's CURRENT name from
+        // users for any snapshot whose id still exists.
+        const snapshotUserNames: Record<string, { firstName: string; lastName: string; email: string | null; avatarUrl: string | null }> = {};
+        try {
+          const snapIds = Array.from(new Set(rows.rows.map((r: any) => {
+            const da: Record<string, any> = r.dept_assignees || {};
+            const k = Object.keys(da).find((kk) => kk.toLowerCase() === deptParam.toLowerCase());
+            return k ? da[k]?.id : null;
+          }).filter(Boolean))) as string[];
+          if (snapIds.length) {
+            const userRows = await pool.query(`SELECT id, "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = ANY($1::text[])`, [snapIds]);
+            for (const u of userRows.rows) snapshotUserNames[u.id] = { firstName: u.firstName || '', lastName: u.lastName || '', email: u.email || null, avatarUrl: u.avatarUrl || null };
+          }
+        } catch { /* fall back to the stored snapshot names */ }
         enrichedIssues = rows.rows.map((row: any) => {
           // "Queue: Infra" + a "Worked" date filter is asking "who from Infra
           // worked this while it sat here" -- but the row's assignee_id/name
@@ -8149,7 +8168,15 @@ async function _handleJiraPgApi(
           // view like "Unassigned" still means exactly that, and must not
           // start showing a fabricated historical name in its Assignee
           // column just because this ticket also happens to have a snapshot.
-          if (!assigneeOverride && (workedRange || movedAwayFromQueue || (queueMembersOnlyParam && !row.assignee_id))) {
+          // ...except when the ticket's live assignee IS the person the
+          // Assignee filter asked for: then that's the answer, and swapping
+          // in this dept's snapshot showed someone else's name on a row that
+          // matched because of the filtered person -- on screen and in the
+          // export, so filtering the export's Assignee column in Excel came
+          // up short (Queue: Migration + Updated: Sep + Assignee: Lakshma
+          // Reddy: 65 in the app, fewer in Excel).
+          const liveAssigneeIsFiltered = !!(historyAssigneeFilterIds && row.assignee_id && historyAssigneeFilterIds.includes(row.assignee_id));
+          if (!assigneeOverride && !liveAssigneeIsFiltered && (workedRange || movedAwayFromQueue || (queueMembersOnlyParam && !row.assignee_id))) {
             const deptAssignees: Record<string, any> = row.dept_assignees || {};
             const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
             // snapKey !== undefined distinguishes "this dept has a recorded
@@ -8169,7 +8196,10 @@ async function _handleJiraPgApi(
             const snapExists = snapKey !== undefined;
             const snap = snapExists ? deptAssignees[snapKey!] : null;
             if (snap?.id) {
-              assigneeOverride = { id: snap.id, firstName: snap.firstName || '', lastName: snap.lastName || '', email: snap.email || null, avatarUrl: snap.avatarUrl || avatarRef(snap.id, null) };
+              const cur = snapshotUserNames[snap.id];
+              assigneeOverride = cur
+                ? { id: snap.id, firstName: cur.firstName, lastName: cur.lastName, email: cur.email, avatarUrl: cur.avatarUrl || avatarRef(snap.id, null) }
+                : { id: snap.id, firstName: snap.firstName || '', lastName: snap.lastName || '', email: snap.email || null, avatarUrl: snap.avatarUrl || avatarRef(snap.id, null) };
             } else if (!snapExists && movedAwayFromQueue && row.reporter_id) {
               // No per-dept assignee snapshot exists at all -- confirmed for
               // real on CF-29845: reported by a Dev-queue member, transferred
