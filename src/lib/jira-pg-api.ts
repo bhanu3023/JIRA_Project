@@ -7086,9 +7086,18 @@ async function _handleJiraPgApi(
       // result set can only grow, never shrink, for anyone already matching
       // today (provably safe, not just reasoned about). Reused by the
       // historyAssigneeIdx block further down instead of re-resolving.
-      const earlyResolvedAssigneeIds = (queueMembersOnlyParam && !workedRange && !unassignedOnly && assignees)
-        ? await resolveUserIds(assignees.split(',').map((x) => x.trim()).filter(Boolean))
-        : [];
+      //
+      // No longer used on the Filters page (always []): the Assignee filter
+      // there now means "the one person shown in this queue's Assignee
+      // column" (deptOwnerSql, by explicit decision), and must only ever
+      // NARROW the unfiltered queue -- adding the selected person's tickets
+      // to the scope here let a filtered view include tickets the full
+      // queue export didn't have, so per-person counts in Excel couldn't
+      // match. Tickets currently in the department are already in scope
+      // for any assignee (memberClause's current_department branch), which
+      // covers the Guru M case above. Kept as an always-empty list so
+      // memberClause's shape stays exactly as it is.
+      const earlyResolvedAssigneeIds: string[] = [];
       if (queueMembersOnlyParam && !workedRange) {
         try {
           const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [(spaceKey || '').toUpperCase()]);
@@ -7272,11 +7281,38 @@ async function _handleJiraPgApi(
       } else if (workedRange && assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         workedAssigneeIds = await resolveUserIds(ids);
-      } else if ((includeHistoryParam || queueMembersOnlyParam) && assignees) {
-        // Filters page (queueMembersOnly): always "owner or past worker",
-        // whatever date filter is active -- by explicit decision, so the
-        // Assignee filter means the same thing in every combination instead
-        // of switching to strict ownership when only Created was set.
+      } else if (queueMembersOnlyParam && assignees) {
+        // Filters page: Assignee = the ONE person this queue's Assignee
+        // column shows for the ticket (by explicit decision: "one owner per
+        // ticket"), so exporting the whole queue and filtering its Assignee
+        // column in Excel gives exactly the same per-person counts as this
+        // filter, and they add up to the ticket total. deptOwnerSql mirrors
+        // the row-display logic further down (assigneeOverride) for an
+        // unfiltered Queue view -- keep the two in step:
+        //   - ticket has left this queue, or has no live assignee, and this
+        //     queue's dept_assignees snapshot names someone -> that person
+        //   - left this queue with no snapshot at all -> its reporter
+        //   - otherwise -> the live assignee
+        // Replaces "owner or past worker", which counted a shared ticket for
+        // everyone who touched it (more than the one name a row can show).
+        const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
+        const resolvedIds = await resolveUserIds(ids);
+        if (resolvedIds.length) {
+          const snapIdSql = `(SELECT ds.v->>'id' FROM jsonb_each(COALESCE(i.dept_assignees, '{}'::jsonb)) ds(k, v) WHERE LOWER(ds.k) = LOWER($2) AND jsonb_typeof(ds.v) = 'object' LIMIT 1)`;
+          const snapExistsSql = `EXISTS (SELECT 1 FROM jsonb_object_keys(COALESCE(i.dept_assignees, '{}'::jsonb)) dk WHERE LOWER(dk) = LOWER($2))`;
+          const movedSql = `LOWER(COALESCE(i.current_department, '')) != LOWER($2)`;
+          const deptOwnerSql = `(CASE
+              WHEN (${movedSql} OR i."assigneeId" IS NULL) AND NULLIF(${snapIdSql}, '') IS NOT NULL THEN ${snapIdSql}
+              WHEN ${movedSql} AND NOT ${snapExistsSql} AND i."reporterId" IS NOT NULL THEN i."reporterId"
+              ELSE i."assigneeId"
+            END)`;
+          deptExtraClauses.push(`${deptOwnerSql} = ANY($${deptParamIdx}::text[])`);
+          deptExtraParams.push(resolvedIds);
+          deptParamIdx++;
+        } else {
+          assigneeFilterForcedEmpty = true;
+        }
+      } else if (includeHistoryParam && assignees) {
         // Explicitly reversing the earlier "Queue + Assignee means current
         // ownership only" decision for the Updated filter specifically, per
         // direct request -- confirmed understanding that this reintroduces
@@ -8034,18 +8070,13 @@ async function _handleJiraPgApi(
         // the other 6 at all. This column gives Excel something it CAN
         // correctly filter on for that case.
         //
-        // It must list exactly the people the Assignee filter would match
-        // this row for (assigneeScopeSql), or filtering it in Excel gives a
-        // different count than the app: the current assignee while the
-        // ticket is in this dept, plus everyone with a worked-on record here
-        // under the same reason rule (on Filters, 'passed' hand-offs count).
-        // Confirmed for real: Queue: Migration + Updated: Sep + Assignee:
-        // Lakshma Reddy showed 65 in the app but 47 when the export's Worked
-        // By was filtered by her name -- it left out tickets she currently
-        // owns with no worked-on row yet, and her hand-off ('passed') rows.
+        // Informational: everyone who owned or handled the ticket in this
+        // dept (current assignee while it's here, plus worked-on records,
+        // 'passed' hand-offs included on the Filters page). The Filters
+        // Assignee filter itself counts only the ONE person shown in the
+        // Assignee column (deptOwnerSql) -- filter that column in Excel, not
+        // this one, to reproduce its counts.
         let workedByNamesByIssue: Record<string, string> = {};
-        // Same people as a list -- used by the export's one-row-per-person mode.
-        const workedByListByIssue: Record<string, { id: string; name: string }[]> = {};
         if (rows.rows.length) {
           try {
             const issueIds = rows.rows.map((r: any) => r.id);
@@ -8070,9 +8101,7 @@ async function _handleJiraPgApi(
               }
             }
             for (const [issueId, people] of Object.entries(peopleByIssue)) {
-              const list = Array.from(people, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
-              workedByListByIssue[issueId] = list;
-              workedByNamesByIssue[issueId] = list.map((p) => p.name).join(', ');
+              workedByNamesByIssue[issueId] = Array.from(people.values()).sort((a, b) => a.localeCompare(b)).join(', ');
             }
           } catch { /* leave workedByNamesByIssue empty -- non-critical column */ }
         }
@@ -8276,7 +8305,6 @@ async function _handleJiraPgApi(
         // a fixed field list and silently dropped workedByNames when it was
         // passed in there, so the export's Worked By column was always empty.
         workedByNames: workedByNamesByIssue[row.id] || '',
-        workedBy: workedByListByIssue[row.id] || [],
         // See the long comment on true_assignee in the non-dept branch above
         // -- same reasoning, but here the override being bypassed is this
         // branch's own assigneeOverride (queue-historical snapshot /

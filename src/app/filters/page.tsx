@@ -1479,11 +1479,14 @@ export default function FiltersPage() {
 
         if (selAssignees.length) {
           params.assignees = Array.from(new Set(selAssignees.flatMap(expandMember))).join(',');
-          // Assignee = "owner or past worker" in every combination, with or
-          // without a Queue (decided explicitly): the current owner, plus
-          // tickets the person held or worked and handed on. The server
-          // applies this for Filters requests (queueMembersOnly in the Queue
-          // branch, the default broadening in the other).
+          // Assignee = the ONE person shown in the Assignee column (decided
+          // explicitly: "one owner per ticket"), so exporting the whole list
+          // and filtering that column in Excel gives the same counts. With a
+          // Queue, the server picks who held it in that queue
+          // (queueMembersOnly); without one, the current owner -- hence
+          // assigneeStrict, which turns off the general branch's
+          // "worked on it once" broadening.
+          params.assigneeStrict = 'true';
         }
 
         if (selReporters.length) {
@@ -1608,7 +1611,7 @@ export default function FiltersPage() {
      browsing cap, so the export covers everything a saved/shared filter
      would actually match, not just what's currently rendered. */
   const [exporting, setExporting] = useState(false);
-  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportProgress, setExportProgress] = useState('');
 
   // Which of STATIC_COLUMN_OPTIONS are currently shown in the results
   // table -- per-browser preference (not shared/synced), read once on
@@ -1652,30 +1655,43 @@ export default function FiltersPage() {
     dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
     resolved:       { label: 'Resolved date',   getValue: (i) => i.resolvedAt ?? '' },
   };
-  // 'ticket': one row per ticket (its single displayed assignee).
-  // 'person': one row per person per ticket -- everyone the Assignee filter
-  // would match the ticket for (owner in the queue + anyone who worked or
-  // held it there, issue.workedBy). A ticket's Assignee column can only hold
-  // one name, so filtering an unfiltered per-ticket export by a person in
-  // Excel undercounts anyone who wasn't that one name (Queue: Migration +
-  // Updated: Sep -- Lakshma Reddy: 65 in the app, 47 in Excel). Filtering
-  // the Person column of this mode gives the app's count.
-  const handleExport = async (mode: 'ticket' | 'person' = 'ticket') => {
+  // One row per ticket. The Assignee column holds the same single person the
+  // Assignee filter matches on, so filtering it in Excel gives the app's
+  // per-person counts.
+  const handleExport = async () => {
     setExporting(true);
     try {
       // The server returns at most 2000 rows per request, so page through
       // until everything matching is fetched (it used to stop at the first
       // 2000). EXPORT_MAX is a safety ceiling for a runaway filter.
-      const PAGE_LIMIT = 2000;
-      const EXPORT_MAX = 50000;
-      const baseParams = buildFilterParams();
+      // Built to get through a full, unfiltered export: pages of 1000 with
+      // a 2-minute timeout each (the normal 20s client timeout cut big
+      // pages off), up to 3 tries per page so one slow response doesn't
+      // abort the whole file, and no includeTimeSpent (an extra history
+      // query per page for a column the CSV doesn't contain).
+      const PAGE_LIMIT = 1000;
+      const EXPORT_MAX = 200000;
+      const filterParams = buildFilterParams();
+      delete filterParams.includeTimeSpent;
+      const baseParams: Record<string, string> = filterParams;
+      const fetchPage = async (p: number) => {
+        const qs = new URLSearchParams({ ...baseParams, page: String(p), limit: String(PAGE_LIMIT) }).toString();
+        let lastErr: unknown;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            return await api.request<{ issues: any[]; total: number }>(`/issues?${qs}`, { signal: AbortSignal.timeout(120_000) });
+          } catch (e) { lastErr = e; }
+        }
+        throw lastErr;
+      };
       const list: any[] = [];
       let matchedTotal = 0;
       for (let p = 1; ; p++) {
-        const { issues: rows, total } = await api.getIssues({ ...baseParams, page: String(p), limit: String(PAGE_LIMIT) });
+        const { issues: rows, total } = await fetchPage(p);
         matchedTotal = total;
-        list.push(...(rows as any[]));
-        if ((rows as any[]).length < PAGE_LIMIT || list.length >= total || list.length >= EXPORT_MAX) break;
+        list.push(...rows);
+        setExportProgress(`${Math.min(list.length, total).toLocaleString()} / ${total.toLocaleString()}`);
+        if (rows.length < PAGE_LIMIT || list.length >= total || list.length >= EXPORT_MAX) break;
       }
       // Which extra fields actually have a selected value right now -- a
       // field the user is genuinely filtering on must show up as a column
@@ -1705,7 +1721,7 @@ export default function FiltersPage() {
         (id) => activeExtras.includes(id) || fieldsWithSelectedValue[id as keyof typeof fieldsWithSelectedValue],
       );
       const header = [
-        'Key', ...(mode === 'person' ? ['Person'] : []), 'Type', 'Summary', 'Assignee', 'Worked By', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'SLA Breached Dept', 'Overdue', 'Department',
+        'Key', 'Type', 'Summary', 'Assignee', 'Worked By', 'Reporter', 'Status', 'Priority', 'SLA Breached', 'SLA Breached By', 'SLA Breached Dept', 'Overdue', 'Department',
         'Created', 'Updated',
         ...extraCols.map((id) => EXPORT_EXTRA_COLUMNS[id].label),
       ];
@@ -1727,27 +1743,20 @@ export default function FiltersPage() {
       const lines = [header.map(csvCell).join(',')];
       const assigneeName = (issue: any) =>
         issue.assignee ? `${issue.assignee.firstName || ''} ${issue.assignee.lastName || ''}`.trim() : 'Unassigned';
-      // Person mode: one line per person in issue.workedBy (only sent for a
-      // Queue view); a ticket with no such list falls back to its assignee.
-      const peopleFor = (issue: any): string[] =>
-        mode === 'person'
-          ? (Array.isArray(issue.workedBy) && issue.workedBy.length ? issue.workedBy.map((p: any) => p.name) : [assigneeName(issue)])
-          : [''];
-      for (const issue of list) for (const person of peopleFor(issue)) {
+      for (const issue of list) {
         lines.push([
           keyLink(issue),
-          ...(mode === 'person' ? [person] : []),
           issue.type ?? '',
           issue.summary ?? '',
           assigneeName(issue),
           // Independent of the Assignee column above (which can legitimately
           // show a historical worker's name, or just the current owner's,
           // depending on whether an Assignee filter is active -- see its own
-          // comment on current_department below) -- this lists every person
-          // the app's Assignee filter would match the row for (current owner
-          // in this queue, plus anyone who worked or held it here), so
-          // filtering THIS column in Excel afterward gives the same result
-          // as filtering Assignee in the app. Only populated on a Queue-
+          // comment on current_department below) -- this lists everyone who
+          // owned or handled the ticket in this queue, for reference. The
+          // app's Assignee filter counts only the Assignee column's one
+          // person, so filter Assignee (not this) in Excel to reproduce its
+          // counts. Only populated on a Queue-
           // scoped export (dept-scoped branch); empty on the general "All
           // Work" tab with no Queue selected, which has no single
           // department's worked-on ledger to draw from.
@@ -1783,7 +1792,7 @@ export default function FiltersPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `filtered-issues${mode === 'person' ? '-by-person' : ''}-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `filtered-issues-${new Date().toISOString().slice(0, 10)}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -1791,10 +1800,11 @@ export default function FiltersPage() {
       if (matchedTotal > list.length) {
         alert(`Exported the first ${list.length.toLocaleString()} of ${matchedTotal.toLocaleString()} matching issues. Narrow your filters to export everything.`);
       }
-    } catch {
-      alert('Export failed. Please try again.');
+    } catch (e: any) {
+      alert(`Export failed${e?.message ? `: ${e.message}` : ''}. Please try again.`);
     }
     setExporting(false);
+    setExportProgress('');
   };
 
   // Filtering by a field and seeing that field's column in the table used to
@@ -2269,9 +2279,8 @@ export default function FiltersPage() {
               onChange={handleColumnsDropdownChange}
             />
             {can(user?.role, 'exportData') && (
-              <div className="relative">
               <button
-                onClick={() => setExportMenuOpen((o) => !o)}
+                onClick={() => handleExport()}
                 disabled={exporting || issues.length === 0}
                 // min-w fits "Exporting…" (the wider of the two labels) so
                 // toggling the label doesn't change this button's own width --
@@ -2280,32 +2289,8 @@ export default function FiltersPage() {
                 // visible as the toolbar jumping the moment Export is clicked.
                 className="flex items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-[12.5px] font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[92px]"
               >
-                <Download size={13} /> {exporting ? 'Exporting…' : 'Export'} <ChevronDown size={12} className="text-gray-400" />
+                <Download size={13} /> {exporting ? `Exporting… ${exportProgress}` : 'Export'}
               </button>
-              {exportMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setExportMenuOpen(false)} />
-                  <div className="absolute right-0 top-full z-50 mt-1 w-72 rounded-lg border border-gray-200 bg-white py-1 shadow-xl">
-                    <button
-                      onClick={() => { setExportMenuOpen(false); handleExport('ticket'); }}
-                      className="block w-full px-3 py-2 text-left hover:bg-gray-50"
-                    >
-                      <span className="block text-[12.5px] font-medium text-gray-800">One row per ticket</span>
-                      <span className="block text-[11.5px] text-gray-500">Each ticket once, with its assignee.</span>
-                    </button>
-                    <button
-                      onClick={() => { setExportMenuOpen(false); handleExport('person'); }}
-                      className="block w-full px-3 py-2 text-left hover:bg-gray-50"
-                    >
-                      <span className="block text-[12.5px] font-medium text-gray-800">One row per person</span>
-                      <span className="block text-[11.5px] text-gray-500">
-                        A ticket appears once for each person who owned or worked it in the queue. Filter the Person column in Excel to get the same counts as the Assignee filter here.
-                      </span>
-                    </button>
-                  </div>
-                </>
-              )}
-              </div>
             )}
             <button
               onClick={() => { setEditingFilter(null); setShowSaveModal(true); }}
