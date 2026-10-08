@@ -10868,7 +10868,30 @@ async function _handleJiraPgApi(
               // timestamp with whatever moment this unrelated action
               // happened, making it read as breached/"resolved late" even
               // though the actual work finished well before the due time.
-              if (oldQueueStatusCategory !== 'done') {
+              // oldQueueStatusCategory (dept_statuses[dept]'s own prior
+              // category) is NOT reliable for this decision: the moment
+              // ANY department resolves a ticket, that done status gets
+              // copied into every OTHER department's dept_statuses entry
+              // too (see the cross-department propagation a few lines up),
+              // including a department the ticket hasn't even been handed
+              // to yet. If that department is later handed the ticket and
+              // reopened via the plain (non-queue) status field -- which
+              // never touches dept_statuses -- its dept_statuses entry is
+              // left silently pre-marked "done" from that earlier,
+              // unrelated propagation. The NEXT time it's genuinely
+              // resolved here, oldQueueStatusCategory already reads 'done'
+              // (stale), so this guard skipped re-stamping resolvedAt
+              // entirely -- confirmed for real on CF-29905: resolved once
+              // in Dev, reopened and handed to Migration, genuinely
+              // resolved again there days later, but resolvedAt stayed
+              // frozen at the FIRST (Dev) resolution forever after,
+              // throwing off every Start/Due time computed from it.
+              // issue.statusId is the ticket's real, authoritative status
+              // as of this request -- same source of truth the plain
+              // body.statusId path below already uses for this exact
+              // wasResolved/willBeResolved decision -- so use that instead.
+              const realWasResolved = realStatuses.find((s: any) => s.id === issue.statusId)?.category === 'done';
+              if (!realWasResolved) {
                 resolvedAtChange = new Date();
               }
               queueStatusSyncedDone = true;
