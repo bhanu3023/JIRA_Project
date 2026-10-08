@@ -8183,7 +8183,7 @@ async function _handleJiraPgApi(
           // balloon this response by tens of MB on its own.
           id: row.id, key: row.key, cf_key: row.cf_key, summary: row.summary, description: (row.description || '').slice(0, 500),
           priority: row.priority, type: row.type, labels: row.labels,
-          createdAt: row.createdAt, updatedAt: row.updatedAt,
+          createdAt: row.createdAt, updatedAt: row.updatedAt, resolvedAt: row.resolvedAt,
           spaceId: row.spaceId, dueDate: row.dueDate,
           workType: row.workType, productType: row.productType, productionTicket: row.productionTicket, combination: row.combination,
           testEnvironment: row.testEnvironment, rootCause: row.rootCause, fixDescription: row.fixDescription,
