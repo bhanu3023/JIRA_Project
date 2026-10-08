@@ -1,10 +1,10 @@
 'use client';
 
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
-import { Clock, Calendar, X, Search } from 'lucide-react';
+import { Clock, Calendar, X, Search, ChevronDown } from 'lucide-react';
 
 type WorklogRow = {
   id: string;
@@ -29,6 +29,80 @@ function formatMinutes(m: number) {
 
 function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
+}
+
+// Plain <select> for "Logged by" had no way to search a 300+ person list --
+// finding one specific name meant scrolling through the whole alphabet.
+// Same search-box-over-a-list pattern as the Filters page's own people
+// pickers, just single-select (clicking an option selects it and closes).
+function UserSearchSelect({
+  value, onChange, options, placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  placeholder: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQ(''); }
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const filtered = options.filter((o) => o.label.toLowerCase().includes(q.trim().toLowerCase()));
+  const selectedLabel = options.find((o) => o.value === value)?.label || placeholder;
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 hover:border-gray-400 transition-colors min-w-[140px]"
+      >
+        <span className="flex-1 text-left truncate">{selectedLabel}</span>
+        <ChevronDown size={12} className={`text-gray-400 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute z-50 mt-1 w-64 rounded-lg border border-gray-200 bg-white shadow-xl overflow-hidden">
+          <div className="border-b border-gray-100 px-2.5 py-2">
+            <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
+              <Search size={12} className="text-gray-400 flex-shrink-0" />
+              <input
+                autoFocus
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search people…"
+                className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
+              />
+            </div>
+          </div>
+          <div className="max-h-64 overflow-y-auto py-1">
+            {filtered.length === 0 ? (
+              <p className="px-3 py-3 text-[12px] text-gray-400 text-center">No results</p>
+            ) : (
+              filtered.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => { onChange(opt.value); setOpen(false); setQ(''); }}
+                  className={`block w-full text-left px-3 py-1.5 text-[12.5px] transition-colors ${opt.value === value ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700 hover:bg-gray-50'}`}
+                >
+                  {opt.label}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function WorklogPage() {
@@ -59,80 +133,69 @@ export default function WorklogPage() {
       to: dateTo ? `${dateTo}T23:59:59` : undefined,
       spaceKey: spaceKeyFilter || undefined,
       userId: userFilter || undefined,
+      dept: deptFilter || undefined,
     })
       .then((data: any) => setRows(Array.isArray(data) ? data : []))
       .catch((e: any) => setError(e?.message || 'Failed to load worklog entries.'))
       .finally(() => setLoading(false));
-  }, [dateFrom, dateTo, spaceKeyFilter, userFilter]);
-
-  // Department/Queue options -- derived from whatever's actually in the
-  // current date+space+user-filtered result set, not a separate static
-  // list, so the dropdown never offers a department with zero entries to
-  // filter down to in the first place.
-  const deptOptions = useMemo(() => Array.from(new Set(rows.map((r) => r.department).filter(Boolean))).sort(), [rows]);
-  // Selected department may no longer be a valid option once the other
-  // filters change (e.g. switching Space drops a department entirely) --
-  // clear it rather than silently filtering to a value nothing can match.
-  useEffect(() => {
-    if (deptFilter && !deptOptions.includes(deptFilter)) setDeptFilter('');
-  }, [deptOptions, deptFilter]);
+  }, [dateFrom, dateTo, spaceKeyFilter, userFilter, deptFilter]);
 
   // Queue filter means "logged by one of THIS queue's own configured
-  // members" -- by explicit request, after seeing Dev-team people's
-  // cross-team entries under Migration (the entry's own Department tag was
-  // accurate, but reads as wrong here: this view is about the Migration
-  // TEAM's logged work, not every entry that happened to touch a Migration
-  // ticket). Different from how the main ticket Queue filter works
-  // elsewhere (tag-based, by separate explicit decision) -- Worklog's
-  // "who logged this" framing is person-centric in a way ticket counts
-  // aren't. Rosters fetched per space actually present in the loaded rows
-  // (a worklog entry's own spaceKey), not just the current Space filter,
-  // so "All spaces" + a Queue filter still resolves each entry against the
-  // right board's own queue config.
-  const [deptRosters, setDeptRosters] = useState<Record<string, Set<string>>>({});
+  // members, wherever they logged it" -- by explicit request (two rounds):
+  // first, Dev-team people's cross-team entries showing under Migration
+  // read as wrong even though the entry's own Department tag was accurate
+  // (fixed by also requiring roster membership); then the SAME Dev people
+  // disappeared from "Queue: Dev" entirely because most of their own
+  // entries are tagged Migration (the department they were helping on, not
+  // their own team) -- "Queue: Dev" needs to mean "this person is a Dev
+  // person", not "AND this specific entry happens to be tagged Dev" on top
+  // of that. The actual roster matching now happens server-side (GET
+  // /worklogs?dept=), not here -- moved there after this exact client-side
+  // version repeatedly tested as "still not working" live despite the
+  // underlying roster data itself checking out correct every time via a
+  // script, so it can be verified directly against real data instead of
+  // depending on this component's own state/effect timing. This only
+  // fetches the dropdown's own option list now: every CONFIGURED queue for
+  // the spaces actually present in the current (unfiltered-by-dept) rows,
+  // not just whichever department tags happen to appear in this date
+  // range, so a queue stays selectable even when none of its own entries
+  // happened to be tagged that way.
+  const [deptOptionsBySpace, setDeptOptionsBySpace] = useState<Record<string, string[]>>({});
   useEffect(() => {
-    if (!deptFilter) return;
     const spaceKeys = Array.from(new Set(rows.map((r) => r.spaceKey).filter(Boolean)));
+    const missing = spaceKeys.filter((sk) => !(sk in deptOptionsBySpace));
+    if (!missing.length) return;
     let cancelled = false;
     (async () => {
-      const entries = await Promise.all(spaceKeys.map(async (sk) => {
-        const cacheKey = `${sk}::${deptFilter.toLowerCase()}`;
-        if (deptRosters[cacheKey]) return [cacheKey, deptRosters[cacheKey]] as const;
+      const entries = await Promise.all(missing.map(async (sk) => {
         try {
           const queues = await api.request<any[]>(`custom-queues/${sk}`);
-          const q = (queues || []).find((qq: any) => String(qq.name || '').toLowerCase() === deptFilter.toLowerCase());
-          return [cacheKey, new Set<string>(Array.isArray(q?.memberIds) ? q.memberIds : [])] as const;
+          return [sk, (queues || []).map((q: any) => q.name).filter(Boolean)] as const;
         } catch {
-          return [cacheKey, new Set<string>()] as const;
+          return [sk, []] as const;
         }
       }));
       if (cancelled) return;
-      setDeptRosters((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
+      setDeptOptionsBySpace((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deptFilter, rows]);
+  }, [rows, deptOptionsBySpace]);
+
+  const deptOptions = useMemo(
+    () => Array.from(new Set(Object.values(deptOptionsBySpace).flat())).sort(),
+    [deptOptionsBySpace],
+  );
 
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return rows.filter((r) => {
-      if (deptFilter) {
-        if (r.department !== deptFilter) return false;
-        const roster = deptRosters[`${r.spaceKey}::${deptFilter.toLowerCase()}`];
-        // Roster not loaded yet, or this dept has no configured queue at
-        // all (roster undefined vs empty Set) -- don't hide everything
-        // while mid-fetch or for a dept with no roster to check against.
-        if (roster && roster.size > 0 && r.authorId && !roster.has(r.authorId)) return false;
-      }
-      if (!q) return true;
-      return (
-        r.issueKey.toLowerCase().includes(q) ||
-        (r.issueSummary || '').toLowerCase().includes(q) ||
-        (r.authorName || '').toLowerCase().includes(q) ||
-        (r.description || '').toLowerCase().includes(q)
-      );
-    });
-  }, [rows, search, deptFilter, deptRosters]);
+    if (!q) return rows;
+    return rows.filter((r) =>
+      r.issueKey.toLowerCase().includes(q) ||
+      (r.issueSummary || '').toLowerCase().includes(q) ||
+      (r.authorName || '').toLowerCase().includes(q) ||
+      (r.description || '').toLowerCase().includes(q)
+    );
+  }, [rows, search]);
 
   const totalMinutes = useMemo(() => filteredRows.reduce((sum, r) => sum + (r.timeSpentMinutes || 0), 0), [filteredRows]);
 
@@ -215,14 +278,16 @@ export default function WorklogPage() {
 
           <div className="flex items-center gap-2">
             <label className="text-[12px] text-gray-400 font-medium">Logged by</label>
-            <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">Everyone</option>
-              <option value={user?.id || ''}>Just me</option>
-              {users.map((u) => (
-                <option key={u.id} value={u.id}>{`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email}</option>
-              ))}
-            </select>
+            <UserSearchSelect
+              value={userFilter}
+              onChange={setUserFilter}
+              placeholder="Everyone"
+              options={[
+                { value: '', label: 'Everyone' },
+                { value: user?.id || '', label: 'Just me' },
+                ...users.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
+              ]}
+            />
           </div>
 
           <div className="relative flex-1 min-w-[180px]">

@@ -2527,7 +2527,29 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         ? issue.sla_snapshot
         : (await pool.query(`SELECT sla_snapshot FROM issues WHERE id=$1`, [issue.id]).catch(() => null))?.rows[0]?.sla_snapshot;
       if (Array.isArray(existingSnapshot) && existingSnapshot.length) {
-        return existingSnapshot;
+        // A waiver applied AFTER the snapshot was frozen (an admin deciding
+        // later that a breach was a mistake) only ever wrote to sla_waivers
+        // -- the "SLA Breach Waiver" endpoint never touches sla_snapshot --
+        // so returning the frozen array as-is kept showing "Breached"
+        // forever afterward, no matter how many times it got waived.
+        // Confirmed for real on CF-29905: waived 2026-09-11 ("it's by
+        // mistake"), still read Breached on the ticket detail page
+        // indefinitely after. Re-apply whatever sla_waivers says right now
+        // on top of the frozen numbers -- due time/elapsed/etc. stay
+        // frozen, only the breach verdict and waiver metadata go live.
+        const waivers: Record<string, any> = (issue as any).sla_waivers || {};
+        return existingSnapshot.map((inst: any) => {
+          const waiver = waivers[inst.policyId] || null;
+          if (!waiver) return inst;
+          return {
+            ...inst,
+            isBreached: false,
+            waived: true,
+            waivedByName: waiver.waivedByName || null,
+            waivedAt: waiver.waivedAt || null,
+            waivedReason: waiver.reason || null,
+          };
+        });
       }
     }
 
@@ -3352,7 +3374,14 @@ function computeSlaBreachedAndOverdue(
   // once and can't afford a per-row round trip. A ticket that's never been
   // individually viewed keeps using the live computation below until it has.
   if (isResolved && Array.isArray(i.sla_snapshot) && i.sla_snapshot.length) {
-    return { slaBreached: i.sla_snapshot.some((x: any) => x.isBreached), overdue: false };
+    // Same "waiver applied after the freeze never reaches the snapshot"
+    // fix as computeSLAInstancesPure's own frozen-snapshot short-circuit --
+    // see its comment. Without this, a ticket waived on the detail page
+    // (e.g. CF-29905) kept counting as breached here too, on the Filters
+    // table/export and MBR, even though the detail page itself now
+    // correctly shows it waived.
+    const snapshotWaivers: Record<string, any> = i.sla_waivers || {};
+    return { slaBreached: i.sla_snapshot.some((x: any) => !snapshotWaivers[x.policyId] && x.isBreached), overdue: false };
   }
   // A department nobody has configured an SLA policy for (e.g. Infra, which
   // never had one set up) previously still showed a hard "No" in the SLA
@@ -10867,7 +10896,30 @@ async function _handleJiraPgApi(
               // timestamp with whatever moment this unrelated action
               // happened, making it read as breached/"resolved late" even
               // though the actual work finished well before the due time.
-              if (oldQueueStatusCategory !== 'done') {
+              // oldQueueStatusCategory (dept_statuses[dept]'s own prior
+              // category) is NOT reliable for this decision: the moment
+              // ANY department resolves a ticket, that done status gets
+              // copied into every OTHER department's dept_statuses entry
+              // too (see the cross-department propagation a few lines up),
+              // including a department the ticket hasn't even been handed
+              // to yet. If that department is later handed the ticket and
+              // reopened via the plain (non-queue) status field -- which
+              // never touches dept_statuses -- its dept_statuses entry is
+              // left silently pre-marked "done" from that earlier,
+              // unrelated propagation. The NEXT time it's genuinely
+              // resolved here, oldQueueStatusCategory already reads 'done'
+              // (stale), so this guard skipped re-stamping resolvedAt
+              // entirely -- confirmed for real on CF-29905: resolved once
+              // in Dev, reopened and handed to Migration, genuinely
+              // resolved again there days later, but resolvedAt stayed
+              // frozen at the FIRST (Dev) resolution forever after,
+              // throwing off every Start/Due time computed from it.
+              // issue.statusId is the ticket's real, authoritative status
+              // as of this request -- same source of truth the plain
+              // body.statusId path below already uses for this exact
+              // wasResolved/willBeResolved decision -- so use that instead.
+              const realWasResolved = realStatuses.find((s: any) => s.id === issue.statusId)?.category === 'done';
+              if (!realWasResolved) {
                 resolvedAtChange = new Date();
               }
               queueStatusSyncedDone = true;
@@ -12290,6 +12342,19 @@ async function _handleJiraPgApi(
     const to = qs.get('to');
     const authorFilter = qs.get('userId');
     const spaceKeyFilter = qs.get('spaceKey');
+    // Queue filter (dept) means "logged by one of THIS queue's own
+    // configured members, wherever they logged it" -- NOT "this specific
+    // entry's own department tag matches", by explicit decision (a Dev
+    // person's real work logged against a Migration-tagged ticket is still
+    // Dev's own person logging it). The Department column in the response
+    // still carries each entry's real tag either way; this only decides
+    // which rows come back at all. Done server-side (not left to the
+    // frontend) specifically so it can be verified directly against real
+    // data before anyone has to test it live in a browser -- moved here
+    // after the identical frontend-only version repeatedly tested as
+    // "still not working" despite the underlying roster data itself being
+    // confirmed correct every time it was checked directly.
+    const deptFilter = qs.get('dept');
     const conditions: string[] = [];
     const params: any[] = [];
     let n = 1;
@@ -12309,7 +12374,30 @@ async function _handleJiraPgApi(
        LIMIT 2000`,
       params
     );
-    return json(rows.rows);
+    let result = rows.rows;
+    if (deptFilter) {
+      // Roster per space actually present in the result set, each
+      // resolved against that row's OWN spaceKey -- "All spaces" + a Queue
+      // filter still checks each entry against the right board's config.
+      const spaceKeys = Array.from(new Set(result.map((r: any) => r.spaceKey).filter(Boolean)));
+      const rosterBySpace: Record<string, Set<string>> = {};
+      for (const sk of spaceKeys) {
+        try {
+          const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [sk]);
+          const queues: any[] = cq.rows[0]?.queues || [];
+          const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === deptFilter.toLowerCase());
+          rosterBySpace[sk] = new Set(Array.isArray(q?.memberIds) ? q.memberIds : []);
+        } catch { rosterBySpace[sk] = new Set(); }
+      }
+      result = result.filter((r: any) => {
+        const roster = rosterBySpace[r.spaceKey];
+        // No configured queue by this name for this space at all -- fall
+        // through to showing nothing for it rather than guessing, same as
+        // an empty roster already means above.
+        return roster && roster.size > 0 && r.authorId && roster.has(r.authorId);
+      });
+    }
+    return json(result);
   }
 
   // DELETE worklogs/:id -- the entry's own author, or an admin, only.
