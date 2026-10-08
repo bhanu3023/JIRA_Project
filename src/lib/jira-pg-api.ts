@@ -2527,7 +2527,29 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         ? issue.sla_snapshot
         : (await pool.query(`SELECT sla_snapshot FROM issues WHERE id=$1`, [issue.id]).catch(() => null))?.rows[0]?.sla_snapshot;
       if (Array.isArray(existingSnapshot) && existingSnapshot.length) {
-        return existingSnapshot;
+        // A waiver applied AFTER the snapshot was frozen (an admin deciding
+        // later that a breach was a mistake) only ever wrote to sla_waivers
+        // -- the "SLA Breach Waiver" endpoint never touches sla_snapshot --
+        // so returning the frozen array as-is kept showing "Breached"
+        // forever afterward, no matter how many times it got waived.
+        // Confirmed for real on CF-29905: waived 2026-09-11 ("it's by
+        // mistake"), still read Breached on the ticket detail page
+        // indefinitely after. Re-apply whatever sla_waivers says right now
+        // on top of the frozen numbers -- due time/elapsed/etc. stay
+        // frozen, only the breach verdict and waiver metadata go live.
+        const waivers: Record<string, any> = (issue as any).sla_waivers || {};
+        return existingSnapshot.map((inst: any) => {
+          const waiver = waivers[inst.policyId] || null;
+          if (!waiver) return inst;
+          return {
+            ...inst,
+            isBreached: false,
+            waived: true,
+            waivedByName: waiver.waivedByName || null,
+            waivedAt: waiver.waivedAt || null,
+            waivedReason: waiver.reason || null,
+          };
+        });
       }
     }
 
@@ -3352,7 +3374,14 @@ function computeSlaBreachedAndOverdue(
   // once and can't afford a per-row round trip. A ticket that's never been
   // individually viewed keeps using the live computation below until it has.
   if (isResolved && Array.isArray(i.sla_snapshot) && i.sla_snapshot.length) {
-    return { slaBreached: i.sla_snapshot.some((x: any) => x.isBreached), overdue: false };
+    // Same "waiver applied after the freeze never reaches the snapshot"
+    // fix as computeSLAInstancesPure's own frozen-snapshot short-circuit --
+    // see its comment. Without this, a ticket waived on the detail page
+    // (e.g. CF-29905) kept counting as breached here too, on the Filters
+    // table/export and MBR, even though the detail page itself now
+    // correctly shows it waived.
+    const snapshotWaivers: Record<string, any> = i.sla_waivers || {};
+    return { slaBreached: i.sla_snapshot.some((x: any) => !snapshotWaivers[x.policyId] && x.isBreached), overdue: false };
   }
   // A department nobody has configured an SLA policy for (e.g. Infra, which
   // never had one set up) previously still showed a hard "No" in the SLA
