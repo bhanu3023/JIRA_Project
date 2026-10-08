@@ -14112,7 +14112,32 @@ async function _handleJiraPgApi(
     // (roster) is already exactly this team's own member list (live queue
     // emails for eng/qa/infra, the fixed list for ent/smb), so no extra
     // lookup is needed to restrict both checks below to it.
-    const deptMatchSql = `(
+    // original_dept and dept_statuses-done below have no Filters equivalent
+    // at all (Filters' Queue: X only ever checks CURRENT department plus a
+    // worked-on-in-range signal, never "did this dept merely CREATE it" or
+    // "was this dept marked done at some point"). For eng/qa/infra that
+    // extra breadth never caused a gap (every Dev/Customer Engineering
+    // mismatch traced back to the worked-on branch, not these two). For
+    // ent/smb specifically it does: confirmed for real for Sep 2026 --
+    // CF-29317/CF-29321 (original_dept=Migration, long since moved to Dev)
+    // and CF-30698/CF-33042/CF-29619/CF-33136 (projectPool set to ENT/SMB
+    // at some point, long since moved to QA/Pre-sales) made ENT+SMB's
+    // combined union read 686 against Filters' own 680 -- 6 tickets Filters
+    // correctly excludes (they're no longer Migration's current scope) that
+    // these two branches kept pulling back in. Drop them for ent/smb only,
+    // keeping current_department + the worked-on signal, which is exactly
+    // what makes a Migration ticket's ENT/SMB classification (via
+    // rosterMatchSql's MIGRATION_POOL_CASE_SQL above) match Filters exactly
+    // by construction.
+    const deptMatchSql = (team === 'ent' || team === 'smb')
+      ? `(
+      LOWER(i.current_department) = LOWER($1)
+      OR EXISTS (
+        SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
+        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND LOWER(wu.email) = ANY($2::text[])
+      )
+    )`
+      : `(
       LOWER(i.current_department) = LOWER($1)
       OR LOWER(COALESCE(
            i.original_dept,
