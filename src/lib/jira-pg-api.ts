@@ -14129,12 +14129,28 @@ async function _handleJiraPgApi(
     // what makes a Migration ticket's ENT/SMB classification (via
     // rosterMatchSql's MIGRATION_POOL_CASE_SQL above) match Filters exactly
     // by construction.
+    // The worked-on branch here is deliberately NOT restricted to $2 (ENT's
+    // or SMB's own roster) for ent/smb, unlike every other use of this
+    // pattern in this handler -- confirmed for real: CF-29311/29330/29557/
+    // 29358/29323 (current dept now QA/Dev/Infra, started in Migration, no
+    // projectPool) all have a genuine Migration worked-on record, but logged
+    // by someone outside BOTH TEAM_ROSTER.ent and TEAM_ROSTER.smb (a QA/Dev/
+    // Infra person who briefly touched Migration). Filters' own broadening
+    // isn't restricted to just ENT+SMB's hardcoded lists either -- it checks
+    // against Migration's full LIVE queue roster. Restricting the check here
+    // made ENT+SMB's union undercount Filters by exactly these 5 tickets.
+    // Safe to drop entirely rather than widen to the live Migration roster:
+    // MIGRATION_POOL_CASE_SQL (rosterMatchSql above) already independently
+    // and exhaustively classifies every ticket this matches into exactly one
+    // of ent/smb (projectPool, then roster, then a stable hash fallback), so
+    // widening who merely COUNTS as "touched Migration" here can only
+    // recover missing tickets, never reintroduce double-counting.
     const deptMatchSql = (team === 'ent' || team === 'smb')
       ? `(
       LOWER(i.current_department) = LOWER($1)
       OR EXISTS (
-        SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
-        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND LOWER(wu.email) = ANY($2::text[])
+        SELECT 1 FROM user_worked_on_tickets w
+        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1)
       )
     )`
       : `(
