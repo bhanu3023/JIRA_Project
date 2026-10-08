@@ -4643,6 +4643,261 @@ async function getCfitsSyncCheckpoint(): Promise<number> {
   return r.rows[0] ? (parseInt(r.rows[0].jira_source_key.split('-').pop() || '0', 10) || 0) : 0;
 }
 
+// Tracks, per project, the latest Jira `updated` timestamp already processed
+// by the "catch up tickets that CHANGED after their initial import" pass in
+// runJiraIssueSync below -- separate from getSyncCheckpoint/setSyncCheckpoint
+// above, which only track issuekey progress for DISCOVERING brand-new
+// tickets. Stored as a plain "yyyy-MM-dd" date (not a precise timestamp):
+// JQL's `updated > "..."` comparison is evaluated in the Jira INSTANCE's own
+// configured timezone for an unqualified literal, which this app has no
+// reliable way to know -- a few hours of drift on a minute-precision
+// checkpoint could permanently skip a ticket right at the boundary. Date-only
+// granularity plus always querying from (checkpoint date - 1 day) in
+// getUpdatedSyncJqlFloor below absorbs any realistic timezone offset via
+// deliberate redundant reprocessing instead of precision, which is safe here
+// since every consumer of this (refreshSyncProjectIssue/refreshCfitsIssue) is
+// a pure field-level UPDATE, not an append -- reprocessing the same ticket
+// twice is a no-op, never a duplicate.
+async function getUpdatedSyncCheckpoint(prefix: string): Promise<string> {
+  await ensureAppSettingsTable();
+  const row = await pool.query(`SELECT value FROM app_settings WHERE key = $1`, [`jira_sync_updated_checkpoint_${prefix}`]);
+  if (row.rows[0]) return row.rows[0].value;
+  // No checkpoint yet -- bootstrap far enough back to eventually walk every
+  // already-imported ticket's current Jira state, not just future changes
+  // (this is what actually fixes an already-stale ticket like CF-29355,
+  // where the real reassignment happened long before this code existed).
+  // Paced at a bounded budget per 5-minute tick (same cadence proven safe
+  // for new-ticket discovery below), so this backlog clears gradually
+  // instead of hammering Jira in one burst.
+  return '2020-01-01';
+}
+
+async function setUpdatedSyncCheckpoint(prefix: string, yyyyMmDd: string): Promise<void> {
+  await ensureAppSettingsTable();
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [`jira_sync_updated_checkpoint_${prefix}`, yyyyMmDd]
+  );
+}
+
+function jiraUpdatedToYyyyMmDd(jiraUpdated: string): string {
+  return new Date(jiraUpdated).toISOString().slice(0, 10);
+}
+
+// One day earlier than the stored checkpoint, as the actual JQL floor --
+// see getUpdatedSyncCheckpoint's comment for why.
+function getUpdatedSyncJqlFloor(checkpointYyyyMmDd: string): string {
+  const d = new Date(`${checkpointYyyyMmDd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// Refreshes an ALREADY-imported L2B/L3B/PSM/SOPS/QA ticket's Jira-sourced
+// fields from Jira's CURRENT data -- the update half of importIssueFromJira's
+// own "existingIssue" branch, deliberately split out as its own function
+// instead of just calling importIssueFromJira for an existing ticket: that
+// function ALSO unconditionally deletes and re-imports every issue_history
+// row from Jira's changelog (db.issueHistory.deleteMany then recreate) and
+// every comment, every single call, new OR existing. It was never actually
+// exercised against an existing ticket before now (see the caller-skips-
+// existing-tickets bug this whole catch-up pass fixes), so that was
+// harmless -- but wiring periodic re-sync straight into importIssueFromJira
+// would have WIPED every in-app history entry this app itself generates
+// (SLA pause/resume/waiver events, department handoffs, status changes made
+// through this app's own queue workflow -- none of which exist in Jira's
+// changelog at all) on every single ticket it touches, replacing them with
+// only Jira's own changelog. Confirmed how destructive that would have been
+// by reading the function in full before wiring this up, not by trial and
+// error against production data. This touches ONLY the same Jira-sourced
+// columns importIssueFromJira's existing-branch updates -- summary, type,
+// priority, status, assignee, reporter, labels, the handful of custom
+// fields, resolvedAt, jira_sla_breached/_due_at/_start_at -- and nothing
+// else: never issue_history, comments, attachments, or any of this app's
+// own department/queue/SLA state (current_department, dept_statuses,
+// dept_sla_log, sla_snapshot, sla_waivers, etc).
+async function refreshSyncProjectIssue(localKey: string): Promise<boolean> {
+  try {
+    const existing = await pool.query(
+      `SELECT id, "assigneeId", "reporterId", "parentKey", labels, "customerName", "clientName",
+              "projectManager", "productType", combination, "productionTicket", "rootCause",
+              "fixDescription", "statusId", "updatedAt", "spaceId"
+       FROM issues WHERE key = $1 LIMIT 1`,
+      [localKey]
+    );
+    const row = existing.rows[0];
+    if (!row) return false; // not imported yet -- let the new-ticket loop handle it
+
+    const creds = await getJiraCredentials();
+    const fields = `summary,issuetype,priority,status,assignee,reporter,parent,labels,updated,resolutiondate,${JIRA_CUSTOM_FIELDS}`;
+    const res = await fetch(`${creds.base}/rest/api/3/issue/${localKey}?fields=${fields}`, {
+      headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    }).catch(() => null);
+    if (!res || !res.ok) return false;
+    const ji: any = await res.json();
+    const f = ji.fields || {};
+
+    const space = await db.space.findUnique({ where: { id: row.spaceId }, include: { statuses: true } });
+    const jiraStatusName: string = f.status?.name || 'Open';
+    const localStatus = space?.statuses.find((s: any) => s.name.toLowerCase() === jiraStatusName.toLowerCase()) ?? null;
+
+    const resolveByDisplayName = async (jiraUser: any): Promise<string | null> => {
+      if (!jiraUser?.displayName) return null;
+      const name = jiraUser.displayName.trim();
+      const parts = name.split(/\s+/);
+      const byFull = await db.user.findFirst({
+        where: { firstName: { equals: parts[0], mode: 'insensitive' }, lastName: { equals: parts.slice(1).join(' '), mode: 'insensitive' } },
+      });
+      if (byFull) return byFull.id;
+      if (jiraUser.emailAddress) {
+        const byEmail = await db.user.findFirst({ where: { email: { equals: jiraUser.emailAddress, mode: 'insensitive' } } });
+        if (byEmail) return byEmail.id;
+      }
+      const byFirst = await db.user.findFirst({ where: { firstName: { equals: parts[0], mode: 'insensitive' } } });
+      return byFirst?.id ?? null;
+    };
+    const [assigneeId, reporterId] = await Promise.all([resolveByDisplayName(f.assignee), resolveByDisplayName(f.reporter)]);
+
+    await pool.query(
+      `UPDATE issues SET
+         summary=$1, type=$2, priority=$3, "statusId"=$4, "assigneeId"=$5, "reporterId"=$6,
+         "parentKey"=$7, labels=$8::text[], "customerName"=$9, "clientName"=$10,
+         "projectManager"=$11, "productType"=$12, combination=$13, "productionTicket"=$14,
+         "rootCause"=$15, "fixDescription"=$16, "updatedAt"=$17
+       WHERE id=$18`,
+      [
+        f.summary || localKey,
+        (f.issuetype?.name || 'task').toLowerCase(),
+        (f.priority?.name || 'medium').toLowerCase(),
+        localStatus?.id ?? row.statusId,
+        assigneeId ?? row.assigneeId,
+        reporterId ?? row.reporterId,
+        f.parent?.key ?? row.parentKey,
+        Array.isArray(f.labels) ? f.labels : row.labels,
+        extractJiraValue(f.customfield_10401) ?? row.customerName,
+        extractJiraValue(f.customfield_10883) ?? row.clientName,
+        extractJiraValue(f.customfield_11380) ?? row.projectManager,
+        extractJiraValue(f.customfield_10203) ?? row.productType,
+        extractJiraValue(f.customfield_10236) ?? row.combination,
+        extractJiraValue(f.customfield_10665) ?? row.productionTicket,
+        extractJiraValue(f.customfield_10059) ?? row.rootCause,
+        extractJiraValue(f.customfield_10402) ?? row.fixDescription,
+        f.updated ? new Date(f.updated) : row.updatedAt,
+        row.id,
+      ]
+    );
+    if (f.resolutiondate) {
+      await pool.query(`UPDATE issues SET "resolvedAt" = $1 WHERE id = $2`, [new Date(f.resolutiondate), row.id]);
+    }
+    const slaBreach = extractJiraSlaBreach(f);
+    if (slaBreach) {
+      await pool.query(
+        `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+        [slaBreach.breached, slaBreach.dueAt, slaBreach.startAt, row.id]
+      );
+    }
+    return true;
+  } catch (e) {
+    console.error('[refreshSyncProjectIssue] error:', localKey, e);
+    return false;
+  }
+}
+
+// Same idea as refreshSyncProjectIssue, for an already-imported CFITS
+// ticket (looked up by jira_source_key, not by a matching local key -- see
+// importCfitsIssue's own comment for why). Equally deliberate about never
+// touching issue_history/comments/attachments or this app's own department/
+// queue/SLA state -- see refreshSyncProjectIssue's comment for why that
+// matters. Returns false (never creates) if cfitsKey isn't imported yet --
+// importCfitsIssue owns that path.
+async function refreshCfitsIssue(cfitsKey: string): Promise<boolean> {
+  try {
+    const existing = await pool.query(
+      `SELECT id, "assigneeId", "reporterId", labels, "customerName", "clientName", "projectManager",
+              "productType", combination, "productionTicket", "rootCause", "fixDescription",
+              "statusId", "updatedAt"
+       FROM issues WHERE jira_source_key = $1 LIMIT 1`,
+      [cfitsKey]
+    );
+    const row = existing.rows[0];
+    if (!row) return false;
+
+    const creds = await getJiraCredentials();
+    const fields = `summary,issuetype,priority,status,assignee,reporter,labels,updated,resolutiondate,${JIRA_CUSTOM_FIELDS}`;
+    const res = await fetch(`${creds.base}/rest/api/3/issue/${cfitsKey}?fields=${fields}`, {
+      headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    }).catch(() => null);
+    if (!res || !res.ok) return false;
+    const ji: any = await res.json();
+    const f = ji.fields || {};
+
+    const space = await db.space.findUnique({ where: { key: CFITS_SPACE_KEY }, include: { statuses: true } });
+    const jiraStatusName: string = f.status?.name || 'Open';
+    const localStatus = space?.statuses.find((s: any) => s.name.toLowerCase() === jiraStatusName.toLowerCase()) ?? null;
+
+    const resolveByDisplayName = async (jiraUser: any): Promise<string | null> => {
+      if (!jiraUser?.displayName) return null;
+      const name = jiraUser.displayName.trim();
+      const parts = name.split(/\s+/);
+      const byFull = await db.user.findFirst({
+        where: { firstName: { equals: parts[0], mode: 'insensitive' }, lastName: { equals: parts.slice(1).join(' '), mode: 'insensitive' } },
+      });
+      if (byFull) return byFull.id;
+      if (jiraUser.emailAddress) {
+        const byEmail = await db.user.findFirst({ where: { email: { equals: jiraUser.emailAddress, mode: 'insensitive' } } });
+        if (byEmail) return byEmail.id;
+      }
+      const byFirst = await db.user.findFirst({ where: { firstName: { equals: parts[0], mode: 'insensitive' } } });
+      return byFirst?.id ?? null;
+    };
+    const [assigneeId, reporterId] = await Promise.all([resolveByDisplayName(f.assignee), resolveByDisplayName(f.reporter)]);
+
+    await pool.query(
+      `UPDATE issues SET
+         summary=$1, type=$2, priority=$3, "statusId"=$4, "assigneeId"=$5, "reporterId"=$6,
+         labels=$7::text[], "customerName"=$8, "clientName"=$9, "projectManager"=$10,
+         "productType"=$11, combination=$12, "productionTicket"=$13,
+         "rootCause"=$14, "fixDescription"=$15, "updatedAt"=$16
+       WHERE id=$17`,
+      [
+        f.summary || cfitsKey,
+        (f.issuetype?.name || 'task').toLowerCase(),
+        (f.priority?.name || 'medium').toLowerCase(),
+        localStatus?.id ?? row.statusId,
+        assigneeId ?? row.assigneeId,
+        reporterId ?? row.reporterId,
+        Array.isArray(f.labels) ? f.labels : row.labels,
+        extractJiraValue(f.customfield_10401) ?? row.customerName,
+        extractJiraValue(f.customfield_10883) ?? row.clientName,
+        extractJiraValue(f.customfield_11380) ?? row.projectManager,
+        extractJiraValue(f.customfield_10203) ?? row.productType,
+        extractJiraValue(f.customfield_10236) ?? row.combination,
+        extractJiraValue(f.customfield_10665) ?? row.productionTicket,
+        extractJiraValue(f.customfield_10059) ?? row.rootCause,
+        extractJiraValue(f.customfield_10402) ?? row.fixDescription,
+        f.updated ? new Date(f.updated) : row.updatedAt,
+        row.id,
+      ]
+    );
+    if (f.resolutiondate) {
+      await pool.query(`UPDATE issues SET "resolvedAt" = $1 WHERE id = $2`, [new Date(f.resolutiondate), row.id]);
+    }
+    const slaBreach = extractJiraSlaBreach(f);
+    if (slaBreach) {
+      await pool.query(
+        `UPDATE issues SET jira_sla_breached = $1, jira_sla_due_at = $2, jira_sla_start_at = $3 WHERE id = $4`,
+        [slaBreach.breached, slaBreach.dueAt, slaBreach.startAt, row.id]
+      );
+    }
+    return true;
+  } catch (e) {
+    console.error('[refreshCfitsIssue] error:', cfitsKey, e);
+    return false;
+  }
+}
+
 // Pulls every Jira issue created after the last-seen key number for each
 // project in SYNC_PROJECTS and imports the ones missing locally, defaulting
 // them into the Dev queue (matching how these boards are actually used --
@@ -4665,9 +4920,9 @@ async function getCfitsSyncCheckpoint(): Promise<number> {
 // instead of a second call actually racing the first.
 let _jiraSyncRunning = false;
 
-export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ imported: string[]; errors: string[] }> {
+export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ imported: string[]; errors: string[]; refreshed: string[] }> {
   if (_jiraSyncRunning) {
-    return { imported: [], errors: ['sync already in progress in this process, skipped'] };
+    return { imported: [], errors: ['sync already in progress in this process, skipped'], refreshed: [] };
   }
   _jiraSyncRunning = true;
   try {
@@ -4785,7 +5040,100 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
     }
   }
 
-  return { imported, errors };
+  // Catch up tickets that CHANGED in Jira after their initial import -- every
+  // loop above only ever discovers brand-new issuekeys; once a ticket exists
+  // locally it's marked done and never looked at again, so a later
+  // reassignment or status change made in Jira was invisible here forever.
+  // Confirmed for real: CF-29355 (CFITS-8987) showed assignee "Ravi Hemanth"
+  // locally while Jira had long since reassigned it to "Devarapu Kota siva",
+  // and a Filters-page audit found many more Unassigned/stale-status rows
+  // across the board. Own budget, separate from maxPerRun above (which only
+  // bounds new-ticket discovery) -- this and that are two independent kinds
+  // of work, and starving this one so the new-ticket loop could run longer
+  // would leave this catch-up permanently unable to make progress on months
+  // of backlog. Same 250ms-per-issue pacing as every loop above.
+  const refreshed: string[] = [];
+  let changedBudget = maxPerRun;
+  for (const { prefix, jiraProject } of SYNC_PROJECTS) {
+    if (changedBudget <= 0) break;
+    let checkpoint = await getUpdatedSyncCheckpoint(prefix);
+    let maxSeenUpdated = checkpoint;
+    let pageToken: string | undefined;
+    const jql = encodeURIComponent(`project = ${jiraProject} AND updated > "${getUpdatedSyncJqlFloor(checkpoint)}" ORDER BY updated ASC`);
+    while (changedBudget > 0) {
+      let url = `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=50&fields=updated`;
+      if (pageToken) url += `&nextPageToken=${encodeURIComponent(pageToken)}`;
+      const res = await fetch(url, {
+        headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      }).catch((e) => { errors.push(`${prefix} (changed): search fetch failed: ${e?.message || e}`); return null; });
+      if (!res) break;
+      if (!res.ok) { errors.push(`${prefix} (changed): search HTTP ${res.status}`); break; }
+      const data: any = await res.json().catch(() => null);
+      if (!data) { errors.push(`${prefix} (changed): bad JSON from search`); break; }
+      const issues: any[] = data.issues || [];
+      if (issues.length === 0) break;
+      for (const ji of issues) {
+        if (changedBudget <= 0) break;
+        try {
+          const ok = await refreshSyncProjectIssue(ji.key);
+          if (ok) refreshed.push(ji.key);
+          if (ji.fields?.updated) {
+            const d = jiraUpdatedToYyyyMmDd(ji.fields.updated);
+            if (d > maxSeenUpdated) maxSeenUpdated = d;
+          }
+        } catch (e: any) {
+          errors.push(`${ji.key} (changed): ${e?.message || e}`);
+        }
+        changedBudget--;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (maxSeenUpdated !== checkpoint) { checkpoint = maxSeenUpdated; await setUpdatedSyncCheckpoint(prefix, checkpoint); }
+      if (data.isLast || !data.nextPageToken) break;
+      pageToken = data.nextPageToken;
+    }
+  }
+
+  if (changedBudget > 0) {
+    let cfitsChangedCheckpoint = await getUpdatedSyncCheckpoint('CFITS');
+    let cfitsMaxSeenUpdated = cfitsChangedCheckpoint;
+    let cfitsChangedPageToken: string | undefined;
+    const cfitsChangedJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND updated > "${getUpdatedSyncJqlFloor(cfitsChangedCheckpoint)}" ORDER BY updated ASC`);
+    while (changedBudget > 0) {
+      let url = `${creds.base}/rest/api/3/search/jql?jql=${cfitsChangedJql}&maxResults=50&fields=updated`;
+      if (cfitsChangedPageToken) url += `&nextPageToken=${encodeURIComponent(cfitsChangedPageToken)}`;
+      const res = await fetch(url, {
+        headers: { Authorization: creds.authHdr, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      }).catch((e) => { errors.push(`CFITS (changed): search fetch failed: ${e?.message || e}`); return null; });
+      if (!res) break;
+      if (!res.ok) { errors.push(`CFITS (changed): search HTTP ${res.status}`); break; }
+      const data: any = await res.json().catch(() => null);
+      if (!data) { errors.push('CFITS (changed): bad JSON from search'); break; }
+      const issues: any[] = data.issues || [];
+      if (issues.length === 0) break;
+      for (const ji of issues) {
+        if (changedBudget <= 0) break;
+        try {
+          const ok = await refreshCfitsIssue(ji.key);
+          if (ok) refreshed.push(ji.key);
+          if (ji.fields?.updated) {
+            const d = jiraUpdatedToYyyyMmDd(ji.fields.updated);
+            if (d > cfitsMaxSeenUpdated) cfitsMaxSeenUpdated = d;
+          }
+        } catch (e: any) {
+          errors.push(`${ji.key} (CFITS changed): ${e?.message || e}`);
+        }
+        changedBudget--;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (cfitsMaxSeenUpdated !== cfitsChangedCheckpoint) { cfitsChangedCheckpoint = cfitsMaxSeenUpdated; await setUpdatedSyncCheckpoint('CFITS', cfitsChangedCheckpoint); }
+      if (data.isLast || !data.nextPageToken) break;
+      cfitsChangedPageToken = data.nextPageToken;
+    }
+  }
+
+  return { imported, errors, refreshed };
   } finally {
     _jiraSyncRunning = false;
   }
@@ -15695,7 +16043,7 @@ async function _handleJiraPgApi(
       return json(result);
     } catch (e: any) {
       console.error('[Jira Sync] runJiraIssueSync threw:', e?.message || e, e?.stack);
-      return json({ imported: [], errors: [`runJiraIssueSync threw: ${e?.message || e}`] });
+      return json({ imported: [], errors: [`runJiraIssueSync threw: ${e?.message || e}`], refreshed: [] });
     }
   }
 

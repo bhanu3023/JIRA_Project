@@ -59,7 +59,12 @@ export async function register() {
       const data = await res.json().catch(() => ({}));
       const imported: string[] = data.imported ?? [];
       const errors: string[] = data.errors ?? [];
+      const refreshed: string[] = data.refreshed ?? [];
       if (imported.length > 0) console.log(`[Jira Sync] ${label} — imported ${imported.length} issue(s):`, imported);
+      // refreshed: tickets that already existed locally but had changed in
+      // Jira since their last known state (assignee, status, etc.) --
+      // see runJiraIssueSync's "catch up tickets that CHANGED" pass.
+      if (refreshed.length > 0) console.log(`[Jira Sync] ${label} — refreshed ${refreshed.length} issue(s):`, refreshed);
       if (errors.length > 0) console.error(`[Jira Sync] ${label} — ${errors.length} error(s):`, errors.slice(0, 10));
       // Belt-and-suspenders: this endpoint is meant to always return
       // { imported, errors } (even on failure -- see the try/catch wrapped
