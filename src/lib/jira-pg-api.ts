@@ -14277,16 +14277,34 @@ async function _handleJiraPgApi(
     // ticket -- team-independent by design, so both the ent and smb queries
     // embed the exact same expression and simply compare it against their
     // own team name; every ticket resolves to precisely one side.
+    //
+    // Tier 2 (no projectPool on this ticket) used to check TEAM_ROSTER.ent/
+    // .smb -- a hand-maintained, static list that silently goes stale the
+    // moment a genuinely new person joins Migration and starts picking up
+    // tickets, exactly the class of drift this whole investigation kept
+    // running into. By explicit request: replaced with a query-time,
+    // self-updating equivalent -- look at THIS SAME assignee's own other
+    // Migration tickets that DO have a projectPool set, and go with
+    // whichever side they've predominantly worked. A brand-new teammate is
+    // correctly classified automatically the moment they have even one
+    // projectPool-tagged ticket, with no code or list ever needing to be
+    // touched again. Only falls through to tier 3 (hash) for someone with
+    // zero historical projectPool data (truly first-ever ticket) or an
+    // exact ENT/SMB tie.
     const MIGRATION_POOL_CASE_SQL = `(
       CASE
         WHEN LOWER(i."projectPool") = 'ent' THEN 'ent'
         WHEN LOWER(i."projectPool") = 'smb' THEN 'smb'
-        WHEN EXISTS (SELECT 1 FROM users pau1 WHERE pau1.id = i."assigneeId" AND LOWER(pau1.email) = ANY(ARRAY[${TEAM_ROSTER.ent.map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[]))
-         AND NOT EXISTS (SELECT 1 FROM users pau2 WHERE pau2.id = i."assigneeId" AND LOWER(pau2.email) = ANY(ARRAY[${TEAM_ROSTER.smb.map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[]))
-          THEN 'ent'
-        WHEN EXISTS (SELECT 1 FROM users pau3 WHERE pau3.id = i."assigneeId" AND LOWER(pau3.email) = ANY(ARRAY[${TEAM_ROSTER.smb.map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[]))
-         AND NOT EXISTS (SELECT 1 FROM users pau4 WHERE pau4.id = i."assigneeId" AND LOWER(pau4.email) = ANY(ARRAY[${TEAM_ROSTER.ent.map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[]))
-          THEN 'smb'
+        WHEN (
+          SELECT COUNT(*) FILTER (WHERE LOWER(pp."projectPool") = 'ent') - COUNT(*) FILTER (WHERE LOWER(pp."projectPool") = 'smb')
+          FROM issues pp
+          WHERE pp."assigneeId" = i."assigneeId" AND LOWER(pp.current_department) = 'migration' AND LOWER(pp."projectPool") IN ('ent', 'smb')
+        ) > 0 THEN 'ent'
+        WHEN (
+          SELECT COUNT(*) FILTER (WHERE LOWER(pp2."projectPool") = 'smb') - COUNT(*) FILTER (WHERE LOWER(pp2."projectPool") = 'ent')
+          FROM issues pp2
+          WHERE pp2."assigneeId" = i."assigneeId" AND LOWER(pp2.current_department) = 'migration' AND LOWER(pp2."projectPool") IN ('ent', 'smb')
+        ) > 0 THEN 'smb'
         ELSE (CASE WHEN ('x' || substr(md5(i.id), 1, 8))::bit(32)::int % 2 = 0 THEN 'ent' ELSE 'smb' END)
       END
     )`;
