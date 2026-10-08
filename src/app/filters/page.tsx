@@ -1725,11 +1725,11 @@ export default function FiltersPage() {
           // Independent of the Assignee column above (which can legitimately
           // show a historical worker's name, or just the current owner's,
           // depending on whether an Assignee filter is active -- see its own
-          // comment on current_department below) -- this always lists every
-          // real worker this queue recorded for the row, current owner or
-          // not, specifically so filtering THIS column in Excel afterward
-          // gives the same result as filtering Assignee in the app, instead
-          // of silently disagreeing with it. Only populated on a Queue-
+          // comment on current_department below) -- this lists every person
+          // the app's Assignee filter would match the row for (current owner
+          // in this queue, plus anyone who worked or held it here), so
+          // filtering THIS column in Excel afterward gives the same result
+          // as filtering Assignee in the app. Only populated on a Queue-
           // scoped export (dept-scoped branch); empty on the general "All
           // Work" tab with no Queue selected, which has no single
           // department's worked-on ledger to draw from.

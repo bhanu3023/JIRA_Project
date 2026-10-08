@@ -8032,9 +8032,17 @@ async function _handleJiraPgApi(
         // exporting the UNFILTERED Dev queue and filtering Excel's own
         // Assignee column by her name found only 64, with no way to see
         // the other 6 at all. This column gives Excel something it CAN
-        // correctly filter on for that case: every name here who has a
-        // real (non-'passed') worked-on record for this dept, regardless
-        // of current ownership.
+        // correctly filter on for that case.
+        //
+        // It must list exactly the people the Assignee filter would match
+        // this row for (assigneeScopeSql), or filtering it in Excel gives a
+        // different count than the app: the current assignee while the
+        // ticket is in this dept, plus everyone with a worked-on record here
+        // under the same reason rule (on Filters, 'passed' hand-offs count).
+        // Confirmed for real: Queue: Migration + Updated: Sep + Assignee:
+        // Lakshma Reddy showed 65 in the app but 47 when the export's Worked
+        // By was filtered by her name -- it left out tickets she currently
+        // owns with no worked-on row yet, and her hand-off ('passed') rows.
         let workedByNamesByIssue: Record<string, string> = {};
         if (rows.rows.length) {
           try {
@@ -8043,13 +8051,20 @@ async function _handleJiraPgApi(
               `SELECT DISTINCT w.issue_id, w.user_id, u."firstName", u."lastName"
                FROM user_worked_on_tickets w
                JOIN users u ON u.id = w.user_id
-               WHERE w.issue_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'`,
+               WHERE w.issue_id = ANY($1::text[]) AND LOWER(w.dept) = LOWER($2)${assigneeHistoryReasonSql}`,
               [issueIds, deptParam]
             );
             const namesByIssue: Record<string, string[]> = {};
             for (const wr of allWorkedRows.rows) {
               const name = `${wr.firstName || ''} ${wr.lastName || ''}`.trim() || wr.user_id;
               (namesByIssue[wr.issue_id] ??= []).push(name);
+            }
+            if (queueMembersOnlyParam) {
+              for (const row of rows.rows) {
+                if (row.assignee_id && String(row.current_department || '').toLowerCase() === deptParam.toLowerCase()) {
+                  (namesByIssue[row.id] ??= []).push(String(row.assignee_name || '').trim() || row.assignee_id);
+                }
+              }
             }
             for (const [issueId, names] of Object.entries(namesByIssue)) {
               workedByNamesByIssue[issueId] = Array.from(new Set(names)).sort().join(', ');
