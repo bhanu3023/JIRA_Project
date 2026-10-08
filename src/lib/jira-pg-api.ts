@@ -14184,21 +14184,61 @@ async function _handleJiraPgApi(
     // indices computed off one another -- is both safe and far less likely
     // to silently break an index somewhere else in this already-complex
     // handler.
-    const OTHER_ENT_SMB_ROSTER: Record<string, string[]> = { ent: TEAM_ROSTER.smb, smb: TEAM_ROSTER.ent };
-    const broadDeptMatchBranch = (team === 'ent' || team === 'smb')
-      ? `OR (LOWER(i.current_department) = LOWER($1) AND NOT EXISTS (
-           SELECT 1 FROM users bau WHERE bau.id = i."assigneeId"
-             AND LOWER(bau.email) = ANY(ARRAY[${OTHER_ENT_SMB_ROSTER[team].map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[])
-         ))`
-      : `OR LOWER(i.current_department) = LOWER($1)`;
-    const rosterMatchSql = `(
+    // By explicit request: ENT's total + SMB's total must sum EXACTLY to
+    // Filters' own Migration total, with no overlap at all -- the roster-
+    // inferred "ambiguous ticket counts on both tabs" tradeoff above
+    // (broadDeptMatchBranch, kept for eng/qa/infra which have no such
+    // ambiguity) makes that impossible by construction: any ticket counted
+    // on both ENT and SMB inflates the sum past the union. Give EVERY
+    // Migration ticket exactly one bucket instead:
+    //   1. Each ticket's own "projectPool" field (ENT/SMB, set directly on
+    //      the ticket -- confirmed covering 328 ENT + 245 SMB of 663
+    //      Migration tickets touched in Sep 2026) is authoritative when set.
+    //   2. Otherwise, the assignee's roster membership, but only when
+    //      unambiguous (on exactly one of the two rosters, not both/neither).
+    //   3. Otherwise (unassigned, or outside both rosters, or projectPool is
+    //      some other/unrecognized value) -- a stable, deterministic 50/50
+    //      split keyed off the ticket's own id (md5 hash parity), so the
+    //      SAME ticket always lands in the SAME bucket on every query
+    //      instead of being arbitrarily dropped from one side or counted on
+    //      both. This replaces rosterMatchSql's roster-inference ENTIRELY
+    //      for ent/smb (not just adding a branch) specifically so every
+    //      Migration ticket is covered by exactly one of the two WHEN
+    //      clauses below, never both.
+    // Computes a single, stable pool ('ent' or 'smb') for ANY Migration
+    // ticket -- team-independent by design, so both the ent and smb queries
+    // embed the exact same expression and simply compare it against their
+    // own team name; every ticket resolves to precisely one side.
+    const MIGRATION_POOL_CASE_SQL = `(
+      CASE
+        WHEN LOWER(i."projectPool") = 'ent' THEN 'ent'
+        WHEN LOWER(i."projectPool") = 'smb' THEN 'smb'
+        WHEN EXISTS (SELECT 1 FROM users pau1 WHERE pau1.id = i."assigneeId" AND LOWER(pau1.email) = ANY(ARRAY[${TEAM_ROSTER.ent.map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[]))
+         AND NOT EXISTS (SELECT 1 FROM users pau2 WHERE pau2.id = i."assigneeId" AND LOWER(pau2.email) = ANY(ARRAY[${TEAM_ROSTER.smb.map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[]))
+          THEN 'ent'
+        WHEN EXISTS (SELECT 1 FROM users pau3 WHERE pau3.id = i."assigneeId" AND LOWER(pau3.email) = ANY(ARRAY[${TEAM_ROSTER.smb.map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[]))
+         AND NOT EXISTS (SELECT 1 FROM users pau4 WHERE pau4.id = i."assigneeId" AND LOWER(pau4.email) = ANY(ARRAY[${TEAM_ROSTER.ent.map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[]))
+          THEN 'smb'
+        ELSE (CASE WHEN ('x' || substr(md5(i.id), 1, 8))::bit(32)::int % 2 = 0 THEN 'ent' ELSE 'smb' END)
+      END
+    )`;
+    // No current_department requirement here -- deptMatchSql (already AND'd
+    // into every query below) already owns the "does this ticket belong to
+    // Migration's scope at all" question, including its own broadened
+    // worked-on/original_dept matching (same logic that fixed the Dev/CE
+    // gap above). Duplicating a current_department check here would narrow
+    // ENT+SMB's combined scope below what deptMatchSql (and so Filters)
+    // actually counts.
+    const rosterMatchSql = (team === 'ent' || team === 'smb')
+      ? `${MIGRATION_POOL_CASE_SQL} = '${team}'`
+      : `(
       EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
       OR EXISTS (
         SELECT 1 FROM user_worked_on_tickets w4 JOIN users wu4 ON wu4.id = w4.user_id
         WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND LOWER(wu4.email) = ANY($2::text[])
       )
       OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($1))
-      ${broadDeptMatchBranch}
+      OR LOWER(i.current_department) = LOWER($1)
     )`;
     // reason != 'passed' removed here too -- see deptMatchSql's own comment
     // above for why (matches Filters' already-made decision).
