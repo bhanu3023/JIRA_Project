@@ -14136,23 +14136,48 @@ async function _handleJiraPgApi(
     // two it would have gone to), same as a genuinely-worked-by-both-teams
     // ticket already legitimately can.
     //
-    // Last branch (`OR current_department = $1` unconditionally, no assignee
-    // check at all): Filters' own "Queue: X" was permanently redefined
-    // app-wide, by explicit decision, to mean "every ticket CURRENTLY TAGGED
-    // X" -- not just tickets held by X's configured roster members (see
-    // memberClause's own matching OR branch and its surrounding comment).
-    // That redefinition only ever reached Filters' memberClause -- this
-    // function's own rosterMatchSql was never updated to match, so a ticket
-    // tagged Dev but assigned to someone outside the Customer Engineering
-    // roster (or tagged Migration but assigned to someone outside both
-    // ENT and SMB) counted in Filters' Queue: Dev/Migration but was
-    // invisible to this tab -- exactly the MBR-vs-Filters count gap
-    // reported for real, for both Dev/Customer Engineering and Migration
-    // ENT+SMB, for Sep 2026. For ent/smb this can now ALSO double-count an
-    // assigned-but-outside-both-rosters Migration ticket across both tabs,
-    // same accepted tradeoff the unassigned case above already lives with
-    // -- there's no way to know which of the two it "belongs" to, and
-    // Filters itself has no ENT/SMB split to disambiguate against either.
+    // Last branch (broadDeptMatchBranch, below): Filters' own "Queue: X" was
+    // permanently redefined app-wide, by explicit decision, to mean "every
+    // ticket CURRENTLY TAGGED X" -- not just tickets held by X's configured
+    // roster members (see memberClause's own matching OR branch and its
+    // surrounding comment). That redefinition only ever reached Filters'
+    // memberClause -- this function's own rosterMatchSql was never updated
+    // to match, so a ticket tagged Dev but assigned to someone outside the
+    // Customer Engineering roster (or tagged Migration but assigned to
+    // someone outside both ENT and SMB) counted in Filters' Queue:
+    // Dev/Migration but was invisible to this tab -- exactly the MBR-vs-
+    // Filters count gap reported for real, for both Dev/Customer
+    // Engineering and Migration ENT+SMB, for Sep 2026.
+    //
+    // ent and smb both map to the SAME department (Migration) -- unlike
+    // eng/qa/infra's clean 1:1 mapping, an unconditional "OR
+    // current_department = $1" branch here can't tell ENT and SMB apart at
+    // all: $1 is 'Migration' for both, so it would make EVERY Migration
+    // ticket match BOTH tabs regardless of who's actually assigned,
+    // collapsing the entire ENT/SMB split. Confirmed for real: deploying
+    // that unconditional branch made ENT (670) + SMB (672) sum to roughly
+    // DOUBLE Filters' own Migration total (680) for Sep 2026, instead of
+    // closing the gap. Only broaden the match this way for a ticket whose
+    // assignee is NOT a member of the OTHER team's roster -- an assignee
+    // clearly on ENT's list should never also count toward SMB, and vice
+    // versa; only a genuinely ambiguous (outside both rosters, or
+    // unassigned, already handled by the branch above) ticket should count
+    // on both, which is the existing, deliberate, pre-existing tradeoff for
+    // ent/smb specifically. TEAM_ROSTER is a static, developer-maintained
+    // constant (not user input), so inlining it as a literal array here --
+    // instead of threading a new positional bind param through every one of
+    // this handler's several derived param arrays (summaryParams,
+    // peopleParams, scopedParams, ...), each with its OWN trailing params at
+    // indices computed off one another -- is both safe and far less likely
+    // to silently break an index somewhere else in this already-complex
+    // handler.
+    const OTHER_ENT_SMB_ROSTER: Record<string, string[]> = { ent: TEAM_ROSTER.smb, smb: TEAM_ROSTER.ent };
+    const broadDeptMatchBranch = (team === 'ent' || team === 'smb')
+      ? `OR (LOWER(i.current_department) = LOWER($1) AND NOT EXISTS (
+           SELECT 1 FROM users bau WHERE bau.id = i."assigneeId"
+             AND LOWER(bau.email) = ANY(ARRAY[${OTHER_ENT_SMB_ROSTER[team].map((e) => `'${e.replace(/'/g, "''")}'`).join(',')}]::text[])
+         ))`
+      : `OR LOWER(i.current_department) = LOWER($1)`;
     const rosterMatchSql = `(
       EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
       OR EXISTS (
@@ -14160,7 +14185,7 @@ async function _handleJiraPgApi(
         WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND w4.reason != 'passed' AND LOWER(wu4.email) = ANY($2::text[])
       )
       OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($1))
-      OR LOWER(i.current_department) = LOWER($1)
+      ${broadDeptMatchBranch}
     )`;
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
