@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
@@ -175,7 +175,11 @@ export default function WorklogPage() {
           </div>
         </div>
 
-        {/* Grouped by ticket */}
+        {/* One table, real column headers, grouped by ticket via a merged
+            first cell instead of a separate boxed header bar per ticket --
+            the old "card per ticket" layout repeated the same ticket-key
+            header weight whether a ticket had 1 entry or 10, and had no
+            column labels at all, reported back as confusing to scan. */}
         {loading ? (
           <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">Loading…</div>
         ) : error ? (
@@ -183,36 +187,48 @@ export default function WorklogPage() {
         ) : groupedByTicket.length === 0 ? (
           <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">No work logged in this range.</div>
         ) : (
-          <div className="space-y-3">
-            {groupedByTicket.map((g) => (
-              <div key={g.issueKey} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-200">
-                  <div className="min-w-0">
-                    <Link href={`/issues/${g.issueKey}`} target="_blank" rel="noopener noreferrer" className="font-semibold text-blue-600 hover:underline text-[13px]">{g.issueKey}</Link>
-                    <span className="text-[12.5px] text-gray-500 ml-2 truncate">{g.issueSummary}</span>
-                  </div>
-                  <div className="flex items-center gap-3 flex-shrink-0 ml-3">
-                    <span className="text-[11.5px] text-gray-400">{g.spaceName || g.spaceKey}</span>
-                    <span className="text-[12.5px] font-semibold text-gray-800">{formatMinutes(g.totalMinutes)} total</span>
-                  </div>
-                </div>
-                <table className="w-full text-left">
-                  <tbody className="divide-y divide-gray-100">
-                    {g.entries.map((r) => (
-                      <tr key={r.id} className="hover:bg-gray-50">
-                        <td className="px-4 py-2 text-[12.5px] text-gray-600 whitespace-nowrap w-[150px]">{r.authorName || 'Unknown'}</td>
-                        <td className="px-4 py-2 text-[12.5px] text-gray-500 whitespace-nowrap w-[110px]">{r.department}</td>
-                        <td className="px-4 py-2 text-[12.5px] text-gray-400 whitespace-nowrap w-[120px]">
-                          {new Date(r.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                        </td>
-                        <td className="px-4 py-2 text-[12.5px] font-semibold text-gray-800 whitespace-nowrap w-[80px]">{formatMinutes(r.timeSpentMinutes || 0)}</td>
-                        <td className="px-4 py-2 text-[12.5px] text-gray-500 truncate">{r.description || '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ))}
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-200">
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500 w-[260px]">Ticket</th>
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Logged by</th>
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Department</th>
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</th>
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Time</th>
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groupedByTicket.map((g, gi) => (
+                    <Fragment key={g.issueKey}>
+                      {g.entries.map((r, idx) => (
+                        <tr
+                          key={r.id}
+                          className={`hover:bg-gray-50 ${idx === 0 && gi > 0 ? 'border-t-4 border-t-gray-100' : 'border-t border-gray-100'}`}
+                        >
+                          {idx === 0 && (
+                            <td rowSpan={g.entries.length} className="align-top px-4 py-2.5 border-r border-gray-100 bg-gray-50/60">
+                              <Link href={`/issues/${g.issueKey}`} target="_blank" rel="noopener noreferrer" className="font-semibold text-blue-600 hover:underline text-[13px]">{g.issueKey}</Link>
+                              <p className="text-[12px] text-gray-500 mt-0.5 line-clamp-2">{g.issueSummary}</p>
+                              <p className="text-[11px] text-gray-400 mt-1">{g.spaceName || g.spaceKey} · <span className="font-semibold text-gray-600">{formatMinutes(g.totalMinutes)} total</span></p>
+                            </td>
+                          )}
+                          <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{r.authorName || 'Unknown'}</td>
+                          <td className="px-4 py-2.5 text-[12.5px] text-gray-500 whitespace-nowrap">{r.department}</td>
+                          <td className="px-4 py-2.5 text-[12.5px] text-gray-400 whitespace-nowrap">
+                            {new Date(r.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                          </td>
+                          <td className="px-4 py-2.5 text-[12.5px] font-semibold text-gray-800 whitespace-nowrap">{formatMinutes(r.timeSpentMinutes || 0)}</td>
+                          <td className="px-4 py-2.5 text-[12.5px] text-gray-500 max-w-[280px] truncate">{r.description || '—'}</td>
+                        </tr>
+                      ))}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>
