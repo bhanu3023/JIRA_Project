@@ -7918,21 +7918,19 @@ async function _handleJiraPgApi(
         if (historyAssigneeFilterIds && historyAssigneeFilterIds.length && rows.rows.length) {
           try {
             const issueIds = rows.rows.map((r: any) => r.id);
-            // reason != 'passed' -- same guard as every other worked-on check
-            // in this file (see the note above workedByMemberSql): a 'passed'
-            // row only means this person routed/reassigned the ticket, not
-            // that they did real work on it. Without this, a lead who just
-            // assigns tickets to their team (never touching them again) got
-            // credited here as if they'd worked every one of them -- showing
-            // their name as the Assignee for tickets they only ever handed
-            // off. Confirmed for real: Ravi Srivastava's Dev-queue tickets
-            // under an Assignee filter showed his name on tickets he'd
-            // reassigned to someone else and never worked again.
+            // Must use the SAME reason rule as the matching (assigneeScopeSql,
+            // assigneeHistoryReasonSql): on the Filters page a 'passed' row
+            // counts, so a row can match the filter purely through one. If
+            // this lookup ignored 'passed', it found nobody for those rows and
+            // the Assignee column fell back to the dept snapshot or current
+            // owner -- showing someone other than the person filtered for.
+            // Other callers keep excluding 'passed' (a lead who only
+            // reassigned the ticket isn't shown as its assignee).
             const workedRows = await pool.query(
               `SELECT DISTINCT ON (w.issue_id) w.issue_id, w.user_id
                FROM user_worked_on_tickets w
-               WHERE w.issue_id = ANY($1::text[]) AND w.user_id = ANY($2::text[]) AND LOWER(w.dept) = LOWER($3) AND w.reason != 'passed'
-               ORDER BY w.issue_id, w.worked_at DESC`,
+               WHERE w.issue_id = ANY($1::text[]) AND w.user_id = ANY($2::text[]) AND LOWER(w.dept) = LOWER($3)${assigneeHistoryReasonSql}
+               ORDER BY w.issue_id, (w.reason = 'passed'), w.worked_at DESC`,
               [issueIds, historyAssigneeFilterIds, deptParam]
             );
             for (const wr of workedRows.rows) filteredWorkerByIssue[wr.issue_id] = wr.user_id;
