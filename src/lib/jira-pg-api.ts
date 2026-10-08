@@ -7148,11 +7148,31 @@ async function _handleJiraPgApi(
           // workedByMemberSql still limits this to this queue's own members.
           // Filters can now count more than MBR, which still excludes 'passed'.
           const reasonClause = '';
-          deptExtraClauses.push(
-            broadenIt
-              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)${reasonClause}${workedByMemberSql}))`
-              : memberClause
-          );
+          // Skipped entirely whenever an explicit Assignee filter is active:
+          // this whole memberClause exists to scope an UNFILTERED "show me
+          // this queue's tickets" view down to its own configured team --
+          // once the caller has already named a specific person via
+          // Assignee, requiring that exact person to ALSO be a configured
+          // member of the queue is redundant at best and silently wrong at
+          // worst. Confirmed for real: Queue: Dev + Assignee: Guru M (423
+          // tickets genuinely assigneeId=Guru AND current_department=Dev,
+          // but Guru isn't in Dev's configured memberIds -- he was never
+          // formally added to that roster) returned 4 instead of 423,
+          // because this check was being ANDed on top of assigneeScopeSql
+          // below, which already correctly scopes to the selected
+          // assignee's own current-assignment-in-dept or worked-on record
+          // -- re-restricting that to "and also a configured queue member"
+          // has no legitimate purpose once a specific person was asked for
+          // by name. memberIds itself is still bound as a parameter
+          // (deptMemberIdsParamIdx) for originDeptMatchSql/updatedDeptMatchSql
+          // further down, which are unrelated and still need it.
+          if (!assignees) {
+            deptExtraClauses.push(
+              broadenIt
+                ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)${reasonClause}${workedByMemberSql}))`
+                : memberClause
+            );
+          }
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
         } catch { /* ignore -- no restriction if lookup fails */ }
       }
