@@ -2503,7 +2503,29 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     const deptStatuses: Record<string, any> = (issue as any).dept_statuses || {};
     const deptStatusKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === issueDept);
     const deptStatusCategory = deptStatusKey ? deptStatuses[deptStatusKey]?.category : undefined;
-    const isResolved = issue.status?.category === 'done' || deptStatusCategory === 'done';
+    // The moment ANY department resolves a ticket via its own queue status,
+    // that done status gets copied into every OTHER department's
+    // dept_statuses too (see the cross-department propagation in the
+    // queueStatusId handler), including a department that hasn't even
+    // received the ticket yet. When that department is later actually
+    // handed the ticket, performDeptHandoff's own "restore this dept's
+    // prior status" logic finds that stale propagated "done" entry and
+    // restores it as if it were genuinely earned -- so a brand-new handoff
+    // can land already marked "done" despite having done no real work at
+    // all, even while the ticket's real global status moments later reads
+    // something else entirely (e.g. "Waiting for Migration"). Confirmed for
+    // real on CF-29397: Migration's SLA card showed "RESOLVED, within goal"
+    // while dept_sla_log.Migration itself still read status:"running",
+    // paused_at:null -- a department whose own clock was never stopped
+    // can't simultaneously be resolved, no matter what the (possibly stale)
+    // dept_statuses snapshot claims. Only trust the dept_statuses fallback
+    // when this department's own SLA bookkeeping agrees it's actually been
+    // stopped -- never when it's still actively running.
+    const deptSlaLogForResolvedCheck: Record<string, any> = (issue as any).dept_sla_log || {};
+    const deptLogKeyForResolvedCheck = Object.keys(deptSlaLogForResolvedCheck).find((k) => k.toLowerCase() === issueDept);
+    const deptLogEntryForResolvedCheck = deptLogKeyForResolvedCheck ? deptSlaLogForResolvedCheck[deptLogKeyForResolvedCheck] : null;
+    const deptClockGenuinelyStopped = !deptLogEntryForResolvedCheck || deptLogEntryForResolvedCheck.status !== 'running';
+    const isResolved = issue.status?.category === 'done' || (deptStatusCategory === 'done' && deptClockGenuinelyStopped);
     const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
 
     // By explicit request: editing an SLA policy (e.g. tightening Migration's
@@ -3333,7 +3355,16 @@ function computeSlaBreachedAndOverdue(
   const deptStatusesForStatus: Record<string, any> = i.dept_statuses || {};
   const deptStatusKeyForStatus = Object.keys(deptStatusesForStatus).find((k) => k.toLowerCase() === issueDeptForStatus);
   const deptStatusCategoryForStatus = deptStatusKeyForStatus ? deptStatusesForStatus[deptStatusKeyForStatus]?.category : undefined;
-  const isResolved = i.status?.category === 'done' || deptStatusCategoryForStatus === 'done';
+  // Same "don't trust a stale, cross-department-propagated done flag over
+  // this department's own SLA clock" guard as computeSLAInstancesPure --
+  // see its own comment (CF-29397) for the full story. A department whose
+  // dept_sla_log entry is still actively "running" can't be resolved no
+  // matter what dept_statuses claims.
+  const deptSlaLogForStatus: Record<string, any> = i.dept_sla_log || {};
+  const deptLogKeyForStatus = Object.keys(deptSlaLogForStatus).find((k) => k.toLowerCase() === issueDeptForStatus);
+  const deptLogEntryForStatus = deptLogKeyForStatus ? deptSlaLogForStatus[deptLogKeyForStatus] : null;
+  const deptClockGenuinelyStoppedForStatus = !deptLogEntryForStatus || deptLogEntryForStatus.status !== 'running';
+  const isResolved = i.status?.category === 'done' || (deptStatusCategoryForStatus === 'done' && deptClockGenuinelyStoppedForStatus);
   // jira_sla_breached (a single per-issue flag imported from Jira's own,
   // separate/legacy SLA field) used to unconditionally seed `breached =
   // true` here, which also SKIPPED the entire live per-policy computation
