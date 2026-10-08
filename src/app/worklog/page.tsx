@@ -65,64 +65,83 @@ export default function WorklogPage() {
       .finally(() => setLoading(false));
   }, [dateFrom, dateTo, spaceKeyFilter, userFilter]);
 
-  // Department/Queue options -- derived from whatever's actually in the
-  // current date+space+user-filtered result set, not a separate static
-  // list, so the dropdown never offers a department with zero entries to
-  // filter down to in the first place.
-  const deptOptions = useMemo(() => Array.from(new Set(rows.map((r) => r.department).filter(Boolean))).sort(), [rows]);
-  // Selected department may no longer be a valid option once the other
-  // filters change (e.g. switching Space drops a department entirely) --
-  // clear it rather than silently filtering to a value nothing can match.
-  useEffect(() => {
-    if (deptFilter && !deptOptions.includes(deptFilter)) setDeptFilter('');
-  }, [deptOptions, deptFilter]);
-
   // Queue filter means "logged by one of THIS queue's own configured
-  // members" -- by explicit request, after seeing Dev-team people's
-  // cross-team entries under Migration (the entry's own Department tag was
-  // accurate, but reads as wrong here: this view is about the Migration
-  // TEAM's logged work, not every entry that happened to touch a Migration
-  // ticket). Different from how the main ticket Queue filter works
-  // elsewhere (tag-based, by separate explicit decision) -- Worklog's
-  // "who logged this" framing is person-centric in a way ticket counts
-  // aren't. Rosters fetched per space actually present in the loaded rows
-  // (a worklog entry's own spaceKey), not just the current Space filter,
-  // so "All spaces" + a Queue filter still resolves each entry against the
-  // right board's own queue config.
-  const [deptRosters, setDeptRosters] = useState<Record<string, Set<string>>>({});
+  // members, wherever they logged it" -- by explicit request (two rounds):
+  // first, Dev-team people's cross-team entries showing under Migration
+  // read as wrong even though the entry's own Department tag was accurate
+  // (fixed by also requiring roster membership); then the SAME Dev people
+  // disappeared from "Queue: Dev" entirely because most of their own
+  // entries are tagged Migration (the department they were helping on, not
+  // their own team) -- "Queue: Dev" needs to mean "this person is a Dev
+  // person", not "AND this specific entry happens to be tagged Dev" on top
+  // of that. Queue: X now shows every entry logged by an X-roster member,
+  // regardless of which department that particular entry's own tag says --
+  // the Department COLUMN still shows the entry's real tag either way,
+  // this only changes what the Queue filter selects.
+  //
+  // Fetched per space actually present in the loaded rows (a worklog
+  // entry's own spaceKey), not just the current Space filter, so "All
+  // spaces" + a Queue filter still resolves each entry against the right
+  // board's own queue config. Also drives the dropdown's own option list --
+  // every CONFIGURED queue for these spaces, not just whichever department
+  // tags happen to appear in this date range's rows, so "Dev" stays
+  // selectable even in a window where every single entry happened to be
+  // tagged something else.
+  const [spaceQueues, setSpaceQueues] = useState<Record<string, { name: string; memberIds: string[] }[]>>({});
   useEffect(() => {
-    if (!deptFilter) return;
     const spaceKeys = Array.from(new Set(rows.map((r) => r.spaceKey).filter(Boolean)));
+    const missing = spaceKeys.filter((sk) => !(sk in spaceQueues));
+    if (!missing.length) return;
     let cancelled = false;
     (async () => {
-      const entries = await Promise.all(spaceKeys.map(async (sk) => {
-        const cacheKey = `${sk}::${deptFilter.toLowerCase()}`;
-        if (deptRosters[cacheKey]) return [cacheKey, deptRosters[cacheKey]] as const;
+      const entries = await Promise.all(missing.map(async (sk) => {
         try {
           const queues = await api.request<any[]>(`custom-queues/${sk}`);
-          const q = (queues || []).find((qq: any) => String(qq.name || '').toLowerCase() === deptFilter.toLowerCase());
-          return [cacheKey, new Set<string>(Array.isArray(q?.memberIds) ? q.memberIds : [])] as const;
+          return [sk, (queues || []).map((q: any) => ({ name: q.name, memberIds: Array.isArray(q.memberIds) ? q.memberIds : [] }))] as const;
         } catch {
-          return [cacheKey, new Set<string>()] as const;
+          return [sk, []] as const;
         }
       }));
       if (cancelled) return;
-      setDeptRosters((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
+      setSpaceQueues((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deptFilter, rows]);
+  }, [rows, spaceQueues]);
+
+  const deptOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const queues of Object.values(spaceQueues)) for (const q of queues) if (q.name) names.add(q.name);
+    return Array.from(names).sort();
+  }, [spaceQueues]);
+  // Selected department may no longer be a valid option once the other
+  // filters change (e.g. switching Space drops a department entirely) --
+  // clear it rather than silently filtering to a value nothing can match.
+  // Skipped while deptOptions is still empty (queues not loaded yet) so
+  // picking a queue doesn't get wiped out by its own not-yet-arrived data.
+  useEffect(() => {
+    if (deptFilter && deptOptions.length && !deptOptions.includes(deptFilter)) setDeptFilter('');
+  }, [deptOptions, deptFilter]);
+
+  const deptRosters = useMemo(() => {
+    const map: Record<string, Set<string>> = {};
+    for (const [sk, queues] of Object.entries(spaceQueues)) {
+      for (const q of queues) {
+        if (!q.name) continue;
+        map[`${sk}::${q.name.toLowerCase()}`] = new Set(q.memberIds);
+      }
+    }
+    return map;
+  }, [spaceQueues]);
 
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((r) => {
       if (deptFilter) {
-        if (r.department !== deptFilter) return false;
         const roster = deptRosters[`${r.spaceKey}::${deptFilter.toLowerCase()}`];
         // Roster not loaded yet, or this dept has no configured queue at
         // all (roster undefined vs empty Set) -- don't hide everything
         // while mid-fetch or for a dept with no roster to check against.
-        if (roster && roster.size > 0 && r.authorId && !roster.has(r.authorId)) return false;
+        if (roster && roster.size > 0 && (!r.authorId || !roster.has(r.authorId))) return false;
       }
       if (!q) return true;
       return (
