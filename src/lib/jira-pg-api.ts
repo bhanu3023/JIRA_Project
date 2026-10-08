@@ -7100,7 +7100,25 @@ async function _handleJiraPgApi(
           // comment above earlyResolvedAssigneeIds' own declaration -- an
           // explicitly-selected Assignee's own current ticket counts here
           // regardless of configured roster membership.
-          const memberClause = `(${memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0'} OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($2))${earlyResolvedAssigneeIds.length ? ` OR i."assigneeId" = ANY($${explicitAssigneeParamIdx}::text[])` : ''})`;
+          // OR current_department = $2 (unconditional, regardless of
+          // assignee): explicit decision -- "Queue: X" means every ticket
+          // CURRENTLY sitting in department X, full stop, not just the ones
+          // whose assignee happens to be a formally configured member of
+          // X's roster. The roster-only restriction kept silently dropping
+          // a ticket the instant it was assigned to (or stayed assigned to)
+          // someone from a different team while in this department --
+          // confirmed for real on 50 Migration-tagged tickets held by Dev-
+          // team people (sairaj.kanigicharla, jaswanth.adari, vishal.kumar,
+          // shivam.singh -- real, active Dev contributors, not a roster
+          // sync bug), the exact same root cause as the earlier Guru-M
+          // (Dev-tagged tickets, Infra person) case, just hitting the
+          // no-Assignee-selected view this time. A ticket currently in X
+          // is unambiguously X's own queue data regardless of who holds
+          // it; per-department attribution (who on THIS team actually
+          // worked it) is a separate, already-solved display concern
+          // (dept_assignees / workedByNames), not something the ticket's
+          // presence in this list should depend on.
+          const memberClause = `(${memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0'} OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($2)) OR LOWER(i.current_department) = LOWER($2)${earlyResolvedAssigneeIds.length ? ` OR i."assigneeId" = ANY($${explicitAssigneeParamIdx}::text[])` : ''})`;
           // Same gap as origin/updated matching had, one layer up: this
           // membership check runs unconditionally whenever queueMembersOnly is
           // set, even when Created/Updated has already broadened department
