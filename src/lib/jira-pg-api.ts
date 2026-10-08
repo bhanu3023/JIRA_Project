@@ -12262,6 +12262,19 @@ async function _handleJiraPgApi(
     const to = qs.get('to');
     const authorFilter = qs.get('userId');
     const spaceKeyFilter = qs.get('spaceKey');
+    // Queue filter (dept) means "logged by one of THIS queue's own
+    // configured members, wherever they logged it" -- NOT "this specific
+    // entry's own department tag matches", by explicit decision (a Dev
+    // person's real work logged against a Migration-tagged ticket is still
+    // Dev's own person logging it). The Department column in the response
+    // still carries each entry's real tag either way; this only decides
+    // which rows come back at all. Done server-side (not left to the
+    // frontend) specifically so it can be verified directly against real
+    // data before anyone has to test it live in a browser -- moved here
+    // after the identical frontend-only version repeatedly tested as
+    // "still not working" despite the underlying roster data itself being
+    // confirmed correct every time it was checked directly.
+    const deptFilter = qs.get('dept');
     const conditions: string[] = [];
     const params: any[] = [];
     let n = 1;
@@ -12281,7 +12294,30 @@ async function _handleJiraPgApi(
        LIMIT 2000`,
       params
     );
-    return json(rows.rows);
+    let result = rows.rows;
+    if (deptFilter) {
+      // Roster per space actually present in the result set, each
+      // resolved against that row's OWN spaceKey -- "All spaces" + a Queue
+      // filter still checks each entry against the right board's config.
+      const spaceKeys = Array.from(new Set(result.map((r: any) => r.spaceKey).filter(Boolean)));
+      const rosterBySpace: Record<string, Set<string>> = {};
+      for (const sk of spaceKeys) {
+        try {
+          const cq = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [sk]);
+          const queues: any[] = cq.rows[0]?.queues || [];
+          const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === deptFilter.toLowerCase());
+          rosterBySpace[sk] = new Set(Array.isArray(q?.memberIds) ? q.memberIds : []);
+        } catch { rosterBySpace[sk] = new Set(); }
+      }
+      result = result.filter((r: any) => {
+        const roster = rosterBySpace[r.spaceKey];
+        // No configured queue by this name for this space at all -- fall
+        // through to showing nothing for it rather than guessing, same as
+        // an empty roster already means above.
+        return roster && roster.size > 0 && r.authorId && roster.has(r.authorId);
+      });
+    }
+    return json(result);
   }
 
   // DELETE worklogs/:id -- the entry's own author, or an admin, only.

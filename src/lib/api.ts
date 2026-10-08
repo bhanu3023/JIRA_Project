@@ -291,12 +291,13 @@ class ApiClient {
   getWorklogs(key: string) { return this.request<any>(`/issues/${key}/worklogs`); }
   addWorklog(key: string, data: { department: string; timeSpentMinutes: number; description?: string; workDate?: string }) { return this.request<any>(`/issues/${key}/worklogs`, { method: 'POST', body: JSON.stringify(data) }); }
   deleteWorklog(id: string) { return this.request<any>(`/worklogs/${id}`, { method: 'DELETE' }); }
-  getAllWorklogs(params: { from?: string; to?: string; userId?: string; spaceKey?: string } = {}) {
+  getAllWorklogs(params: { from?: string; to?: string; userId?: string; spaceKey?: string; dept?: string } = {}) {
     const qs = new URLSearchParams();
     if (params.from) qs.set('from', params.from);
     if (params.to) qs.set('to', params.to);
     if (params.userId) qs.set('userId', params.userId);
     if (params.spaceKey) qs.set('spaceKey', params.spaceKey);
+    if (params.dept) qs.set('dept', params.dept);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return this.request<any>(`/worklogs${suffix}`);
   }

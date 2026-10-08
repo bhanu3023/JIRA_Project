@@ -59,11 +59,12 @@ export default function WorklogPage() {
       to: dateTo ? `${dateTo}T23:59:59` : undefined,
       spaceKey: spaceKeyFilter || undefined,
       userId: userFilter || undefined,
+      dept: deptFilter || undefined,
     })
       .then((data: any) => setRows(Array.isArray(data) ? data : []))
       .catch((e: any) => setError(e?.message || 'Failed to load worklog entries.'))
       .finally(() => setLoading(false));
-  }, [dateFrom, dateTo, spaceKeyFilter, userFilter]);
+  }, [dateFrom, dateTo, spaceKeyFilter, userFilter, deptFilter]);
 
   // Queue filter means "logged by one of THIS queue's own configured
   // members, wherever they logged it" -- by explicit request (two rounds):
@@ -74,84 +75,53 @@ export default function WorklogPage() {
   // entries are tagged Migration (the department they were helping on, not
   // their own team) -- "Queue: Dev" needs to mean "this person is a Dev
   // person", not "AND this specific entry happens to be tagged Dev" on top
-  // of that. Queue: X now shows every entry logged by an X-roster member,
-  // regardless of which department that particular entry's own tag says --
-  // the Department COLUMN still shows the entry's real tag either way,
-  // this only changes what the Queue filter selects.
-  //
-  // Fetched per space actually present in the loaded rows (a worklog
-  // entry's own spaceKey), not just the current Space filter, so "All
-  // spaces" + a Queue filter still resolves each entry against the right
-  // board's own queue config. Also drives the dropdown's own option list --
-  // every CONFIGURED queue for these spaces, not just whichever department
-  // tags happen to appear in this date range's rows, so "Dev" stays
-  // selectable even in a window where every single entry happened to be
-  // tagged something else.
-  const [spaceQueues, setSpaceQueues] = useState<Record<string, { name: string; memberIds: string[] }[]>>({});
+  // of that. The actual roster matching now happens server-side (GET
+  // /worklogs?dept=), not here -- moved there after this exact client-side
+  // version repeatedly tested as "still not working" live despite the
+  // underlying roster data itself checking out correct every time via a
+  // script, so it can be verified directly against real data instead of
+  // depending on this component's own state/effect timing. This only
+  // fetches the dropdown's own option list now: every CONFIGURED queue for
+  // the spaces actually present in the current (unfiltered-by-dept) rows,
+  // not just whichever department tags happen to appear in this date
+  // range, so a queue stays selectable even when none of its own entries
+  // happened to be tagged that way.
+  const [deptOptionsBySpace, setDeptOptionsBySpace] = useState<Record<string, string[]>>({});
   useEffect(() => {
     const spaceKeys = Array.from(new Set(rows.map((r) => r.spaceKey).filter(Boolean)));
-    const missing = spaceKeys.filter((sk) => !(sk in spaceQueues));
+    const missing = spaceKeys.filter((sk) => !(sk in deptOptionsBySpace));
     if (!missing.length) return;
     let cancelled = false;
     (async () => {
       const entries = await Promise.all(missing.map(async (sk) => {
         try {
           const queues = await api.request<any[]>(`custom-queues/${sk}`);
-          return [sk, (queues || []).map((q: any) => ({ name: q.name, memberIds: Array.isArray(q.memberIds) ? q.memberIds : [] }))] as const;
+          return [sk, (queues || []).map((q: any) => q.name).filter(Boolean)] as const;
         } catch {
           return [sk, []] as const;
         }
       }));
       if (cancelled) return;
-      setSpaceQueues((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
+      setDeptOptionsBySpace((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
     })();
     return () => { cancelled = true; };
-  }, [rows, spaceQueues]);
+  }, [rows, deptOptionsBySpace]);
 
-  const deptOptions = useMemo(() => {
-    const names = new Set<string>();
-    for (const queues of Object.values(spaceQueues)) for (const q of queues) if (q.name) names.add(q.name);
-    return Array.from(names).sort();
-  }, [spaceQueues]);
-  // Selected department may no longer be a valid option once the other
-  // filters change (e.g. switching Space drops a department entirely) --
-  // clear it rather than silently filtering to a value nothing can match.
-  // Skipped while deptOptions is still empty (queues not loaded yet) so
-  // picking a queue doesn't get wiped out by its own not-yet-arrived data.
-  useEffect(() => {
-    if (deptFilter && deptOptions.length && !deptOptions.includes(deptFilter)) setDeptFilter('');
-  }, [deptOptions, deptFilter]);
-
-  const deptRosters = useMemo(() => {
-    const map: Record<string, Set<string>> = {};
-    for (const [sk, queues] of Object.entries(spaceQueues)) {
-      for (const q of queues) {
-        if (!q.name) continue;
-        map[`${sk}::${q.name.toLowerCase()}`] = new Set(q.memberIds);
-      }
-    }
-    return map;
-  }, [spaceQueues]);
+  const deptOptions = useMemo(
+    () => Array.from(new Set(Object.values(deptOptionsBySpace).flat())).sort(),
+    [deptOptionsBySpace],
+  );
 
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return rows.filter((r) => {
-      if (deptFilter) {
-        const roster = deptRosters[`${r.spaceKey}::${deptFilter.toLowerCase()}`];
-        // Roster not loaded yet, or this dept has no configured queue at
-        // all (roster undefined vs empty Set) -- don't hide everything
-        // while mid-fetch or for a dept with no roster to check against.
-        if (roster && roster.size > 0 && (!r.authorId || !roster.has(r.authorId))) return false;
-      }
-      if (!q) return true;
-      return (
-        r.issueKey.toLowerCase().includes(q) ||
-        (r.issueSummary || '').toLowerCase().includes(q) ||
-        (r.authorName || '').toLowerCase().includes(q) ||
-        (r.description || '').toLowerCase().includes(q)
-      );
-    });
-  }, [rows, search, deptFilter, deptRosters]);
+    if (!q) return rows;
+    return rows.filter((r) =>
+      r.issueKey.toLowerCase().includes(q) ||
+      (r.issueSummary || '').toLowerCase().includes(q) ||
+      (r.authorName || '').toLowerCase().includes(q) ||
+      (r.description || '').toLowerCase().includes(q)
+    );
+  }, [rows, search]);
 
   const totalMinutes = useMemo(() => filteredRows.reduce((sum, r) => sum + (r.timeSpentMinutes || 0), 0), [filteredRows]);
 
