@@ -2637,48 +2637,34 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
       const rawStartedAt = (issue as any).dept_sla_started_at
         ? new Date((issue as any).dept_sla_started_at).toISOString()
         : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
-      const resolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt) : null;
       // Remaining budget = full goal minus whatever this dept already burned
       // across earlier visits, so resuming here continues the countdown
-      // instead of restarting it at the full duration.
+      // instead of restarting it at the full duration. Still used for a
+      // RUNNING (not yet resolved) ticket's live due time below -- only the
+      // RESOLVED display changed, see next comment.
       const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
-      // For a RESOLVED ticket, priorElapsedMs already includes the just-
-      // ended stint's own full duration (pauseDeptSLA folds it in the
-      // moment it resolves) -- measuring the remaining budget from
-      // startedAt (that same stint's start) then collapses the displayed
-      // due time toward (or before) the start itself as elapsed approaches
-      // the goal, e.g. a ticket resolved in 23h41m against a 24h goal
-      // showed a DUE time only 19 minutes after START instead of ~24h
-      // later. Anchoring to resolvedAt instead answers the sensible
-      // question -- "how much budget was left (or exceeded) AS OF
-      // resolving" -- and is allowed to go negative (due time before
-      // resolvedAt) to show a ticket resolved past its deadline. This is
-      // purely the DISPLAYED due time; isBreached below already compares
-      // priorElapsedMs against durationMs directly and doesn't use this.
-      const dueTime = (isResolved && resolvedAt)
-        ? new Date(resolvedAt.getTime() + (durationMs - priorElapsedMs)).toISOString()
+      // By explicit request: a resolved ticket's displayed Start/Due should
+      // simply be "when the ticket was created" and "created + this
+      // priority's configured goal duration" -- a fixed, always-forward
+      // window -- instead of working backward from resolvedAt and the
+      // cumulative elapsed budget (what this replaced). That anchoring
+      // depended on resolvedAt actually being accurate, which repeatedly
+      // wasn't: confirmed wrong for real on CF-29905 (Start 6 days before
+      // the ticket even existed, caused by a stale resolvedAt -- see the
+      // dedicated fix above/elsewhere in this file) and, independently of
+      // resolvedAt, produced a Due time BEFORE Start whenever a ticket
+      // bounced through the same department more than once (CF-30865,
+      // CF-33222) since the cumulative elapsed total could already exceed
+      // the goal before the final visit even began. createdAt + goal can
+      // never produce either failure mode. Doesn't touch isBreached below,
+      // which already compares priorElapsedMs (the real cumulative tracked
+      // time) against durationMs directly and never reads startedAt/dueTime
+      // for a resolved ticket.
+      const dueTime = isResolved
+        ? new Date(new Date(issue.createdAt).getTime() + durationMs).toISOString()
         : new Date(new Date(rawStartedAt).getTime() + remainingBudgetMs).toISOString();
-      // rawStartedAt (dept_sla_started_at) is only the MOST RECENT resume
-      // into this dept -- fine on its own, but priorElapsedMs (and so
-      // dueTime, above, for a resolved ticket) is the CUMULATIVE total
-      // across every earlier visit too. A ticket that bounced through the
-      // same dept several times can easily have already burned more total
-      // time than the goal allows before its final visit even began, so
-      // dueTime (anchored to resolvedAt minus that full cumulative total)
-      // lands BEFORE rawStartedAt (the final visit's own start) -- shown
-      // side by side as "Due" earlier than "Start", which reads as
-      // nonsensical even though the breach itself is real. Confirmed for
-      // real: CF-30865 (Start 7:32 PM, Due 5:36 PM) and CF-33222 (Start
-      // 9:12 PM, Due 8:49 PM), both bounced through Migration 3 times.
-      // For a resolved ticket, display the START that's actually
-      // consistent with how dueTime was computed -- resolvedAt minus the
-      // full cumulative elapsed time -- instead of the latest visit's raw
-      // timestamp, so Start + goal duration always equals Due and the two
-      // can never cross over. Doesn't touch isBreached below, which
-      // already compares priorElapsedMs against durationMs directly and
-      // never reads startedAt for a resolved ticket.
-      const startedAt = (isResolved && resolvedAt)
-        ? new Date(resolvedAt.getTime() - priorElapsedMs).toISOString()
+      const startedAt = isResolved
+        ? new Date(issue.createdAt).toISOString()
         : rawStartedAt;
       // Paused SLAs are never breached — clock stopped. Resolving a ticket
       // must never ERASE a breach that already happened before it was
@@ -2728,7 +2714,7 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         // So the frontend can freeze the elapsed/progress display at the
         // actual resolution moment instead of continuing to count up against
         // "now" forever after the ticket is already done.
-        resolvedAt: resolvedAt ? resolvedAt.toISOString() : null,
+        resolvedAt: (issue as any).resolvedAt ? new Date((issue as any).resolvedAt).toISOString() : null,
         startedAt,
         goalDurationMs: durationMs,
         isNotified,
