@@ -14122,9 +14122,22 @@ async function _handleJiraPgApi(
       OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v) WHERE LOWER(k) = LOWER($1) AND LOWER(v->>'category') = 'done')
       OR EXISTS (
         SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
-        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND w.reason != 'passed' AND LOWER(wu.email) = ANY($2::text[])
+        WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND LOWER(wu.email) = ANY($2::text[])
       )
     )`;
+    // reason != 'passed' used to be required here too, same as rosterMatchSql
+    // below -- removed to match Filters' own, already-made decision (see
+    // deptExtraClauses' reasonClause in the GET /issues dept-scoped branch):
+    // a queue member who received this ticket and routed it onward is
+    // recorded ONLY as 'passed' for this department, not 'worked'/'closed' --
+    // the routing status change credits the department it LANDS in, not this
+    // one. Excluding 'passed' dropped exactly those tickets from both
+    // deptMatchSql and rosterMatchSql, which is exactly the gap reported for
+    // real: 20 tickets Filters' Queue: Dev counted for Sep 2026 that this
+    // Customer Engineering tab didn't, every one of them a brief Dev
+    // pass-through (confirmed directly against user_worked_on_tickets) by a
+    // genuine Dev roster member, immediately before being routed to
+    // Migration.
     // Roster/member scope: current assignee is a configured queue member, OR
     // a genuine member of $1's own roster has a worked-on-in-$1 record, OR
     // (mirrors Filters' own memberClause fix exactly) the ticket is
@@ -14182,11 +14195,13 @@ async function _handleJiraPgApi(
       EXISTS (SELECT 1 FROM users rau WHERE rau.id = i."assigneeId" AND LOWER(rau.email) = ANY($2::text[]))
       OR EXISTS (
         SELECT 1 FROM user_worked_on_tickets w4 JOIN users wu4 ON wu4.id = w4.user_id
-        WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND w4.reason != 'passed' AND LOWER(wu4.email) = ANY($2::text[])
+        WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($1) AND LOWER(wu4.email) = ANY($2::text[])
       )
       OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($1))
       ${broadDeptMatchBranch}
     )`;
+    // reason != 'passed' removed here too -- see deptMatchSql's own comment
+    // above for why (matches Filters' already-made decision).
 
     let scopedParams = person ? [...baseParams, person] : baseParams;
     const personIdx = scopedParams.length;
@@ -14196,8 +14211,12 @@ async function _handleJiraPgApi(
     // Assignee under a date-range filter: CF-29889 was worked in Dev by Ravi
     // Srivastava, then handed to another dept and reassigned -- "Assignee:
     // Ravi" still needs to find it).
+    // reason != 'passed' removed from both worked-on checks below -- see
+    // deptMatchSql's own comment above for why (matches Filters' already-
+    // made decision); otherwise a person drill-down total could disagree
+    // with the summary total above it, which no longer excludes 'passed'.
     const personMatchSql = person
-      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND wp.reason != 'passed' AND LOWER(wpu.email) = $${personIdx}))`
+      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}))`
       : '';
     // A person-scoped drill-down (e.g. "Resolved tickets — Adari") can include
     // a ticket Adari worked on here that's since been reassigned to another
@@ -14210,7 +14229,7 @@ async function _handleJiraPgApi(
     // intentional historical-attribution behavior it actually is. Flag it
     // explicitly per row so the frontend can say so.
     const personHistoryFlagSql = person
-      ? `(NOT (au.id IS NOT NULL AND LOWER(au.email) = $${personIdx}) AND EXISTS (SELECT 1 FROM user_worked_on_tickets wp3 JOIN users wpu3 ON wpu3.id = wp3.user_id WHERE wp3.issue_id = i.id AND LOWER(wp3.dept) = LOWER($1) AND wp3.reason != 'passed' AND LOWER(wpu3.email) = $${personIdx}))`
+      ? `(NOT (au.id IS NOT NULL AND LOWER(au.email) = $${personIdx}) AND EXISTS (SELECT 1 FROM user_worked_on_tickets wp3 JOIN users wpu3 ON wpu3.id = wp3.user_id WHERE wp3.issue_id = i.id AND LOWER(wp3.dept) = LOWER($1) AND LOWER(wpu3.email) = $${personIdx}))`
       : 'FALSE';
 
     // Drill-down filters for the per-person hygiene columns -- each shows the
@@ -14395,7 +14414,12 @@ async function _handleJiraPgApi(
         LEFT JOIN users u ON LOWER(u.email) = r.email
         LEFT JOIN issues i ON (
           (i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1))
-          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1) AND wpp.reason != 'passed')
+          -- reason != 'passed' removed -- see deptMatchSql's own comment
+          -- above for why (matches Filters' already-made decision); without
+          -- this, a roster member's per-person total could undercount
+          -- relative to the tab's own summary total above, which no longer
+          -- excludes 'passed' either.
+          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1))
         ) ${dateClause}
         LEFT JOIN statuses s ON i."statusId" = s.id
         GROUP BY r.email, u.email, u."firstName", u."lastName"
