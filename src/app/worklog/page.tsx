@@ -41,6 +41,7 @@ export default function WorklogPage() {
   const [dateTo, setDateTo] = useState(() => isoDate(new Date()));
   const [spaceKeyFilter, setSpaceKeyFilter] = useState('');
   const [userFilter, setUserFilter] = useState('');
+  const [deptFilter, setDeptFilter] = useState('');
   const [search, setSearch] = useState('');
 
   const [users, setUsers] = useState<{ id: string; firstName?: string; lastName?: string; email?: string }[]>([]);
@@ -64,18 +65,44 @@ export default function WorklogPage() {
       .finally(() => setLoading(false));
   }, [dateFrom, dateTo, spaceKeyFilter, userFilter]);
 
+  // Department/Queue options -- derived from whatever's actually in the
+  // current date+space+user-filtered result set, not a separate static
+  // list, so the dropdown never offers a department with zero entries to
+  // filter down to in the first place.
+  const deptOptions = useMemo(() => Array.from(new Set(rows.map((r) => r.department).filter(Boolean))).sort(), [rows]);
+  // Selected department may no longer be a valid option once the other
+  // filters change (e.g. switching Space drops a department entirely) --
+  // clear it rather than silently filtering to a value nothing can match.
+  useEffect(() => {
+    if (deptFilter && !deptOptions.includes(deptFilter)) setDeptFilter('');
+  }, [deptOptions, deptFilter]);
+
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter((r) =>
-      r.issueKey.toLowerCase().includes(q) ||
-      (r.issueSummary || '').toLowerCase().includes(q) ||
-      (r.authorName || '').toLowerCase().includes(q) ||
-      (r.description || '').toLowerCase().includes(q)
-    );
-  }, [rows, search]);
+    return rows.filter((r) => {
+      if (deptFilter && r.department !== deptFilter) return false;
+      if (!q) return true;
+      return (
+        r.issueKey.toLowerCase().includes(q) ||
+        (r.issueSummary || '').toLowerCase().includes(q) ||
+        (r.authorName || '').toLowerCase().includes(q) ||
+        (r.description || '').toLowerCase().includes(q)
+      );
+    });
+  }, [rows, search, deptFilter]);
 
   const totalMinutes = useMemo(() => filteredRows.reduce((sum, r) => sum + (r.timeSpentMinutes || 0), 0), [filteredRows]);
+
+  // Label for the summary tile -- "how it should show in Jira": a plain
+  // total when no one's singled out, "<Name>'s total" once a specific
+  // person is selected, matching Jira's own per-assignee time-logged
+  // reading rather than a generic "Total logged" that doesn't say whose.
+  const selectedUserLabel = useMemo(() => {
+    if (!userFilter) return null;
+    if (userFilter === user?.id) return 'You';
+    const u = users.find((uu) => uu.id === userFilter);
+    return u ? (`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email) : null;
+  }, [userFilter, users, user?.id]);
 
   // Grouped by ticket rather than one long flat chronological list, so two
   // entries against the SAME ticket (e.g. one person logs time, the ticket
@@ -135,6 +162,15 @@ export default function WorklogPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            <label className="text-[12px] text-gray-400 font-medium">Queue</label>
+            <select value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)}
+              className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">All queues</option>
+              {deptOptions.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
             <label className="text-[12px] text-gray-400 font-medium">Logged by</label>
             <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)}
               className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -155,8 +191,8 @@ export default function WorklogPage() {
             />
           </div>
 
-          {(spaceKeyFilter || userFilter || search) && (
-            <button onClick={() => { setSpaceKeyFilter(''); setUserFilter(''); setSearch(''); }}
+          {(spaceKeyFilter || userFilter || deptFilter || search) && (
+            <button onClick={() => { setSpaceKeyFilter(''); setUserFilter(''); setDeptFilter(''); setSearch(''); }}
               className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
               <X size={11} /> Clear
             </button>
@@ -166,7 +202,9 @@ export default function WorklogPage() {
         {/* Summary */}
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex items-center gap-6">
           <div>
-            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Total logged</p>
+            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">
+              {selectedUserLabel ? `${selectedUserLabel}'s total` : 'Total logged'}{deptFilter ? ` · ${deptFilter}` : ''}
+            </p>
             <p className="text-[22px] font-bold text-gray-800">{totalMinutes > 0 ? formatMinutes(totalMinutes) : '0m'}</p>
           </div>
           <div>
