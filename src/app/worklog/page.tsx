@@ -1,10 +1,10 @@
 'use client';
 
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
-import { Clock, Calendar, X, Search } from 'lucide-react';
+import { Clock, Calendar, X, Search, ChevronDown } from 'lucide-react';
 
 type WorklogRow = {
   id: string;
@@ -29,6 +29,80 @@ function formatMinutes(m: number) {
 
 function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
+}
+
+// Plain <select> for "Logged by" had no way to search a 300+ person list --
+// finding one specific name meant scrolling through the whole alphabet.
+// Same search-box-over-a-list pattern as the Filters page's own people
+// pickers, just single-select (clicking an option selects it and closes).
+function UserSearchSelect({
+  value, onChange, options, placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  placeholder: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQ(''); }
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const filtered = options.filter((o) => o.label.toLowerCase().includes(q.trim().toLowerCase()));
+  const selectedLabel = options.find((o) => o.value === value)?.label || placeholder;
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 hover:border-gray-400 transition-colors min-w-[140px]"
+      >
+        <span className="flex-1 text-left truncate">{selectedLabel}</span>
+        <ChevronDown size={12} className={`text-gray-400 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute z-50 mt-1 w-64 rounded-lg border border-gray-200 bg-white shadow-xl overflow-hidden">
+          <div className="border-b border-gray-100 px-2.5 py-2">
+            <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
+              <Search size={12} className="text-gray-400 flex-shrink-0" />
+              <input
+                autoFocus
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search people…"
+                className="flex-1 bg-transparent text-[12px] text-gray-700 outline-none placeholder:text-gray-400"
+              />
+            </div>
+          </div>
+          <div className="max-h-64 overflow-y-auto py-1">
+            {filtered.length === 0 ? (
+              <p className="px-3 py-3 text-[12px] text-gray-400 text-center">No results</p>
+            ) : (
+              filtered.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => { onChange(opt.value); setOpen(false); setQ(''); }}
+                  className={`block w-full text-left px-3 py-1.5 text-[12.5px] transition-colors ${opt.value === value ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700 hover:bg-gray-50'}`}
+                >
+                  {opt.label}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function WorklogPage() {
@@ -204,14 +278,16 @@ export default function WorklogPage() {
 
           <div className="flex items-center gap-2">
             <label className="text-[12px] text-gray-400 font-medium">Logged by</label>
-            <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">Everyone</option>
-              <option value={user?.id || ''}>Just me</option>
-              {users.map((u) => (
-                <option key={u.id} value={u.id}>{`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email}</option>
-              ))}
-            </select>
+            <UserSearchSelect
+              value={userFilter}
+              onChange={setUserFilter}
+              placeholder="Everyone"
+              options={[
+                { value: '', label: 'Everyone' },
+                { value: user?.id || '', label: 'Just me' },
+                ...users.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
+              ]}
+            />
           </div>
 
           <div className="relative flex-1 min-w-[180px]">
