@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { pgPool as pool } from '@/lib/pg-pool';
 import { db } from '@/lib/db';
 import { mentionedIds, plainMentions } from '@/lib/kb-mentions';
+import { notifyKbArticlePublished } from '@/lib/notification-service';
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_QA_CHARS = 4000;
@@ -614,13 +615,57 @@ export async function handleKbApi(
   if (action === 'publish' && method === 'POST') {
     const access = await parseAccess(await req.json().catch(() => ({})));
     if ('error' in access) return json({ error: access.error }, 400);
+    // Only true the FIRST time this article goes live -- publishing again
+    // after an edit (status was already 'published') shouldn't re-announce
+    // it to the whole org a second time. published_at is already
+    // COALESCE'd to preserve the original publish moment for exactly this
+    // reason; this mirrors that same "first time only" rule for the
+    // announcement itself.
+    const wasAlreadyPublished = (await pool.query(`SELECT status FROM kb_articles WHERE id = $1`, [id])).rows[0]?.status === 'published';
     const row = await pool.query(
       `UPDATE kb_articles SET status = 'published', visibility = $2, teams = $3,
          published_at = COALESCE(published_at, NOW()), updated_at = NOW()
        WHERE id = $1 RETURNING *`,
       [id, access.visibility, access.teams],
     );
-    return json(formatArticle(row.rows[0], await loadTeams(), true, true));
+    const published = row.rows[0];
+
+    // By explicit request: every KB article/Release Note publish announces
+    // to EVERYONE with access to the app (not just the author's team or
+    // whoever happens to be watching), by email and in-app notification,
+    // naming who published it and linking straight to the article. Runs
+    // fire-and-forget -- the publish response doesn't wait on hundreds of
+    // individual email sends.
+    if (!wasAlreadyPublished) {
+      (async () => {
+        try {
+          const recipients = await db.user.findMany({ where: { isActive: true }, select: { id: true, email: true } });
+          if (!recipients.length) return;
+          const typeLabel = published.kind === 'release' ? 'Release Note' : 'KB Article';
+          await db.notification.createMany({
+            data: recipients.map((u) => ({
+              userId: u.id,
+              type: 'KB_PUBLISHED',
+              title: `New ${typeLabel}: ${published.title}`,
+              message: `Published by ${published.author_name}`,
+              issueKey: published.id,
+            })),
+          });
+          await notifyKbArticlePublished({
+            articleId: published.id,
+            title: published.title,
+            kind: published.kind === 'release' ? 'release' : 'article',
+            authorName: published.author_name,
+            summary: excerptOf(published.body_html, 200),
+            recipientEmails: recipients.map((u) => u.email),
+          });
+        } catch (e: any) {
+          console.error('[KB] Publish announcement failed:', e?.message || e);
+        }
+      })();
+    }
+
+    return json(formatArticle(published, await loadTeams(), true, true));
   }
 
   // PATCH kb/articles/:id/access  {visibility, teams} -- add/remove teams or go org-wide

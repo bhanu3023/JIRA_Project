@@ -1070,3 +1070,66 @@ export async function notifySLABreach(opts: {
   );
   console.log(`[Notification] SLA breach alert for ${opts.issueKey} → ${opts.assigneeEmails.join(', ')}`);
 }
+
+// A KB article or Release Note (same underlying table, distinguished by
+// `kind`) going live is an org-wide announcement, not a per-ticket event --
+// unlike every other notify* above (a handful of people tied to one
+// ticket), the recipient list here can be the WHOLE active user base.
+// Sends one email PER recipient (never one email with everyone in the same
+// To: field) so a large org-wide send never exposes the full recipient
+// list to every other recipient -- the one meaningful privacy difference
+// from this file's other broadcast-shaped sends, all of which are small
+// enough (a few people on one ticket) that this was never a concern there.
+export async function notifyKbArticlePublished(opts: {
+  articleId: string;
+  title: string;
+  kind: 'article' | 'release';
+  authorName: string;
+  summary?: string | null;
+  recipientEmails: string[];
+}) {
+  const uniqueEmails = Array.from(new Set(opts.recipientEmails.filter(Boolean)));
+  if (!uniqueEmails.length) return;
+
+  const typeLabel = opts.kind === 'release' ? 'Release Note' : 'KB Article';
+  const articleUrl = `${APP_URL}/kb?id=${opts.articleId}`;
+  const summaryHtml = opts.summary
+    ? `<p style="margin:12px 0 0;font-size:14px;color:#444;line-height:1.5">${opts.summary}</p>`
+    : '';
+
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:Arial,sans-serif">
+  <div style="max-width:600px;margin:24px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.1)">
+    <div style="background:#0052CC;padding:16px 24px">
+      <span style="color:white;font-size:18px;font-weight:bold">${FROM_NAME}</span>
+    </div>
+    <div style="background:#059669;padding:10px 24px">
+      <span style="color:white;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">📣 New ${typeLabel} Published</span>
+    </div>
+    <div style="padding:20px 24px">
+      <a href="${articleUrl}" style="text-decoration:none">
+        <h2 style="margin:0;font-size:18px;color:#172B4D;line-height:1.3">${opts.title}</h2>
+      </a>
+      <p style="margin:8px 0 0;font-size:13px;color:#888">Published by ${opts.authorName}</p>
+      ${summaryHtml}
+    </div>
+    <div style="padding:0 24px 24px">
+      <a href="${articleUrl}" style="color:#0052CC;font-size:14px;text-decoration:none">View ${typeLabel.toLowerCase()} →</a>
+    </div>
+    <div style="padding:16px 24px;background:#f9fafb;border-top:1px solid #eee">
+      <p style="margin:0;font-size:11px;color:#999">${APP_URL}</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  const text = `New ${typeLabel} published by ${opts.authorName}: ${opts.title}\n${opts.summary ? opts.summary + '\n' : ''}View: ${articleUrl}`;
+  const subject = `New ${typeLabel}: ${opts.title}`;
+
+  for (const email of uniqueEmails) {
+    await sendNotification([email], subject, html, text);
+  }
+  console.log(`[Notification] ${typeLabel} published "${opts.title}" → ${uniqueEmails.length} recipients`);
+}
