@@ -67,7 +67,21 @@ async function main() {
   }
   console.log(`Found ${breachedEntries.length} breached (non-waived, completed) SLA instances across ${rows.length} resolved tickets.\n`);
 
-  const toCheck = breachedEntries.slice(0, LIMIT);
+  // Only tickets that have ANY 'sla'-labeled history at all can possibly be
+  // reconstructed -- many older/Jira-imported tickets have none (this app's
+  // own start/pause/resume logging didn't exist yet when they were created),
+  // and checking those first just burns the whole sample on guaranteed
+  // failures. Filter to ones with at least one 'sla' row before sampling.
+  const idsWithSlaHistory = new Set(
+    (await pool.query(
+      `SELECT DISTINCT "issueId" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'sla'`,
+      [breachedEntries.map((e) => e.issueId)]
+    )).rows.map((r) => r.issueId)
+  );
+  const eligible = breachedEntries.filter((e) => idsWithSlaHistory.has(e.issueId));
+  console.log(`Of those, ${eligible.length} have at least one 'sla' history entry to reconstruct from.\n`);
+
+  const toCheck = eligible.slice(0, LIMIT);
   let okCount = 0, failCount = 0;
   for (const e of toCheck) {
     const { rows: history } = await pool.query(
