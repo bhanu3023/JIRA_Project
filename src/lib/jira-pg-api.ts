@@ -2081,6 +2081,24 @@ async function performDeptHandoff(
     [targetDept, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), targetStatusId, issueId, handoffAssigneeId]
   );
   await startDeptSLA(null, issueId, targetDept);
+  // newDeptStatusObj.category is only ever 'done' via the restoringOwnSnapshot
+  // branch above (the plain branch only ever produces 'in_progress' or
+  // 'todo') -- a ticket landing in this department ALREADY marked done
+  // (restoring a prior, or stale propagated, done status) must have its
+  // clock paused immediately too, or it's left "running" forever with no
+  // real work ever happening against it. Confirmed for real on CF-29397:
+  // Migration's dept_sla_log sat at status:"running", paused_at:null
+  // indefinitely after a handoff that arrived already-resolved via this
+  // exact path, making the SLA panel show RESOLVED while the underlying
+  // clock disagreed -- the class of bug the isResolved consistency guard
+  // (computeSLAInstancesPure) was added to catch symptoms of, but this is
+  // the actual place that lets a department's clock start already-done and
+  // never get stopped. Pausing immediately after starting adds essentially
+  // no new elapsed time (same instant, modulo processing time) -- this
+  // department did no real work, so it should accrue none.
+  if (newDeptStatusObj.category === 'done') {
+    await pauseDeptSLA(null, issueId, targetDept, 'SLA resolved');
+  }
 
   // Callers already log their own "status changed to Waiting for X" /
   // "handed to Y" entries for the picking dept's own action -- accurate, but
