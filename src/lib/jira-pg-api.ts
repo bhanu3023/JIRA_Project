@@ -14171,16 +14171,32 @@ async function _handleJiraPgApi(
     // into exactly one of ent/smb, so this only ever decides whether a
     // ticket counts for Migration's scope AT ALL -- never which side it
     // lands on.
+    // Space scope: every team here (eng/qa/infra/ent/smb) is specifically
+    // about CloudFuze Board (TESTIN) departments -- Filters' own Queue: X is
+    // always called with spaceKey=TESTIN -- but nothing in this handler ever
+    // restricted these queries to that space at all. A ticket from a
+    // completely different space whose department-like fields happen to
+    // match a department name by pure coincidence (or leftover data) could
+    // leak into a team tab with no way for Filters to ever agree, since
+    // Filters never even looks outside its own given space. Confirmed for
+    // real: CF-31525 (key IA-25, the IT ADMINISTRATION space -- which the
+    // deploy script itself logs as having "no department/queue concept" at
+    // all) still carried original_dept='Infra' and an Infra dept_statuses
+    // entry from some earlier state, making it count under the Infra tab
+    // even after its current_department was repaired, while Filters
+    // (scoped to TESTIN) correctly never saw it at all.
     const migrationLiveRosterLiteral = `ARRAY[${migrationLiveRoster.map((e) => `'${e.replace(/'/g, "''")}'`).join(',') || `'__none__'`}]::text[]`;
     const deptMatchSql = (team === 'ent' || team === 'smb')
       ? `(
+      i."spaceId" = (SELECT id FROM spaces WHERE key = 'TESTIN') AND (
       LOWER(i.current_department) = LOWER($1)
       OR EXISTS (
         SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
         WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND LOWER(wu.email) = ANY(${migrationLiveRosterLiteral})
       )
-    )`
+    ))`
       : `(
+      i."spaceId" = (SELECT id FROM spaces WHERE key = 'TESTIN') AND (
       LOWER(i.current_department) = LOWER($1)
       OR LOWER(COALESCE(
            i.original_dept,
@@ -14192,7 +14208,7 @@ async function _handleJiraPgApi(
         SELECT 1 FROM user_worked_on_tickets w JOIN users wu ON wu.id = w.user_id
         WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($1) AND LOWER(wu.email) = ANY($2::text[])
       )
-    )`;
+    ))`;
     // reason != 'passed' used to be required here too, same as rosterMatchSql
     // below -- removed to match Filters' own, already-made decision (see
     // deptExtraClauses' reasonClause in the GET /issues dept-scoped branch):
