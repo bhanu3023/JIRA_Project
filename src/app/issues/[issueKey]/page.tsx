@@ -4784,10 +4784,23 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
               // actual resolution moment (previously kept counting up against
               // "now" forever after resolution, so a ticket resolved on time
               // eventually showed 100%+ elapsed as if it had run over anyway).
+              // For a completed ticket, prefer the backend's actualElapsedMs
+              // (the real cumulative time THIS department spent, summed
+              // across every visit -- same number isBreached is computed
+              // from) over resolvedAt-minus-displayed-Start, which can
+              // include time spent in OTHER departments entirely for a
+              // ticket that bounced around (startedAt is now simply
+              // createdAt, a fixed display window, not this department's own
+              // actual start). Confirmed for real on CF-33040: resolvedAt-
+              // minus-Start read 8h34m (the ticket's whole lifetime,
+              // including ~4.5h in Dev) for a Migration breach that was
+              // actually only 4h6m38s of real Migration time. Falls back to
+              // the old formula only for a ticket resolved before this field
+              // existed (its frozen snapshot has no actualElapsedMs at all).
               const elapsedMs = isPaused
                 ? dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()) + (goalMs - Math.max(0, dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime())))
                 : isCompleted && resolvedAt
-                ? resolvedAt.getTime() - (startedAt?.getTime() ?? resolvedAt.getTime())
+                ? (typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : resolvedAt.getTime() - (startedAt?.getTime() ?? resolvedAt.getTime()))
                 : slaNow - (startedAt?.getTime() ?? slaNow);
               const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
               const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');

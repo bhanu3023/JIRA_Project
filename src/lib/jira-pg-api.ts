@@ -2739,6 +2739,21 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         resolvedAt: (issue as any).resolvedAt ? new Date((issue as any).resolvedAt).toISOString() : null,
         startedAt,
         goalDurationMs: durationMs,
+        // The REAL cumulative time this department actually spent on the
+        // ticket, summed across every separate visit (same value isBreached
+        // above is computed from) -- NOT derivable from startedAt/dueTime,
+        // which (by explicit request) are now simply createdAt and
+        // createdAt+goal, a fixed display window that can span time spent
+        // in OTHER departments entirely for a ticket that bounced around.
+        // Without this, the frontend's "Resolved in Xh Ym" text had no way
+        // to show anything but resolvedAt-minus-displayed-Start, which
+        // significantly overstates how late THIS department actually was
+        // for a multi-hop ticket. Confirmed for real on CF-33040: displayed
+        // "Resolved in 8h34m" (the ticket's entire lifetime, including ~4.5h
+        // spent in Dev and 38s in Infra) for a Migration breach that was
+        // actually only 4h6m38s of real Migration time against its 4h goal
+        // -- a 6-minute overage reading as if it were nearly double budget.
+        actualElapsedMs: priorElapsedMs,
         isNotified,
         waived: !!waiver,
         waivedByName: waiver?.waivedByName || null,
