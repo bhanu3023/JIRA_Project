@@ -1,9 +1,8 @@
-// ENT (387) + SMB (299) = 686, Filters' Queue: Migration = 680 -- a 6-ticket
-// residual gap after making ENT/SMB mutually exclusive via projectPool/
-// roster/hash classification. Diffs the actual ticket sets (ENT union SMB)
-// vs Filters directly to find the exact tickets causing it. Read-only.
+// Diffs ENT∪SMB's actual ticket set against Filters' Queue: Migration for
+// ANY date range, to confirm the exact-match fix holds for new tickets, not
+// just the Sep 2026 data it was originally built against. Read-only.
 //
-// Usage: node check-migration-ent-smb-vs-filters-final.mjs
+// Usage: node check-migration-ent-smb-vs-filters-final.mjs [YYYY-MM-DD] [YYYY-MM-DD]
 import pg from 'pg';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -12,8 +11,8 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
 const BASE = `http://localhost:${PORT}/api`;
-const DATE_FROM = '2026-09-01';
-const DATE_TO = '2026-09-30';
+const DATE_FROM = process.argv[2] || '2026-09-01';
+const DATE_TO = process.argv[3] || '2026-09-30';
 
 async function main() {
   const { rows: adminRows } = await pool.query(`SELECT id FROM users WHERE email = 'bhanu.srikakulam@cloudfuze.com' LIMIT 1`);

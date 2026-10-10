@@ -1,11 +1,13 @@
-// Verifies the rosterMatchSql fix actually closes the gap reported for real:
-// MBR's Customer Engineering (team=eng) tab vs Filters' Queue: Dev, and
-// MBR's combined ENT+SMB tabs vs Filters' Queue: Migration, for Sep 2026.
-// Hits both live endpoints directly (same ones the UI calls) rather than
-// querying the DB by hand, so this reflects exactly what a user sees.
-// Read-only.
+// Verifies MBR vs Filters counts stay exactly matched for ANY date range --
+// originally built (and hardcoded) for Sep 2026 while chasing the original
+// bug; now takes the range as CLI args so it can be re-run for the CURRENT
+// month going forward, to confirm the fix holds for new tickets too, not
+// just the historical data it was originally tested against. Hits both live
+// endpoints directly (same ones the UI calls) rather than querying the DB
+// by hand, so this reflects exactly what a user sees. Read-only.
 //
-// Usage: node check-mbr-team-vs-filters-sep.mjs
+// Usage: node check-mbr-team-vs-filters-sep.mjs [YYYY-MM-DD] [YYYY-MM-DD]
+//        node check-mbr-team-vs-filters-sep.mjs 2026-10-01 2026-10-10
 import pg from 'pg';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -14,8 +16,8 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
 const BASE = `http://localhost:${PORT}/api`;
-const DATE_FROM = '2026-09-01';
-const DATE_TO = '2026-09-30';
+const DATE_FROM = process.argv[2] || '2026-09-01';
+const DATE_TO = process.argv[3] || '2026-09-30';
 
 async function main() {
   const { rows: adminRows } = await pool.query(`SELECT id FROM users WHERE email = 'bhanu.srikakulam@cloudfuze.com' LIMIT 1`);
@@ -51,7 +53,7 @@ async function main() {
   const devFilters = await get(`/issues?spaceKey=TESTIN&dept=Dev&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`);
   const migrationFilters = await get(`/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`);
 
-  console.log(`=== Sep 2026 (${DATE_FROM} to ${DATE_TO}) ===\n`);
+  console.log(`=== ${DATE_FROM} to ${DATE_TO} ===\n`);
   console.log('MBR team=eng summary:', JSON.stringify(engMbr.summary));
   console.log('Filters Queue: Dev total:', devFilters.total ?? JSON.stringify(devFilters).slice(0, 200));
   console.log('');

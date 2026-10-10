@@ -1,10 +1,11 @@
 // QA and Infra both map 1:1 onto their own department (no ENT/SMB-style
 // split), using the SAME code path that already proved exact for Dev/
-// Customer Engineering (0 ticket-level diff). Verifies that holds for QA
-// and Infra too, for the same Sep 2026 range, via direct ticket-level diff
-// against Filters' own Queue: QA / Queue: Infra. Read-only.
+// Customer Engineering (0 ticket-level diff). Verifies that holds for ANY
+// date range (originally Sep 2026, now re-runnable for the current month)
+// via direct ticket-level diff against Filters' own Queue: QA / Queue:
+// Infra. Read-only.
 //
-// Usage: node check-qa-infra-vs-filters.mjs
+// Usage: node check-qa-infra-vs-filters.mjs [YYYY-MM-DD] [YYYY-MM-DD]
 import pg from 'pg';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -13,8 +14,8 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 8080;
 const BASE = `http://localhost:${PORT}/api`;
-const DATE_FROM = '2026-09-01';
-const DATE_TO = '2026-09-30';
+const DATE_FROM = process.argv[2] || '2026-09-01';
+const DATE_TO = process.argv[3] || '2026-09-30';
 
 async function main() {
   const { rows: adminRows } = await pool.query(`SELECT id FROM users WHERE email = 'bhanu.srikakulam@cloudfuze.com' LIMIT 1`);
