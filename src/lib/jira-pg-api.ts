@@ -673,6 +673,7 @@ import {
   notifyIssueDeleted,
   notifyMentioned,
   notifySLABreach,
+  sendNotification,
 } from '@/lib/notification-service';
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Global safety net: prevent IMAP/socket uncaughtExceptions from killing the server Ã¢â€â‚¬Ã¢â€â‚¬
@@ -1284,6 +1285,145 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
   } catch (e: any) { console.error('[MonitorAgent:Dup]', e?.message); }
 
   return results;
+}
+
+// Runs once a day (see instrumentation.ts), also callable manually by an
+// admin via POST /admin/daily-consistency-check. Guards against the two
+// biggest classes of bug found and fixed across a single long debugging
+// session, so a future regression (a new code path, a data anomaly like
+// CF-31525's null department, a stale roster) gets caught automatically
+// instead of waiting for someone to notice a wrong number months later:
+//   1. MBR-vs-Filters count mismatches per department (Dev/QA/Infra/
+//      Migration ENT+SMB), checked over a rolling 30-day window so it
+//      catches drift in NEW tickets, not just historical ones already
+//      verified once.
+//   2. Whole-database SLA consistency (impossible Start/Due dates, a
+//      department shown resolved while its own clock is still running,
+//      a stale resolvedAt, breach-flag disagreement) -- see
+//      check-sla-system-health.mjs, which this mirrors directly in-process
+//      instead of needing a manually-run script.
+// Only emails admins when something is actually wrong -- a clean day sends
+// nothing, so this can never become noise someone learns to ignore.
+async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[]; slaHealthIssues: string[]; checkedAt: string }> {
+  const mbrFiltersIssues: string[] = [];
+  const slaHealthIssues: string[] = [];
+
+  // Self-fetches the SAME live endpoints a user's browser calls (Filters'
+  // GET /issues, MBR's GET /reports/mbr-team) rather than re-implementing
+  // their SQL here a second time -- guarantees this check can never drift
+  // from what a user actually sees, the exact trap a hand-duplicated query
+  // would eventually fall into. Mirrors instrumentation.ts's own Jira-sync
+  // self-fetch pattern (internal job secret, no user session) -- safe here
+  // because, like that job, this only ever runs on a timer well after boot,
+  // never awaited during register() itself.
+  try {
+    const to = new Date();
+    const from = new Date(to.getTime() - 30 * 24 * 3600_000);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const dateFrom = fmt(from);
+    const dateTo = fmt(to);
+    const internalPort = process.env.INTERNAL_PORT || process.env.PORT || '3000';
+    const internalUrl = `http://localhost:${internalPort}/api`;
+    const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
+    const headers = { 'x-internal-job-secret': INTERNAL_JOB_SECRET };
+    const get = async (p: string): Promise<any> => {
+      const res = await fetch(`${internalUrl}${p}`, { headers, signal: AbortSignal.timeout(20000) });
+      if (!res.ok) throw new Error(`${p} -> HTTP ${res.status}`);
+      return res.json();
+    };
+
+    const dateParam = `between:${dateFrom}:${dateTo}`;
+    const oneToOneChecks: Array<{ team: string; dept: string }> = [
+      { team: 'eng', dept: 'Dev' },
+      { team: 'qa', dept: 'QA' },
+      { team: 'infra', dept: 'Infra' },
+    ];
+    for (const { team, dept } of oneToOneChecks) {
+      const [mbr, filters] = await Promise.all([
+        get(`/reports/mbr-team?team=${team}&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+        get(`/issues?spaceKey=TESTIN&dept=${dept}&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`),
+      ]);
+      const mbrTotal = mbr?.summary?.total;
+      const filtersTotal = filters?.total;
+      if (typeof mbrTotal !== 'number' || typeof filtersTotal !== 'number' || mbrTotal !== filtersTotal) {
+        mbrFiltersIssues.push(`${dept}: MBR=${mbrTotal ?? 'n/a'} vs Filters=${filtersTotal ?? 'n/a'} (last 30 days)`);
+      }
+    }
+
+    const [ent, smb, migrationFilters] = await Promise.all([
+      get(`/reports/mbr-team?team=ent&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+      get(`/reports/mbr-team?team=smb&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+      get(`/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`),
+    ]);
+    const entTotal: number = ent?.summary?.total ?? 0;
+    const smbTotal: number = smb?.summary?.total ?? 0;
+    const migrationTotal = migrationFilters?.total;
+    if (typeof migrationTotal !== 'number' || (entTotal + smbTotal) !== migrationTotal) {
+      mbrFiltersIssues.push(`Migration: ENT(${entTotal})+SMB(${smbTotal})=${entTotal + smbTotal} vs Filters=${migrationTotal ?? 'n/a'} (last 30 days)`);
+    }
+  } catch (e: any) {
+    mbrFiltersIssues.push(`MBR-vs-Filters check itself failed to run: ${e?.message || e}`);
+  }
+
+  // Whole-database SLA consistency -- pure SQL, no self-fetch needed (same
+  // logic as check-sla-system-health.mjs).
+  try {
+    const { rows } = await pool.query(`
+      SELECT "createdAt", "resolvedAt", current_department, dept_sla_log, sla_snapshot
+      FROM issues
+      WHERE sla_snapshot IS NOT NULL AND jsonb_array_length(sla_snapshot) > 0
+    `);
+    let impossibleStart = 0, impossibleDue = 0, falseResolvedDept = 0, staleResolvedAt = 0, falsePositiveBreach = 0, falseNegativeBreach = 0;
+    for (const row of rows) {
+      const createdMs = new Date(row.createdAt).getTime();
+      const deptLog = row.dept_sla_log || {};
+      const curDept = (row.current_department || '').trim().toLowerCase();
+      const curDeptKey = Object.keys(deptLog).find((k) => k.toLowerCase() === curDept);
+      for (const inst of row.sla_snapshot || []) {
+        if (inst.startedAt && new Date(inst.startedAt).getTime() < createdMs - 1000) impossibleStart++;
+        if (inst.startedAt && inst.dueTime && new Date(inst.dueTime).getTime() < new Date(inst.startedAt).getTime()) impossibleDue++;
+        const isCurrentDeptInstance = (inst.deptName || '').trim().toLowerCase() === curDept;
+        if (isCurrentDeptInstance && inst.isCompleted && curDeptKey && deptLog[curDeptKey]?.status === 'running') falseResolvedDept++;
+        if (typeof inst.actualElapsedMs === 'number' && typeof inst.goalDurationMs === 'number') {
+          if (inst.isBreached && !inst.waived && inst.actualElapsedMs < inst.goalDurationMs) falsePositiveBreach++;
+          if (!inst.isBreached && !inst.waived && inst.actualElapsedMs >= inst.goalDurationMs) falseNegativeBreach++;
+        }
+      }
+      if (row.resolvedAt && curDeptKey && deptLog[curDeptKey]?.paused_at) {
+        const gapMs = new Date(deptLog[curDeptKey].paused_at).getTime() - new Date(row.resolvedAt).getTime();
+        if (gapMs > 10 * 60 * 1000) staleResolvedAt++;
+      }
+    }
+    if (impossibleStart) slaHealthIssues.push(`${impossibleStart} ticket(s) with an impossible Start date (before their own creation)`);
+    if (impossibleDue) slaHealthIssues.push(`${impossibleDue} ticket(s) with Due before Start`);
+    if (falseResolvedDept) slaHealthIssues.push(`${falseResolvedDept} ticket(s) shown resolved while their current department's SLA clock is still running`);
+    if (staleResolvedAt) slaHealthIssues.push(`${staleResolvedAt} ticket(s) whose resolvedAt disagrees with their own dept_sla_log by more than 10 minutes`);
+    if (falsePositiveBreach) slaHealthIssues.push(`${falsePositiveBreach} ticket(s) flagged breached despite real elapsed time being under goal`);
+    if (falseNegativeBreach) slaHealthIssues.push(`${falseNegativeBreach} ticket(s) NOT flagged breached despite real elapsed time exceeding goal (and not waived)`);
+  } catch (e: any) {
+    slaHealthIssues.push(`SLA health check itself failed to run: ${e?.message || e}`);
+  }
+
+  const checkedAt = new Date().toISOString();
+  const allIssues = [...mbrFiltersIssues, ...slaHealthIssues];
+  if (allIssues.length) {
+    try {
+      const { emails } = await getAllAdminRecipients(null);
+      if (emails.length) {
+        const html = `<div style="font-family:Arial,sans-serif;max-width:600px;color:#172B4D">
+          <h2 style="color:#DC2626;margin:0 0 4px">Daily consistency check found ${allIssues.length} issue(s)</h2>
+          <p style="color:#888;font-size:12px;margin:0 0 16px">Checked ${checkedAt}</p>
+          <ul style="padding-left:20px">${allIssues.map((i) => `<li style="margin-bottom:8px;font-size:13px">${i}</li>`).join('')}</ul>
+        </div>`;
+        await sendNotification(emails, `⚠ Daily consistency check: ${allIssues.length} issue(s) found`, html, allIssues.join('\n'));
+      }
+    } catch (e: any) {
+      console.error('[DailyConsistencyCheck] alert email failed:', e?.message || e);
+    }
+  }
+
+  console.log(`[DailyConsistencyCheck] ${checkedAt} — ${allIssues.length} issue(s) found`);
+  return { mbrFiltersIssues, slaHealthIssues, checkedAt };
 }
 
 declare global {
@@ -5466,7 +5606,7 @@ async function _handleJiraPgApi(
   // to send -- they authenticate with this per-process secret instead (see
   // internal-job-secret.ts). Scoped to one specific path rather than a
   // blanket bypass, since anything landing here has no session to audit.
-  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach' || path === 'admin/backfill-root-cause-fix-description')
+  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach' || path === 'admin/backfill-root-cause-fix-description' || path === 'admin/daily-consistency-check')
     && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
 
   if (!userId && !isPublicPath && !isInternalJob) {
@@ -16638,6 +16778,21 @@ async function _handleJiraPgApi(
     } catch (e: any) {
       console.error('[backfill-root-cause-fix-description] failed:', e?.message || e);
       return json({ error: 'Backfill failed', details: e?.message }, 500);
+    }
+  }
+
+  // POST /admin/daily-consistency-check -- runs automatically once a day
+  // (see instrumentation.ts), also callable manually by an admin to check
+  // on demand. See runDailyConsistencyCheck's own comment for what it
+  // checks and why.
+  if (path === 'admin/daily-consistency-check' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      const result = await runDailyConsistencyCheck();
+      return json(result);
+    } catch (e: any) {
+      console.error('[daily-consistency-check] failed:', e?.message || e);
+      return json({ error: 'Check failed', details: e?.message }, 500);
     }
   }
 

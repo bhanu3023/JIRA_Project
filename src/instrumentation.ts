@@ -184,6 +184,34 @@ export async function register() {
     }
   }
 
+  // Guards against the two biggest classes of bug a single long debugging
+  // session kept finding: MBR-vs-Filters count mismatches, and whole-
+  // database SLA consistency (impossible dates, a department shown
+  // resolved while its own clock still runs, stale resolvedAt, breach-flag
+  // disagreement). By explicit request: this needs to keep working every
+  // day as new tickets come in, not just on the historical data it was
+  // originally verified against -- see runDailyConsistencyCheck's own
+  // comment in jira-pg-api.ts for exactly what it checks. Only emails
+  // admins when something is actually wrong; a clean day is silent.
+  async function runDailyConsistencyCheck(label: string): Promise<void> {
+    try {
+      const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
+      const res = await fetch(`${internalUrl}/api/admin/daily-consistency-check`, {
+        method: 'POST',
+        headers: { 'x-internal-job-secret': INTERNAL_JOB_SECRET },
+      });
+      const data = await res.json().catch(() => ({}));
+      const issueCount = (data.mbrFiltersIssues?.length || 0) + (data.slaHealthIssues?.length || 0);
+      if (issueCount > 0) {
+        console.error(`[DailyConsistencyCheck] ${label} — ${issueCount} issue(s) found (admins emailed):`, data.mbrFiltersIssues, data.slaHealthIssues);
+      } else {
+        console.log(`[DailyConsistencyCheck] ${label} — clean, no issues found.`);
+      }
+    } catch (err) {
+      console.error(`[DailyConsistencyCheck] ${label} — failed to run:`, err);
+    }
+  }
+
   // Fire-and-forget: schedule the boot-time run and both 5-minute intervals,
   // but do NOT await any of it here — see the note above for why.
   setTimeout(() => {
@@ -193,6 +221,10 @@ export async function register() {
     backfillUpdatedAt('Boot');
     backfillSlaBreach('Boot');
     backfillRootCauseFixDescription('Boot');
+    // Not run at Boot -- a freshly-deployed server's tables may still be
+    // mid-migration/backfill for a few seconds, and this isn't time-
+    // sensitive enough to risk a false alarm on day one. The periodic
+    // interval below covers it within 24 hours regardless.
 
     // Retry loop: every 5 minutes, restart any pollers that are down.
     // This handles OAuth token expiry, network blips, and tokens that
@@ -204,5 +236,9 @@ export async function register() {
     // runJiraIssueSync's default maxPerRun), which takes a while the first
     // time; every run after that is just whatever's new since the last tick.
     setInterval(() => { syncJiraIssues('Periodic'); }, 5 * 60 * 1000);
+
+    // Once a day -- see runDailyConsistencyCheck's own comment for why this
+    // doesn't need the 5-minute cadence the SLA breach monitor uses.
+    setInterval(() => { runDailyConsistencyCheck('Periodic'); }, 24 * 60 * 60 * 1000);
   }, 8000);
 }
