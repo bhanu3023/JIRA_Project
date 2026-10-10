@@ -1312,10 +1312,16 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
   // GET /issues, MBR's GET /reports/mbr-team) rather than re-implementing
   // their SQL here a second time -- guarantees this check can never drift
   // from what a user actually sees, the exact trap a hand-duplicated query
-  // would eventually fall into. Mirrors instrumentation.ts's own Jira-sync
-  // self-fetch pattern (internal job secret, no user session) -- safe here
-  // because, like that job, this only ever runs on a timer well after boot,
-  // never awaited during register() itself.
+  // would eventually fall into. Unlike the Jira sync's own self-fetch (which
+  // hits a single internal-job-aware endpoint), GET /issues and GET
+  // /reports/mbr-team are ordinary admin-session-scoped endpoints, never
+  // added to isInternalJob -- confirmed for real: the internal-job-secret
+  // header alone got a 401 here. Mints a real, short-lived session for the
+  // oldest admin account instead (same jwt.sign + user_sessions insert
+  // every real login already does via encodeToken, just awaited explicitly
+  // here rather than encodeToken's own fire-and-forget insert, since this
+  // token gets used again within the same call stack with no network round
+  // trip in between to let that insert land first).
   try {
     const to = new Date();
     const from = new Date(to.getTime() - 30 * 24 * 3600_000);
@@ -1324,8 +1330,20 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
     const dateTo = fmt(to);
     const internalPort = process.env.INTERNAL_PORT || process.env.PORT || '3000';
     const internalUrl = `http://localhost:${internalPort}/api`;
-    const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
-    const headers = { 'x-internal-job-secret': INTERNAL_JOB_SECRET };
+
+    const adminRow = await pool.query(`SELECT id FROM users WHERE role = 'admin' ORDER BY "createdAt" ASC LIMIT 1`);
+    const adminId = adminRow.rows[0]?.id;
+    if (!adminId) throw new Error('No admin account found to run this check as');
+    const jwtLib = require('jsonwebtoken');
+    const tokenPayload = { sub: adminId, ip: '', ua: 'daily-consistency-check', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 3600 };
+    const token = jwtLib.sign(tokenPayload, JWT_SECRET, { algorithm: 'HS256' });
+    const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
+    await pool.query(
+      `INSERT INTO user_sessions (token_hash, user_id, ip, user_agent, expires_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (token_hash) DO NOTHING`,
+      [tokenHash, adminId, '', 'daily-consistency-check', new Date(Date.now() + 3600 * 1000)]
+    );
+
+    const headers = { Authorization: `Bearer ${token}` };
     const get = async (p: string): Promise<any> => {
       const res = await fetch(`${internalUrl}${p}`, { headers, signal: AbortSignal.timeout(20000) });
       if (!res.ok) throw new Error(`${p} -> HTTP ${res.status}`);
