@@ -275,6 +275,9 @@ class ApiClient {
   getIssue(key: string) { return this.request<any>(`/issues/${key}`); }
   createIssue(data: any) { return this.request<any>('/issues', { method: 'POST', body: JSON.stringify(data) }); }
   updateIssue(key: string, data: any) { return this.request<any>(`/issues/${key}`, { method: 'PATCH', body: JSON.stringify(data) }); }
+  dismissAiSuggestion(key: string, field: 'rootCause' | 'fixDescription') {
+    return this.request<{ ok: boolean }>(`/issues/${key}/ai-suggestion`, { method: 'PATCH', body: JSON.stringify({ field }) });
+  }
   setSlaWaiver(key: string, policyId: string, waived: boolean, reason?: string) {
     return this.request<{ ok: boolean; waived: boolean }>(`/issues/${key}/sla-waiver`, {
       method: 'PATCH', body: JSON.stringify({ policyId, waived, reason }),

@@ -1166,6 +1166,19 @@ export default function IssueDetailPage() {
     });
   };
 
+  // Clears just the AI-drafted suggestion (never touches the real
+  // rootCause/fixDescription field) so a suggestion the agent doesn't want
+  // stops showing, without needing the LLM to draft a new one.
+  const dismissAiSuggestion = (field: 'rootCause' | 'fixDescription') => {
+    const aiKey = field === 'rootCause' ? 'aiSuggestedRootCause' : 'aiSuggestedFixDescription';
+    useStore.setState(s => ({
+      currentIssue: s.currentIssue ? { ...s.currentIssue, [aiKey]: null } as any : s.currentIssue,
+    }));
+    api.dismissAiSuggestion(issueKey, field).catch((e: any) => {
+      console.error('Dismiss AI suggestion failed', e);
+    });
+  };
+
   // Shared renderer for the board-specific custom fields below — this exact
   // view/edit/save structure was duplicated ~8 times (once per board), differing
   // only in which fields/options each board uses. Also adds a search box to
@@ -1310,6 +1323,36 @@ export default function IssueDetailPage() {
               : <span className="text-gray-400">None</span>}
           </button>
         )}
+        {/* AI-drafted suggestion -- only for Root Cause / Fix Description,
+            only when the real field is still empty, never auto-applied.
+            Accept reuses the exact same saveCustomField path a manual edit
+            already goes through, so it still logs to history and notifies
+            admins like any other edit -- this is purely a drafted starting
+            point, not a silent auto-fill. */}
+        {!displayVal && editingCustomField !== editKey && (key === 'rootCause' || key === 'fixDescription') && (() => {
+          const suggestion = key === 'rootCause'
+            ? (issue as any).aiSuggestedRootCause
+            : (issue as any).aiSuggestedFixDescription;
+          if (!suggestion) return null;
+          return (
+            <div className="mt-1.5 rounded-md border border-violet-200 bg-violet-50 px-2.5 py-2">
+              <p className="text-[10px] font-semibold text-violet-700 uppercase tracking-wide mb-1">✨ AI suggests</p>
+              <p className="text-[12px] text-gray-700 whitespace-pre-wrap break-words mb-1.5">{suggestion}</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => saveCustomField(key, suggestion)}
+                  className="text-[11px] bg-violet-600 text-white px-2 py-0.5 rounded hover:bg-violet-700">
+                  Accept
+                </button>
+                <button
+                  onClick={() => dismissAiSuggestion(key)}
+                  className="text-[11px] text-gray-500 px-2 py-0.5 rounded hover:bg-gray-100">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          );
+        })()}
       </PropRow>
     );
   };

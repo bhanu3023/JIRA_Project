@@ -606,6 +606,17 @@ pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS "resolvedAt" TIMESTAMPTZ
 // unremovable fact of the ticket's stored dates. Keyed by policy id since a
 // ticket can be tracked against more than one SLA policy at once.
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS sla_waivers JSONB DEFAULT '{}'::jsonb`).catch(() => {});
+// AI-drafted Root Cause / Fix Description suggestions (runAiSuggestionScan,
+// scheduled in instrumentation.ts) -- deliberately separate columns from the
+// real rootCause/fixDescription an agent fills in, never written into those
+// directly. Only ever copied over when an agent clicks Accept (via the
+// normal PATCH /issues/:key path, same as typing it in by hand, so it still
+// logs to history and notifies admins like any other edit). ai_suggested_at
+// doubles as "already attempted" so a ticket that genuinely has nothing
+// useful to suggest (LLM call returned null) isn't retried every scan.
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS ai_suggested_root_cause TEXT`).catch(() => {});
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS ai_suggested_fix_description TEXT`).catch(() => {});
+pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS ai_suggested_at TIMESTAMPTZ`).catch(() => {});
 pool.query(`ALTER TABLE sla_definitions ADD COLUMN IF NOT EXISTS dept_name TEXT`).catch(() => {});
 // Emoji reactions on a comment, Jira-style -- {"👍": ["userId1","userId2"], ...}.
 // A plain map keyed by emoji rather than a separate reactions table since a
@@ -1442,6 +1453,96 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
 
   console.log(`[DailyConsistencyCheck] ${checkedAt} — ${allIssues.length} issue(s) found`);
   return { mbrFiltersIssues, slaHealthIssues, checkedAt };
+}
+
+function stripRichTextToPlain(html: string): string {
+  return String(html || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Runs periodically (see instrumentation.ts), drafting a Root Cause and Fix
+// Description for recently-resolved tickets that have neither field filled
+// in -- the two fields MBR's own hygiene score already tracks (RCA/Fix
+// Description compliance), confirmed reading 0% in production because
+// agents don't fill them in manually. Writes ONLY to the separate
+// ai_suggested_* columns, never to the real rootCause/fixDescription an
+// agent fills in -- an agent has to explicitly click Accept (which goes
+// through the normal PATCH /issues/:key path, same as typing it by hand) for
+// a suggestion to ever become the ticket's real, visible value. Capped per
+// run and paced between calls, same shape as every other batched background
+// job in this file (Jira sync, SLA breach scan) -- this one paces slower
+// since an LLM call costs real money and takes longer than a DB query.
+async function runAiSuggestionScan(maxPerRun: number = 15): Promise<{ attempted: number; drafted: number }> {
+  let attempted = 0;
+  let drafted = 0;
+  try {
+    const { draftRootCauseAndFixDescription } = await import('@/lib/llm-service');
+
+    const { rows } = await pool.query(`
+      SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary, i.description,
+             i.current_department, i.priority
+      FROM issues i
+      LEFT JOIN statuses s ON s.id = i."statusId"
+      WHERE s.category = 'done'
+        AND (i."rootCause" IS NULL OR i."rootCause" = '')
+        AND (i."fixDescription" IS NULL OR i."fixDescription" = '')
+        AND i.ai_suggested_at IS NULL
+        AND i."resolvedAt" IS NOT NULL
+        AND i."resolvedAt" > NOW() - INTERVAL '7 days'
+      ORDER BY i."resolvedAt" DESC
+      LIMIT $1
+    `, [maxPerRun]);
+
+    for (const row of rows) {
+      attempted++;
+      try {
+        const commentRows = await pool.query(
+          `SELECT body FROM comments WHERE "issueId" = $1 ORDER BY "createdAt" ASC LIMIT 10`,
+          [row.id]
+        );
+        const comments = commentRows.rows.map((c: any) => stripRichTextToPlain(c.body)).filter(Boolean);
+
+        const draft = await draftRootCauseAndFixDescription({
+          key: row.key,
+          summary: row.summary || '',
+          description: row.description ? stripRichTextToPlain(row.description) : null,
+          department: row.current_department,
+          priority: row.priority,
+          comments,
+        });
+
+        if (draft) {
+          await pool.query(
+            `UPDATE issues SET ai_suggested_root_cause = $1, ai_suggested_fix_description = $2, ai_suggested_at = NOW() WHERE id = $3`,
+            [draft.rootCause, draft.fixDescription, row.id]
+          );
+          drafted++;
+        } else {
+          // Still mark as attempted -- ai_suggested_at IS NULL is what the
+          // query above uses to pick up new candidates, so a ticket the LLM
+          // genuinely had nothing useful to say about must still be marked
+          // "tried" or it would be re-sent to the API every single run.
+          await pool.query(`UPDATE issues SET ai_suggested_at = NOW() WHERE id = $1`, [row.id]);
+        }
+      } catch (e: any) {
+        console.error(`[AiSuggestionScan] ${row.key} failed:`, e?.message || e);
+      }
+      // Gentle pacing -- an LLM call is slow and costs real money per
+      // request, unlike the lightweight DB-only jobs elsewhere in this file.
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  } catch (e: any) {
+    console.error('[AiSuggestionScan] failed:', e?.message || e);
+  }
+  return { attempted, drafted };
 }
 
 declare global {
@@ -3849,6 +3950,8 @@ function formatIssue(issue: any) {
     combination: issue.combination ?? null,
     rootCause: issue.rootCause ?? null,
     fixDescription: issue.fixDescription ?? null,
+    aiSuggestedRootCause: issue.ai_suggested_root_cause ?? null,
+    aiSuggestedFixDescription: issue.ai_suggested_fix_description ?? null,
     manageClientName: issue.manageClientName ?? null,
     customerPlan: issue.customerPlan ?? null,
     testEnvironment: issue.testEnvironment ?? null,
@@ -5624,7 +5727,7 @@ async function _handleJiraPgApi(
   // to send -- they authenticate with this per-process secret instead (see
   // internal-job-secret.ts). Scoped to one specific path rather than a
   // blanket bypass, since anything landing here has no session to audit.
-  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach' || path === 'admin/backfill-root-cause-fix-description' || path === 'admin/daily-consistency-check')
+  const isInternalJob = (path === 'jira-issue-sync' || path === 'admin/backfill-client-names' || path === 'admin/backfill-updated-at' || path === 'admin/backfill-sla-breach' || path === 'admin/backfill-root-cause-fix-description' || path === 'admin/daily-consistency-check' || path === 'admin/ai-suggestion-scan')
     && req.headers.get('x-internal-job-secret') === INTERNAL_JOB_SECRET;
 
   if (!userId && !isPublicPath && !isInternalJob) {
@@ -10346,6 +10449,28 @@ async function _handleJiraPgApi(
   // waived -- e.g. it was resolved late for a reason outside anyone's
   // control -- so the ticket stops reading as breached, without altering
   // its actual recorded dates/history (see computeSLAInstancesPure).
+  // PATCH issues/:key/ai-suggestion {field} -- dismisses an AI-drafted Root
+  // Cause/Fix Description suggestion (clears ONLY the ai_suggested_* column,
+  // never the real field an agent fills in) so it stops showing without
+  // needing the LLM to draft a new one. Same access rule as editing the
+  // real field itself (any agent who can see the ticket), not admin-only.
+  const aiSuggestionMatch = path.match(/^issues\/([^/]+)\/ai-suggestion$/);
+  if (aiSuggestionMatch && method === 'PATCH') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const key = await resolveCfKey(aiSuggestionMatch[1].toUpperCase());
+    const body = await readJson(req);
+    const field = body.field === 'fixDescription' ? 'fixDescription' : body.field === 'rootCause' ? 'rootCause' : null;
+    if (!field) return json({ error: "field must be 'rootCause' or 'fixDescription'" }, 400);
+
+    const issueRow = await db.issue.findUnique({ where: { key }, include: { space: true } });
+    if (!issueRow) return json({ error: 'Not found' }, 404);
+    if (!(await canAccessIssue(issueRow, userId, isAdmin))) return json({ error: 'Not found' }, 404);
+
+    const column = field === 'rootCause' ? 'ai_suggested_root_cause' : 'ai_suggested_fix_description';
+    await pool.query(`UPDATE issues SET ${column} = NULL WHERE key = $1`, [key]);
+    return json({ ok: true });
+  }
+
   const slaWaiverMatch = path.match(/^issues\/([^/]+)\/sla-waiver$/);
   if (slaWaiverMatch && method === 'PATCH') {
     if (!isAdmin) return json({ error: 'Admin only' }, 403);
@@ -10612,7 +10737,7 @@ async function _handleJiraPgApi(
       // gap for a ticket with genuinely empty dept_sla_log (nothing else
       // for that fallback to catch it with).
       pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts, original_dept, jira_sla_breached, jira_sla_due_at, jira_sla_start_at FROM issues WHERE key = $1 LIMIT 1`,
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts, original_dept, jira_sla_breached, jira_sla_due_at, jira_sla_start_at, ai_suggested_root_cause, ai_suggested_fix_description FROM issues WHERE key = $1 LIMIT 1`,
         [key]
       ).catch(() => ({ rows: [] as any[] })),
       // Partner-ticket comment merge lookup -- also only needs `key`.
@@ -16811,6 +16936,20 @@ async function _handleJiraPgApi(
     } catch (e: any) {
       console.error('[daily-consistency-check] failed:', e?.message || e);
       return json({ error: 'Check failed', details: e?.message }, 500);
+    }
+  }
+
+  // POST /admin/ai-suggestion-scan -- runs automatically every 30 minutes
+  // (see instrumentation.ts), also callable manually by an admin/internal
+  // job. See runAiSuggestionScan's own comment for what it does.
+  if (path === 'admin/ai-suggestion-scan' && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    try {
+      const result = await runAiSuggestionScan();
+      return json(result);
+    } catch (e: any) {
+      console.error('[ai-suggestion-scan] failed:', e?.message || e);
+      return json({ error: 'Scan failed', details: e?.message }, 500);
     }
   }
 

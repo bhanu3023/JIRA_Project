@@ -212,6 +212,26 @@ export async function register() {
     }
   }
 
+  // Automatic agent: drafts Root Cause / Fix Description for recently-
+  // resolved tickets missing both, from their own comments/description,
+  // via an LLM (see runAiSuggestionScan in jira-pg-api.ts and
+  // llm-service.ts). A no-op (logs and returns) wherever ANTHROPIC_API_KEY
+  // isn't configured -- the feature just stays off until someone adds one,
+  // no code change needed either way.
+  async function runAiSuggestionScan(label: string): Promise<void> {
+    try {
+      const { INTERNAL_JOB_SECRET } = await import('@/lib/internal-job-secret');
+      const res = await fetch(`${internalUrl}/api/admin/ai-suggestion-scan`, {
+        method: 'POST',
+        headers: { 'x-internal-job-secret': INTERNAL_JOB_SECRET },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.drafted > 0) console.log(`[AiSuggestionScan] ${label} — attempted ${data.attempted}, drafted ${data.drafted} suggestion(s).`);
+    } catch (err) {
+      console.error(`[AiSuggestionScan] ${label} — failed:`, err);
+    }
+  }
+
   // Fire-and-forget: schedule the boot-time run and both 5-minute intervals,
   // but do NOT await any of it here — see the note above for why.
   setTimeout(() => {
@@ -240,5 +260,11 @@ export async function register() {
     // Once a day -- see runDailyConsistencyCheck's own comment for why this
     // doesn't need the 5-minute cadence the SLA breach monitor uses.
     setInterval(() => { runDailyConsistencyCheck('Periodic'); }, 24 * 60 * 60 * 1000);
+
+    // Every 30 minutes -- frequent enough that a freshly-resolved ticket
+    // gets a draft suggestion within half an hour, slow enough not to
+    // hammer the LLM API on a tight loop. Each run is already capped
+    // (maxPerRun=15, see runAiSuggestionScan) and paced between calls.
+    setInterval(() => { runAiSuggestionScan('Periodic'); }, 30 * 60 * 1000);
   }, 8000);
 }
