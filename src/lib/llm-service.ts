@@ -1,18 +1,27 @@
 /**
  * llm-service.ts
  *
- * Thin wrapper around the Anthropic Messages API, used by the automatic
- * Root Cause / Fix Description drafting agent (runAiSuggestionScan in
- * jira-pg-api.ts, scheduled in instrumentation.ts). Deliberately narrow --
- * one function, one purpose -- rather than a general-purpose LLM client,
- * since that's the only thing this app currently needs an LLM for.
+ * Thin wrapper around an LLM API, used by the automatic Root Cause / Fix
+ * Description drafting agent (runAiSuggestionScan in jira-pg-api.ts,
+ * scheduled in instrumentation.ts). Deliberately narrow -- one function,
+ * one purpose -- rather than a general-purpose LLM client, since that's
+ * the only thing this app currently needs an LLM for.
  *
- * Requires ANTHROPIC_API_KEY in the environment. If it's missing, every
- * call here returns null (never throws) and the caller logs that this ran
- * with no key configured -- the feature just stays off until someone adds
- * one, the same graceful-degradation shape as the email sender when no
- * SMTP/OAuth account is configured.
+ * Supports either provider, tried in this order:
+ *   1. OPENAI_API_KEY      -- OpenAI's Chat Completions API (gpt-4o-mini by
+ *      default -- cost-effective, appropriate for a short drafting task on
+ *      a limited credit budget; override with OPENAI_MODEL).
+ *   2. ANTHROPIC_API_KEY    -- Anthropic's Messages API, if that's what's
+ *      configured instead (override the model with ANTHROPIC_MODEL).
+ * If NEITHER is set, every call here returns null (never throws) and logs
+ * that this ran with no key configured -- the feature just stays off until
+ * someone adds one, the same graceful-degradation shape as the email
+ * sender when no SMTP/OAuth account is configured.
  */
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5';
@@ -39,25 +48,12 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-/**
- * Drafts a Root Cause and Fix Description from a resolved ticket's own
- * content -- never invents anything beyond what's in the summary,
- * description, and comments. Returns null if there's too little content to
- * draft anything meaningful from (e.g. zero comments and a one-line
- * description), or if the API call fails for any reason -- a missing
- * suggestion is always the safe failure mode here, never a fabricated one.
- */
-export async function draftRootCauseAndFixDescription(ctx: TicketDraftContext): Promise<TicketDraft | null> {
-  if (!ANTHROPIC_API_KEY) {
-    console.warn('[LLM] ANTHROPIC_API_KEY not configured -- skipping AI suggestion for', ctx.key);
-    return null;
-  }
-
+function buildPrompt(ctx: TicketDraftContext): string {
   const commentsBlock = ctx.comments.length
     ? ctx.comments.map((c, i) => `[Comment ${i + 1}] ${truncate(c, 1500)}`).join('\n\n')
     : '(no comments)';
 
-  const prompt = `You are drafting a Root Cause and Fix Description for a resolved support ticket, to be reviewed and approved by the agent who worked it before it's saved -- not published automatically. Base your answer ONLY on the information below; never invent technical details, error codes, or steps that aren't actually present in it.
+  return `You are drafting a Root Cause and Fix Description for a resolved support ticket, to be reviewed and approved by the agent who worked it before it's saved -- not published automatically. Base your answer ONLY on the information below; never invent technical details, error codes, or steps that aren't actually present in it.
 
 Ticket: ${ctx.key}
 Department: ${ctx.department || 'unknown'}
@@ -72,36 +68,83 @@ If the comments and description genuinely don't contain enough information to de
 
 Otherwise respond with ONLY a JSON object, no other text, in this exact shape:
 {"rootCause": "one or two sentences describing what actually caused the issue", "fixDescription": "one or two sentences describing what was actually done to resolve it"}`;
+}
 
+function parseDraftResponse(text: string): TicketDraft | null {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed === 'INSUFFICIENT_INFO') return null;
+  const jsonText = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
   try {
-    const res = await fetch(ANTHROPIC_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: ANTHROPIC_MODEL,
-        max_tokens: 500,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      signal: AbortSignal.timeout(30000),
-    });
-    if (!res.ok) {
-      console.error(`[LLM] Anthropic API ${res.status} for ${ctx.key}:`, await res.text().catch(() => ''));
-      return null;
-    }
-    const data: any = await res.json();
-    const text: string = data?.content?.[0]?.text?.trim() || '';
-    if (!text || text === 'INSUFFICIENT_INFO') return null;
-
-    // The model is instructed to return bare JSON, but strip a code fence
-    // defensively in case it wraps the answer in one anyway.
-    const jsonText = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     const parsed = JSON.parse(jsonText);
     if (!parsed?.rootCause || !parsed?.fixDescription) return null;
     return { rootCause: String(parsed.rootCause).trim(), fixDescription: String(parsed.fixDescription).trim() };
+  } catch {
+    return null;
+  }
+}
+
+async function draftViaOpenAI(ctx: TicketDraftContext): Promise<TicketDraft | null> {
+  const res = await fetch(OPENAI_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      max_tokens: 500,
+      messages: [{ role: 'user', content: buildPrompt(ctx) }],
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!res.ok) {
+    console.error(`[LLM] OpenAI API ${res.status} for ${ctx.key}:`, await res.text().catch(() => ''));
+    return null;
+  }
+  const data: any = await res.json();
+  const text: string = data?.choices?.[0]?.message?.content || '';
+  return parseDraftResponse(text);
+}
+
+async function draftViaAnthropic(ctx: TicketDraftContext): Promise<TicketDraft | null> {
+  const res = await fetch(ANTHROPIC_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY!,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 500,
+      messages: [{ role: 'user', content: buildPrompt(ctx) }],
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!res.ok) {
+    console.error(`[LLM] Anthropic API ${res.status} for ${ctx.key}:`, await res.text().catch(() => ''));
+    return null;
+  }
+  const data: any = await res.json();
+  const text: string = data?.content?.[0]?.text || '';
+  return parseDraftResponse(text);
+}
+
+/**
+ * Drafts a Root Cause and Fix Description from a resolved ticket's own
+ * content -- never invents anything beyond what's in the summary,
+ * description, and comments. Returns null if there's too little content to
+ * draft anything meaningful from (e.g. zero comments and a one-line
+ * description), if neither provider is configured, or if the API call
+ * fails for any reason -- a missing suggestion is always the safe failure
+ * mode here, never a fabricated one.
+ */
+export async function draftRootCauseAndFixDescription(ctx: TicketDraftContext): Promise<TicketDraft | null> {
+  try {
+    if (OPENAI_API_KEY) return await draftViaOpenAI(ctx);
+    if (ANTHROPIC_API_KEY) return await draftViaAnthropic(ctx);
+    console.warn('[LLM] No OPENAI_API_KEY or ANTHROPIC_API_KEY configured -- skipping AI suggestion for', ctx.key);
+    return null;
   } catch (e: any) {
     console.error(`[LLM] Draft failed for ${ctx.key}:`, e?.message || e);
     return null;
