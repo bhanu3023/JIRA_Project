@@ -70,8 +70,20 @@ services:
     ports:
       - "127.0.0.1:9093:9093"
 
+  # --- Local LLM for the Root Cause / Fix Description drafting agent ---
+  # No API key, no external account -- the app container reaches it over
+  # the shared compose network as http://ollama:11434. Not exposed outside
+  # this server (no published port), matching the other internal services.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+
 volumes:
   jira_postgres_data:
   jira_app_uploads:
   jira_app_uploads_tmp:
   prometheus_data:
+  ollama_data:
