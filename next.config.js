@@ -48,7 +48,9 @@ const nextConfig = {
           // worker-src are spelled out because without them both fall back to default-src 'self',
           // which blocks Hotjar's consent iframe and its blob: worker. frame-ancestors stays
           // 'none' -- it governs who may embed THIS app, which Hotjar does not need.
-          { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://static.hotjar.com https://script.hotjar.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https://script.hotjar.com; connect-src 'self' https: https://*.hotjar.com https://*.hotjar.io wss://*.hotjar.com; frame-src 'self' https://vars.hotjar.com; worker-src 'self' blob:; frame-ancestors 'none';" },
+          // frame-src also needs blob: because KbFileViewer previews KB PDFs by
+          // iframing a URL.createObjectURL() blob; without it the PDF is blocked.
+          { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://static.hotjar.com https://script.hotjar.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https://script.hotjar.com; connect-src 'self' https: https://*.hotjar.com https://*.hotjar.io wss://*.hotjar.com; frame-src 'self' blob: https://vars.hotjar.com; worker-src 'self' blob:; frame-ancestors 'none';" },
         ],
       },
       {
