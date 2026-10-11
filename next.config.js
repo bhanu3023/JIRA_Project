@@ -48,8 +48,13 @@ const nextConfig = {
           // worker-src are spelled out because without them both fall back to default-src 'self',
           // which blocks Hotjar's consent iframe and its blob: worker. frame-ancestors stays
           // 'none' -- it governs who may embed THIS app, which Hotjar does not need.
-          // frame-src also needs blob: because KbFileViewer previews KB PDFs by
-          // iframing a URL.createObjectURL() blob; without it the PDF is blocked.
+          // frame-src needs blob: too (separate from the worker-src blob: above): the KB
+          // article viewer and ticket-attachment viewer open a PDF in an <iframe src="blob:...">
+          // built from the fetched file's bytes (KbFileViewer.tsx's BlobFrame) -- without
+          // blob: listed here, CSP's frame-src treats that blob: URL as a distinct scheme
+          // that 'self' does NOT cover (even though the blob was created by this same page),
+          // and Edge blocks it with "This content is blocked. Contact the site owner to fix
+          // the issue." -- confirmed live on a KB article's PDF preview.
           { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://static.hotjar.com https://script.hotjar.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https://script.hotjar.com; connect-src 'self' https: https://*.hotjar.com https://*.hotjar.io wss://*.hotjar.com; frame-src 'self' blob: https://vars.hotjar.com; worker-src 'self' blob:; frame-ancestors 'none';" },
         ],
       },
