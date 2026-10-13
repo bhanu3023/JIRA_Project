@@ -4772,9 +4772,20 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
   const currentDeptLower = ((issue as any).current_department || '').trim().toLowerCase();
   const viewDeptLower = (viewDept || '').trim().toLowerCase();
   const isHistoricalView = !!viewDeptLower && viewDeptLower !== currentDeptLower;
+  // For a RESOLVED ticket's plain view (no ?viewDept= perspective), there's no
+  // "someone else's still-running SLA" to avoid confusing a viewer with --
+  // the whole multi-department journey is finished, static history. Show
+  // every department's own frozen card (its own goal, its own elapsed time)
+  // instead of just the one it happened to finish in, so a ticket that
+  // passed through QA -> Dev -> Infra -> Migration shows all four, each
+  // measured against that department's own SLA queue settings. An
+  // in-progress ticket keeps the single-perspective filter below (its
+  // current department's live SLA is the only one actually still ticking).
+  const isResolved = issue.status?.category === 'done';
   const finalEntries = dedupedEntries.filter(s => {
     const sDeptLower = (s.deptName || '').trim().toLowerCase();
     if (!sDeptLower) return true; // space-wide SLA — always relevant regardless of perspective
+    if (isResolved && !isHistoricalView) return true;
     return isHistoricalView ? sDeptLower === viewDeptLower : sDeptLower === currentDeptLower;
   });
 
