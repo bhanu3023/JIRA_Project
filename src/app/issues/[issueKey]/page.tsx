@@ -1871,7 +1871,19 @@ export default function IssueDetailPage() {
   // list's links) says which queue's perspective the viewer opened this from;
   // if that differs from the ticket's current department and a snapshot for it
   // exists, show THAT queue's own frozen status here too instead of the live one.
-  const viewDeptParam = searchParams?.get('viewDept') || '';
+  //
+  // Admins always get the live ticket, never a queue's frozen snapshot --
+  // this used to apply to admins too (an explicit earlier decision, so an
+  // admin editing from a historical view could tell it wasn't live), but
+  // that confused admins who opened a ticket plainly and still landed on a
+  // stale "Showing QA's own assignee" banner for a ticket that had since
+  // moved to Dev (e.g. CF-34103, reached via a Filters/search link carrying
+  // ?viewDept= from whatever queue was selected there, not from the admin
+  // deliberately choosing to view QA's perspective). Zeroing viewDeptParam
+  // here for admins neutralizes it everywhere downstream -- this banner,
+  // the status/assignee snapshot substitution, and the SLA panel's own
+  // viewDept prop (passed this same value) all fall back to the live state.
+  const viewDeptParam = user?.role === 'admin' ? '' : (searchParams?.get('viewDept') || '');
   const currentDeptForView = ((issue as any)?.current_department || '').trim();
   const isHistoricalDeptViewBase = !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
   // Status stays disabled per the original explicit request: always show the
