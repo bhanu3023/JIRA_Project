@@ -12507,8 +12507,21 @@ async function _handleJiraPgApi(
       // request is ALSO reassigning the ticket to someone other than the
       // person making the change -- that's routing, not working it.
       const reassigningToSomeoneElse = data.assigneeId !== undefined && data.assigneeId !== userId;
+      // When this same request also ran a department handoff (deptHandoffDone,
+      // set above), `updated.current_department` was re-read AFTER
+      // performDeptHandoff's own UPDATE already flipped it to the TARGET
+      // department -- crediting the acting user with the department they
+      // handed the ticket TO, not the one they were actually working in.
+      // performDeptHandoff already writes its own correctly-departmented
+      // 'passed' credit (using oldDept, captured before the handoff) for
+      // this exact case, so skip this generic credit entirely rather than
+      // double-crediting with the wrong dept. Confirmed for real on
+      // CF-33996: Bhuvana's own QA -> Dev handoff produced a
+      // (Bhuvana, 'Dev', 'worked') row here, surfacing as a newer, wrong
+      // "Worked On" entry that outranked her correct QA one and sent her
+      // dashboard link to a stale Dev-department snapshot of the ticket.
       const workedDept: string | null = (updated as any).current_department || null;
-      if (userId && workedDept && statusChangedNow && !reassigningToSomeoneElse) {
+      if (userId && workedDept && statusChangedNow && !reassigningToSomeoneElse && !deptHandoffDone) {
         await pool.query(
           `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
            ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET worked_at=NOW()`,
