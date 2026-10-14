@@ -1200,8 +1200,17 @@ export default function IssueDetailPage() {
     const filteredOptions = customFieldSearch.trim()
       ? allOptions.filter(o => o.toLowerCase().includes(customFieldSearch.trim().toLowerCase()))
       : allOptions;
+    // Same condition getMissingCoreFields() already enforces before letting
+    // the ticket resolve -- Root Cause/Fix Description are only mandatory
+    // while the ticket is in Dev's own queue (a Migration ticket that's
+    // never touched Dev has no bug to explain). Shows the red asterisk
+    // up front instead of only surfacing "this is required" as a blocking
+    // popup at the moment someone tries to resolve it.
+    const isRequiredNow = (key === 'rootCause' || key === 'fixDescription')
+      && ((issue as any)?.current_department || '').trim().toLowerCase() === 'dev'
+      && !isMandatoryFieldsExemptDept();
     return (
-      <PropRow key={key} label={label}>
+      <PropRow key={key} label={label} required={isRequiredNow}>
         {editingCustomField === editKey ? (
           <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
             {type === 'textarea' ? (
@@ -5449,11 +5458,14 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
 
 /* ===== Sub-components ===== */
 
-function PropRow({ label, children, pinned, onPin }: { label: string; children: React.ReactNode; pinned?: boolean; onPin?: () => void }) {
+function PropRow({ label, children, pinned, onPin, required }: { label: string; children: React.ReactNode; pinned?: boolean; onPin?: () => void; required?: boolean }) {
   return (
     <div className={`grid grid-cols-[100px_1fr] items-center min-h-[32px] py-1 border-b border-gray-100 last:border-0 group relative ${pinned ? 'bg-blue-50/40' : ''}`}>
       <div className="flex items-center gap-1 self-start pt-[7px]">
-        <span className="text-[12px] font-medium text-[#6B778C] leading-none">{label}</span>
+        <span className="text-[12px] font-medium text-[#6B778C] leading-none">
+          {label}
+          {required && <span className="text-red-500 ml-0.5" title="Required to resolve this ticket">*</span>}
+        </span>
         {onPin && (
           <button
             onClick={onPin}
