@@ -2557,6 +2557,56 @@ async function getStatusHistoryRows(issueId: string): Promise<Array<{ authorName
   } catch { return []; }
 }
 
+// Sums how much of [windowStartMs, windowEndMs) the ticket's GLOBAL status
+// (issue_history field='status', newValue is the literal status name e.g.
+// "In Progress"/"Routed to QA"/"Open") was "In Progress" -- a single pass
+// over the already-chronological status rows, carrying the status forward
+// across each gap the same way the ticket's real status stayed put between
+// recorded changes.
+function computeInProgressMsInWindow(
+  statusHistory: Array<{ newValue: string | null; createdAt: any }>, windowStartMs: number, windowEndMs: number
+): number {
+  if (!(windowEndMs > windowStartMs)) return 0;
+  let total = 0;
+  let currentStatus: string | null = null;
+  let cursor = windowStartMs;
+  for (const row of statusHistory) {
+    const t = new Date(row.createdAt).getTime();
+    if (t <= windowStartMs) { currentStatus = row.newValue; continue; }
+    if (t >= windowEndMs) break;
+    if ((currentStatus || '').trim().toLowerCase() === 'in progress') total += t - cursor;
+    cursor = t;
+    currentStatus = row.newValue;
+  }
+  if ((currentStatus || '').trim().toLowerCase() === 'in progress') total += windowEndMs - cursor;
+  return total;
+}
+
+// Adds inProgressElapsedMs to every SLA instance (current AND historical/
+// paused alike) -- a genuinely different number from actualElapsedMs: that
+// one is how long the DEPARTMENT held the ticket (its SLA clock running),
+// this one is how long the ticket's status was literally "In Progress"
+// within that same window -- time the department held it but the status
+// sat on something else (e.g. waiting on the customer) doesn't count as
+// someone actively working it. Approximates each instance's window as one
+// continuous [startedAt, startedAt + actualElapsedMs) span rather than
+// reconstructing every separate visit to that department -- matches how
+// actualElapsedMs/elapsed_ms is already just a single accumulated number,
+// not a list of spans, and keeps this a light, single-query enrichment
+// instead of a full department-visit reconstruction (like the breach-
+// moment one elsewhere in this file).
+async function enrichSlaWithInProgressTime(issueId: string, slaInstances: any[]): Promise<any[]> {
+  if (!slaInstances.length) return slaInstances;
+  const statusHistory = await getStatusHistoryRows(issueId);
+  if (!statusHistory.length) return slaInstances;
+  return slaInstances.map((s: any) => {
+    const startMs = s.startedAt ? new Date(s.startedAt).getTime() : null;
+    const elapsedMs = typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : null;
+    if (startMs === null || elapsedMs === null) return s;
+    return { ...s, inProgressElapsedMs: computeInProgressMsInWindow(statusHistory, startMs, startMs + elapsedMs) };
+  });
+}
+
 // Attaches resolvedByName + a full per-event `history` to every completed SLA
 // entry, so the frontend can show who resolved it and, when it was resolved
 // more than once, every attempt with its own date and on-time/late verdict --
@@ -3111,6 +3161,11 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
           resolvedAt: null,
           startedAt: histStartedAt,
           goalDurationMs: histDurationMs,
+          // Same reasoning as currentDeptInstances' own actualElapsedMs --
+          // how much real time THIS department actually held the ticket,
+          // for the frontend's "Dev took 2h" breakdown. See that field's
+          // own long comment above for the CF-33040 case this was built for.
+          actualElapsedMs: histElapsed,
           isNotified: false,
           waived: false,
           waivedByName: null,
@@ -10944,8 +10999,11 @@ async function _handleJiraPgApi(
     _mark('partner-comments-merge');
 
     const mergedIssue = { ...issue, comments: allComments, _links: allLinks, ...rawDeptData };
-    const slaInstances = await enrichSlaWithResolver(
-      mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
+    const slaInstances = await enrichSlaWithInProgressTime(
+      mergedIssue.id,
+      await enrichSlaWithResolver(
+        mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
+      )
     );
     _mark('sla-enrichment');
     // Origin department -- the department this ticket actually started in,
@@ -12530,8 +12588,11 @@ async function _handleJiraPgApi(
       }
     } catch { /* non-critical */ }
 
-    const slaInstances = await enrichSlaWithResolver(
-      updated.id, await computeIssueSLAsFromDb(updated), updated.spaceId, (updated as any).current_department
+    const slaInstances = await enrichSlaWithInProgressTime(
+      updated.id,
+      await enrichSlaWithResolver(
+        updated.id, await computeIssueSLAsFromDb(updated), updated.spaceId, (updated as any).current_department
+      )
     );
 
     // Fire connector events (fire-and-forget)

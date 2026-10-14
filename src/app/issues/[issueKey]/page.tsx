@@ -4981,6 +4981,28 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                     </p>
                   )}
 
+                  {/* Same real-elapsed-time number as "Resolved in Xh Ym" above,
+                      for a department the ticket has since moved on from --
+                      previously this card just said "SLA paused" with no figure
+                      at all, which is exactly the "Dev took 2h, Migration took
+                      1h" breakdown that was missing. */}
+                  {isPaused && !isCompleted && typeof s.actualElapsedMs === 'number' && (
+                    <p className="text-[10.5px] mt-1.5 text-amber-700">
+                      Spent <span className="font-semibold">{fmtDuration(s.actualElapsedMs)}</span> here before moving on
+                    </p>
+                  )}
+
+                  {/* How much of that time the status was actually "In Progress"
+                      -- a department can hold a ticket without anyone actively
+                      working it (e.g. waiting on the customer), so this is
+                      deliberately a smaller, separate number from the elapsed
+                      time above rather than replacing it. */}
+                  {typeof s.inProgressElapsedMs === 'number' && (isCompleted || (isPaused && typeof s.actualElapsedMs === 'number')) && (
+                    <p className="text-[10px] mt-1 text-gray-400">
+                      Actively worked (In Progress): <span className="font-semibold text-gray-600">{fmtDuration(s.inProgressElapsedMs)}</span>
+                    </p>
+                  )}
+
                   {/* Who actually resolved it -- otherwise the only name visible
                       anywhere near a breach badge is the CURRENT Assignee, which
                       silently pins a late resolution on whoever holds the ticket
