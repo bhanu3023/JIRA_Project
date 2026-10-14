@@ -13,16 +13,23 @@ async function main() {
   const { data, deleted_by_name, deleted_at } = rows[0];
   console.log('Deleted by:', deleted_by_name, 'at', deleted_at);
   console.log('\nFull stored snapshot keys:', Object.keys(data));
-  console.log('\nreporterId:', data.reporterId);
-  console.log('reporter:', data.reporter);
-  console.log('createdAt:', data.createdAt);
-  console.log('assigneeId:', data.assigneeId);
-  console.log('assignee:', data.assignee);
+  const issue = data.issue || {};
+  console.log('\nissue keys:', Object.keys(issue));
+  console.log('reporterId:', issue.reporterId);
+  console.log('reporter:', issue.reporter);
+  console.log('createdAt:', issue.createdAt);
+  console.log('assigneeId:', issue.assigneeId);
+  console.log('assignee:', issue.assignee);
 
-  // Resolve reporterId to a real name/email if it's just an id
-  if (data.reporterId) {
-    const { rows: u } = await pool.query(`SELECT "firstName", "lastName", email FROM users WHERE id = $1`, [data.reporterId]);
+  const reporterId = issue.reporterId || issue.reporter?.id;
+  if (reporterId) {
+    const { rows: u } = await pool.query(`SELECT "firstName", "lastName", email FROM users WHERE id = $1`, [reporterId]);
     console.log('\nResolved reporter from users table:', u[0]);
+  }
+
+  if (Array.isArray(data.history) && data.history.length) {
+    console.log('\nFirst few history entries:');
+    for (const h of data.history.slice(0, 5)) console.log(' ', h);
   }
 
   await pool.end();
