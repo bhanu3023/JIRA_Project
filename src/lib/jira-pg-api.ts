@@ -6768,6 +6768,17 @@ async function _handleJiraPgApi(
     // together with a dept filter, since that table's dept column is what
     // scopes it; only applied in the dept-scoped branch below.
     const workedRange   = url.searchParams.get('workedRange');
+    // Opt-in: workedRange's own match (workedDeptMatchSql below) is
+    // deliberately scoped to only count FINISHED work (ticket currently, or
+    // historically per dept_statuses, marked done) -- an earlier explicit
+    // decision, used broadly enough elsewhere that it stays the default.
+    // This flag relaxes that for a caller that specifically wants "every
+    // ticket this person touched in this dept/range, open or closed" --
+    // e.g. matching MBR's "Total tickets" column, which (unlike this
+    // endpoint's default Worked behavior) already includes still-open
+    // tickets a person currently holds. Never applied unless explicitly
+    // requested, so every existing default-Worked caller is unaffected.
+    const workedIncludeOpen = url.searchParams.get('workedIncludeOpen') === 'true';
     // Due Date and Resolved date -- the Filters page's UI/URL round-trip for
     // both already existed (dueDateRange has shipped in the "More filters"
     // bar for a while), but neither param was ever actually read here, so
@@ -8367,14 +8378,14 @@ async function _handleJiraPgApi(
       // views (All Tickets, Assigned to me, etc., which never send
       // createdRange) on the original current-department behavior.
       const workedDeptMatchSql = workedRange
-        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${workedRangeSql})
+        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${workedRangeSql})${workedIncludeOpen ? '' : `
            AND (
              (LOWER(i.current_department) = LOWER($2) AND s.category = 'done')
              OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
                SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
                WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
              ))
-           )`
+           )`}`
         : null;
       // Scoped to queueMembersOnlyParam, not just createdRange being present --
       // the department queue board pages (All Tickets, Assigned to me, etc.)

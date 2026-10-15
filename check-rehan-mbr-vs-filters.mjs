@@ -76,7 +76,7 @@ async function main() {
       const dept = TEAM_DEPT[team];
       const filtersQs = new URLSearchParams({
         spaceKey: 'TESTIN', dept, queueMembersOnly: 'true',
-        assignees: rehan.id, workedRange: `between:${fromStr}:${toStr}`, limit: '1',
+        assignees: rehan.id, workedRange: `between:${fromStr}:${toStr}`, workedIncludeOpen: 'true', limit: '1',
       });
       const fRes = await fetch(`${BASE}/issues?${filtersQs}`, { headers: auth });
       if (fRes.ok) {
