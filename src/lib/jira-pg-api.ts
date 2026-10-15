@@ -14759,8 +14759,34 @@ async function _handleJiraPgApi(
     // deptMatchSql's own comment above for why (matches Filters' already-
     // made decision); otherwise a person drill-down total could disagree
     // with the summary total above it, which no longer excludes 'passed'.
+    // The worked-on branch used to be gated by the OUTER dateClause above
+    // (i."createdAt"/"updatedAt" in range) instead of by wp.worked_at --
+    // the wrong clock entirely for "did this person work this ticket in
+    // this window." Filters' own equivalent (workedRange + assignees, see
+    // workedRangeSql/workedDeptMatchSql elsewhere in this file) filters on
+    // worked_at directly, using these same IST-anchored istFrom/istTo
+    // boundaries. Confirmed for real: Rehan Khan, Dev, Oct 1-15 2026 --
+    // this mismatch alone was most of the gap between MBR's summary.total
+    // (61, issue-date-based) and Filters' total for the identical
+    // person+dept+range (59, worked_at-based). Embedding the bound directly
+    // in the worked-on EXISTS (rather than relying on the outer dateClause)
+    // lets the WHERE below skip that outer clause entirely for a
+    // person-scoped query, so a ticket worked in-window but created/updated
+    // outside it (or vice versa) is judged correctly either way. The
+    // current-assignee branch deliberately stays date-unscoped ("this
+    // person's own work" explicitly includes current ownership regardless
+    // of when that ownership began -- see this function's own comment
+    // above) -- that's a separately-decided, documented design choice, not
+    // part of this fix.
+    const personWorkedAtClause = `${fromIdx ? ` AND wp.worked_at >= $${fromIdx}` : ''}${toIdx ? ` AND wp.worked_at <= $${toIdx}` : ''}`;
+    // The assignee branch keeps its own copy of the issue-date test (the
+    // same one the now-skipped outer dateClause used to apply to the WHOLE
+    // query) -- without it, "currently assigned" would count regardless of
+    // date for EVERY range once a person filter is active, inflating a
+    // narrow range (e.g. "This month") with tickets someone merely still
+    // holds from long before it, never touched this window at all.
     const personMatchSql = person
-      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}))`
+      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}${dateClause}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}${personWorkedAtClause}))`
       : '';
     // A person-scoped drill-down (e.g. "Resolved tickets — Adari") can include
     // a ticket Adari worked on here that's since been reassigned to another
@@ -14939,7 +14965,7 @@ async function _handleJiraPgApi(
         SELECT ${fullAgg(summaryStaleIdx)}
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
-        WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}
+        WHERE ${deptMatchSql} AND ${rosterMatchSql}${person ? '' : dateClause}${personMatchSql}
       `, summaryParams),
 
       // LEFT JOIN from the roster itself (not FROM issues) so every roster
@@ -14957,14 +14983,28 @@ async function _handleJiraPgApi(
         FROM roster r
         LEFT JOIN users u ON LOWER(u.email) = r.email
         LEFT JOIN issues i ON (
-          (i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1))
+          -- The assignee branch keeps using the ticket's own created/updated
+          -- (dateClauseInline below -- the same test the old shared
+          -- dateClause applied, just now scoped to only this branch instead
+          -- of the whole JOIN). The worked-on branch now uses wpp.worked_at
+          -- instead -- the wrong clock was being applied to BOTH branches
+          -- before (i."createdAt"/"updatedAt" for a question about when the
+          -- WORK happened, not when the ticket itself was created/touched by
+          -- anyone). Filters' own equivalent (workedRange + assignees)
+          -- filters strictly on worked_at (see workedRangeSql/
+          -- workedDeptMatchSql elsewhere in this file). Confirmed for real:
+          -- Rehan Khan, Dev, Oct 1-15 2026 -- this table's "Total tickets"
+          -- column read 61 for him while Filters (person+dept+range,
+          -- Assignee+Worked) read 59 for the identical real-world question,
+          -- purely from this date-field mismatch on the worked-on branch.
+          (i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1)${dateClause})
           -- reason != 'passed' removed -- see deptMatchSql's own comment
           -- above for why (matches Filters' already-made decision); without
           -- this, a roster member's per-person total could undercount
           -- relative to the tab's own summary total above, which no longer
           -- excludes 'passed' either.
-          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1))
-        ) ${dateClause}
+          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1)${fromIdx ? ` AND wpp.worked_at >= $${fromIdx}` : ''}${toIdx ? ` AND wpp.worked_at <= $${toIdx}` : ''})
+        )
         LEFT JOIN statuses s ON i."statusId" = s.id
         GROUP BY r.email, u.email, u."firstName", u."lastName"
         ORDER BY total DESC
@@ -15004,7 +15044,7 @@ async function _handleJiraPgApi(
         LEFT JOIN spaces sp ON sp.id = i."spaceId"
         LEFT JOIN users au ON au.id = i."assigneeId"
         LEFT JOIN users ru ON ru.id = i."reporterId"
-        WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}${ticketFilterClause}
+        WHERE ${deptMatchSql} AND ${rosterMatchSql}${person ? '' : dateClause}${personMatchSql}${ticketFilterClause}
         ORDER BY i."createdAt" DESC
         LIMIT ${ticketsLimit}
       `, ticketQueryParams),
