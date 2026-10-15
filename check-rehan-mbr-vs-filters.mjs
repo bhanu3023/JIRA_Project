@@ -32,7 +32,7 @@ async function main() {
 
   // Find which team/space has Rehan as a member, by checking the mbr-team
   // endpoint across the most likely teams.
-  const candidateTeams = ['Dev', 'QA', 'Infra', 'Migration', 'Migration ENT', 'Migration SMB'];
+  const candidateTeams = ['eng', 'qa', 'infra', 'ent', 'smb'];
   const now = new Date();
   const ranges = [
     { label: 'This month', from: new Date(now.getFullYear(), now.getMonth(), 1), to: now },
