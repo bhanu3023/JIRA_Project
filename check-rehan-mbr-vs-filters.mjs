@@ -54,18 +54,37 @@ async function main() {
     }
   }
 
+  const TEAM_DEPT = { eng: 'Dev', qa: 'QA', infra: 'Infra', ent: 'Migration', smb: 'Migration' };
+
   for (const team of candidateTeams) {
     for (const r of ranges) {
-      const qs = new URLSearchParams({
-        team, dateFrom: r.from.toISOString().slice(0, 10), dateTo: r.to.toISOString().slice(0, 10), person: rehan.email,
-      });
+      const fromStr = r.from.toISOString().slice(0, 10);
+      const toStr = r.to.toISOString().slice(0, 10);
+      const qs = new URLSearchParams({ team, dateFrom: fromStr, dateTo: toStr, person: rehan.email });
       const res = await fetch(`${BASE}/reports/mbr-team?${qs}`, { headers: auth });
       if (!res.ok) continue;
       const data = await res.json();
-      const people = data.people || [];
-      const me = people.find((p) => p.email === rehan.email);
-      if (me && me.total > 0) {
-        console.log(`\n[MBR] team=${team} range=${r.label} (${qs.get('dateFrom')}..${qs.get('dateTo')}): total=${me.total}, resolved=${me.resolved}`);
+      const me = (data.people || []).find((p) => p.email === rehan.email);
+      if (!me || !me.total) continue;
+      console.log(`\n[MBR] team=${team} range=${r.label} (${fromStr}..${toStr}): total=${me.total}, resolved=${me.resolved}`);
+
+      // Same range, same person, through Filters' own query shape -- dept
+      // scoped to this team's department, assignees=Rehan, workedRange set
+      // to the same window (the "Worked" scope is what credits someone for
+      // real work on a ticket now owned by someone else, same as MBR's own
+      // "Total tickets" methodology per the comment in mbr/page.tsx).
+      const dept = TEAM_DEPT[team];
+      const filtersQs = new URLSearchParams({
+        spaceKey: 'TESTIN', dept, queueMembersOnly: 'true',
+        assignees: rehan.id, workedRange: `between:${fromStr}:${toStr}`, limit: '1',
+      });
+      const fRes = await fetch(`${BASE}/issues?${filtersQs}`, { headers: auth });
+      if (fRes.ok) {
+        const fData = await fRes.json();
+        const match = fData.total === me.total ? 'MATCH' : 'MISMATCH';
+        console.log(`[Filters] dept=${dept} assignees=Rehan workedRange=${fromStr}..${toStr}: total=${fData.total}  -- ${match}`);
+      } else {
+        console.log(`[Filters] request failed: ${fRes.status} ${await fRes.text().catch(() => '')}`);
       }
     }
   }
