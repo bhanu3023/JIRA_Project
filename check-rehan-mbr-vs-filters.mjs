@@ -40,6 +40,20 @@ async function main() {
     { label: 'All time (wide)', from: new Date('2020-01-01'), to: now },
   ];
 
+  // Also check with NO date params at all -- dateFrom/dateTo default to ''
+  // in the MBR page's own useState, so a user who never touched the date
+  // picker is sending neither param, which may hit a different backend
+  // default than any explicit range tested below.
+  for (const team of candidateTeams) {
+    const qs = new URLSearchParams({ team, person: rehan.email });
+    const res = await fetch(`${BASE}/reports/mbr-team?${qs}`, { headers: auth });
+    if (res.ok) {
+      const data = await res.json();
+      const me = (data.people || []).find((p) => p.email === rehan.email);
+      if (me) console.log(`[MBR] team=${team} NO DATE PARAMS (page default): total=${me.total}, resolved=${me.resolved}`);
+    }
+  }
+
   for (const team of candidateTeams) {
     for (const r of ranges) {
       const qs = new URLSearchParams({
