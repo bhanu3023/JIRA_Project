@@ -14817,8 +14817,20 @@ async function _handleJiraPgApi(
     // date for EVERY range once a person filter is active, inflating a
     // narrow range (e.g. "This month") with tickets someone merely still
     // holds from long before it, never touched this window at all.
+    // reason != 'passed' RE-ADDED here (an earlier change removed it,
+    // described in a now-stale comment as "matching Filters' already-made
+    // decision" -- the actual Filters code it was supposedly matching,
+    // workedDeptMatchSql, has always excluded 'passed' and still does).
+    // 'passed' means the ticket moved THROUGH this person on its way
+    // elsewhere, not that they did real work on it -- crediting it as
+    // "this person's own work" is the same over-crediting class as the
+    // Ravi Srivastava routing-credit bug fixed earlier in this file
+    // (reassigningToSomeoneElse / deptHandoffDone guards). Confirmed for
+    // real: Rehan Khan, Dev, Sep 2026 -- 24 of his ~28-ticket MBR-vs-
+    // Filters gap was exactly his reason='passed' rows for that month,
+    // which MBR was crediting and Filters correctly wasn't.
     const personMatchSql = person
-      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}${dateClause}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}${personWorkedAtClause}))`
+      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}${dateClause}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND wp.reason != 'passed' AND LOWER(wpu.email) = $${personIdx}${personWorkedAtClause}))`
       : '';
     // A person-scoped drill-down (e.g. "Resolved tickets — Adari") can include
     // a ticket Adari worked on here that's since been reassigned to another
@@ -15035,7 +15047,11 @@ async function _handleJiraPgApi(
           -- this, a roster member's per-person total could undercount
           -- relative to the tab's own summary total above, which no longer
           -- excludes 'passed' either.
-          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1)${fromIdx ? ` AND wpp.worked_at >= $${fromIdx}` : ''}${toIdx ? ` AND wpp.worked_at <= $${toIdx}` : ''})
+          -- reason != 'passed' RE-ADDED -- see personMatchSql's own comment
+          -- above (summary-card query, same function) for why: 'passed'
+          -- means routed-through, not worked, and MBR crediting it was most
+          -- of Rehan Khan's real Sep-2026 gap against Filters.
+          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1) AND wpp.reason != 'passed'${fromIdx ? ` AND wpp.worked_at >= $${fromIdx}` : ''}${toIdx ? ` AND wpp.worked_at <= $${toIdx}` : ''})
         )
         LEFT JOIN statuses s ON i."statusId" = s.id
         GROUP BY r.email, u.email, u."firstName", u."lastName"
