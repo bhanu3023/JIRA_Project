@@ -16,13 +16,13 @@ async function main() {
   if (!issue) { console.log(`${KEY} not found`); await pool.end(); return; }
 
   const { rows } = await pool.query(`
-    SELECT c.id, c."createdAt", c."authorId", u."firstName", u."lastName", c.body, LENGTH(c.body) AS body_len, c."isInternal"
+    SELECT c.id, c."createdAt", c."authorId", c."authorName", u."firstName", u."lastName", c.body, LENGTH(c.body) AS body_len
     FROM comments c LEFT JOIN users u ON u.id = c."authorId"
     WHERE c."issueId" = $1 ORDER BY c."createdAt" DESC LIMIT 10
   `, [issue.id]);
   console.log(`Last 10 comments on ${KEY}:\n`);
   for (const r of rows) {
-    console.log(`[${r.createdAt.toISOString()}] ${r.firstName} ${r.lastName} (internal=${r.isInternal}) body_len=${r.body_len}`);
+    console.log(`[${r.createdAt.toISOString()}] ${r.firstName || ''} ${r.lastName || ''} (authorName=${r.authorName}) body_len=${r.body_len}`);
     console.log(`  body: ${JSON.stringify(r.body)}`);
     console.log('');
   }
