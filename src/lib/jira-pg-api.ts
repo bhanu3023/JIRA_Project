@@ -8318,12 +8318,30 @@ async function _handleJiraPgApi(
       // deptExtraClauses' own params are finalized, so its parameter indices
       // don't collide with theirs.
       let workedRangeSql = '';
+      // Only used by workedIncludeOpen below -- an additional OR-branch
+      // credits the ticket's CURRENT assignee when the ticket's own
+      // createdAt/updatedAt falls in the window, with no worked_at
+      // requirement at all. This exactly mirrors MBR's own personMatchSql
+      // assignee branch (jira-pg-api.ts, GET /reports/mbr-team), which was
+      // the actual source of a real gap: MBR's "Total tickets" already
+      // counted a ticket this way, but workedIncludeOpen's fix (dropping
+      // only the done-only restriction) still required SOME worked_at row
+      // in range -- so a ticket where this person is simply the current
+      // owner, with the ticket itself touched in-window but no logged work
+      // action in that SAME window, still silently dropped out here.
+      // Confirmed for real: Eng/Dev roster, Sep 1-30 2026 -- 16 of 19
+      // people mismatched (MBR consistently higher), Rehan Khan alone
+      // MBR=88 vs Filters=60 even with workedIncludeOpen=true, before this.
+      let openAssigneeDateSql = '';
       if (workedRange) {
         const { from: workedFrom, to: workedTo } = parseDateRange(workedRange);
         const workedFromIdx = deptParamIdx++;
         const workedToIdx = deptParamIdx++;
         deptExtraParams.push(workedFrom, workedTo);
         workedRangeSql = ` AND w.worked_at >= $${workedFromIdx} AND w.worked_at <= $${workedToIdx}`;
+        if (workedIncludeOpen) {
+          openAssigneeDateSql = ` AND ((i."createdAt" >= $${workedFromIdx} AND i."createdAt" <= $${workedToIdx}) OR (i."updatedAt" >= $${workedFromIdx} AND i."updatedAt" <= $${workedToIdx}))`;
+        }
         // Previously also required the worker to be on that queue's CURRENT
         // configured memberIds list. Checked against real production data
         // (same investigation as loadTeamAnalyticsScope's identical rule) and
@@ -8341,6 +8359,9 @@ async function _handleJiraPgApi(
           const assigneeIdx = deptParamIdx++;
           deptExtraParams.push(workedAssigneeIds.length ? workedAssigneeIds : ['__none__']);
           workedRangeSql += ` AND w.user_id = ANY($${assigneeIdx}::text[])`;
+          if (workedIncludeOpen) {
+            openAssigneeDateSql += ` AND i."assigneeId" = ANY($${assigneeIdx}::text[])`;
+          }
         }
       }
 
@@ -8378,7 +8399,7 @@ async function _handleJiraPgApi(
       // views (All Tickets, Assigned to me, etc., which never send
       // createdRange) on the original current-department behavior.
       const workedDeptMatchSql = workedRange
-        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${workedRangeSql})${workedIncludeOpen ? '' : `
+        ? `(EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${workedRangeSql})${workedIncludeOpen ? ` OR (LOWER(i.current_department) = LOWER($2)${openAssigneeDateSql})` : ''})${workedIncludeOpen ? '' : `
            AND (
              (LOWER(i.current_department) = LOWER($2) AND s.category = 'done')
              OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
