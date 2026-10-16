@@ -148,7 +148,27 @@ function escapeStrayAngleBrackets(html: string): string {
 }
 function sanitizeRichText(html: string | null | undefined): string {
   if (!html) return '';
-  return sanitizeHtml(escapeStrayAngleBrackets(html), RICH_TEXT_SANITIZE_OPTIONS);
+  const sanitized = sanitizeHtml(escapeStrayAngleBrackets(html), RICH_TEXT_SANITIZE_OPTIONS);
+  // Safety net for the exact CF-33365/CF-33620 failure class this file has
+  // already fought twice (see the long comment above escapeStrayAngleBrackets):
+  // a stray "<" followed by text that happens to match a real HTML tag name
+  // (the allowlist above includes plenty of ordinary English words -- table,
+  // data, mark, title, form, address, label, time, var, etc.) is still parsed
+  // as a genuine, unclosed tag open, and can swallow everything after it.
+  // If the input clearly had real content but sanitizing it left nothing (or
+  // only empty markup/whitespace), that's sanitization failing destructively,
+  // not the user submitting a blank comment -- fall back to escaping the
+  // ENTIRE original input as plain text (every "<"/">" as an entity) so the
+  // content survives, even if it loses rich formatting, rather than silently
+  // vanishing. Confirmed for real: CF-34159, Kamal Basha's comment saved
+  // with an empty body despite a substantial original message -- by the time
+  // this was noticed, the original text was already gone; this prevents the
+  // next person's comment from suffering the same unrecoverable loss.
+  const sanitizedText = sanitized.replace(/<[^>]*>/g, '').trim();
+  if (!sanitizedText && html.trim()) {
+    return html.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  return sanitized;
 }
 
 // 60-second in-memory cache for user role lookups so every API request
