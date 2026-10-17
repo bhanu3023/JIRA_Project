@@ -3494,6 +3494,7 @@ function computeInProgressHours(
 // side effects) -- that person's speed got misattributed to them too, just
 // for being in the same ticket's worked-roster. A personal "how fast did
 // YOU respond" metric should only count the actual author's own actions.
+const RESPONSE_ARRIVAL_WINDOW_MS = 10_000;
 function computeResponseTimeHours(
   statusHist: Array<{ oldValue: string | null; newValue: string; authorEmail?: string | null; createdAt: Date | string }>,
   deptStartedAt: Date | string | null,
@@ -3507,11 +3508,23 @@ function computeResponseTimeHours(
   // any-status-change fallback below.
   const anchor = deptStartedAt || issueCreatedAt;
   if (!anchor) return null;
+  // A status row landing within RESPONSE_ARRIVAL_WINDOW_MS of the anchor is
+  // part of the hand-off request itself, not anyone's response: a
+  // department move stamps dept_sla_started_at=NOW() and the sender's own
+  // "Routed to X"/"Resolved" status row (plus transferToDept's automatic
+  // "In Progress" arrival status) milliseconds apart in the same request.
+  // Counting those read as a 0:00:00 response for whoever received the
+  // ticket (credited to them via the current-assignee fallback below, since
+  // the row's author is the sender) -- confirmed for real as the cause of
+  // Customer Engineering people with many routed-in tickets showing a flat
+  // 0:00:00 average. No human opens a just-arrived ticket and changes its
+  // status that fast.
   const startMs = new Date(anchor).getTime();
+  const cutoffMs = startMs + RESPONSE_ARRIVAL_WINDOW_MS;
   for (const h of statusHist) {
     if (!IN_PROGRESS_STATUS_NAMES.has(String(h.newValue || '').trim().toLowerCase())) continue;
     const t = new Date(h.createdAt).getTime();
-    if (t < startMs) continue;
+    if (t < cutoffMs) continue;
     // Nearest second, not nearest 0.1h -- see the same fix's comment on
     // computeInProgressHours above.
     return { hours: Math.round(((t - startMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
@@ -3529,7 +3542,7 @@ function computeResponseTimeHours(
   // as a looser "when did someone first touch this ticket" proxy.
   for (const h of statusHist) {
     const t = new Date(h.createdAt).getTime();
-    if (t < startMs) continue;
+    if (t < cutoffMs) continue;
     return { hours: Math.round(((t - startMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
   }
   // Last resort: nothing qualifies AT OR AFTER the anchor at all. Confirmed
@@ -3542,10 +3555,13 @@ function computeResponseTimeHours(
   // from its createdAt -- a real, meaningful response time exists, it's
   // just entirely before whatever reset the anchor moved to.
   if (statusHist.length && issueCreatedAt) {
-    const h = statusHist[0];
     const createdMs = new Date(issueCreatedAt).getTime();
-    const t = new Date(h.createdAt).getTime();
-    if (t >= createdMs) {
+    // Same arrival-window skip as above -- a status row written by the
+    // create request itself (created and auto-routed in one go) isn't a
+    // response either.
+    const h = statusHist.find((x) => new Date(x.createdAt).getTime() >= createdMs + RESPONSE_ARRIVAL_WINDOW_MS);
+    const t = h ? new Date(h.createdAt).getTime() : NaN;
+    if (h && t >= createdMs) {
       return { hours: Math.round(((t - createdMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
     }
   }
@@ -15320,9 +15336,22 @@ async function _handleJiraPgApi(
       // only tickets that are actually done AND have a real resolvedAt
       // contribute a resolution time at all.
       if (row.status_category === 'done' && row.resolvedAt) {
-        const { inProgressHrs } = computeInProgressHours(
+        let { inProgressHrs } = computeInProgressHours(
           statusHistByIssue[row.id] || [], row.createdAt, true, row.resolvedAt, row.status_name
         );
+        // A ticket that went straight Open -> Resolved (or through a
+        // queue-specific status) never accrues any "In Progress" time, so it
+        // averaged in as a flat 0 -- a person who simply never uses the In
+        // Progress status read as 0:00:00 resolution across the board. Fall
+        // back to arrival-in-department -> resolvedAt for those (createdAt
+        // when the dept anchor is missing or was reset past the resolution
+        // by a later re-transfer, same reasoning as computeResponseTimeHours).
+        if (inProgressHrs <= 0) {
+          const resolvedMs = new Date(row.resolvedAt).getTime();
+          const deptMs = row.dept_sla_started_at ? new Date(row.dept_sla_started_at).getTime() : NaN;
+          const fromMs = Number.isFinite(deptMs) && deptMs <= resolvedMs ? deptMs : new Date(row.createdAt).getTime();
+          inProgressHrs = Math.max(0, Math.round((resolvedMs - fromMs) / 1000) / 3600);
+        }
         for (const email of Array.from(emails)) {
           const acc = (peopleInProgress[email] ??= { sum: 0, count: 0 });
           acc.sum += inProgressHrs;
