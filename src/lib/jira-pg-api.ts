@@ -3415,6 +3415,21 @@ async function loadTeamAnalyticsScope(url: URL) {
   return { issues: enriched, depts, dateType, dateFrom, dateTo, productType: productTypeParam };
 }
 
+// MBR's "Screenshot %" evidence check, for issues aliased `i`. Used to look
+// only at the attachments table by mimeType, which missed nearly every real
+// screenshot: the rich text editor embeds a pasted/dropped image INLINE in
+// the description/comment HTML (insertImage -> data: URL), never as an
+// attachment row, and Jira-synced images are inline <img src="/api/
+// jira-image..."> too. Attachment rows can also carry a null mimeType (both
+// the upload endpoint and the Jira attachment sync allow it), so the file
+// extension counts as well.
+const SCREENSHOT_EVIDENCE_SQL = `(
+  EXISTS (SELECT 1 FROM attachments a WHERE a."issueId" = i.id
+          AND (a."mimeType" LIKE 'image/%' OR LOWER(a.filename) ~ '\\.(png|jpe?g|gif|bmp|webp)$'))
+  OR strpos(COALESCE(i.description, ''), '<img') > 0
+  OR EXISTS (SELECT 1 FROM comments c WHERE c."issueId" = i.id AND strpos(COALESCE(c.body, ''), '<img') > 0)
+)`;
+
 // Status names seen across real (mostly Jira-migrated) data that this app's
 // own catalog doesn't classify as category:'done' but that clearly ARE
 // terminal -- used only as a fallback when a ticket has no real resolvedAt.
@@ -14076,8 +14091,7 @@ async function _handleJiraPgApi(
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
         COUNT(*) FILTER (WHERE s.category = 'done') AS closed,
         COUNT(*) FILTER (WHERE s.category = 'done' AND LOWER(s.name) NOT IN ('closed','resolved','done','cancelled','declined')) AS no_closure,
-        COUNT(*) FILTER (WHERE s.category = 'done' AND EXISTS (
-           SELECT 1 FROM attachments a WHERE a."issueId" = i.id AND a."mimeType" LIKE 'image/%')) AS screenshots
+        COUNT(*) FILTER (WHERE s.category = 'done' AND ${SCREENSHOT_EVIDENCE_SQL}) AS screenshots
       FROM issues i
       LEFT JOIN statuses s ON i."statusId" = s.id
       LEFT JOIN users u ON u.id = i."assigneeId"
@@ -14904,7 +14918,7 @@ async function _handleJiraPgApi(
     } else if (ticketFilter === 'noComment') {
       ticketFilterClause = ` AND s.category = 'done' AND NOT (LOWER(s.name) IN ('closed','resolved') AND EXISTS (SELECT 1 FROM comments c WHERE c."issueId" = i.id AND length(trim(c.body)) > 10))`;
     } else if (ticketFilter === 'noScreenshot') {
-      ticketFilterClause = ` AND s.category = 'done' AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a."issueId" = i.id AND a."mimeType" LIKE 'image/%')`;
+      ticketFilterClause = ` AND s.category = 'done' AND NOT ${SCREENSHOT_EVIDENCE_SQL}`;
     } else if (ticketFilter === 'noRcaFix') {
       ticketFilterClause = ` AND s.category = 'done' AND NOT (length(trim(COALESCE(i."rootCause", ''))) > 0 OR length(trim(COALESCE(i."fixDescription", ''))) > 0)`;
     } else if (ticketFilter === 'hasResolutionTime') {
@@ -14975,8 +14989,7 @@ async function _handleJiraPgApi(
         COUNT(i.id) FILTER (WHERE s.category != 'done' AND (i.priority IS NULL OR i."dueDate" IS NULL OR array_length(i.labels,1) IS NULL)) AS missing,
         COUNT(i.id) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
         COUNT(i.id) FILTER (WHERE s.category = 'done' AND LOWER(s.name) NOT IN ('closed','resolved','done','cancelled','declined')) AS no_closure,
-        COUNT(i.id) FILTER (WHERE s.category = 'done' AND EXISTS (
-          SELECT 1 FROM attachments a WHERE a."issueId" = i.id AND a."mimeType" LIKE 'image/%')) AS screenshots,
+        COUNT(i.id) FILTER (WHERE s.category = 'done' AND ${SCREENSHOT_EVIDENCE_SQL}) AS screenshots,
         COUNT(i.id) FILTER (WHERE s.category = 'done' AND LOWER(s.name) IN ('closed','resolved') AND EXISTS (
           SELECT 1 FROM comments c WHERE c."issueId" = i.id AND length(trim(c.body)) > 10)) AS closing_good,
         COUNT(i.id) FILTER (WHERE s.category = 'done' AND (
