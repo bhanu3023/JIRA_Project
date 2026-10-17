@@ -1200,8 +1200,17 @@ export default function IssueDetailPage() {
     const filteredOptions = customFieldSearch.trim()
       ? allOptions.filter(o => o.toLowerCase().includes(customFieldSearch.trim().toLowerCase()))
       : allOptions;
+    // Same condition getMissingCoreFields() already enforces before letting
+    // the ticket resolve -- Root Cause/Fix Description are only mandatory
+    // while the ticket is in Dev's own queue (a Migration ticket that's
+    // never touched Dev has no bug to explain). Shows the red asterisk
+    // up front instead of only surfacing "this is required" as a blocking
+    // popup at the moment someone tries to resolve it.
+    const isRequiredNow = (key === 'rootCause' || key === 'fixDescription')
+      && ((issue as any)?.current_department || '').trim().toLowerCase() === 'dev'
+      && !isMandatoryFieldsExemptDept();
     return (
-      <PropRow key={key} label={label}>
+      <PropRow key={key} label={label} required={isRequiredNow}>
         {editingCustomField === editKey ? (
           <div className="flex flex-col gap-1 px-1.5 py-1" onClick={e => e.stopPropagation()}>
             {type === 'textarea' ? (
@@ -1871,7 +1880,19 @@ export default function IssueDetailPage() {
   // list's links) says which queue's perspective the viewer opened this from;
   // if that differs from the ticket's current department and a snapshot for it
   // exists, show THAT queue's own frozen status here too instead of the live one.
-  const viewDeptParam = searchParams?.get('viewDept') || '';
+  //
+  // Admins always get the live ticket, never a queue's frozen snapshot --
+  // this used to apply to admins too (an explicit earlier decision, so an
+  // admin editing from a historical view could tell it wasn't live), but
+  // that confused admins who opened a ticket plainly and still landed on a
+  // stale "Showing QA's own assignee" banner for a ticket that had since
+  // moved to Dev (e.g. CF-34103, reached via a Filters/search link carrying
+  // ?viewDept= from whatever queue was selected there, not from the admin
+  // deliberately choosing to view QA's perspective). Zeroing viewDeptParam
+  // here for admins neutralizes it everywhere downstream -- this banner,
+  // the status/assignee snapshot substitution, and the SLA panel's own
+  // viewDept prop (passed this same value) all fall back to the live state.
+  const viewDeptParam = user?.role === 'admin' ? '' : (searchParams?.get('viewDept') || '');
   const currentDeptForView = ((issue as any)?.current_department || '').trim();
   const isHistoricalDeptViewBase = !!viewDeptParam && viewDeptParam.toLowerCase() !== currentDeptForView.toLowerCase();
   // Status stays disabled per the original explicit request: always show the
@@ -4772,9 +4793,20 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
   const currentDeptLower = ((issue as any).current_department || '').trim().toLowerCase();
   const viewDeptLower = (viewDept || '').trim().toLowerCase();
   const isHistoricalView = !!viewDeptLower && viewDeptLower !== currentDeptLower;
+  // For a RESOLVED ticket's plain view (no ?viewDept= perspective), there's no
+  // "someone else's still-running SLA" to avoid confusing a viewer with --
+  // the whole multi-department journey is finished, static history. Show
+  // every department's own frozen card (its own goal, its own elapsed time)
+  // instead of just the one it happened to finish in, so a ticket that
+  // passed through QA -> Dev -> Infra -> Migration shows all four, each
+  // measured against that department's own SLA queue settings. An
+  // in-progress ticket keeps the single-perspective filter below (its
+  // current department's live SLA is the only one actually still ticking).
+  const isResolved = issue.status?.category === 'done';
   const finalEntries = dedupedEntries.filter(s => {
     const sDeptLower = (s.deptName || '').trim().toLowerCase();
     if (!sDeptLower) return true; // space-wide SLA — always relevant regardless of perspective
+    if (isResolved && !isHistoricalView) return true;
     return isHistoricalView ? sDeptLower === viewDeptLower : sDeptLower === currentDeptLower;
   });
 
@@ -4808,230 +4840,259 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
 
         {slaExpanded && (
           <div className="space-y-2">
-            {finalEntries.map((s: any) => {
-              const startedAt = s.startedAt ? new Date(s.startedAt) : null;
-              const dueAt = new Date(s.dueTime);
-              const resolvedAt = s.resolvedAt ? new Date(s.resolvedAt) : null;
-              const remainingMs = dueAt.getTime() - slaNow;
-              const isPaused = s.isPaused === true;
-              const isCompleted = s.isCompleted === true;
-              // Backend flags isBreached=true for a resolved ticket too, if it
-              // was resolved AFTER its due time -- distinguish "still open and
-              // actively overdue right now" from "was resolved, but late" so a
-              // late resolution doesn't get whitewashed into a clean on-time
-              // completion just because it's done now.
-              const resolvedLate = isCompleted && s.isBreached === true;
-              const isBreached = !isPaused && !isCompleted && (s.isBreached || remainingMs <= 0);
-              const goalMs: number = s.goalDurationMs || 0;
-              // Paused: freeze elapsed at pause time. Completed: freeze at the
-              // actual resolution moment (previously kept counting up against
-              // "now" forever after resolution, so a ticket resolved on time
-              // eventually showed 100%+ elapsed as if it had run over anyway).
-              // For a completed ticket, prefer the backend's actualElapsedMs
-              // (the real cumulative time THIS department spent, summed
-              // across every visit -- same number isBreached is computed
-              // from) over resolvedAt-minus-displayed-Start, which can
-              // include time spent in OTHER departments entirely for a
-              // ticket that bounced around (startedAt is now simply
-              // createdAt, a fixed display window, not this department's own
-              // actual start). Confirmed for real on CF-33040: resolvedAt-
-              // minus-Start read 8h34m (the ticket's whole lifetime,
-              // including ~4.5h in Dev) for a Migration breach that was
-              // actually only 4h6m38s of real Migration time. Falls back to
-              // the old formula only for a ticket resolved before this field
-              // existed (its frozen snapshot has no actualElapsedMs at all).
-              const elapsedMs = isPaused
-                ? dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()) + (goalMs - Math.max(0, dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime())))
-                : isCompleted && resolvedAt
-                ? (typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : resolvedAt.getTime() - (startedAt?.getTime() ?? resolvedAt.getTime()))
-                : slaNow - (startedAt?.getTime() ?? slaNow);
-              const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
-              const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');
-              // Each department has its own SLA clock (see computeSLAInstancesPure
-              // -- it only returns policies for the ticket's CURRENT department),
-              // so at any moment there's exactly one dept whose SLA is actually
-              // running here. Space-wide policies (deptName null) still apply to
-              // whichever department currently holds the ticket, so fall back to
-              // that instead of showing no queue at all.
-              const slaDept = s.deptName || (issue as any).current_department || null;
+            {(() => {
+              // Each department this ticket visited used to get its own
+              // fully-bordered card -- confirmed as confusing in practice
+              // (CF-32894: two separate boxes with no visual link between
+              // them, each with its own Start/Due, read as "two SLAs" even
+              // though it's one policy's journey through two queues). Group
+              // by policy name instead and render ONE box per policy, with
+              // each department as a row inside it.
+              const deptAssignees: Record<string, any> = (issue as any)?.dept_assignees || {};
+              const entries = finalEntries.map((s: any) => {
+                const startedAt = s.startedAt ? new Date(s.startedAt) : null;
+                const dueAt = new Date(s.dueTime);
+                const resolvedAt = s.resolvedAt ? new Date(s.resolvedAt) : null;
+                const remainingMs = dueAt.getTime() - slaNow;
+                const isPaused = s.isPaused === true;
+                const isCompleted = s.isCompleted === true;
+                // Backend flags isBreached=true for a resolved ticket too, if
+                // it was resolved AFTER its due time -- distinguish "still
+                // open and actively overdue right now" from "was resolved,
+                // but late" so a late resolution doesn't get whitewashed
+                // into a clean on-time completion just because it's done now.
+                const resolvedLate = isCompleted && s.isBreached === true;
+                const isBreached = !isPaused && !isCompleted && (s.isBreached || remainingMs <= 0);
+                // A paused (historical) department can still have genuinely
+                // breached its OWN goal before the ticket was handed off --
+                // that department's own miss still happened and shouldn't
+                // silently vanish just because it's no longer current.
+                const historicallyBreached = isPaused && !isCompleted && s.isBreached === true;
+                const goalMs: number = s.goalDurationMs || 0;
+                // Paused: freeze elapsed at pause time. Completed: freeze at
+                // the actual resolution moment. Prefer the backend's
+                // actualElapsedMs (real cumulative time THIS department
+                // spent) over resolvedAt-minus-Start, which can span time
+                // spent in OTHER departments for a ticket that bounced
+                // around. See actualElapsedMs's own long comment in
+                // jira-pg-api.ts (CF-33040) for why.
+                const elapsedMs = isPaused
+                  ? (typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()) + (goalMs - Math.max(0, dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()))))
+                  : isCompleted && resolvedAt
+                  ? (typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : resolvedAt.getTime() - (startedAt?.getTime() ?? resolvedAt.getTime()))
+                  : slaNow - (startedAt?.getTime() ?? slaNow);
+                const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
+                const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');
+                const slaDept = s.deptName || (issue as any).current_department || null;
+                const warnMs = 30 * 60 * 1000;
+                const isNotified = s.isNotified === true && (remainingMs <= warnMs);
+                const isBreachingSoon = !isPaused && !isCompleted && !isBreached && remainingMs > 0 && remainingMs <= warnMs;
+                const showAsBreach = isBreached || resolvedLate || historicallyBreached;
+                // Who to attribute a breach to: a resolved entry already has
+                // a real resolvedByName from the resolution-event history; a
+                // department that breached its own goal before handing the
+                // ticket off has no resolution event at all, so fall back to
+                // that department's own frozen assignee snapshot
+                // (dept_assignees) -- whoever actually held it when its own
+                // clock ran out.
+                const deptAssigneeKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === (slaDept || '').toLowerCase());
+                const deptAssigneeSnap = deptAssigneeKey ? deptAssignees[deptAssigneeKey] : null;
+                const deptAssigneeName = deptAssigneeSnap
+                  ? `${deptAssigneeSnap.firstName || deptAssigneeSnap.displayName || ''} ${deptAssigneeSnap.lastName || ''}`.trim() || null
+                  : null;
+                return { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, baseName, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName };
+              });
 
-              const warnMs = 30 * 60 * 1000;
-              const isNotified = s.isNotified === true && (remainingMs <= warnMs);
-              // Same 30-min threshold the SLA_BREACH notification already
-              // warns at — this badge used to jump straight from green
-              // "RUNNING" to red "BREACHED" the instant the due time passed,
-              // with no visual cue in between even though a warning
-              // notification had already gone out. The progress bar alone
-              // turning amber past 80% elapsed was too easy to miss (and,
-              // for a long-duration goal, unrelated to how close to the
-              // actual due time it is) -- add an explicit orange
-              // "breaching soon" badge state for the same last-30-minutes
-              // window the notification uses.
-              const isBreachingSoon = !isPaused && !isCompleted && !isBreached && remainingMs > 0 && remainingMs <= warnMs;
-              const showAsBreach = isBreached || resolvedLate;
+              const groups = new Map<string, typeof entries>();
+              for (const e of entries) {
+                const list = groups.get(e.baseName) || [];
+                list.push(e);
+                groups.set(e.baseName, list);
+              }
 
-              return (
-                <div key={s.id} className={`rounded-xl border p-3 ${showAsBreach ? 'border-red-300 bg-red-50' : isCompleted ? 'border-emerald-300 bg-emerald-50' : isPaused ? 'border-amber-300 bg-amber-50' : isBreachingSoon ? 'border-orange-300 bg-orange-50' : 'border-gray-200 bg-white'}`}>
+              return Array.from(groups.entries()).map(([baseName, group]) => {
+                const multi = group.length > 1;
+                const groupShowAsBreach = group.some((e) => e.showAsBreach);
+                const allCompleted = group.every((e) => e.isCompleted);
+                const anyRunning = group.some((e) => !e.isPaused && !e.isCompleted);
+                const groupBg = groupShowAsBreach ? 'border-red-300 bg-red-50'
+                  : allCompleted ? 'border-emerald-300 bg-emerald-50'
+                  : anyRunning ? 'border-gray-200 bg-white'
+                  : 'border-amber-300 bg-amber-50';
 
-                  {/* Row 1: policy name + status badges */}
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <Clock size={13} className={showAsBreach ? 'text-red-500' : isCompleted ? 'text-emerald-500' : isPaused ? 'text-amber-500' : isBreachingSoon ? 'text-orange-500' : 'text-blue-500'} />
+                return (
+                  <div key={baseName} className={`rounded-xl border p-3 ${groupBg}`}>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Clock size={13} className={groupShowAsBreach ? 'text-red-500' : allCompleted ? 'text-emerald-500' : 'text-blue-500'} />
                       <span className="text-[12px] font-semibold text-gray-800">{baseName}</span>
-                      {goalMs > 0 && (
-                        <span className="text-[10px] text-gray-400 font-medium">({fmtGoal(goalMs)})</span>
-                      )}
-                      {slaDept && (
-                        <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-1.5 py-0.5">
-                          {slaDept}
-                        </span>
-                      )}
+                      {multi && <span className="text-[10px] text-gray-400 font-medium">— {group.length} queues</span>}
                     </div>
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                      {isNotified && (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
-                          🔔 NOTIFIED
-                        </span>
-                      )}
-                      <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
-                        isBreached ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse'
-                        : resolvedLate ? 'bg-red-100 text-red-700 border border-red-200'
-                        : isCompleted ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-                        : isPaused ? 'bg-amber-100 text-amber-700 border border-amber-200'
-                        : isBreachingSoon ? 'bg-orange-100 text-orange-700 border border-orange-200 animate-pulse'
-                        : 'bg-green-100 text-green-700'
-                      }`}>
-                        {isBreached ? '⚠ BREACHED' : resolvedLate ? '✓ RESOLVED (Breached)' : isCompleted ? '✓ RESOLVED' : isPaused ? '⏸ PAUSED' : isBreachingSoon ? '⚠ BREACHING SOON' : '● RUNNING'}
-                      </span>
-                    </div>
-                  </div>
 
-                  {/* Row 2: countdown / paused / overdue / resolved time — a
-                      resolved ticket must stop counting down, not keep ticking
-                      toward (or past) its due time forever. */}
-                  <div className={`text-[17px] font-bold tabular-nums mb-2 ${showAsBreach ? 'text-red-600' : isCompleted ? 'text-emerald-600' : isPaused ? 'text-amber-600' : isBreachingSoon ? 'text-orange-600' : 'text-gray-900'}`}>
-                    {resolvedLate ? 'Resolved late' : isCompleted ? 'Resolved' : isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
-                  </div>
-
-                  {/* Row 3: progress bar */}
-                  {goalMs > 0 && (
-                    <div className="w-full h-1.5 rounded-full bg-gray-200 overflow-hidden mb-3">
-                      <div
-                        className={`h-1.5 rounded-full transition-none ${showAsBreach ? 'bg-red-500' : isCompleted ? 'bg-emerald-500' : isPaused ? 'bg-amber-400' : isBreachingSoon ? 'bg-orange-500' : pct > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
-                        style={{ width: `${Math.min(pct, 100)}%` }}
-                      />
-                    </div>
-                  )}
-
-                  {/* Row 4: Start time / Due time — always visible, stacked */}
-                  {startedAt && (
-                    <div className="grid grid-cols-2 gap-2 mt-1">
-                      <div className="bg-gray-50 rounded-lg px-2.5 py-1.5">
-                        <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Start</p>
-                        {/* Reverted per explicit request: each department's own
-                            SLA should show when THAT department actually
-                            received the ticket, not the ticket's original
-                            creation date -- e.g. Migration created at 10:07 PM,
-                            routed to Dev at 11:00 PM, Dev's own SLA Start should
-                            read 11:00 PM, not 10:07 PM. `startedAt` already holds
-                            exactly that (dept_sla_started_at), matching the
-                            Due-time math right next to it. */}
-                        <p className="text-[11px] font-semibold text-gray-700">{fmtTime(startedAt)}</p>
-                      </div>
-                      <div className={`rounded-lg px-2.5 py-1.5 ${showAsBreach ? 'bg-red-100' : 'bg-gray-50'}`}>
-                        <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Due</p>
-                        <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* How long it actually took, in plain words -- Start/Due
-                      alone meant working this out by hand from two separate
-                      timestamps. elapsedMs is already frozen at the real
-                      resolution moment above, not still counting up against
-                      "now" the way a still-open ticket's would be. */}
-                  {isCompleted && resolvedAt && startedAt && (
-                    <p className={`text-[10.5px] mt-1.5 ${resolvedLate ? 'text-red-500' : 'text-emerald-600'}`}>
-                      Resolved in <span className="font-semibold">{fmtDuration(elapsedMs)}</span>
-                      {goalMs > 0 && !resolvedLate && ' — within the SLA goal'}
-                      {resolvedLate && ' — past the SLA goal'}
-                    </p>
-                  )}
-
-                  {/* Who actually resolved it -- otherwise the only name visible
-                      anywhere near a breach badge is the CURRENT Assignee, which
-                      silently pins a late resolution on whoever holds the ticket
-                      now even if a different person's later status change (e.g.
-                      reopening and re-resolving after the due time) is what
-                      actually caused it. When the ticket was resolved more than
-                      once (resolved, reopened, resolved again by someone else),
-                      show every attempt with its own date and on-time/late verdict
-                      instead of collapsing them into one badge that only reflects
-                      whichever attempt happened last. */}
-                  {isCompleted && Array.isArray(s.history) && s.history.length > 0 && (
-                    s.history.length === 1 ? (
-                      <p className="text-[10.5px] text-gray-400 mt-2">
-                        Resolved by <span className={`font-semibold ${s.history[0].wasBreached ? 'text-red-500' : 'text-gray-600'}`}>{s.history[0].resolvedByName}</span>
-                      </p>
-                    ) : (
-                      <div className="mt-2 pt-2 border-t border-gray-100">
-                        <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-1">Resolution history</p>
-                        <div className="space-y-1">
-                          {s.history.map((h: any, i: number) => (
-                            <p key={i} className="text-[10.5px] text-gray-500 flex items-center gap-1.5">
-                              <span className={`font-semibold ${h.wasBreached ? 'text-red-500' : 'text-emerald-600'}`}>{h.resolvedByName}</span>
-                              <span className="text-gray-300">·</span>
-                              <span>{fmtTime(new Date(h.resolvedAt))}</span>
-                              <span className={`ml-auto text-[9.5px] font-bold px-1.5 py-0.5 rounded-full ${h.wasBreached ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}`}>
-                                {h.wasBreached ? 'Late' : 'On time'}
+                    {group.map((e, i) => {
+                      const { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName } = e;
+                      return (
+                        <div key={s.id} className={i > 0 ? 'pt-3 mt-3 border-t border-gray-200' : ''}>
+                          {/* Dept badge + goal + status badges */}
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {slaDept && (
+                                <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-1.5 py-0.5">
+                                  {slaDept}
+                                </span>
+                              )}
+                              {goalMs > 0 && (
+                                <span className="text-[10px] text-gray-400 font-medium">({fmtGoal(goalMs)})</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 flex-shrink-0">
+                              {isNotified && (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
+                                  🔔 NOTIFIED
+                                </span>
+                              )}
+                              <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
+                                isBreached ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse'
+                                : resolvedLate ? 'bg-red-100 text-red-700 border border-red-200'
+                                : historicallyBreached ? 'bg-red-100 text-red-700 border border-red-200'
+                                : isCompleted ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                                : isPaused ? 'bg-amber-100 text-amber-700 border border-amber-200'
+                                : isBreachingSoon ? 'bg-orange-100 text-orange-700 border border-orange-200 animate-pulse'
+                                : 'bg-green-100 text-green-700'
+                              }`}>
+                                {isBreached ? '⚠ BREACHED' : resolvedLate ? '✓ RESOLVED (Breached)' : historicallyBreached ? '⚠ BREACHED HERE' : isCompleted ? '✓ RESOLVED' : isPaused ? '⏸ PAUSED' : isBreachingSoon ? '⚠ BREACHING SOON' : '● RUNNING'}
                               </span>
+                            </div>
+                          </div>
+
+                          {/* Countdown / paused / overdue / resolved time */}
+                          <div className={`text-[15px] font-bold tabular-nums mb-1.5 ${showAsBreach ? 'text-red-600' : isCompleted ? 'text-emerald-600' : isPaused ? 'text-amber-600' : isBreachingSoon ? 'text-orange-600' : 'text-gray-900'}`}>
+                            {resolvedLate ? 'Resolved late' : isCompleted ? 'Resolved' : isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
+                          </div>
+
+                          {/* Progress bar */}
+                          {goalMs > 0 && (
+                            <div className="w-full h-1.5 rounded-full bg-gray-200 overflow-hidden mb-2">
+                              <div
+                                className={`h-1.5 rounded-full transition-none ${showAsBreach ? 'bg-red-500' : isCompleted ? 'bg-emerald-500' : isPaused ? 'bg-amber-400' : isBreachingSoon ? 'bg-orange-500' : pct > 80 ? 'bg-amber-400' : 'bg-blue-500'}`}
+                                style={{ width: `${Math.min(pct, 100)}%` }}
+                              />
+                            </div>
+                          )}
+
+                          {/* Start time / Due time */}
+                          {startedAt && (
+                            <div className="grid grid-cols-2 gap-2 mt-1">
+                              <div className="bg-gray-50 rounded-lg px-2.5 py-1.5">
+                                <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Start</p>
+                                <p className="text-[11px] font-semibold text-gray-700">{fmtTime(startedAt)}</p>
+                              </div>
+                              <div className={`rounded-lg px-2.5 py-1.5 ${showAsBreach ? 'bg-red-100' : 'bg-gray-50'}`}>
+                                <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Due</p>
+                                <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* How long it actually took, in plain words */}
+                          {isCompleted && resolvedAt && startedAt && (
+                            <p className={`text-[10.5px] mt-1.5 ${resolvedLate ? 'text-red-500' : 'text-emerald-600'}`}>
+                              Resolved in <span className="font-semibold">{fmtDuration(elapsedMs)}</span>
+                              {goalMs > 0 && !resolvedLate && ' — within the SLA goal'}
+                              {resolvedLate && ' — past the SLA goal'}
                             </p>
+                          )}
+
+                          {/* Same real-elapsed-time number as "Resolved in Xh
+                              Ym" above, for a department the ticket has since
+                              moved on from -- the "Dev took 2h, Migration
+                              took 1h" breakdown. */}
+                          {isPaused && !isCompleted && typeof s.actualElapsedMs === 'number' && (
+                            <p className={`text-[10.5px] mt-1.5 ${historicallyBreached ? 'text-red-500' : 'text-amber-700'}`}>
+                              Spent <span className="font-semibold">{fmtDuration(s.actualElapsedMs)}</span> here before moving on
+                              {historicallyBreached && goalMs > 0 && ' — past this queue’s own SLA goal'}
+                            </p>
+                          )}
+
+                          {/* How much of that time the status was actually
+                              "In Progress" -- a department can hold a ticket
+                              without anyone actively working it (e.g.
+                              waiting on the customer), so this is a smaller,
+                              separate number from the elapsed time above. */}
+                          {typeof s.inProgressElapsedMs === 'number' && (isCompleted || (isPaused && typeof s.actualElapsedMs === 'number')) && (
+                            <p className="text-[10px] mt-1 text-gray-400">
+                              Actively worked (In Progress): <span className="font-semibold text-gray-600">{fmtDuration(s.inProgressElapsedMs)}</span>
+                            </p>
+                          )}
+
+                          {/* Who actually resolved it */}
+                          {isCompleted && Array.isArray(s.history) && s.history.length > 0 && (
+                            s.history.length === 1 ? (
+                              <p className="text-[10.5px] text-gray-400 mt-2">
+                                Resolved by <span className={`font-semibold ${s.history[0].wasBreached ? 'text-red-500' : 'text-gray-600'}`}>{s.history[0].resolvedByName}</span>
+                              </p>
+                            ) : (
+                              <div className="mt-2 pt-2 border-t border-gray-100">
+                                <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-1">Resolution history</p>
+                                <div className="space-y-1">
+                                  {s.history.map((h: any, hi: number) => (
+                                    <p key={hi} className="text-[10.5px] text-gray-500 flex items-center gap-1.5">
+                                      <span className={`font-semibold ${h.wasBreached ? 'text-red-500' : 'text-emerald-600'}`}>{h.resolvedByName}</span>
+                                      <span className="text-gray-300">·</span>
+                                      <span>{fmtTime(new Date(h.resolvedAt))}</span>
+                                      <span className={`ml-auto text-[9.5px] font-bold px-1.5 py-0.5 rounded-full ${h.wasBreached ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}`}>
+                                        {h.wasBreached ? 'Late' : 'On time'}
+                                      </span>
+                                    </p>
+                                  ))}
+                                </div>
+                              </div>
+                            )
+                          )}
+
+                          {/* Who held it when a historical (passed-through)
+                              department's own goal ran out -- the breach
+                              attribution the resolution-history block above
+                              can't provide, since this department never
+                              resolved the ticket. */}
+                          {historicallyBreached && (
+                            <p className="text-[10.5px] text-red-500 mt-2">
+                              Breached by <span className="font-semibold">{deptAssigneeName || 'Unassigned'}</span>
+                            </p>
+                          )}
+
+                          {/* Admin override: a breach can be waived */}
+                          {user?.role === 'admin' && (s.waived ? (
+                            <div className="mt-2 pt-2 border-t border-gray-100 flex items-start justify-between gap-2">
+                              <p className="text-[10.5px] text-emerald-600">
+                                ✓ Breach waived by <span className="font-semibold">{s.waivedByName}</span>
+                                {s.waivedReason && <span className="text-gray-400"> — {s.waivedReason}</span>}
+                              </p>
+                              <button
+                                onClick={() => handleSlaWaiver(s.policyId, false)}
+                                disabled={slaWaiverBusyId === s.policyId}
+                                className="text-[10px] font-semibold text-gray-400 hover:text-red-500 flex-shrink-0 disabled:opacity-50"
+                              >
+                                {slaWaiverBusyId === s.policyId ? 'Removing…' : 'Remove waiver'}
+                              </button>
+                            </div>
+                          ) : resolvedLate && (
+                            <div className="mt-2 pt-2 border-t border-gray-100">
+                              <button
+                                onClick={() => handleSlaWaiver(s.policyId, true)}
+                                disabled={slaWaiverBusyId === s.policyId}
+                                className="text-[10.5px] font-semibold text-gray-400 hover:text-emerald-600 disabled:opacity-50"
+                              >
+                                {slaWaiverBusyId === s.policyId ? 'Waiving…' : 'Waive this breach'}
+                              </button>
+                            </div>
                           ))}
                         </div>
-                      </div>
-                    )
-                  )}
-
-                  {/* Admin override: a breach can be waived (e.g. resolved late
-                      for a reason outside anyone's control) so the ticket stops
-                      reading as breached without altering its actual recorded
-                      dates/history -- the waiver itself stays visible here for
-                      accountability instead of silently erasing the breach.
-                      Admin-only, same as the waive/remove controls themselves --
-                      the reason text is an internal admin note (e.g. "its a
-                      bug") that any other viewer (agent, non-admin) could
-                      previously see just by opening the ticket, even though
-                      only an admin can act on it. Non-admins still see the
-                      correct RESOLVED/not-breached state above; they just
-                      don't see WHY it was waived. */}
-                  {user?.role === 'admin' && (s.waived ? (
-                    <div className="mt-2 pt-2 border-t border-gray-100 flex items-start justify-between gap-2">
-                      <p className="text-[10.5px] text-emerald-600">
-                        ✓ Breach waived by <span className="font-semibold">{s.waivedByName}</span>
-                        {s.waivedReason && <span className="text-gray-400"> — {s.waivedReason}</span>}
-                      </p>
-                      <button
-                        onClick={() => handleSlaWaiver(s.policyId, false)}
-                        disabled={slaWaiverBusyId === s.policyId}
-                        className="text-[10px] font-semibold text-gray-400 hover:text-red-500 flex-shrink-0 disabled:opacity-50"
-                      >
-                        {slaWaiverBusyId === s.policyId ? 'Removing…' : 'Remove waiver'}
-                      </button>
-                    </div>
-                  ) : resolvedLate && (
-                    <div className="mt-2 pt-2 border-t border-gray-100">
-                      <button
-                        onClick={() => handleSlaWaiver(s.policyId, true)}
-                        disabled={slaWaiverBusyId === s.policyId}
-                        className="text-[10.5px] font-semibold text-gray-400 hover:text-emerald-600 disabled:opacity-50"
-                      >
-                        {slaWaiverBusyId === s.policyId ? 'Waiving…' : 'Waive this breach'}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              );
-            })}
+                      );
+                    })}
+                  </div>
+                );
+              });
+            })()}
 
           </div>
         )}
@@ -5397,11 +5458,14 @@ function DepartmentField({ issueKey, currentDepartment, spaceKey, spaceId, curre
 
 /* ===== Sub-components ===== */
 
-function PropRow({ label, children, pinned, onPin }: { label: string; children: React.ReactNode; pinned?: boolean; onPin?: () => void }) {
+function PropRow({ label, children, pinned, onPin, required }: { label: string; children: React.ReactNode; pinned?: boolean; onPin?: () => void; required?: boolean }) {
   return (
     <div className={`grid grid-cols-[100px_1fr] items-center min-h-[32px] py-1 border-b border-gray-100 last:border-0 group relative ${pinned ? 'bg-blue-50/40' : ''}`}>
       <div className="flex items-center gap-1 self-start pt-[7px]">
-        <span className="text-[12px] font-medium text-[#6B778C] leading-none">{label}</span>
+        <span className="text-[12px] font-medium text-[#6B778C] leading-none">
+          {label}
+          {required && <span className="text-red-500 ml-0.5" title="Required to resolve this ticket">*</span>}
+        </span>
         {onPin && (
           <button
             onClick={onPin}

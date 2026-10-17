@@ -148,7 +148,27 @@ function escapeStrayAngleBrackets(html: string): string {
 }
 function sanitizeRichText(html: string | null | undefined): string {
   if (!html) return '';
-  return sanitizeHtml(escapeStrayAngleBrackets(html), RICH_TEXT_SANITIZE_OPTIONS);
+  const sanitized = sanitizeHtml(escapeStrayAngleBrackets(html), RICH_TEXT_SANITIZE_OPTIONS);
+  // Safety net for the exact CF-33365/CF-33620 failure class this file has
+  // already fought twice (see the long comment above escapeStrayAngleBrackets):
+  // a stray "<" followed by text that happens to match a real HTML tag name
+  // (the allowlist above includes plenty of ordinary English words -- table,
+  // data, mark, title, form, address, label, time, var, etc.) is still parsed
+  // as a genuine, unclosed tag open, and can swallow everything after it.
+  // If the input clearly had real content but sanitizing it left nothing (or
+  // only empty markup/whitespace), that's sanitization failing destructively,
+  // not the user submitting a blank comment -- fall back to escaping the
+  // ENTIRE original input as plain text (every "<"/">" as an entity) so the
+  // content survives, even if it loses rich formatting, rather than silently
+  // vanishing. Confirmed for real: CF-34159, Kamal Basha's comment saved
+  // with an empty body despite a substantial original message -- by the time
+  // this was noticed, the original text was already gone; this prevents the
+  // next person's comment from suffering the same unrecoverable loss.
+  const sanitizedText = sanitized.replace(/<[^>]*>/g, '').trim();
+  if (!sanitizedText && html.trim()) {
+    return html.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  return sanitized;
 }
 
 // 60-second in-memory cache for user role lookups so every API request
@@ -2557,6 +2577,56 @@ async function getStatusHistoryRows(issueId: string): Promise<Array<{ authorName
   } catch { return []; }
 }
 
+// Sums how much of [windowStartMs, windowEndMs) the ticket's GLOBAL status
+// (issue_history field='status', newValue is the literal status name e.g.
+// "In Progress"/"Routed to QA"/"Open") was "In Progress" -- a single pass
+// over the already-chronological status rows, carrying the status forward
+// across each gap the same way the ticket's real status stayed put between
+// recorded changes.
+function computeInProgressMsInWindow(
+  statusHistory: Array<{ newValue: string | null; createdAt: any }>, windowStartMs: number, windowEndMs: number
+): number {
+  if (!(windowEndMs > windowStartMs)) return 0;
+  let total = 0;
+  let currentStatus: string | null = null;
+  let cursor = windowStartMs;
+  for (const row of statusHistory) {
+    const t = new Date(row.createdAt).getTime();
+    if (t <= windowStartMs) { currentStatus = row.newValue; continue; }
+    if (t >= windowEndMs) break;
+    if ((currentStatus || '').trim().toLowerCase() === 'in progress') total += t - cursor;
+    cursor = t;
+    currentStatus = row.newValue;
+  }
+  if ((currentStatus || '').trim().toLowerCase() === 'in progress') total += windowEndMs - cursor;
+  return total;
+}
+
+// Adds inProgressElapsedMs to every SLA instance (current AND historical/
+// paused alike) -- a genuinely different number from actualElapsedMs: that
+// one is how long the DEPARTMENT held the ticket (its SLA clock running),
+// this one is how long the ticket's status was literally "In Progress"
+// within that same window -- time the department held it but the status
+// sat on something else (e.g. waiting on the customer) doesn't count as
+// someone actively working it. Approximates each instance's window as one
+// continuous [startedAt, startedAt + actualElapsedMs) span rather than
+// reconstructing every separate visit to that department -- matches how
+// actualElapsedMs/elapsed_ms is already just a single accumulated number,
+// not a list of spans, and keeps this a light, single-query enrichment
+// instead of a full department-visit reconstruction (like the breach-
+// moment one elsewhere in this file).
+async function enrichSlaWithInProgressTime(issueId: string, slaInstances: any[]): Promise<any[]> {
+  if (!slaInstances.length) return slaInstances;
+  const statusHistory = await getStatusHistoryRows(issueId);
+  if (!statusHistory.length) return slaInstances;
+  return slaInstances.map((s: any) => {
+    const startMs = s.startedAt ? new Date(s.startedAt).getTime() : null;
+    const elapsedMs = typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : null;
+    if (startMs === null || elapsedMs === null) return s;
+    return { ...s, inProgressElapsedMs: computeInProgressMsInWindow(statusHistory, startMs, startMs + elapsedMs) };
+  });
+}
+
 // Attaches resolvedByName + a full per-event `history` to every completed SLA
 // entry, so the frontend can show who resolved it and, when it was resolved
 // more than once, every attempt with its own date and on-time/late verdict --
@@ -3111,6 +3181,11 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
           resolvedAt: null,
           startedAt: histStartedAt,
           goalDurationMs: histDurationMs,
+          // Same reasoning as currentDeptInstances' own actualElapsedMs --
+          // how much real time THIS department actually held the ticket,
+          // for the frontend's "Dev took 2h" breakdown. See that field's
+          // own long comment above for the CF-33040 case this was built for.
+          actualElapsedMs: histElapsed,
           isNotified: false,
           waived: false,
           waivedByName: null,
@@ -6738,6 +6813,17 @@ async function _handleJiraPgApi(
     // together with a dept filter, since that table's dept column is what
     // scopes it; only applied in the dept-scoped branch below.
     const workedRange   = url.searchParams.get('workedRange');
+    // Opt-in: workedRange's own match (workedDeptMatchSql below) is
+    // deliberately scoped to only count FINISHED work (ticket currently, or
+    // historically per dept_statuses, marked done) -- an earlier explicit
+    // decision, used broadly enough elsewhere that it stays the default.
+    // This flag relaxes that for a caller that specifically wants "every
+    // ticket this person touched in this dept/range, open or closed" --
+    // e.g. matching MBR's "Total tickets" column, which (unlike this
+    // endpoint's default Worked behavior) already includes still-open
+    // tickets a person currently holds. Never applied unless explicitly
+    // requested, so every existing default-Worked caller is unaffected.
+    const workedIncludeOpen = url.searchParams.get('workedIncludeOpen') === 'true';
     // Due Date and Resolved date -- the Filters page's UI/URL round-trip for
     // both already existed (dueDateRange has shipped in the "More filters"
     // bar for a while), but neither param was ever actually read here, so
@@ -8277,12 +8363,30 @@ async function _handleJiraPgApi(
       // deptExtraClauses' own params are finalized, so its parameter indices
       // don't collide with theirs.
       let workedRangeSql = '';
+      // Only used by workedIncludeOpen below -- an additional OR-branch
+      // credits the ticket's CURRENT assignee when the ticket's own
+      // createdAt/updatedAt falls in the window, with no worked_at
+      // requirement at all. This exactly mirrors MBR's own personMatchSql
+      // assignee branch (jira-pg-api.ts, GET /reports/mbr-team), which was
+      // the actual source of a real gap: MBR's "Total tickets" already
+      // counted a ticket this way, but workedIncludeOpen's fix (dropping
+      // only the done-only restriction) still required SOME worked_at row
+      // in range -- so a ticket where this person is simply the current
+      // owner, with the ticket itself touched in-window but no logged work
+      // action in that SAME window, still silently dropped out here.
+      // Confirmed for real: Eng/Dev roster, Sep 1-30 2026 -- 16 of 19
+      // people mismatched (MBR consistently higher), Rehan Khan alone
+      // MBR=88 vs Filters=60 even with workedIncludeOpen=true, before this.
+      let openAssigneeDateSql = '';
       if (workedRange) {
         const { from: workedFrom, to: workedTo } = parseDateRange(workedRange);
         const workedFromIdx = deptParamIdx++;
         const workedToIdx = deptParamIdx++;
         deptExtraParams.push(workedFrom, workedTo);
         workedRangeSql = ` AND w.worked_at >= $${workedFromIdx} AND w.worked_at <= $${workedToIdx}`;
+        if (workedIncludeOpen) {
+          openAssigneeDateSql = ` AND ((i."createdAt" >= $${workedFromIdx} AND i."createdAt" <= $${workedToIdx}) OR (i."updatedAt" >= $${workedFromIdx} AND i."updatedAt" <= $${workedToIdx}))`;
+        }
         // Previously also required the worker to be on that queue's CURRENT
         // configured memberIds list. Checked against real production data
         // (same investigation as loadTeamAnalyticsScope's identical rule) and
@@ -8300,6 +8404,9 @@ async function _handleJiraPgApi(
           const assigneeIdx = deptParamIdx++;
           deptExtraParams.push(workedAssigneeIds.length ? workedAssigneeIds : ['__none__']);
           workedRangeSql += ` AND w.user_id = ANY($${assigneeIdx}::text[])`;
+          if (workedIncludeOpen) {
+            openAssigneeDateSql += ` AND i."assigneeId" = ANY($${assigneeIdx}::text[])`;
+          }
         }
       }
 
@@ -8337,14 +8444,14 @@ async function _handleJiraPgApi(
       // views (All Tickets, Assigned to me, etc., which never send
       // createdRange) on the original current-department behavior.
       const workedDeptMatchSql = workedRange
-        ? `EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${workedRangeSql})
+        ? `(EXISTS (SELECT 1 FROM user_worked_on_tickets w WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2) AND w.reason != 'passed'${workedRangeSql})${workedIncludeOpen ? ` OR (LOWER(i.current_department) = LOWER($2)${openAssigneeDateSql})` : ''})${workedIncludeOpen ? '' : `
            AND (
              (LOWER(i.current_department) = LOWER($2) AND s.category = 'done')
              OR (LOWER(i.current_department) != LOWER($2) AND EXISTS (
                SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
                WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
              ))
-           )`
+           )`}`
         : null;
       // Scoped to queueMembersOnlyParam, not just createdRange being present --
       // the department queue board pages (All Tickets, Assigned to me, etc.)
@@ -10969,8 +11076,11 @@ async function _handleJiraPgApi(
     _mark('partner-comments-merge');
 
     const mergedIssue = { ...issue, comments: allComments, _links: allLinks, ...rawDeptData };
-    const slaInstances = await enrichSlaWithResolver(
-      mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
+    const slaInstances = await enrichSlaWithInProgressTime(
+      mergedIssue.id,
+      await enrichSlaWithResolver(
+        mergedIssue.id, await computeIssueSLAsFromDb(mergedIssue), mergedIssue.spaceId, mergedIssue.current_department
+      )
     );
     _mark('sla-enrichment');
     // Origin department -- the department this ticket actually started in,
@@ -12532,8 +12642,21 @@ async function _handleJiraPgApi(
       // request is ALSO reassigning the ticket to someone other than the
       // person making the change -- that's routing, not working it.
       const reassigningToSomeoneElse = data.assigneeId !== undefined && data.assigneeId !== userId;
+      // When this same request also ran a department handoff (deptHandoffDone,
+      // set above), `updated.current_department` was re-read AFTER
+      // performDeptHandoff's own UPDATE already flipped it to the TARGET
+      // department -- crediting the acting user with the department they
+      // handed the ticket TO, not the one they were actually working in.
+      // performDeptHandoff already writes its own correctly-departmented
+      // 'passed' credit (using oldDept, captured before the handoff) for
+      // this exact case, so skip this generic credit entirely rather than
+      // double-crediting with the wrong dept. Confirmed for real on
+      // CF-33996: Bhuvana's own QA -> Dev handoff produced a
+      // (Bhuvana, 'Dev', 'worked') row here, surfacing as a newer, wrong
+      // "Worked On" entry that outranked her correct QA one and sent her
+      // dashboard link to a stale Dev-department snapshot of the ticket.
       const workedDept: string | null = (updated as any).current_department || null;
-      if (userId && workedDept && statusChangedNow && !reassigningToSomeoneElse) {
+      if (userId && workedDept && statusChangedNow && !reassigningToSomeoneElse && !deptHandoffDone) {
         await pool.query(
           `INSERT INTO user_worked_on_tickets (user_id, issue_id, dept, reason) VALUES ($1,$2,$3,'worked')
            ON CONFLICT (user_id, issue_id, dept) DO UPDATE SET worked_at=NOW()`,
@@ -12542,8 +12665,11 @@ async function _handleJiraPgApi(
       }
     } catch { /* non-critical */ }
 
-    const slaInstances = await enrichSlaWithResolver(
-      updated.id, await computeIssueSLAsFromDb(updated), updated.spaceId, (updated as any).current_department
+    const slaInstances = await enrichSlaWithInProgressTime(
+      updated.id,
+      await enrichSlaWithResolver(
+        updated.id, await computeIssueSLAsFromDb(updated), updated.spaceId, (updated as any).current_department
+      )
     );
 
     // Fire connector events (fire-and-forget)
@@ -14709,8 +14835,46 @@ async function _handleJiraPgApi(
     // deptMatchSql's own comment above for why (matches Filters' already-
     // made decision); otherwise a person drill-down total could disagree
     // with the summary total above it, which no longer excludes 'passed'.
+    // The worked-on branch used to be gated by the OUTER dateClause above
+    // (i."createdAt"/"updatedAt" in range) instead of by wp.worked_at --
+    // the wrong clock entirely for "did this person work this ticket in
+    // this window." Filters' own equivalent (workedRange + assignees, see
+    // workedRangeSql/workedDeptMatchSql elsewhere in this file) filters on
+    // worked_at directly, using these same IST-anchored istFrom/istTo
+    // boundaries. Confirmed for real: Rehan Khan, Dev, Oct 1-15 2026 --
+    // this mismatch alone was most of the gap between MBR's summary.total
+    // (61, issue-date-based) and Filters' total for the identical
+    // person+dept+range (59, worked_at-based). Embedding the bound directly
+    // in the worked-on EXISTS (rather than relying on the outer dateClause)
+    // lets the WHERE below skip that outer clause entirely for a
+    // person-scoped query, so a ticket worked in-window but created/updated
+    // outside it (or vice versa) is judged correctly either way. The
+    // current-assignee branch deliberately stays date-unscoped ("this
+    // person's own work" explicitly includes current ownership regardless
+    // of when that ownership began -- see this function's own comment
+    // above) -- that's a separately-decided, documented design choice, not
+    // part of this fix.
+    const personWorkedAtClause = `${fromIdx ? ` AND wp.worked_at >= $${fromIdx}` : ''}${toIdx ? ` AND wp.worked_at <= $${toIdx}` : ''}`;
+    // The assignee branch keeps its own copy of the issue-date test (the
+    // same one the now-skipped outer dateClause used to apply to the WHOLE
+    // query) -- without it, "currently assigned" would count regardless of
+    // date for EVERY range once a person filter is active, inflating a
+    // narrow range (e.g. "This month") with tickets someone merely still
+    // holds from long before it, never touched this window at all.
+    // reason != 'passed' RE-ADDED here (an earlier change removed it,
+    // described in a now-stale comment as "matching Filters' already-made
+    // decision" -- the actual Filters code it was supposedly matching,
+    // workedDeptMatchSql, has always excluded 'passed' and still does).
+    // 'passed' means the ticket moved THROUGH this person on its way
+    // elsewhere, not that they did real work on it -- crediting it as
+    // "this person's own work" is the same over-crediting class as the
+    // Ravi Srivastava routing-credit bug fixed earlier in this file
+    // (reassigningToSomeoneElse / deptHandoffDone guards). Confirmed for
+    // real: Rehan Khan, Dev, Sep 2026 -- 24 of his ~28-ticket MBR-vs-
+    // Filters gap was exactly his reason='passed' rows for that month,
+    // which MBR was crediting and Filters correctly wasn't.
     const personMatchSql = person
-      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND LOWER(wpu.email) = $${personIdx}))`
+      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}${dateClause}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND wp.reason != 'passed' AND LOWER(wpu.email) = $${personIdx}${personWorkedAtClause}))`
       : '';
     // A person-scoped drill-down (e.g. "Resolved tickets — Adari") can include
     // a ticket Adari worked on here that's since been reassigned to another
@@ -14889,7 +15053,7 @@ async function _handleJiraPgApi(
         SELECT ${fullAgg(summaryStaleIdx)}
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
-        WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}
+        WHERE ${deptMatchSql} AND ${rosterMatchSql}${person ? '' : dateClause}${personMatchSql}
       `, summaryParams),
 
       // LEFT JOIN from the roster itself (not FROM issues) so every roster
@@ -14907,14 +15071,32 @@ async function _handleJiraPgApi(
         FROM roster r
         LEFT JOIN users u ON LOWER(u.email) = r.email
         LEFT JOIN issues i ON (
-          (i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1))
+          -- The assignee branch keeps using the ticket's own created/updated
+          -- (dateClauseInline below -- the same test the old shared
+          -- dateClause applied, just now scoped to only this branch instead
+          -- of the whole JOIN). The worked-on branch now uses wpp.worked_at
+          -- instead -- the wrong clock was being applied to BOTH branches
+          -- before (i."createdAt"/"updatedAt" for a question about when the
+          -- WORK happened, not when the ticket itself was created/touched by
+          -- anyone). Filters' own equivalent (workedRange + assignees)
+          -- filters strictly on worked_at (see workedRangeSql/
+          -- workedDeptMatchSql elsewhere in this file). Confirmed for real:
+          -- Rehan Khan, Dev, Oct 1-15 2026 -- this table's "Total tickets"
+          -- column read 61 for him while Filters (person+dept+range,
+          -- Assignee+Worked) read 59 for the identical real-world question,
+          -- purely from this date-field mismatch on the worked-on branch.
+          (i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1)${dateClause})
           -- reason != 'passed' removed -- see deptMatchSql's own comment
           -- above for why (matches Filters' already-made decision); without
           -- this, a roster member's per-person total could undercount
           -- relative to the tab's own summary total above, which no longer
           -- excludes 'passed' either.
-          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1))
-        ) ${dateClause}
+          -- reason != 'passed' RE-ADDED -- see personMatchSql's own comment
+          -- above (summary-card query, same function) for why: 'passed'
+          -- means routed-through, not worked, and MBR crediting it was most
+          -- of Rehan Khan's real Sep-2026 gap against Filters.
+          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1) AND wpp.reason != 'passed'${fromIdx ? ` AND wpp.worked_at >= $${fromIdx}` : ''}${toIdx ? ` AND wpp.worked_at <= $${toIdx}` : ''})
+        )
         LEFT JOIN statuses s ON i."statusId" = s.id
         GROUP BY r.email, u.email, u."firstName", u."lastName"
         ORDER BY total DESC
@@ -14954,7 +15136,7 @@ async function _handleJiraPgApi(
         LEFT JOIN spaces sp ON sp.id = i."spaceId"
         LEFT JOIN users au ON au.id = i."assigneeId"
         LEFT JOIN users ru ON ru.id = i."reporterId"
-        WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}${personMatchSql}${ticketFilterClause}
+        WHERE ${deptMatchSql} AND ${rosterMatchSql}${person ? '' : dateClause}${personMatchSql}${ticketFilterClause}
         ORDER BY i."createdAt" DESC
         LIMIT ${ticketsLimit}
       `, ticketQueryParams),
