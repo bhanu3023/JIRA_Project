@@ -3465,107 +3465,86 @@ function computeInProgressHours(
   return { inProgressHrs, noHistory: statusHist.length === 0 };
 }
 
-// "Response time" per explicit request, generalized across every
-// department/queue (Dev, Migration, QA, Infra, ...): how long it took
-// someone to actually START working a ticket after it arrived in their
-// department, not how long the whole resolution took (that's
-// avgResolutionHours/computeInProgressHours above, a different metric).
-// Walks the same sorted status-history list, looking for the FIRST
-// transition INTO an IN_PROGRESS_STATUS_NAMES status -- same name-
-// allowlist reasoning as computeInProgressHours (this app has many
-// differently-cased/duplicated "In Progress" status rows across queues,
-// so matching by literal name is more reliable than category). Measured
-// from deptStartedAt (dept_sla_started_at -- when the ticket arrived in
-// THIS department), the same anchor the rest of this department's SLA
-// math already uses, not the ticket's overall createdAt: a ticket that
-// sat untouched in a PRIOR department for days shouldn't inflate this
-// department's own response time. A transition timestamped before the
-// department even started (a stale in-progress event carried over from
-// an earlier stint) is skipped rather than producing a negative number.
-// Also returns WHO made the qualifying transition (authorEmail on that
-// specific history row) -- MBR's per-person average used to credit this
-// single per-ticket value to every person in the ticket's "worked" roster
-// (assignee + anyone else who'd touched it), not just whoever actually made
-// the fast/slow move. Confirmed for real: Naved and Jaswanth (both
-// Dev-roster, both handling a lot of multi-hop Migration<->Dev<->QA<->Infra
-// tickets) showed a flat 0:00:00 average because several of their shared
-// tickets' near-instant "In Progress" transitions were actually made by
-// SOMEONE ELSE (another agent, or a chain of automated department-arrival
-// side effects) -- that person's speed got misattributed to them too, just
-// for being in the same ticket's worked-roster. A personal "how fast did
-// YOU respond" metric should only count the actual author's own actions.
+// "Response time", per explicit definition: once a person is ASSIGNED a
+// ticket, how long they took to move it from Open into "In Progress".
+// E.g. Migration hands a ticket to Dev -> it lands as Open -> a Dev person
+// gets assigned -> they move it Open -> In Progress; the response is the
+// gap between that assignment and that status change, credited to the
+// person who was assigned.
+//
+// Walks the ticket's assignee history as a sequence of "stints" (from one
+// assignment until the next reassignment). For each stint, the response is
+// the first transition INTO an IN_PROGRESS_STATUS_NAMES status during that
+// stint, provided the ticket wasn't already In Progress when they got it
+// (a mid-work reassignment isn't a pickup). Only the person's FIRST
+// responded stint on a ticket counts, so each ticket contributes at most one
+// sample per person. A stint with no In Progress move (straight to
+// Resolved, reassigned before starting, still untouched) gives no sample --
+// a missing response isn't a 0.
+//
+// Assignee history stores display names ("First Last", or the email when a
+// user has no name), not ids -- nameToEmail maps those back to a person.
+// A ticket assigned at creation has no assignee row for that first
+// assignment, so the first row's oldValue (or, with no rows at all, the
+// current assignee) is treated as assigned from createdAt.
+//
+// Status rows within RESPONSE_ARRIVAL_WINDOW_MS of the assignment are
+// skipped: a department hand-off writes the new assignee and the
+// automatic/sender's status change in the same request, milliseconds
+// apart -- that's the system, not the person responding.
 const RESPONSE_ARRIVAL_WINDOW_MS = 10_000;
-function computeResponseTimeHours(
-  statusHist: Array<{ oldValue: string | null; newValue: string; authorEmail?: string | null; createdAt: Date | string }>,
-  deptStartedAt: Date | string | null,
-  issueCreatedAt?: Date | string | null,
-): { hours: number; authorEmail: string | null } | null {
-  // dept_sla_started_at is null for tickets that predate this app's
-  // department-transfer bookkeeping (confirmed for real: Mayank Jain's
-  // tickets, some with rich real status history going back to March 2026)
-  // -- falling back to the ticket's own createdAt keeps those measurable
-  // instead of unconditionally giving up before even trying the
-  // any-status-change fallback below.
-  const anchor = deptStartedAt || issueCreatedAt;
-  if (!anchor) return null;
-  // A status row landing within RESPONSE_ARRIVAL_WINDOW_MS of the anchor is
-  // part of the hand-off request itself, not anyone's response: a
-  // department move stamps dept_sla_started_at=NOW() and the sender's own
-  // "Routed to X"/"Resolved" status row (plus transferToDept's automatic
-  // "In Progress" arrival status) milliseconds apart in the same request.
-  // Counting those read as a 0:00:00 response for whoever received the
-  // ticket (credited to them via the current-assignee fallback below, since
-  // the row's author is the sender) -- confirmed for real as the cause of
-  // Customer Engineering people with many routed-in tickets showing a flat
-  // 0:00:00 average. No human opens a just-arrived ticket and changes its
-  // status that fast.
-  const startMs = new Date(anchor).getTime();
-  const cutoffMs = startMs + RESPONSE_ARRIVAL_WINDOW_MS;
-  for (const h of statusHist) {
-    if (!IN_PROGRESS_STATUS_NAMES.has(String(h.newValue || '').trim().toLowerCase())) continue;
-    const t = new Date(h.createdAt).getTime();
-    if (t < cutoffMs) continue;
-    // Nearest second, not nearest 0.1h -- see the same fix's comment on
-    // computeInProgressHours above.
-    return { hours: Math.round(((t - startMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
+function computeAssigneeResponseTimes(
+  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+  assigneeHist: Array<{ oldValue: string | null; newValue: string | null; createdAt: Date | string }>,
+  issueCreatedAt: Date | string,
+  currentAssigneeEmail: string | null,
+  nameToEmail: Map<string, string>,
+): Map<string, number> {
+  const toEmail = (name: string | null | undefined): string | null => {
+    const k = String(name || '').trim().toLowerCase();
+    return k ? (nameToEmail.get(k) || null) : null;
+  };
+  const isInProgress = (name: string | null | undefined) => IN_PROGRESS_STATUS_NAMES.has(String(name || '').trim().toLowerCase());
+  const createdMs = new Date(issueCreatedAt).getTime();
+
+  const stints: Array<{ email: string | null; startMs: number; endMs: number }> = [];
+  if (assigneeHist.length === 0) {
+    stints.push({ email: currentAssigneeEmail ? currentAssigneeEmail.toLowerCase() : null, startMs: createdMs, endMs: Infinity });
+  } else {
+    const firstMs = new Date(assigneeHist[0].createdAt).getTime();
+    if (assigneeHist[0].oldValue) stints.push({ email: toEmail(assigneeHist[0].oldValue), startMs: createdMs, endMs: firstMs });
+    assigneeHist.forEach((h, i) => {
+      const startMs = new Date(h.createdAt).getTime();
+      const endMs = i + 1 < assigneeHist.length ? new Date(assigneeHist[i + 1].createdAt).getTime() : Infinity;
+      stints.push({ email: toEmail(h.newValue), startMs, endMs });
+    });
   }
-  // Fallback: no "In Progress"-named transition exists at all for this
-  // stint -- confirmed for real (srinu gudimitla, checked across his full
-  // ticket history) this is the NORMAL case for most agents, not rare:
-  // plenty of tickets go straight from Open to Resolved, or through a
-  // "Waiting for X"/queue-specific status, without ever passing through a
-  // status literally named "In Progress"/"Work in Progress". Leaving these
-  // as null meant most people showed no response-time data at all, not
-  // just the few genuinely-misattributed cases the author-matching fix
-  // targeted. Per explicit request to show a real number for everyone,
-  // fall back to the FIRST status change of any kind after deptStartedAt
-  // as a looser "when did someone first touch this ticket" proxy.
-  for (const h of statusHist) {
-    const t = new Date(h.createdAt).getTime();
-    if (t < cutoffMs) continue;
-    return { hours: Math.round(((t - startMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
-  }
-  // Last resort: nothing qualifies AT OR AFTER the anchor at all. Confirmed
-  // for real (CF-29926, Lakshmi Prasanna): she genuinely responded in ~3
-  // minutes (created it, clicked In Progress moments later) -- but the
-  // ticket was already Resolved before a LATER, unrelated administrative
-  // re-transfer/reassignment reset dept_sla_started_at to a time after all
-  // the real activity, leaving nothing measurable after that late anchor.
-  // Falls back to the ticket's own very first status change ever, measured
-  // from its createdAt -- a real, meaningful response time exists, it's
-  // just entirely before whatever reset the anchor moved to.
-  if (statusHist.length && issueCreatedAt) {
-    const createdMs = new Date(issueCreatedAt).getTime();
-    // Same arrival-window skip as above -- a status row written by the
-    // create request itself (created and auto-routed in one go) isn't a
-    // response either.
-    const h = statusHist.find((x) => new Date(x.createdAt).getTime() >= createdMs + RESPONSE_ARRIVAL_WINDOW_MS);
-    const t = h ? new Date(h.createdAt).getTime() : NaN;
-    if (h && t >= createdMs) {
-      return { hours: Math.round(((t - createdMs) / 1000)) / 3600, authorEmail: h.authorEmail ? h.authorEmail.toLowerCase() : null };
+
+  // Status as of a moment: the newValue of the last change at or before it,
+  // else the first change's oldValue (what it started as).
+  const statusAt = (ms: number): string | null => {
+    let s: string | null = statusHist.length ? statusHist[0].oldValue : null;
+    for (const h of statusHist) {
+      if (new Date(h.createdAt).getTime() > ms) break;
+      s = h.newValue;
+    }
+    return s;
+  };
+
+  const result = new Map<string, number>();
+  for (const st of stints) {
+    if (!st.email || result.has(st.email)) continue;
+    if (isInProgress(statusAt(st.startMs))) continue;
+    for (const h of statusHist) {
+      const t = new Date(h.createdAt).getTime();
+      if (t < st.startMs + RESPONSE_ARRIVAL_WINDOW_MS) continue;
+      if (t >= st.endMs) break;
+      if (!isInProgress(h.newValue)) continue;
+      result.set(st.email, Math.round((t - st.startMs) / 1000) / 3600);
+      break;
     }
   }
-  return null; // genuinely untouched since arriving in this department -- nothing to measure yet
+  return result;
 }
 
 function buildTeamAnalyticsOverview(scope: Awaited<ReturnType<typeof loadTeamAnalyticsScope>>) {
@@ -15220,14 +15199,32 @@ async function _handleJiraPgApi(
     // once here rather than per-ticket, same shape as workedRosterRes above.
     const statusHistRes = slaCandidateIds.length
       ? await pool.query(
-          `SELECT "issueId", "oldValue", "newValue", "authorEmail", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field = 'status' ORDER BY "issueId", "createdAt" ASC`,
+          `SELECT "issueId", field, "oldValue", "newValue", "authorEmail", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field IN ('status', 'assignee') ORDER BY "issueId", "createdAt" ASC`,
           [slaCandidateIds]
         )
       : { rows: [] as any[] };
     const statusHistByIssue: Record<string, Array<{ oldValue: string | null; newValue: string; authorEmail: string | null; createdAt: Date }>> = {};
+    // Assignee history feeds Avg. response time (computeAssigneeResponseTimes).
+    const assigneeHistByIssue: Record<string, Array<{ oldValue: string | null; newValue: string | null; createdAt: Date }>> = {};
     for (const h of statusHistRes.rows) {
-      (statusHistByIssue[h.issueId] ??= []).push(h);
+      if (h.field === 'assignee') (assigneeHistByIssue[h.issueId] ??= []).push(h);
+      else (statusHistByIssue[h.issueId] ??= []).push(h);
     }
+    // Assignee history rows store display names, not ids -- map this team's
+    // own members' names (and bare emails, the fallback display value) back
+    // to their email so a stint can be credited to the right person.
+    const responseNameToEmail = new Map<string, string>();
+    const rosterUserRows = await pool.query(
+      `SELECT email, "firstName", "lastName" FROM users WHERE LOWER(email) = ANY($1::text[])`,
+      [roster.map((e) => e.toLowerCase())]
+    );
+    for (const u of rosterUserRows.rows) {
+      const email = String(u.email).toLowerCase();
+      const fullName = `${u.firstName || ''} ${u.lastName || ''}`.trim().toLowerCase();
+      if (fullName && !responseNameToEmail.has(fullName)) responseNameToEmail.set(fullName, email);
+      responseNameToEmail.set(email, email);
+    }
+    const responseHoursByIssue = new Map<string, Map<string, number>>();
     const peopleInProgress: Record<string, { sum: number; count: number }> = {};
     const peopleResponseTime: Record<string, { sum: number; count: number }> = {};
 
@@ -15345,7 +15342,7 @@ async function _handleJiraPgApi(
         // Progress status read as 0:00:00 resolution across the board. Fall
         // back to arrival-in-department -> resolvedAt for those (createdAt
         // when the dept anchor is missing or was reset past the resolution
-        // by a later re-transfer, same reasoning as computeResponseTimeHours).
+        // by a later re-transfer).
         if (inProgressHrs <= 0) {
           const resolvedMs = new Date(row.resolvedAt).getTime();
           const deptMs = row.dept_sla_started_at ? new Date(row.dept_sla_started_at).getTime() : NaN;
@@ -15359,53 +15356,25 @@ async function _handleJiraPgApi(
         }
       }
 
-      // Response time: how long it took to move this ticket from arrival
-      // in THIS department into actual work -- doesn't require the ticket
-      // to be done, unlike resolution hours above, since "how fast did you
-      // pick this up" is meaningful for open tickets too. Only counted once
-      // work has genuinely started (computeResponseTimeHours returns null
-      // otherwise), so a still-untouched ticket doesn't drag the average
-      // down with a misleading "0".
-      // Prefers crediting the actual transition author (see
-      // computeResponseTimeHours's own comment for why that's the correct
-      // attribution) -- but confirmed for real (srinu gudimitla, checked
-      // across his full 1048-ticket worked+assigned history): most agents
-      // rarely personally click "Open -> In Progress" themselves at all
-      // (someone else usually already has it moving, or an automated
-      // handoff does), so author-only attribution left the large majority
-      // of people with NO data at all, not just a few misattributed cases
-      // -- a dash for someone with dozens of resolved tickets read as
-      // broken, not "accurately sparse". Per explicit request to show a
-      // real number for everyone: when the transition has no author (or an
-      // author who isn't in this ticket's roster), fall back to crediting
-      // the ticket's CURRENT assignee only (not the full multi-person
-      // worked-roster the original bug used) -- "how responsive is
-      // whoever owns this ticket now", a much narrower and more defensible
-      // fallback than the original bug's fan-out to everyone who ever
-      // touched it.
-      const response = computeResponseTimeHours(statusHistByIssue[row.id] || [], row.dept_sla_started_at, row.createdAt);
-      const responseCreditEmail = response?.authorEmail && emails.has(response.authorEmail)
-        ? response.authorEmail
-        : (row.assignee_email ? String(row.assignee_email).toLowerCase() : null);
-      // The strict `emails` set only adds the assignee when
-      // current_department matches this team's own department exactly --
-      // right for every metric that legitimately needs "is this ticket
-      // currently sitting in our queue", but a ticket with a NULL
-      // current_department (confirmed for real: a handful of null-authored,
-      // near-instant bot/test-created tickets) can never pass that check
-      // even though it's already counted in this person's total ticket
-      // count elsewhere in this same loop. Treat a missing department as a
-      // data gap, not a legitimate "belongs to someone else" case -- still
-      // require the credited person to actually be this team's roster
-      // member, just without the department condition.
-      const creditedIsRosterAssignee = responseCreditEmail
-        && String(row.assignee_email || '').toLowerCase() === responseCreditEmail
-        && roster.some((e) => e.toLowerCase() === responseCreditEmail);
-      if (response != null && responseCreditEmail && (emails.has(responseCreditEmail) || (!row.current_department && creditedIsRosterAssignee))) {
-        const acc = (peopleResponseTime[responseCreditEmail] ??= { sum: 0, count: 0 });
-        acc.sum += response.hours;
+      // Response time: assignment -> Open-to-In-Progress, credited to the
+      // person who was assigned (see computeAssigneeResponseTimes). Open
+      // tickets count too -- "how fast did you pick this up" doesn't need
+      // the ticket to be done. Only this tab's own team members are
+      // credited; a stint held by someone outside the team (e.g. the
+      // Migration engineer before the hand-off to Dev) is ignored here.
+      const responseByPerson = computeAssigneeResponseTimes(
+        statusHistByIssue[row.id] || [], assigneeHistByIssue[row.id] || [], row.createdAt,
+        row.assignee_email ? String(row.assignee_email) : null, responseNameToEmail,
+      );
+      const rosterResponses = new Map<string, number>();
+      for (const [email, hours] of Array.from(responseByPerson.entries())) {
+        if (!roster.some((e) => e.toLowerCase() === email)) continue;
+        rosterResponses.set(email, hours);
+        const acc = (peopleResponseTime[email] ??= { sum: 0, count: 0 });
+        acc.sum += hours;
         acc.count++;
       }
+      responseHoursByIssue.set(row.id, rosterResponses);
 
       if (isEntSmb) {
         const descText = stripHtml(row.description);
@@ -15472,9 +15441,9 @@ async function _handleJiraPgApi(
         // H:MM:SS now, and 6-minute rounding zeroed out real sub-3-minute
         // averages.
         avgResolutionHours: ip && ip.count > 0 ? Math.round((ip.sum / ip.count) * 3600) / 3600 : null,
-        // How fast this person actually picks up a ticket once it lands in
-        // their department -- see computeResponseTimeHours/peopleResponseTime
-        // construction above. Averaged across only the tickets they've
+        // How fast this person moves a ticket Open -> In Progress once it's
+        // assigned to them -- see computeAssigneeResponseTimes/
+        // peopleResponseTime construction above. Averaged across only the tickets they've
         // actually started (null tickets don't count, same "don't drag the
         // average down with a fake 0" reasoning as avgResolutionHours).
         avgResponseTimeHours: rt && rt.count > 0 ? Math.round((rt.sum / rt.count) * 3600) / 3600 : null,
@@ -15535,13 +15504,20 @@ async function _handleJiraPgApi(
       updated: r.updatedAt,
       resolved: r.resolvedAt,
       rb: !!slaById.get(r.id),
-      // Same per-ticket computeResponseTimeHours the per-person average
-      // above is built from -- shown per row in the drill-down table so
-      // "why is my average X" is answerable without leaving the page.
-      // statusHistByIssue already covers every id here: ticketRows is
-      // always a subset of slaCandidatesRes.rows (same base dept+roster+
-      // date WHERE clause, this query only narrows it further).
-      responseTimeHours: computeResponseTimeHours(statusHistByIssue[r.id] || [], r.dept_sla_started_at, r.createdAt)?.hours ?? null,
+      // The same per-person value the average above is built from, shown
+      // per row so "why is my average X" is answerable from the drill-down:
+      // the drilled-into person's own response when a person is selected,
+      // else the current assignee's, else whichever team member responded.
+      // responseHoursByIssue covers every id here: ticketRows is always a
+      // subset of slaCandidatesRes.rows (same base WHERE clause).
+      responseTimeHours: (() => {
+        const m = responseHoursByIssue.get(r.id);
+        if (!m || m.size === 0) return null;
+        if (person) return m.get(person) ?? null;
+        const assigneeEmail = responseNameToEmail.get(String(r.assignee_name || '').trim().toLowerCase());
+        if (assigneeEmail && m.has(assigneeEmail)) return m.get(assigneeEmail)!;
+        return Array.from(m.values())[0];
+      })(),
       };
     });
 
