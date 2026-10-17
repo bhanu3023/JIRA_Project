@@ -1369,7 +1369,7 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
     ];
     for (const { team, dept } of oneToOneChecks) {
       const [mbr, filters] = await Promise.all([
-        get(`/reports/mbr-team?team=${team}&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+        get(`/reports/mbr-team?team=${team}&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
         get(`/issues?spaceKey=TESTIN&dept=${dept}&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`),
       ]);
       const mbrTotal = mbr?.summary?.total;
@@ -1380,8 +1380,8 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
     }
 
     const [ent, smb, migrationFilters] = await Promise.all([
-      get(`/reports/mbr-team?team=ent&dateFrom=${dateFrom}&dateTo=${dateTo}`),
-      get(`/reports/mbr-team?team=smb&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+      get(`/reports/mbr-team?team=ent&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
+      get(`/reports/mbr-team?team=smb&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
       get(`/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`),
     ]);
     const entTotal: number = ent?.summary?.total ?? 0;
@@ -5791,11 +5791,19 @@ async function _handleJiraPgApi(
     // All authenticated users can list users (needed for queue member search)
     const [users, statusRows] = await Promise.all([
       db.user.findMany({ orderBy: { firstName: 'asc' } }),
-      pool.query(`SELECT id, status FROM users`).catch(() => ({ rows: [] as any[] })),
+      pool.query(`SELECT id, status, manager_id FROM users`)
+        .catch(() => pool.query(`SELECT id, status FROM users`))
+        .catch(() => ({ rows: [] as any[] })),
     ]);
     const statusMap: Record<string, string> = {};
-    for (const r of statusRows.rows) statusMap[r.id] = r.status;
-    return json(users.map(u => ({ ...formatUser(u), status: statusMap[u.id] || (u.isActive ? 'active' : 'inactive') })));
+    const managerMap: Record<string, string | null> = {};
+    for (const r of statusRows.rows) { statusMap[r.id] = r.status; managerMap[r.id] = r.manager_id || null; }
+    return json(users.map(u => ({
+      ...formatUser(u),
+      status: statusMap[u.id] || (u.isActive ? 'active' : 'inactive'),
+      // Who approves this user's KB articles (raw column, added in kb-api.ts).
+      managerId: managerMap[u.id] || null,
+    })));
   }
 
   if (path === 'users' && method === 'POST') {
@@ -5839,8 +5847,25 @@ async function _handleJiraPgApi(
     if (body.displayName !== undefined) data.displayName = String(body.displayName);
     if (body.avatarUrl !== undefined) data.avatarUrl = body.avatarUrl ? String(body.avatarUrl) : null;
     if (body.password !== undefined) data.password = await hashPassword(String(body.password));
+    // Manager = who approves this user's KB articles. Admin-only; raw column.
+    let managerId: string | null | undefined;
+    if (body.managerId !== undefined) {
+      if (!isAdmin) return json({ error: 'Only admins can change a manager' }, 403);
+      managerId = body.managerId ? String(body.managerId) : null;
+      if (managerId === id) return json({ error: 'Someone can’t be their own manager' }, 400);
+      if (managerId && !(await db.user.findUnique({ where: { id: managerId }, select: { id: true } }))) {
+        return json({ error: 'Manager not found' }, 400);
+      }
+    }
     try {
-      const user = await db.user.update({ where: { id }, data });
+      const user = Object.keys(data).length
+        ? await db.user.update({ where: { id }, data })
+        : await db.user.findUniqueOrThrow({ where: { id } });
+      if (managerId !== undefined) {
+        await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_id TEXT`);
+        await pool.query(`UPDATE users SET manager_id = $1 WHERE id = $2`, [managerId, id]);
+        return json({ ...formatUser(user), managerId });
+      }
       return json(formatUser(user));
     } catch {
       return json({ error: 'Not found' }, 404);
@@ -13754,16 +13779,16 @@ async function _handleJiraPgApi(
     const dateTo     = url.searchParams.get('dateTo') || '';
     const staleDays  = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
-    // Matches createdAt OR updatedAt -- MBR's date range means "touched" here,
-    // same as Filters' own "Queue: X" scope with BOTH its Created and Updated
-    // filters active at once (see queueMembersOnlyParam's dateClause union
-    // and deptScopeSql's origin-OR-updated union above in this file). MBR has
-    // no separate Created/Updated toggle the way Filters does, so its one
-    // date range is applied to both fields and OR'd together -- the same
-    // convention as reports/mbr-team's team tabs below. (This handler used to
-    // pin to updatedAt only, to match Filters' Updated-only mode specifically
-    // -- that's no longer the comparison point now that both fields are
-    // meant to count.)
+    // Matches createdAt OR resolvedAt -- a ticket belongs to MBR's date range
+    // if it was raised in it, or resolved in it (e.g. created Aug 29, resolved
+    // Sep 5 counts for September). Used to be createdAt OR updatedAt, but
+    // updatedAt moves on ANY touch (a comment, a worklog, a hand-off), so
+    // months-old tickets merely commented on in range kept flooding every
+    // tab. Same rule as reports/mbr-team's team tabs below. A done ticket
+    // with no resolvedAt (old Jira imports with no resolutiondate) is
+    // deliberately NOT counted as resolved in range -- no evidence of when it
+    // was actually resolved, and guessing from history/import timestamps
+    // would put import-day noise into whatever month the import ran.
     // Anchored to IST (+05:30), not parsed as bare UTC -- a bare
     // "YYYY-MM-DD" string is parsed as UTC midnight by Date's ISO handling,
     // which is 5:30 AM IST, not midnight IST. This app's users operate in
@@ -13796,10 +13821,10 @@ async function _handleJiraPgApi(
     let dateClause = '';
     if (fromIdx || toIdx) {
       const createdConds: string[] = [];
-      const updatedConds: string[] = [];
-      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
-      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
-      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
+      const resolvedConds: string[] = [];
+      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); resolvedConds.push(`i."resolvedAt"::date >= $${fromIdx}::date`); }
+      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   resolvedConds.push(`i."resolvedAt"::date <= $${toIdx}::date`); }
+      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${resolvedConds.join(' AND ')}))`;
     }
     let deptClause = '';
     let personDeptClause = '';
@@ -13957,7 +13982,7 @@ async function _handleJiraPgApi(
       SELECT i.id, COALESCE(i.cf_key, i.key) AS key, sp.name AS project_name, i.current_department AS dept,
         COALESCE(NULLIF(TRIM(au."firstName" || ' ' || au."lastName"), ''), au.email) AS assignee_name,
         COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
-        s.name AS status_name, i.summary, i."createdAt", i."updatedAt",
+        s.name AS status_name, i.summary, i."createdAt", i."updatedAt", i."resolvedAt",
         COUNT(*) OVER() AS total_matched
       FROM issues i
       LEFT JOIN statuses s ON i."statusId" = s.id
@@ -13981,6 +14006,7 @@ async function _handleJiraPgApi(
       summary: r.summary || '',
       created: r.createdAt,
       updated: r.updatedAt,
+      resolved: r.resolvedAt,
       slaBreached: !!slaBreachedByIssue[r.id],
     }));
 
@@ -14054,11 +14080,10 @@ async function _handleJiraPgApi(
   // *and* assignee in that team's hardcoded roster (real team membership,
   // not just whoever happened to touch a Dev/QA/Infra-tagged ticket) — the
   // roster is the source of truth given to us for these three tabs.
-  // "Touched in range" = createdAt or updatedAt falls inside [dateFrom, dateTo]
+  // "In range" = createdAt or resolvedAt falls inside [dateFrom, dateTo]
   // for the overall total/summary/tickets (same convention as reports/mbr
-  // above); the monthly trend instead buckets strictly by createdAt within
-  // that same window, so a ticket only merely *updated* in range doesn't
-  // make some earlier month bleed into the trend. There's no
+  // above); the monthly trend buckets by createdAt when that's in range,
+  // else by resolvedAt (see monthlyBucketExpr). There's no
   // first-response-SLA column on `issues` (only jira_sla_breached/_due_at/
   // _start_at, which track resolution SLA), so frbBreached/frbTracked always
   // come back 0/0 — kept in the response shape for the frontend, not because
@@ -14342,17 +14367,16 @@ async function _handleJiraPgApi(
     const istTo   = dateTo   ? new Date(`${dateTo}T23:59:59.999+05:30`) : null;
     if (istFrom) { baseParams.push(istFrom); fromIdx = baseParams.length; }
     if (istTo)   { baseParams.push(istTo);   toIdx = baseParams.length; }
-    // Matches createdAt OR updatedAt -- "touched" -- same as Filters' own
-    // "Queue: X" scope with BOTH its Created and Updated filters active at
-    // once (see queueMembersOnlyParam's dateClause union and deptScopeSql's
-    // origin-OR-updated union above in this file: "Confirmed with the user
-    // this is meant to be a union instead: everything created in that
-    // window, plus everything updated in that window"). There's no separate
-    // Created/Updated toggle here the way Filters has one, so the one range
-    // is applied to both fields and OR'd, same as reports/mbr above. (This
-    // used to be pinned to updatedAt only, to match Filters' Updated-only
-    // mode specifically -- no longer the comparison point now that both
-    // fields are meant to count.)
+    // Matches createdAt OR resolvedAt -- raised in range, or resolved in range
+    // -- same rule as reports/mbr above (see its comment for why updatedAt was
+    // dropped: any touch moves it, so old tickets merely commented on in
+    // range flooded every tab). dateMode=touched restores the old createdAt
+    // OR updatedAt union; only the daily MBR-vs-Filters consistency check
+    // uses it, since Filters itself has no resolved-date filter to compare
+    // the new rule against -- that check is about department/roster scope
+    // agreeing, not about which date field counts.
+    const dateMode = url.searchParams.get('dateMode') === 'touched' ? 'touched' : 'resolved';
+    const secondDateCol = dateMode === 'touched' ? 'updatedAt' : 'resolvedAt';
     let dateClause = '';
     const createdConds: string[] = [];
     const updatedConds: string[] = [];
@@ -14370,8 +14394,8 @@ async function _handleJiraPgApi(
       // '...T21:05Z'::date is still '...-07-31' in UTC. Same IST-anchoring
       // fix already applied to Filters' own parseDateRange, applied here so
       // the two pages agree on where a calendar day starts and ends.
-      if (fromIdx) { createdConds.push(`i."createdAt" >= $${fromIdx}`); updatedConds.push(`i."updatedAt" >= $${fromIdx}`); }
-      if (toIdx)   { createdConds.push(`i."createdAt" <= $${toIdx}`);   updatedConds.push(`i."updatedAt" <= $${toIdx}`); }
+      if (fromIdx) { createdConds.push(`i."createdAt" >= $${fromIdx}`); updatedConds.push(`i."${secondDateCol}" >= $${fromIdx}`); }
+      if (toIdx)   { createdConds.push(`i."createdAt" <= $${toIdx}`);   updatedConds.push(`i."${secondDateCol}" <= $${toIdx}`); }
       dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
     // Bucket by whichever field actually put this ticket in range, preferring
@@ -14401,7 +14425,7 @@ async function _handleJiraPgApi(
     // to_char reads the calendar month is the same zero-dependency trick
     // monthLabelFor already uses in JS.
     const monthlyBucketExpr = (fromIdx || toIdx)
-      ? `(CASE WHEN (${createdConds.join(' AND ')}) THEN i."createdAt" ELSE i."updatedAt" END + interval '5 hours 30 minutes')`
+      ? `(CASE WHEN (${createdConds.join(' AND ')}) THEN i."createdAt" ELSE i."${secondDateCol}" END + interval '5 hours 30 minutes')`
       : `(i."createdAt" + interval '5 hours 30 minutes')`;
 
     // Deliberately mirrors the Filters page's own "Queue: <dept>" matching
@@ -14923,7 +14947,7 @@ async function _handleJiraPgApi(
           NOT (au.id IS NOT NULL AND LOWER(au.email) = ANY($2::text[])) AS assignee_outside_roster,
           ${personHistoryFlagSql} AS matched_via_person_history,
           COALESCE(NULLIF(TRIM(ru."firstName" || ' ' || ru."lastName"), ''), ru.email) AS reporter_name,
-          s.name AS status_name, i.summary, i."createdAt", i."updatedAt", i.dept_sla_started_at,
+          s.name AS status_name, i.summary, i."createdAt", i."updatedAt", i."resolvedAt", i.dept_sla_started_at,
           COUNT(*) OVER() AS total_matched
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
@@ -15043,7 +15067,7 @@ async function _handleJiraPgApi(
         // Monthly summary even though the date filter was set to August
         // only and the ticket correctly appears in the August-scoped total.
         const createdInRange = (!istFrom || d.getTime() >= istFrom.getTime()) && (!istTo || d.getTime() <= istTo.getTime());
-        if (!createdInRange) d = new Date(row.updatedAt);
+        if (!createdInRange) d = new Date(row[secondDateCol]);
       }
       // The label itself also needs IST's calendar month, not UTC's -- the
       // same 2026-07-31T21:05Z example is "Aug 2026" to every actual user
@@ -15298,6 +15322,7 @@ async function _handleJiraPgApi(
       summary: r.summary || '',
       created: r.createdAt,
       updated: r.updatedAt,
+      resolved: r.resolvedAt,
       rb: !!slaById.get(r.id),
       // Same per-ticket computeResponseTimeHours the per-person average
       // above is built from -- shown per row in the drill-down table so

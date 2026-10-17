@@ -10,13 +10,20 @@
  *
  * Only the author and admins can edit, delete, or change who has access.
  * Drafts are visible only to their author and to admins.
+ *
+ * Publishing needs approval: a non-admin's "publish" submits the article
+ * (status 'pending') to their manager -- users.manager_id, set by an admin in
+ * Settings > Users -- or, if they have no manager, to any admin. Only once
+ * the approver approves does it go live and notify the chosen audience.
+ * Admins publish directly. A rejected article goes back to draft with the
+ * approver's note.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { pgPool as pool } from '@/lib/pg-pool';
 import { db } from '@/lib/db';
 import { mentionedIds, plainMentions } from '@/lib/kb-mentions';
-import { notifyKbArticlePublished } from '@/lib/notification-service';
+import { notifyKbApproval, notifyKbArticlePublished } from '@/lib/notification-service';
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_QA_CHARS = 4000;
@@ -74,11 +81,22 @@ const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
   // documents and questions, just listed separately.
   .then(() => pool.query(`ALTER TABLE kb_articles ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'kb'`))
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS kb_articles_kind_idx ON kb_articles(kind)`))
+  // Approval workflow. approver_id is the manager the request went to (NULL =
+  // any admin); review_note is the reason given when changes were requested.
+  .then(() => pool.query(`ALTER TABLE kb_articles
+    ADD COLUMN IF NOT EXISTS approver_id TEXT,
+    ADD COLUMN IF NOT EXISTS approver_name TEXT,
+    ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS review_note TEXT,
+    ADD COLUMN IF NOT EXISTS reviewed_by_name TEXT`))
+  .then(() => pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_id TEXT`))
   .catch((e) => { console.error('[kb] schema setup failed:', e?.message || e); });
 
 // Same row the bell in Header.tsx polls for. KB_* notifications carry the
 // article id in issueKey; Header routes those to /kb instead of /issues.
-async function notify(userId: string, type: 'KB_QUESTION' | 'KB_ANSWER' | 'KB_MENTION', title: string, message: string, articleId: string) {
+type KbNotificationType = 'KB_QUESTION' | 'KB_ANSWER' | 'KB_MENTION' | 'KB_APPROVAL' | 'KB_APPROVED' | 'KB_REJECTED';
+
+async function notify(userId: string, type: KbNotificationType, title: string, message: string, articleId: string) {
   if (!userId) return;
   try {
     await db.notification.create({ data: { userId, type, title, message, issueKey: articleId } });
@@ -237,7 +255,7 @@ function displayNameOf(user: any): string {
   return user.displayName || full || user.email || 'Unknown';
 }
 
-function formatArticle(row: any, teams: Map<string, Team>, canManage: boolean, includeBody: boolean) {
+function formatArticle(row: any, teams: Map<string, Team>, canManage: boolean, includeBody: boolean, canApprove = false) {
   const teamKeys: string[] = row.teams || [];
   return {
     id: row.id,
@@ -255,8 +273,71 @@ function formatArticle(row: any, teams: Map<string, Team>, canManage: boolean, i
     fileCount: Number(row.file_count || 0),
     questionCount: Number(row.question_count || 0),
     openQuestionCount: Number(row.open_question_count || 0),
+    // Approval: who it's waiting on (null name = any admin) while pending, and
+    // the approver's note after changes were requested.
+    approverName: row.status === 'pending' ? row.approver_name || null : null,
+    submittedAt: row.status === 'pending' ? row.submitted_at : null,
+    reviewNote: row.status === 'draft' ? row.review_note || null : null,
+    reviewedByName: row.status === 'draft' && row.review_note ? row.reviewed_by_name || null : null,
     canManage,
+    canApprove,
   };
+}
+
+// Who approves `authorId`'s articles: their manager (users.manager_id) when
+// that's an active user other than themselves, otherwise null = any admin.
+async function resolveApprover(authorId: string): Promise<{ id: string; name: string; email: string } | null> {
+  const managerId = (await pool.query(`SELECT manager_id FROM users WHERE id = $1`, [authorId])).rows[0]?.manager_id;
+  if (!managerId || managerId === authorId) return null;
+  const manager = await db.user.findFirst({ where: { id: managerId, isActive: true } });
+  return manager ? { id: manager.id, name: displayNameOf(manager), email: manager.email } : null;
+}
+
+async function activeAdmins() {
+  return db.user.findMany({ where: { isActive: true, role: 'admin' }, select: { id: true, email: true } });
+}
+
+// Announces a newly published article by email and in-app notification,
+// naming who published it and linking straight to the article. Recipients
+// follow the access chosen at publish time: "Entire organization" goes to
+// every active user; specific teams go only to those teams' members. Runs
+// fire-and-forget -- callers don't wait on hundreds of individual email sends.
+function announcePublished(published: any) {
+  (async () => {
+    try {
+      const users = await db.user.findMany({ where: { isActive: true }, select: { id: true, email: true } });
+      let recipients = users;
+      if (published.visibility !== 'org') {
+        const teams = await loadTeams();
+        const memberIds = new Set<string>();
+        for (const key of (published.teams || []) as string[]) {
+          teams.get(key)?.memberIds.forEach((memberId) => memberIds.add(memberId));
+        }
+        recipients = users.filter((u) => memberIds.has(u.id));
+      }
+      if (!recipients.length) return;
+      const typeLabel = published.kind === 'release' ? 'Release Note' : 'KB Article';
+      await db.notification.createMany({
+        data: recipients.map((u) => ({
+          userId: u.id,
+          type: 'KB_PUBLISHED',
+          title: `New ${typeLabel}: ${published.title}`,
+          message: `Published by ${published.author_name}`,
+          issueKey: published.id,
+        })),
+      });
+      await notifyKbArticlePublished({
+        articleId: published.id,
+        title: published.title,
+        kind: published.kind === 'release' ? 'release' : 'article',
+        authorName: published.author_name,
+        summary: excerptOf(published.body_html, 200),
+        recipientEmails: recipients.map((u) => u.email),
+      });
+    } catch (e: any) {
+      console.error('[KB] Publish announcement failed:', e?.message || e);
+    }
+  })();
 }
 
 // Per-article counts, joined onto every article row we return.
@@ -302,10 +383,28 @@ export async function handleKbApi(
   await kbSchemaReady;
 
   const canManage = (row: any) => isAdmin || row.author_id === userId;
+  // A pending article waits on its manager (approver_id), or any admin when
+  // the author has no manager.
+  const canApprove = (row: any) =>
+    row.status === 'pending' && row.author_id !== userId && (isAdmin || (!!row.approver_id && row.approver_id === userId));
   const canRead = (row: any, myTeams: string[]) =>
     canManage(row) ||
+    canApprove(row) ||
     (row.status === 'published' &&
       (row.visibility === 'org' || (row.teams || []).some((t: string) => myTeams.includes(t))));
+
+  // GET kb/me -- how publishing works for the current user: admins publish
+  // directly; everyone else submits to `approver` (null = any admin).
+  // `reviews` is true when the user may have articles to approve.
+  if (path === 'kb/me' && method === 'GET') {
+    const approver = isAdmin ? null : await resolveApprover(userId);
+    const reportCount = Number((await pool.query(`SELECT COUNT(*) FROM users WHERE manager_id = $1`, [userId])).rows[0]?.count || 0);
+    return json({
+      publishesDirectly: isAdmin,
+      approver: approver ? { id: approver.id, name: approver.name } : null,
+      reviews: isAdmin || reportCount > 0,
+    });
+  }
 
   // GET kb/teams -- every team a writer can publish to (names only, no member ids)
   if (path === 'kb/teams' && method === 'GET') {
@@ -317,7 +416,7 @@ export async function handleKbApi(
     );
   }
 
-  // GET kb/articles?kind=kb|release&q=&scope=all|mine|drafts
+  // GET kb/articles?kind=kb|release&q=&scope=all|mine|drafts|approvals
   if (path === 'kb/articles' && method === 'GET') {
     const scope = url.searchParams.get('scope') || 'all';
     const q = (url.searchParams.get('q') || '').trim();
@@ -327,8 +426,13 @@ export async function handleKbApi(
     const p = (v: any) => { params.push(v); return `$${params.length}`; };
     where.push(`a.kind = ${p(parseKind(url.searchParams.get('kind')))}`);
 
-    if (scope === 'drafts') {
-      where.push(`status = 'draft'`);
+    if (scope === 'approvals') {
+      // Articles waiting on me: as the author's manager, or as an admin.
+      where.push(`status = 'pending' AND author_id <> ${p(userId)}`);
+      if (!isAdmin) where.push(`approver_id = ${p(userId)}`);
+    } else if (scope === 'drafts') {
+      // Drafts include the ones submitted and waiting for approval.
+      where.push(`status IN ('draft', 'pending')`);
       if (!isAdmin) where.push(`author_id = ${p(userId)}`);
     } else if (scope === 'mine') {
       where.push(`author_id = ${p(userId)}`);
@@ -348,7 +452,7 @@ export async function handleKbApi(
       params,
     );
     const teams = await loadTeams();
-    return json(rows.rows.map((r) => formatArticle(r, teams, canManage(r), false)));
+    return json(rows.rows.map((r) => formatArticle(r, teams, canManage(r), false, canApprove(r))));
   }
 
   // POST kb/articles -- create a draft
@@ -367,10 +471,11 @@ export async function handleKbApi(
 
   // kb/articles/:id
   // kb/articles/:id/(publish|access)
+  // kb/articles/:id/(approve|reject|withdraw)
   // kb/articles/:id/files[/:fileId]
   // kb/articles/:id/questions[/:qid[/answer]]
   // kb/articles/:id/people?q=
-  const m = path.match(/^kb\/articles\/([^/]+)(?:\/(publish|access|files|questions|people)(?:\/([^/]+)(?:\/(answer))?)?)?$/);
+  const m = path.match(/^kb\/articles\/([^/]+)(?:\/(publish|access|approve|reject|withdraw|files|questions|people)(?:\/([^/]+)(?:\/(answer))?)?)?$/);
   if (!m) return json({ error: 'Not found' }, 404);
   const id = m[1];
   const action = m[2] || null;
@@ -385,10 +490,82 @@ export async function handleKbApi(
   const myTeams = await getUserTeamKeys(userId);
   if (!canRead(article, myTeams)) return json({ error: 'Article not found' }, 404);
   const manager = canManage(article);
+  // While an article waits for approval its author can't change it -- the
+  // approver should publish exactly what they reviewed. Withdrawing the
+  // request puts it back to draft for editing. Admins aren't held to this.
+  const lockedForReview = article.status === 'pending' && !isAdmin;
 
   if (!action && method === 'GET') {
     const files = await pool.query(`SELECT * FROM kb_files WHERE article_id = $1 ORDER BY created_at`, [id]);
-    return json({ ...formatArticle(article, await loadTeams(), manager, true), files: files.rows.map(formatFile) });
+    return json({ ...formatArticle(article, await loadTeams(), manager, true, canApprove(article)), files: files.rows.map(formatFile) });
+  }
+
+  // ── Approval ─────────────────────────────────────────────────────────────
+  if ((action === 'approve' || action === 'reject' || action === 'withdraw') && method !== 'POST') {
+    return json({ error: 'Method not allowed' }, 405);
+  }
+
+  // POST kb/articles/:id/approve -- the approver publishes it to the
+  // audience the author chose, and that audience is notified.
+  if (action === 'approve') {
+    if (!canApprove(article)) return json({ error: 'Only the author’s manager or an admin can approve this' }, 403);
+    const approverName = displayNameOf(currentUser);
+    const row = await pool.query(
+      `UPDATE kb_articles SET status = 'published', published_at = COALESCE(published_at, NOW()), updated_at = NOW(),
+         review_note = NULL, reviewed_by_name = $2
+       WHERE id = $1 AND status = 'pending' RETURNING *`,
+      [id, approverName],
+    );
+    const published = row.rows[0];
+    if (!published) return json({ error: 'This is no longer waiting for approval' }, 409);
+    announcePublished(published);
+    const kindLabel = published.kind === 'release' ? 'release note' : 'article';
+    await notify(published.author_id, 'KB_APPROVED', `${approverName} approved your ${kindLabel} "${clip(published.title, 80)}"`, 'It is now published.', id);
+    const author = await db.user.findUnique({ where: { id: published.author_id }, select: { email: true } });
+    notifyKbApproval({
+      recipientEmails: author?.email ? [author.email] : [],
+      event: 'approved', articleId: id, title: published.title,
+      kind: published.kind === 'release' ? 'release' : 'article', actorName: approverName,
+    }).catch((e) => console.error('[KB] Approval email failed:', e?.message || e));
+    return json(formatArticle({ ...article, ...published }, await loadTeams(), manager, true, false));
+  }
+
+  // POST kb/articles/:id/reject {note} -- back to the author's drafts with a reason.
+  if (action === 'reject') {
+    if (!canApprove(article)) return json({ error: 'Only the author’s manager or an admin can review this' }, 403);
+    const body: any = await req.json().catch(() => ({}));
+    const note = String(body.note || '').trim();
+    if (!note) return json({ error: 'Tell the author what needs to change' }, 400);
+    if (note.length > MAX_QA_CHARS) return json({ error: `Notes are limited to ${MAX_QA_CHARS} characters` }, 400);
+    const reviewerName = displayNameOf(currentUser);
+    const row = await pool.query(
+      `UPDATE kb_articles SET status = 'draft', review_note = $2, reviewed_by_name = $3, updated_at = NOW()
+       WHERE id = $1 AND status = 'pending' RETURNING *`,
+      [id, note, reviewerName],
+    );
+    const updated = row.rows[0];
+    if (!updated) return json({ error: 'This is no longer waiting for approval' }, 409);
+    const kindLabel = updated.kind === 'release' ? 'release note' : 'article';
+    await notify(updated.author_id, 'KB_REJECTED', `${reviewerName} requested changes to your ${kindLabel} "${clip(updated.title, 80)}"`, clip(note, 140), id);
+    const author = await db.user.findUnique({ where: { id: updated.author_id }, select: { email: true } });
+    notifyKbApproval({
+      recipientEmails: author?.email ? [author.email] : [],
+      event: 'rejected', articleId: id, title: updated.title,
+      kind: updated.kind === 'release' ? 'release' : 'article', actorName: reviewerName, note,
+    }).catch((e) => console.error('[KB] Rejection email failed:', e?.message || e));
+    return json(formatArticle({ ...article, ...updated }, await loadTeams(), manager, true, false));
+  }
+
+  // POST kb/articles/:id/withdraw -- the author takes back a pending request.
+  if (action === 'withdraw') {
+    if (!manager) return json({ error: 'Only the author or an admin can withdraw this' }, 403);
+    const row = await pool.query(
+      `UPDATE kb_articles SET status = 'draft', review_note = NULL, updated_at = NOW()
+       WHERE id = $1 AND status = 'pending' RETURNING *`,
+      [id],
+    );
+    if (!row.rows[0]) return json({ error: 'This is not waiting for approval' }, 409);
+    return json(formatArticle({ ...article, ...row.rows[0] }, await loadTeams(), true, true, false));
   }
 
   // ── People to @mention ───────────────────────────────────────────────────
@@ -449,6 +626,7 @@ export async function handleKbApi(
     }
 
     if (!manager) return json({ error: 'Only the author or an admin can change documents' }, 403);
+    if (lockedForReview) return json({ error: 'Waiting for approval. Withdraw the request to make changes.' }, 409);
 
     // POST kb/articles/:id/files  (multipart field "file")
     if (!subId && method === 'POST') {
@@ -589,6 +767,7 @@ export async function handleKbApi(
   }
 
   if (!action && method === 'PUT') {
+    if (lockedForReview) return json({ error: 'Waiting for approval. Withdraw the request to make changes.' }, 409);
     const body: any = await req.json().catch(() => ({}));
     const title = body.title !== undefined ? String(body.title).trim() : article.title;
     if (!title) return json({ error: 'Title is required' }, 400);
@@ -612,64 +791,65 @@ export async function handleKbApi(
   }
 
   // POST kb/articles/:id/publish  {visibility, teams}
+  // Admins publish straight away. Anyone else submits the article for
+  // approval: it goes to 'pending' with the chosen audience saved, and is
+  // published -- and that audience notified -- only when the approver approves.
   if (action === 'publish' && method === 'POST') {
+    if (lockedForReview) return json({ error: 'This is already waiting for approval' }, 409);
     const access = await parseAccess(await req.json().catch(() => ({})));
     if ('error' in access) return json({ error: access.error }, 400);
-    // Only true the FIRST time this article goes live -- publishing again
-    // after an edit (status was already 'published') shouldn't re-announce
-    // it to the whole org a second time. published_at is already
-    // COALESCE'd to preserve the original publish moment for exactly this
-    // reason; this mirrors that same "first time only" rule for the
-    // announcement itself.
-    const wasAlreadyPublished = (await pool.query(`SELECT status FROM kb_articles WHERE id = $1`, [id])).rows[0]?.status === 'published';
-    const row = await pool.query(
-      `UPDATE kb_articles SET status = 'published', visibility = $2, teams = $3,
-         published_at = COALESCE(published_at, NOW()), updated_at = NOW()
-       WHERE id = $1 RETURNING *`,
-      [id, access.visibility, access.teams],
-    );
-    const published = row.rows[0];
 
-    // By explicit request: every KB article/Release Note publish announces
-    // to EVERYONE with access to the app (not just the author's team or
-    // whoever happens to be watching), by email and in-app notification,
-    // naming who published it and linking straight to the article. Runs
-    // fire-and-forget -- the publish response doesn't wait on hundreds of
-    // individual email sends.
-    if (!wasAlreadyPublished) {
-      (async () => {
-        try {
-          const recipients = await db.user.findMany({ where: { isActive: true }, select: { id: true, email: true } });
-          if (!recipients.length) return;
-          const typeLabel = published.kind === 'release' ? 'Release Note' : 'KB Article';
-          await db.notification.createMany({
-            data: recipients.map((u) => ({
-              userId: u.id,
-              type: 'KB_PUBLISHED',
-              title: `New ${typeLabel}: ${published.title}`,
-              message: `Published by ${published.author_name}`,
-              issueKey: published.id,
-            })),
-          });
-          await notifyKbArticlePublished({
-            articleId: published.id,
-            title: published.title,
-            kind: published.kind === 'release' ? 'release' : 'article',
-            authorName: published.author_name,
-            summary: excerptOf(published.body_html, 200),
-            recipientEmails: recipients.map((u) => u.email),
-          });
-        } catch (e: any) {
-          console.error('[KB] Publish announcement failed:', e?.message || e);
-        }
-      })();
+    // Already live: this only changes who can read it (same as PATCH access),
+    // and doesn't re-announce it.
+    if (article.status === 'published') {
+      const row = await pool.query(
+        `UPDATE kb_articles SET visibility = $2, teams = $3, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        [id, access.visibility, access.teams],
+      );
+      return json(formatArticle({ ...article, ...row.rows[0] }, await loadTeams(), true, true));
     }
 
-    return json(formatArticle(published, await loadTeams(), true, true));
+    if (isAdmin) {
+      const row = await pool.query(
+        `UPDATE kb_articles SET status = 'published', visibility = $2, teams = $3,
+           published_at = COALESCE(published_at, NOW()), updated_at = NOW(), review_note = NULL
+         WHERE id = $1 RETURNING *`,
+        [id, access.visibility, access.teams],
+      );
+      const published = row.rows[0];
+      announcePublished(published);
+      return json(formatArticle({ ...article, ...published }, await loadTeams(), true, true));
+    }
+
+    const approver = await resolveApprover(article.author_id);
+    const row = await pool.query(
+      `UPDATE kb_articles SET status = 'pending', visibility = $2, teams = $3, approver_id = $4, approver_name = $5,
+         submitted_at = NOW(), review_note = NULL, reviewed_by_name = NULL, updated_at = NOW()
+       WHERE id = $1 RETURNING *`,
+      [id, access.visibility, access.teams, approver?.id || null, approver?.name || null],
+    );
+    const pending = row.rows[0];
+
+    // Tell whoever has to approve it: the manager, or every admin when the
+    // author has no manager set.
+    const reviewers = (approver ? [approver] : await activeAdmins()).filter((r) => r.id !== userId);
+    const authorName = displayNameOf(currentUser);
+    const kindLabel = pending.kind === 'release' ? 'release note' : 'article';
+    for (const r of reviewers) {
+      await notify(r.id, 'KB_APPROVAL', `${authorName} needs your approval to publish the ${kindLabel} "${clip(pending.title, 80)}"`, excerptOf(pending.body_html, 140), id);
+    }
+    notifyKbApproval({
+      recipientEmails: reviewers.map((r) => r.email),
+      event: 'requested', articleId: id, title: pending.title,
+      kind: pending.kind === 'release' ? 'release' : 'article', actorName: authorName,
+    }).catch((e) => console.error('[KB] Approval request email failed:', e?.message || e));
+
+    return json(formatArticle({ ...article, ...pending }, await loadTeams(), true, true));
   }
 
   // PATCH kb/articles/:id/access  {visibility, teams} -- add/remove teams or go org-wide
   if (action === 'access' && method === 'PATCH') {
+    if (lockedForReview) return json({ error: 'Waiting for approval. Withdraw the request to make changes.' }, 409);
     const access = await parseAccess(await req.json().catch(() => ({})));
     if ('error' in access) return json({ error: access.error }, 400);
     const row = await pool.query(

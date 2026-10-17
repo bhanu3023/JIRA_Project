@@ -1133,3 +1133,69 @@ export async function notifyKbArticlePublished(opts: {
   }
   console.log(`[Notification] ${typeLabel} published "${opts.title}" → ${uniqueEmails.length} recipients`);
 }
+
+function escapeHtml(s: string) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
+
+/**
+ * KB approval workflow emails: the request sent to the author's manager, and
+ * the approved / changes-requested outcome sent back to the author.
+ */
+export async function notifyKbApproval(opts: {
+  recipientEmails: string[];
+  event: 'requested' | 'approved' | 'rejected';
+  articleId: string;
+  title: string;
+  kind: 'article' | 'release';
+  actorName: string;
+  note?: string | null;
+}) {
+  const uniqueEmails = Array.from(new Set(opts.recipientEmails.filter(Boolean)));
+  if (!uniqueEmails.length) return;
+
+  const typeLabel = opts.kind === 'release' ? 'Release Note' : 'KB Article';
+  const articleUrl = `${APP_URL}/kb?id=${opts.articleId}`;
+  const copy = {
+    requested: { banner: 'Approval needed', color: '#D97706', subject: `Approval needed: ${opts.title}`, line: `${opts.actorName} submitted this ${typeLabel.toLowerCase()} for your approval. It will be published only after you approve it.`, link: 'Review and approve →' },
+    approved:  { banner: 'Approved and published', color: '#059669', subject: `Approved: ${opts.title}`, line: `${opts.actorName} approved your ${typeLabel.toLowerCase()}. It is now published.`, link: `View ${typeLabel.toLowerCase()} →` },
+    rejected:  { banner: 'Changes requested', color: '#DC2626', subject: `Changes requested: ${opts.title}`, line: `${opts.actorName} did not approve your ${typeLabel.toLowerCase()}. It is back in your drafts.`, link: `Open ${typeLabel.toLowerCase()} →` },
+  }[opts.event];
+  const noteHtml = opts.note
+    ? `<p style="margin:12px 0 0;padding:10px 12px;background:#f4f5f7;border-radius:6px;font-size:14px;color:#444;line-height:1.5">${escapeHtml(opts.note)}</p>`
+    : '';
+
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:Arial,sans-serif">
+  <div style="max-width:600px;margin:24px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.1)">
+    <div style="background:#0052CC;padding:16px 24px">
+      <span style="color:white;font-size:18px;font-weight:bold">${FROM_NAME}</span>
+    </div>
+    <div style="background:${copy.color};padding:10px 24px">
+      <span style="color:white;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">${copy.banner}</span>
+    </div>
+    <div style="padding:20px 24px">
+      <a href="${articleUrl}" style="text-decoration:none">
+        <h2 style="margin:0;font-size:18px;color:#172B4D;line-height:1.3">${escapeHtml(opts.title)}</h2>
+      </a>
+      <p style="margin:8px 0 0;font-size:14px;color:#444;line-height:1.5">${escapeHtml(copy.line)}</p>
+      ${noteHtml}
+    </div>
+    <div style="padding:0 24px 24px">
+      <a href="${articleUrl}" style="color:#0052CC;font-size:14px;text-decoration:none">${copy.link}</a>
+    </div>
+    <div style="padding:16px 24px;background:#f9fafb;border-top:1px solid #eee">
+      <p style="margin:0;font-size:11px;color:#999">${APP_URL}</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  const text = `${copy.line}\n${opts.title}\n${opts.note ? `Note: ${opts.note}\n` : ''}${articleUrl}`;
+  for (const email of uniqueEmails) {
+    await sendNotification([email], copy.subject, html, text);
+  }
+  console.log(`[Notification] KB approval ${opts.event} "${opts.title}" → ${uniqueEmails.length} recipients`);
+}

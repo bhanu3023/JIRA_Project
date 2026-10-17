@@ -355,6 +355,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                         t.key, t.project, t.assignee, t.status, t.summary, t.reporter,
                         t.created ? new Date(t.created).toLocaleString() : '',
                         t.updated ? new Date(t.updated).toLocaleString() : '',
+                        t.resolved ? new Date(t.resolved).toLocaleString() : '',
                         t.rb === true ? 'Yes' : t.rb === false ? 'No' : 'N/A',
                         t.matchedViaPersonHistory ? 'Yes' : 'No',
                       ]);
@@ -362,7 +363,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   }
                   downloadCsv(
                     `mbr-${team}-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
-                    ['Person', 'Person Email', 'Ticket', 'Board', 'Current Assignee', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'Resolution SLA Breached', 'Historical Credit Only'],
+                    ['Person', 'Person Email', 'Ticket', 'Board', 'Current Assignee', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'Resolved', 'Resolution SLA Breached', 'Historical Credit Only'],
                     rows,
                   );
                   if (truncated.length) {
@@ -501,6 +502,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Summary</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolved</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Open → In Progress, measured from arrival in this department">Response time (hrs)</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolution SLA breached</th>
                 </tr>
@@ -545,6 +547,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.resolved ? new Date(t.resolved).toLocaleDateString() : '—'}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.responseTimeHours === null || t.responseTimeHours === undefined ? '—' : t.responseTimeHours}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100">
                       {t.rb === true && <span className="font-semibold text-red-600">Yes</span>}
@@ -610,6 +613,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Summary</th>
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolved</th>
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Open → In Progress, measured from arrival in this department">Response time (hrs)</th>
                     </tr>
                   </thead>
@@ -652,6 +656,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.resolved ? new Date(t.resolved).toLocaleDateString() : '—'}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.responseTimeHours === null || t.responseTimeHours === undefined ? '—' : t.responseTimeHours}</td>
                       </tr>
                     ))}
@@ -913,11 +918,12 @@ export default function MbrPage() {
                             t.dept, t.key, t.project, t.status, t.summary, t.reporter,
                             t.created ? new Date(t.created).toLocaleString() : '',
                             t.updated ? new Date(t.updated).toLocaleString() : '',
+                            t.resolved ? new Date(t.resolved).toLocaleString() : '',
                             t.slaBreached ? 'Yes' : 'No',
                           ]);
                         downloadCsv(
                           `mbr-tickets-by-person-${new Date().toISOString().slice(0, 10)}.csv`,
-                          ['Assignee', 'Assignee Email', 'Department', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'SLA Breached'],
+                          ['Assignee', 'Assignee Email', 'Department', 'Ticket', 'Board', 'Status', 'Summary', 'Reporter', 'Created', 'Updated', 'Resolved', 'SLA Breached'],
                           rows,
                         );
                         if (d.totalMatched > d.tickets.length) {
@@ -1014,6 +1020,7 @@ export default function MbrPage() {
                         <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Summary</th>
                         <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
                         <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
+                        <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolved</th>
                         <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">SLA breached</th>
                       </tr>
                     </thead>
@@ -1031,6 +1038,7 @@ export default function MbrPage() {
                           <td className="px-3 py-1.5 border-b border-gray-100 text-gray-800 max-w-[360px] truncate">{t.summary}</td>
                           <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
                           <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
+                          <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.resolved ? new Date(t.resolved).toLocaleDateString() : '—'}</td>
                           <td className="px-3 py-1.5 border-b border-gray-100">
                             {t.slaBreached ? <span className="font-semibold text-red-600">Yes</span> : <span className="font-medium text-green-600">No</span>}
                           </td>

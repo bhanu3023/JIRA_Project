@@ -374,7 +374,7 @@ export default function Header() {
                           className="flex-1 cursor-pointer min-w-0"
                           onClick={() => {
                             // KB question/answer notifications carry the article id in issueKey.
-                            if (n.type?.startsWith('KB_') && n.issueKey) router.push(`/kb?id=${encodeURIComponent(n.issueKey)}#questions`);
+                            if (n.type?.startsWith('KB_') && n.issueKey) router.push(`/kb?id=${encodeURIComponent(n.issueKey)}${['KB_QUESTION', 'KB_ANSWER', 'KB_MENTION'].includes(n.type) ? '#questions' : ''}`);
                             else if (n.issueKey) router.push(`/issues/${n.issueKey}`);
                             if (!n.isRead) { api.markRead(n.id); loadNotifications(); }
                             closeAll();

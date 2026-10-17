@@ -376,6 +376,20 @@ function SettingsContent() {
     }
   };
 
+  // Manager = who approves this user's KB articles before they're published.
+  const handleManagerChange = async (userId: string, managerId: string | null) => {
+    const target = users.find(u => u.id === userId);
+    const name = target ? `${target.firstName} ${target.lastName}`.trim() : 'User';
+    const manager = users.find(u => u.id === managerId);
+    try {
+      await api.updateUser(userId, { managerId });
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, managerId } : u));
+      pushUserToast(manager ? `${name}'s manager set to ${manager.firstName} ${manager.lastName}`.trim() : `${name} has no manager now`);
+    } catch (err: any) {
+      pushUserToast(err?.message || 'Failed to update manager', 'error');
+    }
+  };
+
   const handleProfileSave = async () => {
     setSaving(true);
     try {
@@ -2233,6 +2247,7 @@ function SettingsContent() {
                     <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[220px]">Name</th>
                     <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Email</th>
                     <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[160px]">Role</th>
+                    <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[180px]" title="Approves this user's KB articles and release notes before they're published">Manager</th>
                     <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[100px]">Status</th>
                     <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[110px]">Last seen</th>
                     <th className="px-4 py-2.5 text-right text-[11px] font-semibold text-gray-400 uppercase tracking-wider w-[80px]">Actions</th>
@@ -2285,6 +2300,19 @@ function SettingsContent() {
                             </>
                           )}
                         </div>
+                      </td>
+                      <td className="px-4 py-2.5 w-[180px]">
+                        <select
+                          value={u.managerId || ''}
+                          onChange={(e) => handleManagerChange(u.id, e.target.value || null)}
+                          title="Approves this user's KB articles and release notes"
+                          className={`w-full max-w-[180px] truncate rounded border border-transparent bg-transparent py-1 text-sm hover:border-gray-300 focus:border-blue-500 focus:outline-none ${u.managerId ? 'text-gray-700' : 'text-gray-400'}`}
+                        >
+                          <option value="">No manager</option>
+                          {users
+                            .filter(m => m.id !== u.id && (m.isActive !== false || m.id === u.managerId))
+                            .map(m => <option key={m.id} value={m.id}>{`${m.firstName} ${m.lastName}`.trim() || m.email}</option>)}
+                        </select>
                       </td>
                       <td className="px-4 py-2.5 w-[100px] whitespace-nowrap">
                         {(() => {

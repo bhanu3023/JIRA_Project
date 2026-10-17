@@ -3,13 +3,13 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useStore } from '@/store';
-import { api, type KbAccess, type KbArticle, type KbFile, type KbKind, type KbTeam } from '@/lib/api';
+import { api, type KbAccess, type KbArticle, type KbFile, type KbKind, type KbMe, type KbTeam } from '@/lib/api';
 import { sanitizeForDisplay } from '@/lib/kb-sanitize';
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import { KbDocumentEditor, KbDocumentList, FileIcon, downloadFile } from '@/components/kb/KbDocuments';
 import { KbFileViewer, viewKindOf } from '@/components/kb/KbFileViewer';
 import { KbQuestions } from '@/components/kb/KbQuestions';
-import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion, Maximize2, Minimize2, Download, Megaphone } from 'lucide-react';
+import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion, Maximize2, Minimize2, Download, Megaphone, Clock, CheckCircle2, AlertCircle } from 'lucide-react';
 
 // True when the editor HTML has something a reader would see (text or an image).
 function hasBodyContent(html: string) {
@@ -36,13 +36,24 @@ function KindIcon({ kind, size }: { kind: KbKind; size: number }) {
   return kind === 'release' ? <Megaphone size={size} /> : <BookOpen size={size} />;
 }
 
-type Scope = 'all' | 'mine' | 'drafts';
-function scopesFor(kind: KbKind): { id: Scope; label: string }[] {
+// How publishing works for the signed-in user: admins publish directly,
+// everyone else submits to their manager for approval.
+function useKbMe() {
+  const [me, setMe] = useState<KbMe | null>(null);
+  useEffect(() => {
+    api.getKbMe().then(setMe).catch(() => setMe({ publishesDirectly: false, approver: null, reviews: false }));
+  }, []);
+  return me;
+}
+
+type Scope = 'all' | 'mine' | 'drafts' | 'approvals';
+function scopesFor(kind: KbKind, reviews: boolean): { id: Scope; label: string }[] {
   const { many } = KINDS[kind];
   return [
     { id: 'all', label: `All ${many}` },
     { id: 'mine', label: `My ${many}` },
     { id: 'drafts', label: 'Drafts' },
+    ...(reviews ? [{ id: 'approvals' as Scope, label: 'Awaiting my approval' }] : []),
   ];
 }
 
@@ -52,8 +63,13 @@ function formatDate(d: string | null | undefined) {
 }
 
 function VisibilityBadge({ article }: { article: KbArticle }) {
+  if (article.status === 'pending') {
+    return <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-[11px] font-medium text-orange-700"><Clock size={11} /> Awaiting approval</span>;
+  }
   if (article.status === 'draft') {
-    return <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">Draft</span>;
+    return article.reviewNote
+      ? <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700"><AlertCircle size={11} /> Changes requested</span>
+      : <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">Draft</span>;
   }
   if (article.visibility === 'org') {
     return <span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[11px] font-medium text-green-700"><Globe size={11} /> Organization</span>;
@@ -68,14 +84,16 @@ function VisibilityBadge({ article }: { article: KbArticle }) {
 // ── Publish / Manage access dialog ───────────────────────────────────────────
 
 function AccessDialog({
-  mode, kind, initial, onCancel, onConfirm,
+  mode, kind, initial, me, onCancel, onConfirm,
 }: {
   mode: 'publish' | 'access';
   kind: KbKind;
   initial?: KbAccess;
+  me?: KbMe | null; // publish mode: decides "Publish" vs "Submit for approval"
   onCancel: () => void;
   onConfirm: (access: KbAccess) => Promise<void>;
 }) {
+  const submits = mode === 'publish' && !me?.publishesDirectly;
   const [teams, setTeams] = useState<KbTeam[] | null>(null);
   const [visibility, setVisibility] = useState<'org' | 'teams'>(initial?.visibility || 'org');
   const [selected, setSelected] = useState<Set<string>>(new Set(initial?.teams || []));
@@ -113,10 +131,19 @@ function AccessDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
       <div className="w-full max-w-md rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
-          <h2 className="text-[15px] font-semibold text-gray-800">{mode === 'publish' ? `Publish ${KINDS[kind].one}` : 'Manage access'}</h2>
+          <h2 className="text-[15px] font-semibold text-gray-800">{mode === 'access' ? 'Manage access' : submits ? 'Submit for approval' : `Publish ${KINDS[kind].one}`}</h2>
           <button onClick={onCancel} className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"><X size={16} /></button>
         </div>
         <div className="space-y-3 px-5 py-4">
+          {submits && (
+            <p className="flex items-start gap-2 rounded-lg bg-orange-50 px-3 py-2 text-[12.5px] text-orange-800">
+              <Clock size={14} className="mt-0.5 flex-shrink-0" />
+              <span>
+                {me?.approver ? <><b>{me.approver.name}</b> (your manager)</> : 'An admin (you have no manager set)'} will review this {KINDS[kind].one}.
+                It’s published, and the readers you choose below are notified, only once it’s approved.
+              </span>
+            </p>
+          )}
           <p className="text-[13px] text-gray-600">Who should be able to read this {KINDS[kind].one}?</p>
           <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${visibility === 'org' ? 'border-blue-500 bg-blue-50/50' : 'border-gray-200'}`}>
             <input type="radio" className="mt-0.5" checked={visibility === 'org'} onChange={() => setVisibility('org')} />
@@ -166,7 +193,7 @@ function AccessDialog({
             disabled={!canConfirm}
             className="rounded-lg bg-blue-600 px-4 py-2 text-[13px] font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {busy ? 'Saving…' : mode === 'publish' ? 'Publish' : 'Save access'}
+            {busy ? 'Saving…' : mode === 'access' ? 'Save access' : submits ? 'Send for approval' : 'Publish'}
           </button>
         </div>
       </div>
@@ -183,6 +210,7 @@ function ArticleList({ kind, onKindChange, onOpen, onNew }: {
   onNew: () => void;
 }) {
   const { one, many } = KINDS[kind];
+  const me = useKbMe();
   const [scope, setScope] = useState<Scope>('all');
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -224,7 +252,7 @@ function ArticleList({ kind, onKindChange, onOpen, onNew }: {
       </div>
       <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-white px-8">
         <div className="flex gap-1">
-          {scopesFor(kind).map((s) => (
+          {scopesFor(kind, !!me?.reviews).map((s) => (
             <button key={s.id} onClick={() => setScope(s.id)}
               className={`border-b-2 px-4 py-3 text-[13px] transition-colors ${scope === s.id ? 'border-blue-600 font-semibold text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
               {s.label}
@@ -250,9 +278,9 @@ function ArticleList({ kind, onKindChange, onOpen, onNew }: {
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center">
             <FileText size={28} className="mb-2 text-gray-300" />
             <p className="text-[14px] font-medium text-gray-700">
-              {debounced ? `No ${many} match your search` : scope === 'drafts' ? 'No drafts' : `No ${many} yet`}
+              {debounced ? `No ${many} match your search` : scope === 'drafts' ? 'No drafts' : scope === 'approvals' ? 'Nothing is waiting for your approval' : `No ${many} yet`}
             </p>
-            {!debounced && (
+            {!debounced && scope !== 'approvals' && (
               <p className="mt-1 text-[13px] text-gray-500">
                 {kind === 'release' ? 'Let everyone know what shipped: write the first release note.' : 'Share what you know: write the first article.'}
               </p>
@@ -269,7 +297,7 @@ function ArticleList({ kind, onKindChange, onOpen, onNew }: {
                 </div>
                 {a.excerpt && <p className="mt-1.5 line-clamp-2 text-[13px] text-gray-600">{a.excerpt}</p>}
                 <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-gray-400">
-                  <span>{a.authorName || 'Unknown'} · {a.status === 'draft' ? `Edited ${formatDate(a.updatedAt)}` : `Published ${formatDate(a.publishedAt)}`}</span>
+                  <span>{a.authorName || 'Unknown'} · {a.status === 'pending' ? `Submitted ${formatDate(a.submittedAt)}${a.approverName ? ` · Waiting on ${a.approverName}` : ''}` : a.status === 'draft' ? `Edited ${formatDate(a.updatedAt)}` : `Published ${formatDate(a.publishedAt)}`}</span>
                   {a.fileCount > 0 && <span className="flex items-center gap-1"><Paperclip size={12} /> {a.fileCount} document{a.fileCount === 1 ? '' : 's'}</span>}
                   {a.questionCount > 0 && <span className="flex items-center gap-1"><MessageCircleQuestion size={12} /> {a.questionCount} question{a.questionCount === 1 ? '' : 's'}</span>}
                   {a.canManage && a.openQuestionCount > 0 && (
@@ -334,6 +362,11 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: (kind: KbKind
   const [dialog, setDialog] = useState<'publish' | 'access' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const me = useKbMe();
+  const user = useStore((s) => s.user);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectNote, setRejectNote] = useState('');
 
   const isWide = useIsWide();
   const [openFileId, setOpenFileId] = useState<string | null>(null);
@@ -453,6 +486,21 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: (kind: KbKind
     }
   };
 
+  // Approve / request changes / withdraw. Responses don't carry the file list.
+  const review = async (call: () => Promise<KbArticle>) => {
+    setReviewBusy(true);
+    setError(null);
+    try {
+      const updated = await call();
+      setArticle((prev) => ({ ...updated, files: prev?.files }));
+      setRejecting(false);
+      setRejectNote('');
+    } catch (e: any) {
+      setError(e?.message || 'Something went wrong');
+    }
+    setReviewBusy(false);
+  };
+
   const downloadCurrent = async () => {
     if (!article || !docFile) return;
     setDownloading(true);
@@ -462,7 +510,13 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: (kind: KbKind
 
   const questionsVisible = isWide ? showQuestions : drawerOpen;
   const published = article?.status === 'published';
+  const pending = article?.status === 'pending';
+  // While pending, the author can't edit until they withdraw (admins can).
+  const editLocked = pending && !me?.publishesDirectly;
   const kind = kindOf(article?.kind);
+  const audience = article
+    ? article.visibility === 'org' ? 'the entire organization' : article.teams.map((t) => t.name).join(', ')
+    : '';
   const meta = article
     ? `By ${article.authorName || 'Unknown'}${article.publishedAt ? ` · ${formatDate(article.publishedAt)}` : ''}`
     : '';
@@ -485,11 +539,21 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: (kind: KbKind
           {article?.canManage && !focusMode && (
             <>
               {article.status === 'draft' ? (
-                <button onClick={() => setDialog('publish')} className="rounded-lg bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700">Publish</button>
+                <button onClick={() => setDialog('publish')} disabled={!me} className="rounded-lg bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+                  {me && !me.publishesDirectly ? 'Submit for approval' : 'Publish'}
+                </button>
+              ) : pending ? (
+                article.authorId === user?.id && (
+                  <button onClick={() => review(() => api.withdrawKbArticle(article.id))} disabled={reviewBusy} className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+                    Withdraw request
+                  </button>
+                )
               ) : (
                 <button onClick={() => setDialog('access')} title="Manage access" className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-2.5 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50"><ShieldCheck size={14} /> <span className="hidden 2xl:inline">Manage access</span></button>
               )}
-              <button onClick={onEdit} title="Edit" className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-2.5 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50"><Pencil size={14} /> <span className="hidden 2xl:inline">Edit</span></button>
+              {!editLocked && (
+                <button onClick={onEdit} title="Edit" className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-2.5 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50"><Pencil size={14} /> <span className="hidden 2xl:inline">Edit</span></button>
+              )}
               {confirmDelete ? (
                 <span className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-2 py-1 text-[12px] text-red-700">
                   Delete?
@@ -521,6 +585,64 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: (kind: KbKind
           )}
         </div>
       </div>
+
+      {/* Approval status */}
+      {article && article.canApprove && !focusMode && (
+        <div className="flex-shrink-0 border-b border-orange-200 bg-orange-50 px-4 py-2.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <Clock size={15} className="flex-shrink-0 text-orange-600" />
+            <p className="min-w-0 flex-1 text-[13px] text-orange-900">
+              <b>{article.authorName || 'The author'}</b> is asking to publish this {KINDS[kind].one} to <b>{audience}</b>
+              {article.submittedAt ? ` (submitted ${formatDate(article.submittedAt)})` : ''}. Nobody else can see it until you approve it.
+            </p>
+            {!rejecting && (
+              <div className="flex flex-shrink-0 gap-2">
+                <button onClick={() => setRejecting(true)} disabled={reviewBusy} className="rounded-lg border border-orange-300 bg-white px-3 py-1.5 text-[13px] text-orange-800 hover:bg-orange-100 disabled:opacity-50">Request changes</button>
+                <button onClick={() => review(() => api.approveKbArticle(article.id))} disabled={reviewBusy} className="flex items-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-green-700 disabled:opacity-50">
+                  <CheckCircle2 size={14} /> {reviewBusy ? 'Publishing…' : 'Approve & publish'}
+                </button>
+              </div>
+            )}
+          </div>
+          {rejecting && (
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end">
+              <textarea
+                autoFocus
+                value={rejectNote}
+                onChange={(e) => setRejectNote(e.target.value)}
+                maxLength={4000}
+                rows={2}
+                placeholder="What should the author change? They'll see this note."
+                className="min-w-0 flex-1 rounded-lg border border-orange-300 bg-white px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-orange-400"
+              />
+              <div className="flex flex-shrink-0 gap-2">
+                <button onClick={() => { setRejecting(false); setRejectNote(''); }} className="rounded-lg px-3 py-1.5 text-[13px] text-gray-600 hover:bg-orange-100">Cancel</button>
+                <button onClick={() => review(() => api.rejectKbArticle(article.id, rejectNote))} disabled={reviewBusy || !rejectNote.trim()} className="rounded-lg bg-red-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-red-700 disabled:opacity-50">
+                  {reviewBusy ? 'Sending…' : 'Send back to author'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {article && pending && !article.canApprove && article.canManage && !focusMode && (
+        <div className="flex flex-shrink-0 items-center gap-2 border-b border-orange-200 bg-orange-50 px-4 py-2.5 text-[13px] text-orange-900">
+          <Clock size={15} className="flex-shrink-0 text-orange-600" />
+          <span>
+            Waiting for approval from <b>{article.approverName || 'an admin'}</b>
+            {article.submittedAt ? ` since ${formatDate(article.submittedAt)}` : ''}. Once approved it’s published to <b>{audience}</b> and they’re notified.
+            {editLocked ? ' To make changes, withdraw the request.' : ''}
+          </span>
+        </div>
+      )}
+      {article && article.status === 'draft' && article.reviewNote && article.canManage && !focusMode && (
+        <div className="flex flex-shrink-0 items-start gap-2 border-b border-red-200 bg-red-50 px-4 py-2.5 text-[13px] text-red-900">
+          <AlertCircle size={15} className="mt-0.5 flex-shrink-0 text-red-600" />
+          <span className="min-w-0 whitespace-pre-wrap break-words">
+            <b>{article.reviewedByName || 'Your manager'} requested changes:</b> {article.reviewNote}
+          </span>
+        </div>
+      )}
 
       {/* Workspace */}
       <div ref={workspaceRef} className="flex min-h-0 flex-1">
@@ -676,6 +798,7 @@ function ArticleView({ id, onBack, onEdit }: { id: string; onBack: (kind: KbKind
         <AccessDialog
           mode={dialog}
           kind={kind}
+          me={me}
           initial={dialog === 'access' ? { visibility: article.visibility, teams: article.teams.map((t) => t.key) } : undefined}
           onCancel={() => setDialog(null)}
           onConfirm={async (access) => {
@@ -700,7 +823,8 @@ function ArticleEditor({ id, newKind = 'kb', onDone, onCancel }: {
 }) {
   const [articleId, setArticleId] = useState<string | null>(id);
   const [kind, setKind] = useState<KbKind>(newKind);
-  const [status, setStatus] = useState<'draft' | 'published'>('draft');
+  const [status, setStatus] = useState<KbArticle['status']>('draft');
+  const me = useKbMe();
   const [title, setTitle] = useState('');
   const [bodyHtml, setBodyHtml] = useState('');
   const [loaded, setLoaded] = useState(!id);
@@ -722,6 +846,13 @@ function ArticleEditor({ id, newKind = 'kb', onDone, onCancel }: {
       .catch((e) => { setError(e?.message || 'Failed to load article'); setLoaded(true); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Waiting for approval: only admins may edit; send everyone else back to the
+  // article, where they can withdraw the request.
+  useEffect(() => {
+    if (status === 'pending' && me && !me.publishesDirectly && articleId) onDone(articleId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, me]);
 
   // Creates the article on first save, updates it after that. Returns its id.
   // An in-flight save is shared, so two quick document uploads on a brand-new
@@ -771,12 +902,12 @@ function ArticleEditor({ id, newKind = 'kb', onDone, onCancel }: {
                 Save draft
               </button>
               <button
-                disabled={busy || !hasContent}
+                disabled={busy || !hasContent || !me}
                 title={hasContent ? undefined : 'Write something or upload a document first'}
                 onClick={async () => { if (await save()) setPublishOpen(true); }}
                 className="rounded-lg bg-blue-600 px-3.5 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700 disabled:opacity-50"
               >
-                Publish…
+                {me && !me.publishesDirectly ? 'Submit for approval…' : 'Publish…'}
               </button>
             </>
           ) : (
@@ -833,6 +964,7 @@ function ArticleEditor({ id, newKind = 'kb', onDone, onCancel }: {
         <AccessDialog
           mode="publish"
           kind={kind}
+          me={me}
           onCancel={() => setPublishOpen(false)}
           onConfirm={async (access) => {
             await api.publishKbArticle(articleId, access);

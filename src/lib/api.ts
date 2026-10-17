@@ -438,7 +438,19 @@ class ApiClient {
   getKbTeams() {
     return this.request<KbTeam[]>('/kb/teams');
   }
-  listKbArticles(kind: KbKind, scope: 'all' | 'mine' | 'drafts' = 'all', q?: string) {
+  getKbMe() {
+    return this.request<KbMe>('/kb/me');
+  }
+  approveKbArticle(id: string) {
+    return this.request<KbArticle>(`/kb/articles/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+  }
+  rejectKbArticle(id: string, note: string) {
+    return this.request<KbArticle>(`/kb/articles/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ note }) });
+  }
+  withdrawKbArticle(id: string) {
+    return this.request<KbArticle>(`/kb/articles/${encodeURIComponent(id)}/withdraw`, { method: 'POST' });
+  }
+  listKbArticles(kind: KbKind, scope: 'all' | 'mine' | 'drafts' | 'approvals' = 'all', q?: string) {
     const params = new URLSearchParams({ kind, scope });
     if (q) params.set('q', q);
     return this.request<KbArticle[]>(`/kb/articles?${params}`);
@@ -597,7 +609,8 @@ export type KbArticle = {
   title: string;
   bodyHtml?: string;
   excerpt?: string;
-  status: 'draft' | 'published';
+  // 'pending' = submitted, waiting for the author's manager to approve.
+  status: 'draft' | 'pending' | 'published';
   visibility: 'org' | 'teams';
   teams: { key: string; name: string }[];
   authorId: string;
@@ -609,8 +622,15 @@ export type KbArticle = {
   questionCount: number;
   openQuestionCount: number;
   files?: KbFile[];
+  approverName: string | null; // while pending; null = any admin
+  submittedAt: string | null;
+  reviewNote: string | null;   // on a draft whose approval was refused
+  reviewedByName: string | null;
   canManage: boolean;
+  canApprove: boolean;
 };
+// How publishing works for the signed-in user.
+export type KbMe = { publishesDirectly: boolean; approver: { id: string; name: string } | null; reviews: boolean };
 export type KbFile = { id: string; filename: string; mime: string | null; size: number; createdAt: string };
 export type KbQuestion = {
   id: string;
