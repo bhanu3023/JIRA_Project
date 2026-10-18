@@ -519,7 +519,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                         <>
                           {people.find((p) => p.email === person)?.name || 'selected person'}
                           {t.assignee && (
-                            <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${people.find((p) => p.email === person)?.name || 'the selected person'} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                            <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${people.find((p) => p.email === person)?.name || 'the selected person'} held it in this department before it moved on (same owner Filters shows)`} className="ml-1.5 text-[10.5px] text-gray-400">
                               (now: {t.assignee})
                             </span>
                           )}
@@ -528,7 +528,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                         <>
                           {t.teamWorkerName}
                           {t.assignee && (
-                            <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${t.teamWorkerName} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                            <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${t.teamWorkerName} held it in this department before it moved on (same owner Filters shows)`} className="ml-1.5 text-[10.5px] text-gray-400">
                               (now: {t.assignee})
                             </span>
                           )}
@@ -629,7 +629,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                             <>
                               {people.find((p) => p.email === drillDown.person)?.name || 'selected person'}
                               {t.assignee && (
-                                <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${people.find((p) => p.email === drillDown.person)?.name || 'the selected person'} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                                <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${people.find((p) => p.email === drillDown.person)?.name || 'the selected person'} held it in this department before it moved on (same owner Filters shows)`} className="ml-1.5 text-[10.5px] text-gray-400">
                                   (now: {t.assignee})
                                 </span>
                               )}
@@ -638,7 +638,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                             <>
                               {t.teamWorkerName}
                               {t.assignee && (
-                                <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${t.teamWorkerName} did this team's real work on it before it moved on`} className="ml-1.5 text-[10.5px] text-gray-400">
+                                <span title={`Currently assigned to ${t.assignee} — shown here as the primary name because ${t.teamWorkerName} held it in this department before it moved on (same owner Filters shows)`} className="ml-1.5 text-[10.5px] text-gray-400">
                                   (now: {t.assignee})
                                 </span>
                               )}

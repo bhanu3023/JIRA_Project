@@ -4096,6 +4096,68 @@ function formatIssue(issue: any) {
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Date range parser (same logic as mock) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Filters' "Queue: X" scope building blocks (GET /issues with
+// queueMembersOnly=true), shared verbatim with MBR's team tabs so the
+// per-person counts on both pages come from one definition instead of two
+// hand-synced copies -- every drift between them has shown up as "same
+// person, same dates, different count". All assume `i` = issues and $2 =
+// the department name, exactly as GET /issues' dept branch binds them;
+// memberIdx is the bind index of the queue's own member-id array (null when
+// the queue has no configured members).
+function queueMemberClauseSql(memberIdx: number | null, broaden: boolean, extraOrSql = ''): string {
+  const memberClause = `(${memberIdx !== null ? `i."assigneeId" = ANY($${memberIdx}::text[])` : '1=0'} OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($2)) OR LOWER(i.current_department) = LOWER($2)${extraOrSql})`;
+  if (!broaden) return memberClause;
+  const workedByMemberSql = memberIdx !== null ? ` AND w4.user_id = ANY($${memberIdx}::text[])` : '';
+  return `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)${workedByMemberSql}))`;
+}
+// Created-date department match: originated in $2, or genuinely worked there.
+function queueOriginDeptMatchSql(memberIdx: number | null): string {
+  const byMember = memberIdx !== null ? ` AND w.user_id = ANY($${memberIdx}::text[])` : '';
+  return `(
+             LOWER(COALESCE(
+               i.original_dept,
+               (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
+               i.current_department
+             )) = LOWER($2)
+             OR EXISTS (
+               SELECT 1 FROM user_worked_on_tickets w
+               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${byMember}
+             )
+           )`;
+}
+// Updated/Resolved/Due-date department match: currently in $2, or moved on
+// after being completed or worked there.
+function queueUpdatedDeptMatchSql(memberIdx: number | null, deptDoneClause: string): string {
+  const byMember = memberIdx !== null ? ` AND w.user_id = ANY($${memberIdx}::text[])` : '';
+  return `(
+             (LOWER(i.current_department) = LOWER($2) ${deptDoneClause})
+             OR (LOWER(i.current_department) != LOWER($2) AND (
+               EXISTS (
+                 SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
+                 WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
+               )
+               OR EXISTS (
+                 SELECT 1 FROM user_worked_on_tickets w
+                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${byMember}
+               )
+             ))
+           )`;
+}
+// Who a ticket "belongs to" for Queue: $2 + Assignee: the person who held it
+// in $2 -- the frozen per-dept assignee snapshot once it has moved on (or
+// while unassigned), the reporter when it moved on with no snapshot at all,
+// otherwise the current assignee. One owner per ticket.
+function queueDeptOwnerSql(): string {
+  const snapIdSql = `(SELECT ds.v->>'id' FROM jsonb_each(COALESCE(i.dept_assignees, '{}'::jsonb)) ds(k, v) WHERE LOWER(ds.k) = LOWER($2) AND jsonb_typeof(ds.v) = 'object' LIMIT 1)`;
+  const snapExistsSql = `EXISTS (SELECT 1 FROM jsonb_object_keys(COALESCE(i.dept_assignees, '{}'::jsonb)) dk WHERE LOWER(dk) = LOWER($2))`;
+  const movedSql = `LOWER(COALESCE(i.current_department, '')) != LOWER($2)`;
+  return `(CASE
+              WHEN (${movedSql} OR i."assigneeId" IS NULL) AND NULLIF(${snapIdSql}, '') IS NOT NULL THEN ${snapIdSql}
+              WHEN ${movedSql} AND NOT ${snapExistsSql} AND i."reporterId" IS NOT NULL THEN i."reporterId"
+              ELSE i."assigneeId"
+            END)`;
+}
+
 function parseDateRange(range: string): { from: Date; to: Date } {
   const now = new Date();
   // IST midnight, not the server process's local midnight -- the container
@@ -7946,7 +8008,6 @@ async function _handleJiraPgApi(
           // worked it) is a separate, already-solved display concern
           // (dept_assignees / workedByNames), not something the ticket's
           // presence in this list should depend on.
-          const memberClause = `(${memberIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0'} OR (i."assigneeId" IS NULL AND LOWER(i.current_department) = LOWER($2)) OR LOWER(i.current_department) = LOWER($2)${earlyResolvedAssigneeIds.length ? ` OR i."assigneeId" = ANY($${explicitAssigneeParamIdx}::text[])` : ''})`;
           // Same gap as origin/updated matching had, one layer up: this
           // membership check runs unconditionally whenever queueMembersOnly is
           // set, even when Created/Updated has already broadened department
@@ -8003,7 +8064,6 @@ async function _handleJiraPgApi(
           // configured queue (falls back to the old unrestricted check for a
           // dept with no queue config at all, rather than silently excluding
           // everything for it).
-          const workedByMemberSql = memberIds.length ? ` AND w4.user_id = ANY($${deptParamIdx}::text[])` : '';
           // A "Routed to X"/"Waiting for X" status selection is SPECIFICALLY
           // asking for tickets that were routed onward -- exactly what writes
           // a 'passed' row (see performDeptHandoff/the direct-statusId handoff
@@ -8022,16 +8082,17 @@ async function _handleJiraPgApi(
           // dropped exactly those tickets (Queue: Dev + Created/Updated Sep).
           // workedByMemberSql still limits this to this queue's own members.
           // Filters can now count more than MBR, which still excludes 'passed'.
-          const reasonClause = '';
           // This push stays unconditional -- see earlyResolvedAssigneeIds'
           // own comment above for why an earlier attempt that conditionally
           // SKIPPED this push (instead of OR-ing into memberClause the way
           // it does now) caused a real regression and was reverted.
-          deptExtraClauses.push(
-            broadenIt
-              ? `(${memberClause} OR EXISTS (SELECT 1 FROM user_worked_on_tickets w4 WHERE w4.issue_id = i.id AND LOWER(w4.dept) = LOWER($2)${reasonClause}${workedByMemberSql}))`
-              : memberClause
-          );
+          // Built by queueMemberClauseSql (shared with MBR) -- memberClause
+          // above plus, when broadened, the queue-member worked-on check.
+          deptExtraClauses.push(queueMemberClauseSql(
+            memberIds.length ? deptParamIdx : null,
+            !!broadenIt,
+            earlyResolvedAssigneeIds.length ? ` OR i."assigneeId" = ANY($${explicitAssigneeParamIdx}::text[])` : '',
+          ));
           if (memberIds.length) { deptExtraParams.push(memberIds); deptParamIdx++; }
           if (earlyResolvedAssigneeIds.length) { deptExtraParams.push(earlyResolvedAssigneeIds); deptParamIdx++; }
         } catch { /* ignore -- no restriction if lookup fails */ }
@@ -8100,14 +8161,7 @@ async function _handleJiraPgApi(
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         const resolvedIds = await resolveUserIds(ids);
         if (resolvedIds.length) {
-          const snapIdSql = `(SELECT ds.v->>'id' FROM jsonb_each(COALESCE(i.dept_assignees, '{}'::jsonb)) ds(k, v) WHERE LOWER(ds.k) = LOWER($2) AND jsonb_typeof(ds.v) = 'object' LIMIT 1)`;
-          const snapExistsSql = `EXISTS (SELECT 1 FROM jsonb_object_keys(COALESCE(i.dept_assignees, '{}'::jsonb)) dk WHERE LOWER(dk) = LOWER($2))`;
-          const movedSql = `LOWER(COALESCE(i.current_department, '')) != LOWER($2)`;
-          const deptOwnerSql = `(CASE
-              WHEN (${movedSql} OR i."assigneeId" IS NULL) AND NULLIF(${snapIdSql}, '') IS NOT NULL THEN ${snapIdSql}
-              WHEN ${movedSql} AND NOT ${snapExistsSql} AND i."reporterId" IS NOT NULL THEN i."reporterId"
-              ELSE i."assigneeId"
-            END)`;
+          const deptOwnerSql = queueDeptOwnerSql();
           deptExtraClauses.push(`${deptOwnerSql} = ANY($${deptParamIdx}::text[])`);
           deptExtraParams.push(resolvedIds);
           deptParamIdx++;
@@ -8467,19 +8521,8 @@ async function _handleJiraPgApi(
       // dept's own queue" restriction as memberClause's broadenIt above (see
       // its comment re: CF-29568/CF-29902) -- only applied when this dept
       // actually has a configured queue to check against.
-      const originWorkedByMemberSql = deptMemberIdsParamIdx !== null ? ` AND w.user_id = ANY($${deptMemberIdsParamIdx}::text[])` : '';
       const originDeptMatchSql = createdRange && queueMembersOnlyParam
-        ? `(
-             LOWER(COALESCE(
-               i.original_dept,
-               (SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'department' ORDER BY h."createdAt" ASC LIMIT 1),
-               i.current_department
-             )) = LOWER($2)
-             OR EXISTS (
-               SELECT 1 FROM user_worked_on_tickets w
-               WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${originWorkedByMemberSql}
-             )
-           )`
+        ? queueOriginDeptMatchSql(deptMemberIdsParamIdx)
         : null;
       // Filters page "Updated" range + Queue: same gap as Created had -- a ticket
       // resolved by this dept and then routed on to wherever it originated
@@ -8514,19 +8557,7 @@ async function _handleJiraPgApi(
       // Resolved date: Sep 2026 undercounted resolved tickets for exactly
       // this reason before this was added.
       const updatedDeptMatchSql = (updatedRange || resolvedRange || dueDateRange) && queueMembersOnlyParam && !workedDeptMatchSql
-        ? `(
-             (LOWER(i.current_department) = LOWER($2) ${deptDoneClause})
-             OR (LOWER(i.current_department) != LOWER($2) AND (
-               EXISTS (
-                 SELECT 1 FROM jsonb_each(COALESCE(i.dept_statuses, '{}'::jsonb)) ds(k, v)
-                 WHERE LOWER(k) = LOWER($2) AND LOWER(v->>'category') = 'done'
-               )
-               OR EXISTS (
-                 SELECT 1 FROM user_worked_on_tickets w
-                 WHERE w.issue_id = i.id AND LOWER(w.dept) = LOWER($2)${originWorkedByMemberSql}
-               )
-             ))
-           )`
+        ? queueUpdatedDeptMatchSql(deptMemberIdsParamIdx, deptDoneClause)
         : null;
       // A selected Status filter can name a "Routed to X"/"Waiting for X"
       // queue label -- by definition something the SOURCE department wrote
@@ -14811,71 +14842,86 @@ async function _handleJiraPgApi(
     // reason != 'passed' removed here too -- see deptMatchSql's own comment
     // above for why (matches Filters' already-made decision).
 
-    let scopedParams = person ? [...baseParams, person] : baseParams;
-    const personIdx = scopedParams.length;
-    // Selecting a specific person means "this person's own work" -- current
-    // assignee OR a genuine worked-on-in-$1 record for exactly that person
-    // (mirrors Filters' historyAssigneeIdx/workedAssigneeIds handling of
-    // Assignee under a date-range filter: CF-29889 was worked in Dev by Ravi
-    // Srivastava, then handed to another dept and reassigned -- "Assignee:
-    // Ravi" still needs to find it).
-    // reason != 'passed' removed from both worked-on checks below -- see
-    // deptMatchSql's own comment above for why (matches Filters' already-
-    // made decision); otherwise a person drill-down total could disagree
-    // with the summary total above it, which no longer excludes 'passed'.
-    // The worked-on branch used to be gated by the OUTER dateClause above
-    // (i."createdAt"/"updatedAt" in range) instead of by wp.worked_at --
-    // the wrong clock entirely for "did this person work this ticket in
-    // this window." Filters' own equivalent (workedRange + assignees, see
-    // workedRangeSql/workedDeptMatchSql elsewhere in this file) filters on
-    // worked_at directly, using these same IST-anchored istFrom/istTo
-    // boundaries. Confirmed for real: Rehan Khan, Dev, Oct 1-15 2026 --
-    // this mismatch alone was most of the gap between MBR's summary.total
-    // (61, issue-date-based) and Filters' total for the identical
-    // person+dept+range (59, worked_at-based). Embedding the bound directly
-    // in the worked-on EXISTS (rather than relying on the outer dateClause)
-    // lets the WHERE below skip that outer clause entirely for a
-    // person-scoped query, so a ticket worked in-window but created/updated
-    // outside it (or vice versa) is judged correctly either way. The
-    // current-assignee branch deliberately stays date-unscoped ("this
-    // person's own work" explicitly includes current ownership regardless
-    // of when that ownership began -- see this function's own comment
-    // above) -- that's a separately-decided, documented design choice, not
-    // part of this fix.
-    const personWorkedAtClause = `${fromIdx ? ` AND wp.worked_at >= $${fromIdx}` : ''}${toIdx ? ` AND wp.worked_at <= $${toIdx}` : ''}`;
-    // The assignee branch keeps its own copy of the issue-date test (the
-    // same one the now-skipped outer dateClause used to apply to the WHOLE
-    // query) -- without it, "currently assigned" would count regardless of
-    // date for EVERY range once a person filter is active, inflating a
-    // narrow range (e.g. "This month") with tickets someone merely still
-    // holds from long before it, never touched this window at all.
-    // reason != 'passed' RE-ADDED here (an earlier change removed it,
-    // described in a now-stale comment as "matching Filters' already-made
-    // decision" -- the actual Filters code it was supposedly matching,
-    // workedDeptMatchSql, has always excluded 'passed' and still does).
-    // 'passed' means the ticket moved THROUGH this person on its way
-    // elsewhere, not that they did real work on it -- crediting it as
-    // "this person's own work" is the same over-crediting class as the
-    // Ravi Srivastava routing-credit bug fixed earlier in this file
-    // (reassigningToSomeoneElse / deptHandoffDone guards). Confirmed for
-    // real: Rehan Khan, Dev, Sep 2026 -- 24 of his ~28-ticket MBR-vs-
-    // Filters gap was exactly his reason='passed' rows for that month,
-    // which MBR was crediting and Filters correctly wasn't.
-    const personMatchSql = person
-      ? ` AND (EXISTS (SELECT 1 FROM users pau WHERE pau.id = i."assigneeId" AND LOWER(pau.email) = $${personIdx}${dateClause}) OR EXISTS (SELECT 1 FROM user_worked_on_tickets wp JOIN users wpu ON wpu.id = wp.user_id WHERE wp.issue_id = i.id AND LOWER(wp.dept) = LOWER($1) AND wp.reason != 'passed' AND LOWER(wpu.email) = $${personIdx}${personWorkedAtClause}))`
-      : '';
-    // A person-scoped drill-down (e.g. "Resolved tickets — Adari") can include
-    // a ticket Adari worked on here that's since been reassigned to another
-    // roster member -- personMatchSql above deliberately allows that (CF-29889
-    // pattern). But the ticket table's own assignee_name always shows the
-    // CURRENT roster assignee first, with no awareness of which specific
-    // person this drill-down is scoped to -- so a row under "— Adari" could
-    // legitimately show a completely different name (e.g. K N V S Raj Kumar)
-    // with nothing explaining why, reading as a data bug rather than the
-    // intentional historical-attribution behavior it actually is. Flag it
-    // explicitly per row so the frontend can say so.
+    // Per-person scope = exactly what Filters returns for "Queue: <dept> +
+    // Assignee: <person>" with the same dates as Created + Resolved date
+    // (Created + Updated under dateMode=touched): same boards (CloudFuze
+    // Board plus its sub-boards), same queue-member/department matching and
+    // the same single owner per ticket, all from the shared queue*Sql
+    // helpers GET /issues itself uses. MBR used to credit a ticket to its
+    // current assignee OR anyone with a worked-on record (dated by worked_at,
+    // not by the ticket), on CloudFuze Board only -- confirmed for real as
+    // why Pragati Pandey read 71 here vs 66 in Filters for Dev, Sep 2026.
+    // Every per-person number (people table, person summary cards, person
+    // drill-downs, per-person SLA/resolution/response) is driven from
+    // ownerByIssue below.
+    const ownerByIssue = new Map<string, string>();
+    const ownedIdsByEmail = new Map<string, string[]>();
+    {
+      const spaceRow = await pool.query(`SELECT id, COALESCE(sub_board_keys, '{}') AS sub_board_keys FROM spaces WHERE key = 'TESTIN'`);
+      const scopeSpaceIds: string[] = [];
+      if (spaceRow.rows[0]) {
+        scopeSpaceIds.push(spaceRow.rows[0].id);
+        const subKeys: string[] = spaceRow.rows[0].sub_board_keys || [];
+        if (subKeys.length) {
+          const subRows = await pool.query(`SELECT id FROM spaces WHERE key = ANY($1::text[])`, [subKeys]);
+          for (const r of subRows.rows) scopeSpaceIds.push(r.id);
+        }
+      }
+      const cqScope = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = 'TESTIN'`);
+      const scopeQueue = (cqScope.rows[0]?.queues || []).find((qq: any) => String(qq.name || '').toLowerCase() === dept.toLowerCase());
+      const scopeMemberIds: string[] = Array.isArray(scopeQueue?.memberIds) ? scopeQueue.memberIds : [];
+      const scopeParams: any[] = [scopeSpaceIds, dept];
+      const memberIdx = scopeMemberIds.length ? (scopeParams.push(scopeMemberIds), scopeParams.length) : null;
+      const hasRange = !!(dateFrom || dateTo);
+      let scopeDateSql = '';
+      if (hasRange) {
+        // parseDateRange's own "between:" handling, as Filters' date chips send it.
+        const { from, to } = parseDateRange(`between:${dateFrom}:${dateTo}`);
+        scopeParams.push(from, to);
+        const a = scopeParams.length - 1, b = scopeParams.length;
+        scopeDateSql = ` AND ((i."createdAt" >= $${a} AND i."createdAt" <= $${b}) OR (i."${secondDateCol}" >= $${a} AND i."${secondDateCol}" <= $${b}))`;
+      }
+      // Any date chip broadens department scope to origin OR updated-style
+      // matching, and broadens the queue-member check -- same as GET /issues.
+      const scopeDeptSql = hasRange
+        ? `(${queueOriginDeptMatchSql(memberIdx)} OR ${queueUpdatedDeptMatchSql(memberIdx, '')})`
+        : `LOWER(i.current_department) = LOWER($2)`;
+      const ownerRes = await pool.query(`
+        SELECT i.id, LOWER(ou.email) AS owner_email
+        FROM issues i
+        JOIN users ou ON ou.id = ${queueDeptOwnerSql()}
+        WHERE i."spaceId" = ANY($1::text[])
+          AND ${scopeDeptSql}
+          AND ${queueMemberClauseSql(memberIdx, hasRange)}${scopeDateSql}
+      `, scopeParams);
+      for (const r of ownerRes.rows) {
+        if (!r.owner_email) continue;
+        ownerByIssue.set(r.id, r.owner_email);
+        const list = ownedIdsByEmail.get(r.owner_email);
+        if (list) list.push(r.id); else ownedIdsByEmail.set(r.owner_email, [r.id]);
+      }
+    }
+    const personOwnedIds = person ? (ownedIdsByEmail.get(person) || []) : [];
+
+    let scopedParams = person ? [...baseParams, person, personOwnedIds] : baseParams;
+    const personIdx = person ? scopedParams.length - 1 : scopedParams.length;
+    const personIdsIdx = scopedParams.length;
+    // Selecting a specific person = exactly their tickets in Filters' "Queue
+    // + Assignee" result (ownerByIssue above), nothing else -- so the person
+    // summary cards and drill-downs list the same tickets Filters does. The
+    // `FALSE AND (...)` tail is never true (Postgres folds it away at plan
+    // time); it only keeps every positional param still referenced, since
+    // node-pg sends untyped params and an unreferenced one fails with
+    // "could not determine data type of parameter".
+    const personScopeWhere = person
+      ? `(i.id = ANY($${personIdsIdx}::text[]) OR (FALSE AND ${deptMatchSql} AND ${rosterMatchSql}${dateClause} AND $${personIdx}::text IS NOT NULL))`
+      : `${deptMatchSql} AND ${rosterMatchSql}${dateClause}`;
+    // A person-scoped drill-down can include a ticket this person owned in
+    // this department that has since moved on and is held by someone else
+    // (Filters' Dev-owner rule) -- the ticket table's assignee_name always
+    // shows the CURRENT holder, so flag those rows for the frontend to say so.
     const personHistoryFlagSql = person
-      ? `(NOT (au.id IS NOT NULL AND LOWER(au.email) = $${personIdx}) AND EXISTS (SELECT 1 FROM user_worked_on_tickets wp3 JOIN users wpu3 ON wpu3.id = wp3.user_id WHERE wp3.issue_id = i.id AND LOWER(wp3.dept) = LOWER($1) AND LOWER(wpu3.email) = $${personIdx}))`
+      ? `(NOT (au.id IS NOT NULL AND LOWER(au.email) = $${personIdx}))`
       : 'FALSE';
 
     // Drill-down filters for the per-person hygiene columns -- each shows the
@@ -15023,67 +15069,41 @@ async function _handleJiraPgApi(
     const summaryParams = [...scopedParams, staleDays];
     const summaryStaleIdx = summaryParams.length;
     // The per-person breakdown always lists the curated team roster, even
-    // though totals/matching above use the live queue's full membership
-    // (kept broad on purpose to stay in sync with Filters' own counts).
+    // though totals/matching above use the live queue's full membership.
     // Live queue membership for eng/qa/infra includes broader operational/
     // support accounts (e.g. admins) alongside actual team members -- fine
     // for "does this ticket count," wrong for "list this team's people."
-    // Same params shape as baseParams (dept, roster, ...dateFrom/dateTo) so
-    // dateClause's positional $3/$4 refs still line up -- only the roster
-    // at position 2 changes.
-    const peopleBaseParams = [dept, TEAM_ROSTER[team] || roster, ...baseParams.slice(2)];
-    const peopleParams = [...peopleBaseParams, staleDays];
-    const peopleStaleIdx = peopleParams.length;
+    // Each person's tickets are their Filters-owned set (ownedIdsByEmail),
+    // passed as parallel email/issue-id arrays.
+    const ownedEmails: string[] = [];
+    const ownedIssueIds: string[] = [];
+    for (const [email, ids] of Array.from(ownedIdsByEmail.entries())) {
+      for (const id of ids) { ownedEmails.push(email); ownedIssueIds.push(id); }
+    }
+    const peopleParams = [(TEAM_ROSTER[team] || roster).map((e) => e.toLowerCase()), staleDays, ownedEmails, ownedIssueIds];
+    const peopleStaleIdx = 2;
 
     const [summaryRes, peopleRes, monthlyRes, ticketsRes] = await Promise.all([
       pool.query(`
         SELECT ${fullAgg(summaryStaleIdx)}
         FROM issues i
         LEFT JOIN statuses s ON i."statusId" = s.id
-        WHERE ${deptMatchSql} AND ${rosterMatchSql}${person ? '' : dateClause}${personMatchSql}
+        WHERE ${personScopeWhere}
       `, summaryParams),
 
       // LEFT JOIN from the roster itself (not FROM issues) so every roster
       // member appears even with zero tickets in the selected range —
       // "make sure those are displayed under those tabs" applies to the
       // person list itself, not just to whoever happens to have activity.
-      // Keyed to u.id directly (not the generic dept-wide match above), so
-      // each roster member is credited for exactly their own current-owner
-      // or worked-on tickets -- the same ticket can legitimately show up
-      // under more than one person if, say, one resolved it here and it's
-      // since been handed to another of this dept's own members.
+      // Each ticket is counted for exactly one person, its Filters owner.
       pool.query(`
-        WITH roster(email) AS (SELECT unnest($2::text[]))
+        WITH roster(email) AS (SELECT unnest($1::text[])),
+             owned(email, issue_id) AS (SELECT * FROM unnest($3::text[], $4::text[]))
         SELECT COALESCE(u.email, r.email) AS email, u."firstName", u."lastName", ${fullAgg(peopleStaleIdx)}
         FROM roster r
         LEFT JOIN users u ON LOWER(u.email) = r.email
-        LEFT JOIN issues i ON (
-          -- The assignee branch keeps using the ticket's own created/updated
-          -- (dateClauseInline below -- the same test the old shared
-          -- dateClause applied, just now scoped to only this branch instead
-          -- of the whole JOIN). The worked-on branch now uses wpp.worked_at
-          -- instead -- the wrong clock was being applied to BOTH branches
-          -- before (i."createdAt"/"updatedAt" for a question about when the
-          -- WORK happened, not when the ticket itself was created/touched by
-          -- anyone). Filters' own equivalent (workedRange + assignees)
-          -- filters strictly on worked_at (see workedRangeSql/
-          -- workedDeptMatchSql elsewhere in this file). Confirmed for real:
-          -- Rehan Khan, Dev, Oct 1-15 2026 -- this table's "Total tickets"
-          -- column read 61 for him while Filters (person+dept+range,
-          -- Assignee+Worked) read 59 for the identical real-world question,
-          -- purely from this date-field mismatch on the worked-on branch.
-          (i."assigneeId" = u.id AND LOWER(i.current_department) = LOWER($1)${dateClause})
-          -- reason != 'passed' removed -- see deptMatchSql's own comment
-          -- above for why (matches Filters' already-made decision); without
-          -- this, a roster member's per-person total could undercount
-          -- relative to the tab's own summary total above, which no longer
-          -- excludes 'passed' either.
-          -- reason != 'passed' RE-ADDED -- see personMatchSql's own comment
-          -- above (summary-card query, same function) for why: 'passed'
-          -- means routed-through, not worked, and MBR crediting it was most
-          -- of Rehan Khan's real Sep-2026 gap against Filters.
-          OR EXISTS (SELECT 1 FROM user_worked_on_tickets wpp WHERE wpp.issue_id = i.id AND wpp.user_id = u.id AND LOWER(wpp.dept) = LOWER($1) AND wpp.reason != 'passed'${fromIdx ? ` AND wpp.worked_at >= $${fromIdx}` : ''}${toIdx ? ` AND wpp.worked_at <= $${toIdx}` : ''})
-        )
+        LEFT JOIN owned o ON o.email = r.email
+        LEFT JOIN issues i ON i.id = o.issue_id
         LEFT JOIN statuses s ON i."statusId" = s.id
         GROUP BY r.email, u.email, u."firstName", u."lastName"
         ORDER BY total DESC
@@ -15123,7 +15143,7 @@ async function _handleJiraPgApi(
         LEFT JOIN spaces sp ON sp.id = i."spaceId"
         LEFT JOIN users au ON au.id = i."assigneeId"
         LEFT JOIN users ru ON ru.id = i."reporterId"
-        WHERE ${deptMatchSql} AND ${rosterMatchSql}${person ? '' : dateClause}${personMatchSql}${ticketFilterClause}
+        WHERE ${personScopeWhere}${ticketFilterClause}
         ORDER BY i."createdAt" DESC
         LIMIT ${ticketsLimit}
       `, ticketQueryParams),
@@ -15150,12 +15170,16 @@ async function _handleJiraPgApi(
       SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
         i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
         i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category,
-        ${isEntSmbTeam ? 'i.summary, i.description' : 'NULL AS summary, NULL AS description'}
+        ${isEntSmbTeam ? 'i.summary, i.description' : 'NULL AS summary, NULL AS description'},
+        (${deptMatchSql} AND ${rosterMatchSql}${dateClause}) AS in_team_scope
       FROM issues i
       LEFT JOIN statuses s ON i."statusId" = s.id
       LEFT JOIN users au ON au.id = i."assigneeId"
-      WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}
-    `, baseParams);
+      WHERE (${deptMatchSql} AND ${rosterMatchSql}${dateClause}) OR i.id = ANY($${baseParams.length + 1}::text[])
+    `, [...baseParams, Array.from(ownerByIssue.keys())]);
+    // in_team_scope = counts toward the tab-wide totals/monthly rows; rows
+    // pulled in only via ownerByIssue (a person's Filters-owned ticket
+    // outside the tab-wide scope) count for that person alone.
 
     const slaCandidateIds = slaCandidatesRes.rows.map((r: any) => r.id);
     const workedRosterRes = slaCandidateIds.length
@@ -15308,17 +15332,20 @@ async function _handleJiraPgApi(
         && instances.some((x: any) => (!x.deptName || x.deptName.toLowerCase() === dept.toLowerCase()) && x.isBreached);
       slaById.set(row.id, breached);
 
-      const emails = new Set<string>(workedRosterByIssue[row.id] || []);
-      if (row.assignee_email && String(row.current_department || '').toLowerCase() === dept.toLowerCase()
-        && roster.some((e) => e.toLowerCase() === String(row.assignee_email).toLowerCase())) {
-        emails.add(String(row.assignee_email).toLowerCase());
-      }
+      // One person per ticket: its Filters owner (see ownerByIssue).
+      const owner = ownerByIssue.get(row.id);
+      const emails = new Set<string>(owner ? [owner] : []);
+      // Counts toward the summary cards: tab-wide scope with no person
+      // selected, else the selected person's own tickets.
+      const inSummary = person ? owner === person : !!row.in_team_scope;
 
       if (breached) {
-        const monthLabel = monthLabelFor(row);
-        monthlyRbBreached[monthLabel] = (monthlyRbBreached[monthLabel] || 0) + 1;
+        if (row.in_team_scope) {
+          const monthLabel = monthLabelFor(row);
+          monthlyRbBreached[monthLabel] = (monthlyRbBreached[monthLabel] || 0) + 1;
+        }
         for (const email of Array.from(emails)) peopleRbBreached[email] = (peopleRbBreached[email] || 0) + 1;
-        if (!person || emails.has(person)) summaryRbBreached++;
+        if (inSummary) summaryRbBreached++;
       }
 
       // Same "no evidence, don't guess" rule as the resolvedAt backfill:
@@ -15360,7 +15387,9 @@ async function _handleJiraPgApi(
       );
       const rosterResponses = new Map<string, number>();
       for (const [email, hours] of Array.from(responseByPerson.entries())) {
-        if (!roster.some((e) => e.toLowerCase() === email)) continue;
+        // Only the ticket's owner -- a person's average covers exactly the
+        // tickets in their own list.
+        if (!emails.has(email)) continue;
         rosterResponses.set(email, hours);
         const acc = (peopleResponseTime[email] ??= { sum: 0, count: 0 });
         acc.sum += hours;
@@ -15384,7 +15413,7 @@ async function _handleJiraPgApi(
           if (misaligned !== null) { agg.alignedTrackedCount++; if (misaligned) agg.misalignedCount++; }
         };
         for (const email of Array.from(emails)) applyTo(peopleTextAgg[email] ??= newTextAgg());
-        if (!person || emails.has(person)) applyTo(summaryTextAgg);
+        if (inSummary) applyTo(summaryTextAgg);
       }
     }
 

@@ -1,11 +1,13 @@
 // For one person, fetches the real ticket KEY LISTS from both the live
 // Filters (/issues) and MBR (/reports/mbr-team) endpoints for the same
-// Queue:Dev + Created/Updated Aug 2026 scope, and diffs them -- to find
-// exactly which tickets are causing a count mismatch, not just the size of
-// the gap. Reuses the same real-session approach as
+// Queue + Assignee + Created/Resolved date scope MBR uses, and diffs them --
+// to find exactly which tickets are causing a count mismatch, not just the
+// size of the gap. Reuses the same real-session approach as
 // check-ce-roster-filters-vs-mbr.mjs.
 //
-// Usage: node diff-filters-vs-mbr-tickets.mjs <email>
+// Usage: node diff-filters-vs-mbr-tickets.mjs <email> [team=eng] [from=2026-09-01] [to=2026-09-30]
+//   team: eng|qa|infra|ent|smb (Queue: Dev/QA/Infra/Migration/Migration)
+// APP_URL env overrides http://localhost:8080.
 
 import pg from 'pg';
 import jwt from 'jsonwebtoken';
@@ -13,8 +15,12 @@ import crypto from 'crypto';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const JWT_SECRET = process.env.JWT_SECRET || 'NeutaraTech_SecureKey_2024_ab12f83079d8cadd0eb5678dc3d6aca6a5f65ed4d21646496093895b2ab4edfc';
-const APP_URL = 'http://localhost:8080';
-const EMAIL = process.argv[2];
+const APP_URL = process.env.APP_URL || 'http://localhost:8080';
+const EMAIL = (process.argv[2] || '').toLowerCase();
+const TEAM = process.argv[3] || 'eng';
+const FROM = process.argv[4] || '2026-09-01';
+const TO = process.argv[5] || '2026-09-30';
+const DEPT = { eng: 'Dev', qa: 'QA', infra: 'Infra', ent: 'Migration', smb: 'Migration' }[TEAM];
 
 if (!EMAIL) {
   console.error('Usage: node diff-filters-vs-mbr-tickets.mjs <email>');
@@ -39,20 +45,27 @@ async function main() {
   const authHeader = { Authorization: `Bearer ${token}` };
 
   const filtersParams = new URLSearchParams({
-    spaceKey: 'TESTIN', dept: 'Dev', queueMembersOnly: 'true', assignees: EMAIL,
-    createdRange: 'between:2026-08-01:2026-08-31', updatedRange: 'between:2026-08-01:2026-08-31',
-    page: '1', limit: '200',
+    spaceKey: 'TESTIN', dept: DEPT, queueMembersOnly: 'true', assignees: EMAIL,
+    createdRange: `between:${FROM}:${TO}`, resolvedRange: `between:${FROM}:${TO}`,
+    page: '1', limit: '2000',
   });
   const filtersRes = await fetch(`${APP_URL}/api/issues?${filtersParams}`, { headers: authHeader });
   const filtersData = await filtersRes.json();
   const filtersKeys = new Set((filtersData.issues || []).map(i => i.cfKey || i.key));
 
-  const mbrParams = new URLSearchParams({ team: 'eng', dateFrom: '2026-08-01', dateTo: '2026-08-31', person: EMAIL });
+  const mbrParams = new URLSearchParams({ team: TEAM, dateFrom: FROM, dateTo: TO, person: EMAIL });
   const mbrRes = await fetch(`${APP_URL}/api/reports/mbr-team?${mbrParams}`, { headers: authHeader });
   const mbrData = await mbrRes.json();
   const mbrKeys = new Set((mbrData.tickets || []).map(t => t.key));
 
-  console.log(`${EMAIL}: Filters=${filtersKeys.size} tickets, MBR=${mbrKeys.size} tickets\n`);
+  // The headline numbers each page shows, not just the lists: Filters'
+  // total, MBR's person summary card, and MBR's per-person table row.
+  const mbrAllRes = await fetch(`${APP_URL}/api/reports/mbr-team?${new URLSearchParams({ team: TEAM, dateFrom: FROM, dateTo: TO })}`, { headers: authHeader });
+  const mbrAll = await mbrAllRes.json();
+  const personRow = (mbrAll.people || []).find(p => String(p.email).toLowerCase() === EMAIL);
+  console.log(`${EMAIL} | ${TEAM} (Queue: ${DEPT}) | ${FROM}..${TO}`);
+  console.log(`  Filters total=${filtersData.total} (listed ${filtersKeys.size})`);
+  console.log(`  MBR person card total=${mbrData.summary?.total} (listed ${mbrKeys.size}), MBR people-table total=${personRow?.total ?? 'n/a'}\n`);
 
   const onlyInFilters = [...filtersKeys].filter(k => !mbrKeys.has(k));
   const onlyInMbr = [...mbrKeys].filter(k => !filtersKeys.has(k));
