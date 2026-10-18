@@ -1182,11 +1182,13 @@ export default function FiltersPage() {
   // send both params at once. Due Date has no such union support on the
   // backend, so it stays exclusive with both.
   const DATE_GROUP_KEYS = ['created', 'updated', 'worked', 'dueDate', 'resolved'];
-  // Worked/Due Date/Resolved date stand apart from created/updated: none of
-  // these may combine with each other (same reasoning as dueDate's existing
-  // isolation -- each changes what the date column itself means, rather
-  // than narrowing the same created/updated window further).
-  const EXCLUSIVE_DATE_KEYS = ['worked', 'dueDate', 'resolved'];
+  // Worked/Due Date stand apart from created/updated/resolved: neither may
+  // combine with any other date filter (each changes what the date column
+  // itself means, rather than widening the same window). Resolved date used
+  // to be exclusive too, which made Created + Resolved impossible to select
+  // -- the backend now unions it with Created/Updated the same way
+  // (created in range, plus resolved in range), so it combines freely.
+  const EXCLUSIVE_DATE_KEYS = ['worked', 'dueDate'];
   const clearExtraValue = (key: string) => {
     if (key === 'created')        setSelCreated('');
     if (key === 'updated')        setSelUpdated('');

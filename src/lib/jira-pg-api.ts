@@ -7182,27 +7182,20 @@ async function _handleJiraPgApi(
     // reason for an intersection here ("More than N ago" matching nearly
     // everything) no longer applies: that option is now a bounded
     // "Exactly N ago" window.
-    if (createdRange && updatedRange) {
-      const created = parseDateRange(createdRange);
-      const updated = parseDateRange(updatedRange);
-      addOrGroup([
-        { createdAt: { gte: created.from, lte: created.to } },
-        { updatedAt: { gte: updated.from, lte: updated.to } },
-      ]);
-    } else if (createdRange) {
-      const { from, to } = parseDateRange(createdRange);
-      where.createdAt = { gte: from, lte: to };
-    } else if (updatedRange) {
-      const { from, to } = parseDateRange(updatedRange);
-      where.updatedAt = { gte: from, lte: to };
-    }
+    // Resolved date joins the same union: Created + Resolved means
+    // "created in that window, plus resolved in that window" (the same rule
+    // MBR uses), not an intersection -- a ticket created Aug 29 and resolved
+    // Sep 5 belongs to a September view. Any combination of the three
+    // unions; a single one is a plain range.
+    const dateOrParts: any[] = [];
+    if (createdRange)  { const r = parseDateRange(createdRange);  dateOrParts.push({ createdAt:  { gte: r.from, lte: r.to } }); }
+    if (updatedRange)  { const r = parseDateRange(updatedRange);  dateOrParts.push({ updatedAt:  { gte: r.from, lte: r.to } }); }
+    if (resolvedRange) { const r = parseDateRange(resolvedRange); dateOrParts.push({ resolvedAt: { gte: r.from, lte: r.to } }); }
+    if (dateOrParts.length > 1) addOrGroup(dateOrParts);
+    else if (dateOrParts.length === 1) Object.assign(where, dateOrParts[0]);
     if (dueDateRange) {
       const { from, to } = parseDateRange(dueDateRange);
       where.dueDate = { gte: from, lte: to };
-    }
-    if (resolvedRange) {
-      const { from, to } = parseDateRange(resolvedRange);
-      where.resolvedAt = { gte: from, lte: to };
     }
 
     // Custom text field filters Ã¢â‚¬â€ support comma-separated multi-select values
@@ -8334,36 +8327,22 @@ async function _handleJiraPgApi(
       // intersection, untouched here); a Queue filter already bounds the
       // result set to that department's own tickets, so the same swamping
       // risk doesn't apply here the way it did unscoped.
-      if (createdRange && updatedRange) {
-        const created = parseDateRange(createdRange);
-        const updated = parseDateRange(updatedRange);
-        deptExtraClauses.push(
-          `((i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}) OR (i."updatedAt" >= $${deptParamIdx + 2} AND i."updatedAt" <= $${deptParamIdx + 3}))`
-        );
-        deptExtraParams.push(created.from, created.to, updated.from, updated.to);
-        deptParamIdx += 4;
-      } else if (createdRange) {
-        const { from, to } = parseDateRange(createdRange);
-        deptExtraClauses.push(`i."createdAt" >= $${deptParamIdx} AND i."createdAt" <= $${deptParamIdx + 1}`);
-        deptExtraParams.push(from, to);
-        deptParamIdx += 2;
-      } else if (updatedRange) {
-        const { from, to } = parseDateRange(updatedRange);
-        deptExtraClauses.push(`i."updatedAt" >= $${deptParamIdx} AND i."updatedAt" <= $${deptParamIdx + 1}`);
+      // Created/Updated/Resolved date union with each other, same as the
+      // general branch above (Resolved included -- see its comment).
+      const deptDateOrParts: string[] = [];
+      for (const [range, col] of [[createdRange, 'createdAt'], [updatedRange, 'updatedAt'], [resolvedRange, 'resolvedAt']] as const) {
+        if (!range) continue;
+        const { from, to } = parseDateRange(range);
+        deptDateOrParts.push(`(i."${col}" >= $${deptParamIdx} AND i."${col}" <= $${deptParamIdx + 1})`);
         deptExtraParams.push(from, to);
         deptParamIdx += 2;
       }
-      // Due Date and Resolved date -- same "never actually wired into this
-      // dept-scoped branch" gap as the general branch above.
+      if (deptDateOrParts.length) deptExtraClauses.push(deptDateOrParts.length === 1 ? deptDateOrParts[0] : `(${deptDateOrParts.join(' OR ')})`);
+      // Due Date -- same "never actually wired into this dept-scoped branch"
+      // gap as the general branch above.
       if (dueDateRange) {
         const { from, to } = parseDateRange(dueDateRange);
         deptExtraClauses.push(`i."dueDate" >= $${deptParamIdx} AND i."dueDate" <= $${deptParamIdx + 1}`);
-        deptExtraParams.push(from, to);
-        deptParamIdx += 2;
-      }
-      if (resolvedRange) {
-        const { from, to } = parseDateRange(resolvedRange);
-        deptExtraClauses.push(`i."resolvedAt" >= $${deptParamIdx} AND i."resolvedAt" <= $${deptParamIdx + 1}`);
         deptExtraParams.push(from, to);
         deptParamIdx += 2;
       }
