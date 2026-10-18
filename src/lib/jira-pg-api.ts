@@ -3581,17 +3581,27 @@ function timeWithPersonInDeptMs(
 ): number {
   const d = dept.trim().toLowerCase();
   const norm = (s: string | null | undefined) => String(s || '').trim().toLowerCase();
+  // The clock is also stopped while the ticket sits in a done status or a
+  // "Routed to X"/"Waiting for X" routing label: the person has finished
+  // with it, whatever the saved dates later say. Confirmed for real on
+  // CF-23245: routed to Migration in April, but the hand-off silently
+  // failed, so it officially stayed in Dev with Lakshmi Adabala until a
+  // September data-repair script completed the move (and a later backfill
+  // moved resolvedAt to September too). Without this, those ~5 months of
+  // nobody touching it counted as her resolution time. A move back to an
+  // active status (reopen) restarts the clock.
+  const isStopped = (s: string) => pauseStatuses.has(s) || DONE_STATUS_NAME_HINTS.has(s) || /^(routed\s+to|waiting\s+for)\s/.test(s);
   const paused: Array<{ startMs: number; endMs: number }> = [];
-  if (pauseStatuses.size) {
+  {
     let cur = statusHist.length ? norm(statusHist[0].oldValue) : norm(currentStatusName);
     let curStart = new Date(issueCreatedAt).getTime();
     for (const h of statusHist) {
       const t = new Date(h.createdAt).getTime();
-      if (pauseStatuses.has(cur) && t > curStart) paused.push({ startMs: curStart, endMs: t });
+      if (isStopped(cur) && t > curStart) paused.push({ startMs: curStart, endMs: t });
       cur = norm(h.newValue);
       curStart = t;
     }
-    if (pauseStatuses.has(cur)) paused.push({ startMs: curStart, endMs: Infinity });
+    if (isStopped(cur)) paused.push({ startMs: curStart, endMs: Infinity });
   }
   let total = 0;
   for (const st of stints) {
