@@ -3508,21 +3508,19 @@ function computeInProgressHours(
 // automatic/sender's status change in the same request, milliseconds
 // apart -- that's the system, not the person responding.
 const RESPONSE_ARRIVAL_WINDOW_MS = 10_000;
-function computeAssigneeResponseTimes(
-  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+type AssigneeStint = { email: string | null; startMs: number; endMs: number };
+function buildAssigneeStints(
   assigneeHist: Array<{ oldValue: string | null; newValue: string | null; createdAt: Date | string }>,
   issueCreatedAt: Date | string,
   currentAssigneeEmail: string | null,
   nameToEmail: Map<string, string>,
-): Map<string, number> {
+): AssigneeStint[] {
   const toEmail = (name: string | null | undefined): string | null => {
     const k = String(name || '').trim().toLowerCase();
     return k ? (nameToEmail.get(k) || null) : null;
   };
-  const isInProgress = (name: string | null | undefined) => IN_PROGRESS_STATUS_NAMES.has(String(name || '').trim().toLowerCase());
   const createdMs = new Date(issueCreatedAt).getTime();
-
-  const stints: Array<{ email: string | null; startMs: number; endMs: number }> = [];
+  const stints: AssigneeStint[] = [];
   if (assigneeHist.length === 0) {
     stints.push({ email: currentAssigneeEmail ? currentAssigneeEmail.toLowerCase() : null, startMs: createdMs, endMs: Infinity });
   } else {
@@ -3534,6 +3532,16 @@ function computeAssigneeResponseTimes(
       stints.push({ email: toEmail(h.newValue), startMs, endMs });
     });
   }
+  return stints;
+}
+// Returns each person's response hours plus the assignment it was measured
+// from (startMs) -- Avg. resolution reuses that same start, so a person's
+// resolution time is never shorter than their response time on a ticket.
+function computeAssigneeResponseTimes(
+  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+  stints: AssigneeStint[],
+): Map<string, { hours: number; startMs: number }> {
+  const isInProgress = (name: string | null | undefined) => IN_PROGRESS_STATUS_NAMES.has(String(name || '').trim().toLowerCase());
 
   // Status as of a moment: the newValue of the last change at or before it,
   // else the first change's oldValue (what it started as).
@@ -3546,7 +3554,7 @@ function computeAssigneeResponseTimes(
     return s;
   };
 
-  const result = new Map<string, number>();
+  const result = new Map<string, { hours: number; startMs: number }>();
   for (const st of stints) {
     if (!st.email || result.has(st.email)) continue;
     if (isInProgress(statusAt(st.startMs))) continue;
@@ -3555,7 +3563,7 @@ function computeAssigneeResponseTimes(
       if (t < st.startMs + RESPONSE_ARRIVAL_WINDOW_MS) continue;
       if (t >= st.endMs) break;
       if (!isInProgress(h.newValue)) continue;
-      result.set(st.email, Math.round((t - st.startMs) / 1000) / 3600);
+      result.set(st.email, { hours: Math.round((t - st.startMs) / 1000) / 3600, startMs: st.startMs });
       break;
     }
   }
@@ -15348,54 +15356,49 @@ async function _handleJiraPgApi(
         if (inSummary) summaryRbBreached++;
       }
 
-      // Same "no evidence, don't guess" rule as the resolvedAt backfill:
-      // only tickets that are actually done AND have a real resolvedAt
-      // contribute a resolution time at all.
-      if (row.status_category === 'done' && row.resolvedAt) {
-        let { inProgressHrs } = computeInProgressHours(
-          statusHistByIssue[row.id] || [], row.createdAt, true, row.resolvedAt, row.status_name
-        );
-        // A ticket that went straight Open -> Resolved (or through a
-        // queue-specific status) never accrues any "In Progress" time, so it
-        // averaged in as a flat 0 -- a person who simply never uses the In
-        // Progress status read as 0:00:00 resolution across the board. Fall
-        // back to arrival-in-department -> resolvedAt for those (createdAt
-        // when the dept anchor is missing or was reset past the resolution
-        // by a later re-transfer).
-        if (inProgressHrs <= 0) {
-          const resolvedMs = new Date(row.resolvedAt).getTime();
-          const deptMs = row.dept_sla_started_at ? new Date(row.dept_sla_started_at).getTime() : NaN;
-          const fromMs = Number.isFinite(deptMs) && deptMs <= resolvedMs ? deptMs : new Date(row.createdAt).getTime();
-          inProgressHrs = Math.max(0, Math.round((resolvedMs - fromMs) / 1000) / 3600);
-        }
-        for (const email of Array.from(emails)) {
-          const acc = (peopleInProgress[email] ??= { sum: 0, count: 0 });
-          acc.sum += inProgressHrs;
-          acc.count++;
-        }
-      }
-
       // Response time: assignment -> Open-to-In-Progress, credited to the
       // person who was assigned (see computeAssigneeResponseTimes). Open
       // tickets count too -- "how fast did you pick this up" doesn't need
-      // the ticket to be done. Only this tab's own team members are
-      // credited; a stint held by someone outside the team (e.g. the
-      // Migration engineer before the hand-off to Dev) is ignored here.
-      const responseByPerson = computeAssigneeResponseTimes(
-        statusHistByIssue[row.id] || [], assigneeHistByIssue[row.id] || [], row.createdAt,
+      // the ticket to be done. Only the ticket's owner is credited -- a
+      // person's average covers exactly the tickets in their own list.
+      const stints = buildAssigneeStints(
+        assigneeHistByIssue[row.id] || [], row.createdAt,
         row.assignee_email ? String(row.assignee_email) : null, responseNameToEmail,
       );
+      const responseByPerson = computeAssigneeResponseTimes(statusHistByIssue[row.id] || [], stints);
       const rosterResponses = new Map<string, number>();
-      for (const [email, hours] of Array.from(responseByPerson.entries())) {
-        // Only the ticket's owner -- a person's average covers exactly the
-        // tickets in their own list.
+      for (const [email, r] of Array.from(responseByPerson.entries())) {
         if (!emails.has(email)) continue;
-        rosterResponses.set(email, hours);
+        rosterResponses.set(email, r.hours);
         const acc = (peopleResponseTime[email] ??= { sum: 0, count: 0 });
-        acc.sum += hours;
+        acc.sum += r.hours;
         acc.count++;
       }
       responseHoursByIssue.set(row.id, rosterResponses);
+
+      // Resolution time, per explicit definition: from when the owner was
+      // ASSIGNED the ticket until it was resolved -- the same start as their
+      // response time (so resolution >= response on every ticket), and
+      // falling back to their first assignment at or before the resolution
+      // when they never moved it to In Progress. Used to be time spent
+      // "In Progress" only (summed across every department the ticket
+      // visited), which left out all waiting time and read nonsensically
+      // next to response time: 39h to pick up, 1h to "resolve". Same "no
+      // evidence, don't guess" rule as before: only done tickets with a real
+      // resolvedAt, and only when the owner's assignment can be found.
+      if (row.status_category === 'done' && row.resolvedAt) {
+        const resolvedMs = new Date(row.resolvedAt).getTime();
+        for (const email of Array.from(emails)) {
+          const responseStart = responseByPerson.get(email)?.startMs;
+          const startMs = responseStart !== undefined && responseStart <= resolvedMs
+            ? responseStart
+            : stints.find((st) => st.email === email && st.startMs <= resolvedMs)?.startMs;
+          if (startMs === undefined) continue;
+          const acc = (peopleInProgress[email] ??= { sum: 0, count: 0 });
+          acc.sum += Math.round((resolvedMs - startMs) / 1000) / 3600;
+          acc.count++;
+        }
+      }
 
       if (isEntSmb) {
         const descText = stripHtml(row.description);
@@ -15454,9 +15457,8 @@ async function _handleJiraPgApi(
         ...toSummary(r, rbBreached),
         ...hygieneFrom(r),
         ...(isEntSmb ? weeklyScoreFrom(r, peopleTextAgg[email] || newTextAgg(), Number(r.total) || 0, rbBreached) : {}),
-        // Active work time per ticket (time actually spent In Progress),
-        // not full elapsed creation-to-resolution time -- see
-        // peopleInProgress construction above for why.
+        // Assigned -> resolved per ticket, averaged over this person's
+        // resolved tickets -- see peopleInProgress construction above.
         // Rounded to the nearest second, not the nearest 0.1h -- see the
         // computeInProgressHours comment above for why: MBR renders this as
         // H:MM:SS now, and 6-minute rounding zeroed out real sub-3-minute
