@@ -3568,9 +3568,31 @@ function buildDeptSegments(
   return segs;
 }
 // Total ms a person held the ticket while it sat in `dept`, up to capMs:
-// the overlap of their assignee stints with that department's segments.
-function timeWithPersonInDeptMs(stints: AssigneeStint[], segs: DeptSegment[], email: string, dept: string, capMs: number): number {
+// the overlap of their assignee stints with that department's segments,
+// minus any stretch spent in one of pauseStatuses (the department's SLA
+// policies' pause statuses, lowercased -- the same "clock stopped" rule the
+// SLA engine applies, matched against the same global status name). The
+// status timeline comes from status history: the first row's oldValue from
+// creation, then each row's newValue (current status when there's none).
+function timeWithPersonInDeptMs(
+  stints: AssigneeStint[], segs: DeptSegment[], email: string, dept: string, capMs: number,
+  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+  issueCreatedAt: Date | string, currentStatusName: string | null, pauseStatuses: Set<string>,
+): number {
   const d = dept.trim().toLowerCase();
+  const norm = (s: string | null | undefined) => String(s || '').trim().toLowerCase();
+  const paused: Array<{ startMs: number; endMs: number }> = [];
+  if (pauseStatuses.size) {
+    let cur = statusHist.length ? norm(statusHist[0].oldValue) : norm(currentStatusName);
+    let curStart = new Date(issueCreatedAt).getTime();
+    for (const h of statusHist) {
+      const t = new Date(h.createdAt).getTime();
+      if (pauseStatuses.has(cur) && t > curStart) paused.push({ startMs: curStart, endMs: t });
+      cur = norm(h.newValue);
+      curStart = t;
+    }
+    if (pauseStatuses.has(cur)) paused.push({ startMs: curStart, endMs: Infinity });
+  }
   let total = 0;
   for (const st of stints) {
     if (st.email !== email) continue;
@@ -3578,7 +3600,14 @@ function timeWithPersonInDeptMs(stints: AssigneeStint[], segs: DeptSegment[], em
       if (sg.dept !== d) continue;
       const start = Math.max(st.startMs, sg.startMs);
       const end = Math.min(st.endMs, sg.endMs, capMs);
-      if (end > start) total += end - start;
+      if (end <= start) continue;
+      let span = end - start;
+      for (const p of paused) {
+        const ps = Math.max(start, p.startMs);
+        const pe = Math.min(end, p.endMs);
+        if (pe > ps) span -= pe - ps;
+      }
+      if (span > 0) total += span;
     }
   }
   return total;
@@ -15310,6 +15339,10 @@ async function _handleJiraPgApi(
       responseNameToEmail.set(email, email);
     }
     const responseHoursByIssue = new Map<string, Map<string, number>>();
+    // Each ticket's own resolution hours (its owner's time in this queue),
+    // shown per row in the drill-down next to response time.
+    const resolutionHoursByIssue = new Map<string, number>();
+    const pauseStatusesBySpace = new Map<string, Set<string>>();
     const peopleInProgress: Record<string, { sum: number; count: number }> = {};
     const peopleResponseTime: Record<string, { sum: number; count: number }> = {};
 
@@ -15397,8 +15430,21 @@ async function _handleJiraPgApi(
       // this team if it's actually this team's own (deptName null/empty =
       // a space-wide policy, implicitly the current department, which the
       // gate above already confirmed matches).
-      const breached = String(row.current_department || '').toLowerCase() === dept.toLowerCase()
-        && instances.some((x: any) => (!x.deptName || x.deptName.toLowerCase() === dept.toLowerCase()) && x.isBreached);
+      // A ticket that has LEFT this department still carries this
+      // department's own frozen SLA instance (deptName = this dept, built
+      // from dept_sla_log -- see computeSLAInstancesPure's
+      // historicalInstances), and that instance's isBreached is exactly
+      // whether this team breached it. The old gate (current_department must
+      // equal this dept, for EVERY instance) threw those away, so a ticket
+      // this team worked and then routed on could never read as breached --
+      // confirmed as why people whose tickets mostly go back to Migration
+      // showed 0 breaches next to a 60+ hour average resolution. Only an
+      // untagged (space-wide policy) instance still needs the ticket to be
+      // here now, since that one is evaluated against its live state.
+      const inThisDeptNow = String(row.current_department || '').toLowerCase() === dept.toLowerCase();
+      const breached = instances.some((x: any) => x.isBreached && (
+        x.deptName ? x.deptName.toLowerCase() === dept.toLowerCase() : inThisDeptNow
+      ));
       slaById.set(row.id, breached);
 
       // One person per ticket: its Filters owner (see ownerByIssue).
@@ -15440,7 +15486,9 @@ async function _handleJiraPgApi(
       // Resolution time, per explicit definition: the total time the ticket
       // stood with its owner IN THIS QUEUE -- every stretch they were the
       // assignee while it sat in this department, added up, ending when it
-      // was resolved (or left the department, or was reassigned). Average =
+      // was resolved (or left the department, or was reassigned), minus any
+      // time in this department's SLA pause statuses (pause time doesn't
+      // count, same as the SLA clock). Average =
       // sum over their tickets / number of those tickets. Only tickets whose
       // time in this queue is finished count: resolved (with a real
       // resolvedAt), or already moved on to another department; a ticket
@@ -15452,11 +15500,28 @@ async function _handleJiraPgApi(
       if (isDone || leftDept) {
         const capMs = isDone ? new Date(row.resolvedAt).getTime() : Date.now();
         const segs = buildDeptSegments(deptTransByIssue[row.id] || [], deptHistByIssue[row.id] || [], row.createdAt, row.current_department);
+        let pauseSet = pauseStatusesBySpace.get(row.spaceId);
+        if (!pauseSet) {
+          // This department's own SLA policies (plus space-wide ones) on the
+          // ticket's board -- the same set computeSLAInstancesPure checks.
+          pauseSet = new Set<string>();
+          for (const p of slaPoliciesBySpace[row.spaceId] || []) {
+            const pDept = String(p.dept_name || '').trim().toLowerCase();
+            if (pDept && pDept !== dept.toLowerCase()) continue;
+            for (const s of Array.isArray(p.pauseStatuses) ? p.pauseStatuses : []) pauseSet.add(String(s).trim().toLowerCase());
+          }
+          pauseStatusesBySpace.set(row.spaceId, pauseSet);
+        }
         for (const email of Array.from(emails)) {
-          const ms = timeWithPersonInDeptMs(stints, segs, email, dept, capMs);
+          const ms = timeWithPersonInDeptMs(
+            stints, segs, email, dept, capMs,
+            statusHistByIssue[row.id] || [], row.createdAt, row.status_name, pauseSet,
+          );
           if (ms <= 0) continue;
           const acc = (peopleInProgress[email] ??= { sum: 0, count: 0 });
-          acc.sum += Math.round(ms / 1000) / 3600;
+          const hours = Math.round(ms / 1000) / 3600;
+          resolutionHoursByIssue.set(row.id, hours);
+          acc.sum += hours;
           acc.count++;
         }
       }
@@ -15602,6 +15667,9 @@ async function _handleJiraPgApi(
         if (assigneeEmail && m.has(assigneeEmail)) return m.get(assigneeEmail)!;
         return Array.from(m.values())[0];
       })(),
+      // Owner's time in this queue (Avg. resolution's per-ticket value);
+      // null = not finished here yet, or no measurable assignment.
+      resolutionHours: resolutionHoursByIssue.get(r.id) ?? null,
       };
     });
 
