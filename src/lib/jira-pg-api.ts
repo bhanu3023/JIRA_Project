@@ -3534,6 +3534,56 @@ function buildAssigneeStints(
   }
   return stints;
 }
+// Which department a ticket sat in, as [startMs, endMs) segments over its
+// life. issue_dept_transitions (written at every department move) is the
+// primary source; tickets older than that table fall back to issue_history's
+// field='department' rows (oldValue = the department it was leaving), and a
+// ticket with neither has sat in current_department its whole life.
+type DeptSegment = { dept: string; startMs: number; endMs: number };
+function buildDeptSegments(
+  transitions: Array<{ from_dept: string; to_dept: string; moved_at: Date | string }>,
+  deptHist: Array<{ oldValue: string | null; createdAt: Date | string }>,
+  issueCreatedAt: Date | string,
+  currentDept: string | null,
+): DeptSegment[] {
+  const createdMs = new Date(issueCreatedAt).getTime();
+  const norm = (d: string | null | undefined) => String(d || '').trim().toLowerCase();
+  const segs: DeptSegment[] = [];
+  if (transitions.length) {
+    segs.push({ dept: norm(transitions[0].from_dept), startMs: createdMs, endMs: new Date(transitions[0].moved_at).getTime() });
+    transitions.forEach((t, i) => {
+      const startMs = new Date(t.moved_at).getTime();
+      const endMs = i + 1 < transitions.length ? new Date(transitions[i + 1].moved_at).getTime() : Infinity;
+      segs.push({ dept: norm(t.to_dept), startMs, endMs });
+    });
+  } else if (deptHist.length) {
+    deptHist.forEach((h, i) => {
+      const startMs = i === 0 ? createdMs : new Date(deptHist[i - 1].createdAt).getTime();
+      segs.push({ dept: norm(h.oldValue), startMs, endMs: new Date(h.createdAt).getTime() });
+    });
+    segs.push({ dept: norm(currentDept), startMs: new Date(deptHist[deptHist.length - 1].createdAt).getTime(), endMs: Infinity });
+  } else {
+    segs.push({ dept: norm(currentDept), startMs: createdMs, endMs: Infinity });
+  }
+  return segs;
+}
+// Total ms a person held the ticket while it sat in `dept`, up to capMs:
+// the overlap of their assignee stints with that department's segments.
+function timeWithPersonInDeptMs(stints: AssigneeStint[], segs: DeptSegment[], email: string, dept: string, capMs: number): number {
+  const d = dept.trim().toLowerCase();
+  let total = 0;
+  for (const st of stints) {
+    if (st.email !== email) continue;
+    for (const sg of segs) {
+      if (sg.dept !== d) continue;
+      const start = Math.max(st.startMs, sg.startMs);
+      const end = Math.min(st.endMs, sg.endMs, capMs);
+      if (end > start) total += end - start;
+    }
+  }
+  return total;
+}
+
 // Returns each person's response hours plus the assignment it was measured
 // from (startMs) -- Avg. resolution reuses that same start, so a person's
 // resolution time is never shorter than their response time on a ticket.
@@ -15223,17 +15273,28 @@ async function _handleJiraPgApi(
     // once here rather than per-ticket, same shape as workedRosterRes above.
     const statusHistRes = slaCandidateIds.length
       ? await pool.query(
-          `SELECT "issueId", field, "oldValue", "newValue", "authorEmail", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field IN ('status', 'assignee') ORDER BY "issueId", "createdAt" ASC`,
+          `SELECT "issueId", field, "oldValue", "newValue", "authorEmail", "createdAt" FROM issue_history WHERE "issueId" = ANY($1::text[]) AND field IN ('status', 'assignee', 'department') ORDER BY "issueId", "createdAt" ASC`,
           [slaCandidateIds]
         )
       : { rows: [] as any[] };
     const statusHistByIssue: Record<string, Array<{ oldValue: string | null; newValue: string; authorEmail: string | null; createdAt: Date }>> = {};
-    // Assignee history feeds Avg. response time (computeAssigneeResponseTimes).
+    // Assignee history feeds Avg. response time (computeAssigneeResponseTimes)
+    // and, with the department history/transitions, Avg. resolution.
     const assigneeHistByIssue: Record<string, Array<{ oldValue: string | null; newValue: string | null; createdAt: Date }>> = {};
+    const deptHistByIssue: Record<string, Array<{ oldValue: string | null; createdAt: Date }>> = {};
     for (const h of statusHistRes.rows) {
       if (h.field === 'assignee') (assigneeHistByIssue[h.issueId] ??= []).push(h);
+      else if (h.field === 'department') (deptHistByIssue[h.issueId] ??= []).push(h);
       else (statusHistByIssue[h.issueId] ??= []).push(h);
     }
+    const deptTransRes = slaCandidateIds.length
+      ? await pool.query(
+          `SELECT issue_id, from_dept, to_dept, moved_at FROM issue_dept_transitions WHERE issue_id = ANY($1::text[]) ORDER BY issue_id, moved_at ASC`,
+          [slaCandidateIds]
+        )
+      : { rows: [] as any[] };
+    const deptTransByIssue: Record<string, Array<{ from_dept: string; to_dept: string; moved_at: Date }>> = {};
+    for (const t of deptTransRes.rows) (deptTransByIssue[t.issue_id] ??= []).push(t);
     // Assignee history rows store display names, not ids -- map this team's
     // own members' names (and bare emails, the fallback display value) back
     // to their email so a stint can be credited to the right person.
@@ -15376,26 +15437,26 @@ async function _handleJiraPgApi(
       }
       responseHoursByIssue.set(row.id, rosterResponses);
 
-      // Resolution time, per explicit definition: from when the owner was
-      // ASSIGNED the ticket until it was resolved -- the same start as their
-      // response time (so resolution >= response on every ticket), and
-      // falling back to their first assignment at or before the resolution
-      // when they never moved it to In Progress. Used to be time spent
-      // "In Progress" only (summed across every department the ticket
-      // visited), which left out all waiting time and read nonsensically
-      // next to response time: 39h to pick up, 1h to "resolve". Same "no
-      // evidence, don't guess" rule as before: only done tickets with a real
-      // resolvedAt, and only when the owner's assignment can be found.
-      if (row.status_category === 'done' && row.resolvedAt) {
-        const resolvedMs = new Date(row.resolvedAt).getTime();
+      // Resolution time, per explicit definition: the total time the ticket
+      // stood with its owner IN THIS QUEUE -- every stretch they were the
+      // assignee while it sat in this department, added up, ending when it
+      // was resolved (or left the department, or was reassigned). Average =
+      // sum over their tickets / number of those tickets. Only tickets whose
+      // time in this queue is finished count: resolved (with a real
+      // resolvedAt), or already moved on to another department; a ticket
+      // still open here has no resolution time yet. A ticket where the
+      // owner's assignment can't be found in history (0 measurable time)
+      // is skipped rather than averaged in as 0.
+      const isDone = row.status_category === 'done' && !!row.resolvedAt;
+      const leftDept = String(row.current_department || '').toLowerCase() !== dept.toLowerCase();
+      if (isDone || leftDept) {
+        const capMs = isDone ? new Date(row.resolvedAt).getTime() : Date.now();
+        const segs = buildDeptSegments(deptTransByIssue[row.id] || [], deptHistByIssue[row.id] || [], row.createdAt, row.current_department);
         for (const email of Array.from(emails)) {
-          const responseStart = responseByPerson.get(email)?.startMs;
-          const startMs = responseStart !== undefined && responseStart <= resolvedMs
-            ? responseStart
-            : stints.find((st) => st.email === email && st.startMs <= resolvedMs)?.startMs;
-          if (startMs === undefined) continue;
+          const ms = timeWithPersonInDeptMs(stints, segs, email, dept, capMs);
+          if (ms <= 0) continue;
           const acc = (peopleInProgress[email] ??= { sum: 0, count: 0 });
-          acc.sum += Math.round((resolvedMs - startMs) / 1000) / 3600;
+          acc.sum += Math.round(ms / 1000) / 3600;
           acc.count++;
         }
       }
@@ -15457,8 +15518,8 @@ async function _handleJiraPgApi(
         ...toSummary(r, rbBreached),
         ...hygieneFrom(r),
         ...(isEntSmb ? weeklyScoreFrom(r, peopleTextAgg[email] || newTextAgg(), Number(r.total) || 0, rbBreached) : {}),
-        // Assigned -> resolved per ticket, averaged over this person's
-        // resolved tickets -- see peopleInProgress construction above.
+        // Time each ticket stood with this person in this queue, summed and
+        // divided by the number of tickets -- see peopleInProgress above.
         // Rounded to the nearest second, not the nearest 0.1h -- see the
         // computeInProgressHours comment above for why: MBR renders this as
         // H:MM:SS now, and 6-minute rounding zeroed out real sub-3-minute
