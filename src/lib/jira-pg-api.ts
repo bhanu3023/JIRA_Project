@@ -14403,6 +14403,11 @@ async function _handleJiraPgApi(
   // avgResolutionHours always comes back null.
   if (path === 'reports/mbr-team' && method === 'GET') {
     if (!isAdmin && !(await userCanViewMbr(userId))) return json({ error: 'Forbidden' }, 403);
+    // Per-phase timings, logged with the response -- the frontend gives up
+    // after 20s, so a slow phase needs to be findable from the server log.
+    const mbrTimings: Record<string, number> = {};
+    let mbrPhaseStart = Date.now();
+    const mbrMark = (phase: string) => { const now = Date.now(); mbrTimings[phase] = now - mbrPhaseStart; mbrPhaseStart = now; };
 
     // Migration ENT/SMB "Overall Score" — a 5-factor per-ticket content score
     // (Summary Quality, Description Quality, SLA Compliance, Closing Comments,
@@ -15068,6 +15073,7 @@ async function _handleJiraPgApi(
         if (list) list.push(r.id); else ownedIdsByEmail.set(r.owner_email, [r.id]);
       }
     }
+    mbrMark('filtersOwnerScope');
     const personOwnedIds = person ? (ownedIdsByEmail.get(person) || []) : [];
 
     let scopedParams = person ? [...baseParams, person, personOwnedIds] : baseParams;
@@ -15333,20 +15339,39 @@ async function _handleJiraPgApi(
     // check-api-response-times.mjs: MBR eng took 4.5s, ent 3.2s, for the
     // same date range.
     const isEntSmbTeam = team === 'ent' || team === 'smb';
-    const slaCandidatesRes = await pool.query(`
-      SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
-        i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
-        i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category,
-        ${isEntSmbTeam ? 'i.summary, i.description' : 'NULL AS summary, NULL AS description'},
-        (${deptMatchSql} AND ${rosterMatchSql}${dateClause}) AS in_team_scope
-      FROM issues i
-      LEFT JOIN statuses s ON i."statusId" = s.id
-      LEFT JOIN users au ON au.id = i."assigneeId"
-      WHERE (${deptMatchSql} AND ${rosterMatchSql}${dateClause}) OR i.id = ANY($${baseParams.length + 1}::text[])
-    `, [...baseParams, Array.from(ownerByIssue.keys())]);
+    // Two queries, not one `(team scope) OR i.id = ANY(owned ids)`: the OR
+    // stopped Postgres narrowing by board/date first, so deptMatchSql's
+    // per-row subqueries ran against every issue in the database and the
+    // Customer Engineering tab blew past the frontend's 20s request timeout.
+    // The team-scope query is exactly the original; the second fetches only
+    // the person-owned tickets it didn't return, by primary key.
     // in_team_scope = counts toward the tab-wide totals/monthly rows; rows
     // pulled in only via ownerByIssue (a person's Filters-owned ticket
     // outside the tab-wide scope) count for that person alone.
+    const slaCandidateCols = `i.id, COALESCE(i.cf_key, i.key) AS key, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
+        i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
+        i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category,
+        ${isEntSmbTeam ? 'i.summary, i.description' : 'NULL AS summary, NULL AS description'}`;
+    const teamScopeRes = await pool.query(`
+      SELECT ${slaCandidateCols}, TRUE AS in_team_scope
+      FROM issues i
+      LEFT JOIN statuses s ON i."statusId" = s.id
+      LEFT JOIN users au ON au.id = i."assigneeId"
+      WHERE ${deptMatchSql} AND ${rosterMatchSql}${dateClause}
+    `, baseParams);
+    const teamScopeIds = new Set(teamScopeRes.rows.map((r: any) => r.id));
+    const ownedOutsideIds = Array.from(ownerByIssue.keys()).filter((id) => !teamScopeIds.has(id));
+    const ownedOutsideRes = ownedOutsideIds.length
+      ? await pool.query(`
+          SELECT ${slaCandidateCols}, FALSE AS in_team_scope
+          FROM issues i
+          LEFT JOIN statuses s ON i."statusId" = s.id
+          LEFT JOIN users au ON au.id = i."assigneeId"
+          WHERE i.id = ANY($1::text[])
+        `, [ownedOutsideIds])
+      : { rows: [] as any[] };
+    const slaCandidatesRes = { rows: [...teamScopeRes.rows, ...ownedOutsideRes.rows] };
+    mbrMark('summaryPeopleMonthlyTicketsAndCandidates');
 
     const slaCandidateIds = slaCandidatesRes.rows.map((r: any) => r.id);
     const workedRosterRes = slaCandidateIds.length
@@ -15783,7 +15808,8 @@ async function _handleJiraPgApi(
       };
     });
 
-    console.log('[DEBUG mbr-team-tab]', JSON.stringify({ team, dept, dateFrom, dateTo, person, ticketFilter, totalMatched, summary }));
+    mbrMark('historyAndPerTicketLoop');
+    console.log('[DEBUG mbr-team-tab]', JSON.stringify({ team, dept, dateFrom, dateTo, person, ticketFilter, totalMatched, candidates: slaCandidatesRes.rows.length, timingsMs: mbrTimings, summary }));
     return json({ people, monthly, summary, tickets, totalMatched });
   }
 
