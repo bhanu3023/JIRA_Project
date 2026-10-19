@@ -3674,7 +3674,7 @@ function timeWithPersonInDeptMs(stints: AssigneeStint[], email: string, capMs: n
 // hand-off request itself, not the person. Each person's first responded
 // stint counts; startMs is returned so resolution can share it.
 function computeAssigneeResponseTimes(
-  statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
+  statusHist: Array<{ oldValue: string | null; newValue: string; authorEmail?: string | null; createdAt: Date | string }>,
   stints: AssigneeStint[], clock: ActiveClock, pauseStatuses: Set<string>,
   capMs: number, finished: boolean,
 ): Map<string, { hours: number; startMs: number }> {
@@ -3714,7 +3714,14 @@ function computeAssigneeResponseTimes(
     let found = false;
     for (const h of statusHist) {
       const t = new Date(h.createdAt).getTime();
-      if (t < st.startMs + RESPONSE_ARRIVAL_WINDOW_MS) continue;
+      // The arrival window only skips rows written by SOMEONE ELSE (the
+      // hand-off's sender, or the system) -- the assignee's own status
+      // change in that window is a genuine, instant pickup. Skipping those
+      // too missed every "assign it to myself and start it" in one go and
+      // ran on to a later status change instead (confirmed for real:
+      // CF-33224, Adari Venkata Jaswanth self-assigned and moved it Open ->
+      // In Progress at the same minute, but MBR read 2:34:27).
+      if (t < st.startMs + RESPONSE_ARRIVAL_WINDOW_MS && norm(h.authorEmail) !== st.email) continue;
       if (t >= stintEndMs) break;
       if (!clock.inDeptAt(t)) continue;
       const name = norm(h.newValue);
