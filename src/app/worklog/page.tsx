@@ -232,6 +232,28 @@ export default function WorklogPage() {
     return groups;
   }, [filteredRows]);
 
+  // Per-person breakdown -- the summary bar above only ever shows ONE
+  // combined Total/Entries/Avg, which mixes everyone together into a single
+  // number the moment "Logged by" is left on All. Only meaningful (and only
+  // shown) when no specific person is already selected there -- picking a
+  // person already gives their own numbers via selectedUserLabel above, so
+  // this would just show a single-row repeat of the same stats.
+  const groupedByUser = useMemo(() => {
+    if (userFilter) return [];
+    const map = new Map<string, { authorId: string | null; name: string; totalMinutes: number; entries: number }>();
+    for (const r of filteredRows) {
+      const key = r.authorId || r.authorName || 'unknown';
+      let g = map.get(key);
+      if (!g) {
+        g = { authorId: r.authorId, name: r.authorName || 'Unknown', totalMinutes: 0, entries: 0 };
+        map.set(key, g);
+      }
+      g.totalMinutes += r.timeSpentMinutes || 0;
+      g.entries += 1;
+    }
+    return Array.from(map.values()).sort((a, b) => b.totalMinutes - a.totalMinutes);
+  }, [filteredRows, userFilter]);
+
   return (
     <div className="flex flex-col h-full min-h-0 overflow-auto bg-gray-50">
       {/* Header */}
@@ -326,6 +348,44 @@ export default function WorklogPage() {
             </p>
           </div>
         </div>
+
+        {/* Per-person breakdown -- only when no one's singled out via
+            "Logged by" (see groupedByUser's own comment for why). Same
+            three stats as the combined summary bar above, one row per
+            person instead of everyone folded into one number. */}
+        {!userFilter && groupedByUser.length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden mb-5">
+            <div className="px-5 py-3 border-b border-gray-200">
+              <p className="text-[12.5px] font-semibold text-gray-700">Per-person breakdown</p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-200">
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Name</th>
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Total</th>
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Entries</th>
+                    <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Avg per entry</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groupedByUser.map((g) => (
+                    <tr
+                      key={g.authorId || g.name}
+                      className={`border-b border-gray-100 last:border-0 ${g.authorId ? 'cursor-pointer hover:bg-gray-50' : ''}`}
+                      onClick={() => { if (g.authorId) setUserFilter(g.authorId); }}
+                    >
+                      <td className="px-4 py-2.5 text-[13px] font-medium text-gray-800">{g.name}</td>
+                      <td className="px-4 py-2.5 text-[13px] text-gray-700">{formatMinutes(g.totalMinutes)}</td>
+                      <td className="px-4 py-2.5 text-[13px] text-gray-700">{g.entries}</td>
+                      <td className="px-4 py-2.5 text-[13px] text-gray-700">{formatMinutes(Math.round(g.totalMinutes / g.entries))}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
 
         {/* One table, real column headers, grouped by ticket via a merged
             first cell instead of a separate boxed header bar per ticket --
