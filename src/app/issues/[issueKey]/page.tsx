@@ -1201,13 +1201,14 @@ export default function IssueDetailPage() {
       ? allOptions.filter(o => o.toLowerCase().includes(customFieldSearch.trim().toLowerCase()))
       : allOptions;
     // Same condition getMissingCoreFields() already enforces before letting
-    // the ticket resolve -- Root Cause/Fix Description are only mandatory
-    // while the ticket is in Dev's own queue (a Migration ticket that's
-    // never touched Dev has no bug to explain). Shows the red asterisk
-    // up front instead of only surfacing "this is required" as a blocking
-    // popup at the moment someone tries to resolve it.
+    // the ticket resolve -- Root Cause/Fix Description are mandatory while
+    // the ticket is in Dev's or Migration's own queue (see that function's
+    // own comment for why both). Shows the red asterisk up front instead of
+    // only surfacing "this is required" as a blocking popup at the moment
+    // someone tries to resolve it.
+    const _reqDeptLower = ((issue as any)?.current_department || '').trim().toLowerCase();
     const isRequiredNow = (key === 'rootCause' || key === 'fixDescription')
-      && ((issue as any)?.current_department || '').trim().toLowerCase() === 'dev'
+      && (_reqDeptLower === 'dev' || _reqDeptLower === 'migration')
       && !isMandatoryFieldsExemptDept();
     return (
       <PropRow key={key} label={label} required={isRequiredNow}>
@@ -1412,10 +1413,15 @@ export default function IssueDetailPage() {
       { name: 'Combination',     key: 'combination'    },
     ];
     // Root Cause / Fix Description capture why a bug happened and what
-    // actually fixed it -- only meaningful for a ticket that's gone through
-    // Dev's own resolution workflow, so only required while it's currently
-    // in the Dev queue (not, say, a Migration ticket that's never touched Dev).
-    if (((issue as any)?.current_department || '').toLowerCase() === 'dev') {
+    // actually fixed it. Required resolving a Dev ticket (its own
+    // resolution workflow) -- and, per explicit request, also required
+    // resolving a Migration ticket, since Migration's own tickets just as
+    // often need their own documented root cause and fix (e.g. a migration
+    // script fix, a client-side config issue) even when Dev was never
+    // involved. Not required for any OTHER department (QA/Infra/etc.),
+    // which don't have the same "bug and fix" shape.
+    const deptLower = ((issue as any)?.current_department || '').toLowerCase();
+    if (deptLower === 'dev' || deptLower === 'migration') {
       alwaysRequired.push({ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' });
     }
     for (const f of alwaysRequired) {
