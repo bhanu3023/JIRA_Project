@@ -3643,9 +3643,14 @@ function timeWithPersonInDeptMs(stints: AssigneeStint[], email: string, capMs: n
 // Avg. response time's per-ticket value: active time from the person's
 // assignment until they moved it into In Progress while it sat in this
 // queue. A stint where the ticket was already In Progress when they got it
-// (a mid-work hand-over) isn't a pickup; one that reaches a done/routing
-// status before ever going In Progress gives no response (it was finished
-// without being started -- a later reopen isn't a response). Status rows
+// (a mid-work hand-over) isn't a pickup. One that reaches a done/routing
+// status before ever going In Progress responds at THAT moment -- resolving
+// or routing it straight from Open is the person's first action on it (a
+// later reopen is never the response). Without this, those tickets had no
+// response at all, so a person's average response covered only their
+// tickets that went through In Progress while their average resolution
+// covered all of them -- confirmed for real as how K N V S Raj Kumar read
+// 38h response against 22h resolution. Status rows
 // within RESPONSE_ARRIVAL_WINDOW_MS of the assignment are written by the
 // hand-off request itself, not the person. Each person's first responded
 // stint counts; startMs is returned so resolution can share it.
@@ -3672,11 +3677,11 @@ function computeAssigneeResponseTimes(
       if (t >= st.endMs) break;
       if (!clock.inDeptAt(t)) continue;
       const name = norm(h.newValue);
-      if (IN_PROGRESS_STATUS_NAMES.has(name)) {
+      const finishes = !pauseStatuses.has(name) && (DONE_STATUS_NAME_HINTS.has(name) || ROUTING_LABEL_RE.test(name));
+      if (IN_PROGRESS_STATUS_NAMES.has(name) || finishes) {
         result.set(st.email, { hours: Math.round(clock.activeMs(st.startMs, t) / 1000) / 3600, startMs: st.startMs });
         break;
       }
-      if (!pauseStatuses.has(name) && (DONE_STATUS_NAME_HINTS.has(name) || ROUTING_LABEL_RE.test(name))) break;
     }
   }
   return result;
@@ -15520,19 +15525,16 @@ async function _handleJiraPgApi(
         dept, statusHistByIssue[row.id] || [], row.createdAt, row.status_name, pauseSet,
       );
 
-      // Response time: assignment -> Open-to-In-Progress (see
-      // computeAssigneeResponseTimes). Open tickets count too -- "how fast
-      // did you pick this up" doesn't need the ticket to be done. Only the
-      // ticket's owner is credited -- a person's average covers exactly the
-      // tickets in their own list.
+      // Response time: assignment -> first pickup (see
+      // computeAssigneeResponseTimes), credited to the ticket's owner only.
+      // Shown per ticket for every ticket, but AVERAGED only over the same
+      // tickets as Avg. resolution below -- the two columns used to average
+      // different ticket sets, so a person's average response could exceed
+      // their average resolution even though no single ticket did.
       const responseByPerson = computeAssigneeResponseTimes(statusHistByIssue[row.id] || [], stints, clock, pauseSet);
       const rosterResponses = new Map<string, number>();
       for (const [email, r] of Array.from(responseByPerson.entries())) {
-        if (!emails.has(email)) continue;
-        rosterResponses.set(email, r.hours);
-        const acc = (peopleResponseTime[email] ??= { sum: 0, count: 0 });
-        acc.sum += r.hours;
-        acc.count++;
+        if (emails.has(email)) rosterResponses.set(email, r.hours);
       }
       responseHoursByIssue.set(row.id, rosterResponses);
 
@@ -15544,11 +15546,18 @@ async function _handleJiraPgApi(
       // already moved on to another department; a ticket still open here
       // has no resolution time yet. A ticket where the owner's assignment
       // can't be found in history (0 measurable time) is skipped rather than
-      // averaged in as 0.
+      // averaged in as 0. The end point is the later of resolvedAt and the
+      // ticket's last status change: resolvedAt alone can be stale (left
+      // over from an earlier resolution when a reopen-and-resolve never
+      // re-stamped it), which cut resolution off before the work it was
+      // supposed to cover -- the clock itself already stops at the real
+      // done/routing status either way.
       const isDone = row.status_category === 'done' && !!row.resolvedAt;
       const leftDept = String(row.current_department || '').toLowerCase() !== dept.toLowerCase();
       if (isDone || leftDept) {
-        const capMs = isDone ? new Date(row.resolvedAt).getTime() : Date.now();
+        const hist = statusHistByIssue[row.id] || [];
+        const lastStatusMs = hist.length ? new Date(hist[hist.length - 1].createdAt).getTime() : 0;
+        const capMs = isDone ? Math.max(new Date(row.resolvedAt).getTime(), lastStatusMs) : Date.now();
         for (const email of Array.from(emails)) {
           const ms = timeWithPersonInDeptMs(stints, email, capMs, clock);
           if (ms <= 0) continue;
@@ -15557,6 +15566,12 @@ async function _handleJiraPgApi(
           resolutionHoursByIssue.set(row.id, hours);
           acc.sum += hours;
           acc.count++;
+          const response = rosterResponses.get(email);
+          if (response !== undefined) {
+            const racc = (peopleResponseTime[email] ??= { sum: 0, count: 0 });
+            racc.sum += response;
+            racc.count++;
+          }
         }
       }
 
