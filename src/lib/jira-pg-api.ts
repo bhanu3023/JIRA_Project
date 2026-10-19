@@ -3587,8 +3587,25 @@ function buildDeptSegments(
 // ticket resolved straight from Open, reopened weeks later and only then
 // moved to In Progress counted all those weeks as "response"). Sharing the
 // clock means response <= resolution on every ticket.
-const ROUTING_LABEL_RE = /^(routed\s+to|waiting\s+for)\s/;
-type ActiveClock = { activeMs: (fromMs: number, toMs: number) => number; inDeptAt: (ms: number) => boolean };
+const ROUTING_LABEL_RE = /^(routed\s+to|waiting\s+for)\s+(.+)$/;
+// "Routed to X"/"Waiting for X" only means the person is finished when X is
+// a DIFFERENT queue. The ticket's global status keeps the SENDER's label
+// while it waits in X's own queue -- QA routes a ticket to Dev, and it sits
+// in Dev as "Routed to Dev" until a Dev engineer picks it up. Treating that
+// as stopped zeroed exactly the waiting time response is meant to measure
+// (confirmed for real: CF-31361/CF-33283/CF-33502 read 0:00:00 response for
+// K N V S Raj Kumar despite 20-30 minute pickups).
+function isRoutedAwayFrom(status: string, dept: string): boolean {
+  const m = status.match(ROUTING_LABEL_RE);
+  return !!m && m[2].trim().toLowerCase() !== dept.trim().toLowerCase();
+}
+type ActiveClock = {
+  activeMs: (fromMs: number, toMs: number) => number;
+  inDeptAt: (ms: number) => boolean;
+  // Done, or routed away to another queue (not a mere pause): the person
+  // has finished with the ticket.
+  finishes: (status: string) => boolean;
+};
 function buildActiveClock(
   segs: DeptSegment[], dept: string,
   statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
@@ -3596,7 +3613,8 @@ function buildActiveClock(
 ): ActiveClock {
   const d = dept.trim().toLowerCase();
   const norm = (s: string | null | undefined) => String(s || '').trim().toLowerCase();
-  const isStopped = (s: string) => pauseStatuses.has(s) || DONE_STATUS_NAME_HINTS.has(s) || ROUTING_LABEL_RE.test(s);
+  const finishes = (s: string) => !pauseStatuses.has(s) && (DONE_STATUS_NAME_HINTS.has(s) || isRoutedAwayFrom(s, d));
+  const isStopped = (s: string) => pauseStatuses.has(s) || finishes(s);
   const stopped: Array<{ startMs: number; endMs: number }> = [];
   let cur = statusHist.length ? norm(statusHist[0].oldValue) : norm(currentStatusName);
   let curStart = new Date(issueCreatedAt).getTime();
@@ -3626,6 +3644,7 @@ function buildActiveClock(
       return total;
     },
     inDeptAt: (ms) => deptSegs.some((sg) => ms >= sg.startMs && ms < sg.endMs),
+    finishes: (status) => finishes(String(status || '').trim().toLowerCase()),
   };
 }
 
@@ -3699,8 +3718,7 @@ function computeAssigneeResponseTimes(
       if (t >= stintEndMs) break;
       if (!clock.inDeptAt(t)) continue;
       const name = norm(h.newValue);
-      const finishes = !pauseStatuses.has(name) && (DONE_STATUS_NAME_HINTS.has(name) || ROUTING_LABEL_RE.test(name));
-      if (IN_PROGRESS_STATUS_NAMES.has(name) || finishes) {
+      if (IN_PROGRESS_STATUS_NAMES.has(name) || clock.finishes(name)) {
         result.set(st.email, { hours: toHours(clock.activeMs(st.startMs, t)), startMs: st.startMs });
         found = true;
         break;
