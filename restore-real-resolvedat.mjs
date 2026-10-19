@@ -27,7 +27,8 @@
 //
 // Usage:
 //   node restore-real-resolvedat.mjs                 # dry run, every ticket
-//   node restore-real-resolvedat.mjs CF-23245        # dry run, one ticket
+//   node restore-real-resolvedat.mjs CF-23245        # dry run, one ticket: prints its
+//                                                    # history and which check stopped it
 //   node restore-real-resolvedat.mjs --apply         # write the corrections
 //   node restore-real-resolvedat.mjs CF-23245 --apply
 
@@ -50,40 +51,53 @@ async function main() {
   `, [DONE_NAMES]);
   const bulkInstants = new Set(bulkRows.map((r) => new Date(r.createdAt).getTime()));
 
+  // With a single key, report the ticket's state and which check stopped it
+  // (read-only) -- so a "0 would be corrected" result is explainable.
   const { rows: issues } = await pool.query(`
-    SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i."resolvedAt", i.sla_snapshot
-    FROM issues i JOIN statuses s ON s.id = i."statusId"
-    WHERE s.category = 'done' AND i."resolvedAt" IS NOT NULL
-      ${ONLY_KEY ? `AND (i.cf_key = $1 OR i.key = $1)` : ''}
+    SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i."resolvedAt", i.sla_snapshot, i.current_department,
+           s.name AS status_name, s.category AS status_category
+    FROM issues i LEFT JOIN statuses s ON s.id = i."statusId"
+    WHERE ${ONLY_KEY ? `(i.cf_key = $1 OR i.key = $1)` : `s.category = 'done' AND i."resolvedAt" IS NOT NULL`}
   `, ONLY_KEY ? [ONLY_KEY] : []);
+  if (ONLY_KEY && !issues.length) console.log(`${ONLY_KEY}: not found`);
 
+  const fmt = (d) => (d ? new Date(d).toISOString() : 'null');
   let candidates = 0;
   for (const issue of issues) {
-    const resolvedMs = new Date(issue.resolvedAt).getTime();
+    const skip = (reason) => { if (ONLY_KEY) console.log(`\n${issue.key}: SKIPPED -- ${reason}`); };
     const { rows: hist } = await pool.query(
       `SELECT id, field, "oldValue", "newValue", "authorName", "createdAt" FROM issue_history WHERE "issueId" = $1 ORDER BY "createdAt" ASC`,
       [issue.id]
     );
+    if (ONLY_KEY) {
+      console.log(`${issue.key}: status "${issue.status_name}" (${issue.status_category}), dept ${issue.current_department}, resolvedAt ${fmt(issue.resolvedAt)}`);
+      console.log('history:');
+      for (const h of hist) console.log(`  ${fmt(h.createdAt)}  ${h.field.padEnd(10)} ${JSON.stringify(h.oldValue)} -> ${JSON.stringify(h.newValue)}  [${h.authorName || 'Unknown'}]`);
+    }
+    if (issue.status_category !== 'done' || !issue.resolvedAt) { skip('not currently done with a resolvedAt'); continue; }
+    const resolvedMs = new Date(issue.resolvedAt).getTime();
     const statusRows = hist.filter((h) => h.field === 'status');
     const isRealDone = (h) => DONE_NAMES.includes(String(h.newValue || '').trim().toLowerCase())
       && !bulkInstants.has(new Date(h.createdAt).getTime());
 
-    if (statusRows.some((h) => isRealDone(h) && Math.abs(new Date(h.createdAt).getTime() - resolvedMs) <= MATCH_WINDOW_MS)) continue;
+    const matching = statusRows.find((h) => isRealDone(h) && Math.abs(new Date(h.createdAt).getTime() - resolvedMs) <= MATCH_WINDOW_MS);
+    if (matching) { skip(`resolvedAt is backed by a real "${matching.newValue}" at ${fmt(matching.createdAt)}`); continue; }
 
     const lastStatus = statusRows[statusRows.length - 1];
-    if (!lastStatus || !isRealDone(lastStatus)) continue; // reopened (or never resolved) since
+    if (!lastStatus) { skip('no status history at all'); continue; }
+    if (!isRealDone(lastStatus)) { skip(`last status change is "${lastStatus.newValue}" at ${fmt(lastStatus.createdAt)}, not a real resolution (reopened/routed since, or a bulk artifact)`); continue; }
     const realMs = new Date(lastStatus.createdAt).getTime();
-    if (realMs >= resolvedMs - MATCH_WINDOW_MS) continue; // only move resolvedAt BACK
+    if (realMs >= resolvedMs - MATCH_WINDOW_MS) { skip('last real resolution is not earlier than resolvedAt'); continue; }
 
-    const humanAfter = hist.some((h) => new Date(h.createdAt).getTime() > realMs
+    const humanAfter = hist.find((h) => new Date(h.createdAt).getTime() > realMs
       && h.field !== 'sla'
       && !NON_HUMAN_AUTHORS.has(String(h.authorName || '').trim().toLowerCase()));
-    if (humanAfter) continue;
+    if (humanAfter) { skip(`activity after the last real resolution: ${humanAfter.field} by ${humanAfter.authorName || 'Unknown'} at ${fmt(humanAfter.createdAt)}`); continue; }
     const { rows: commentRows } = await pool.query(
-      `SELECT 1 FROM comments WHERE "issueId" = $1 AND "createdAt" > $2 LIMIT 1`,
+      `SELECT "createdAt" FROM comments WHERE "issueId" = $1 AND "createdAt" > $2 ORDER BY "createdAt" LIMIT 1`,
       [issue.id, lastStatus.createdAt]
     );
-    if (commentRows.length) continue;
+    if (commentRows.length) { skip(`comment after the last real resolution at ${fmt(commentRows[0].createdAt)}`); continue; }
 
     candidates++;
     const oldIso = new Date(issue.resolvedAt).toISOString();

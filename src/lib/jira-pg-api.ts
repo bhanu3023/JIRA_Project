@@ -3567,93 +3567,116 @@ function buildDeptSegments(
   }
   return segs;
 }
-// Total ms a person held the ticket while it sat in `dept`, up to capMs:
-// the overlap of their assignee stints with that department's segments,
-// minus any stretch spent in one of pauseStatuses (the department's SLA
-// policies' pause statuses, lowercased -- the same "clock stopped" rule the
-// SLA engine applies, matched against the same global status name). The
-// status timeline comes from status history: the first row's oldValue from
-// creation, then each row's newValue (current status when there's none).
-function timeWithPersonInDeptMs(
-  stints: AssigneeStint[], segs: DeptSegment[], email: string, dept: string, capMs: number,
+// One "active clock" shared by MBR's Avg. resolution AND Avg. response time,
+// so the two columns always measure the same kind of time. Time only counts
+// while ALL of these hold: the person holds the ticket (an assignee stint),
+// it sits in this department (a dept segment -- time in another queue never
+// counts), and its status is not stopped. Stopped = one of the department's
+// SLA pause statuses (pause time never counts, same as the SLA clock), a
+// done status, or a "Routed to X"/"Waiting for X" routing label (the person
+// has finished with it, whatever the saved dates later say -- confirmed for
+// real on CF-23245: routed to Migration in April, but the hand-off silently
+// failed, so it officially stayed in Dev with Lakshmi Adabala until a
+// September data-repair script completed the move). A move back to an active
+// status (reopen) restarts the clock. The status timeline comes from status
+// history: the first row's oldValue from creation, then each row's newValue
+// (the current status when there's no history).
+//
+// Response time used to run on plain wall-clock time with none of these
+// rules, so it could be LARGER than resolution on the same ticket (e.g. a
+// ticket resolved straight from Open, reopened weeks later and only then
+// moved to In Progress counted all those weeks as "response"). Sharing the
+// clock means response <= resolution on every ticket.
+const ROUTING_LABEL_RE = /^(routed\s+to|waiting\s+for)\s/;
+type ActiveClock = { activeMs: (fromMs: number, toMs: number) => number; inDeptAt: (ms: number) => boolean };
+function buildActiveClock(
+  segs: DeptSegment[], dept: string,
   statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
   issueCreatedAt: Date | string, currentStatusName: string | null, pauseStatuses: Set<string>,
-): number {
+): ActiveClock {
   const d = dept.trim().toLowerCase();
   const norm = (s: string | null | undefined) => String(s || '').trim().toLowerCase();
-  // The clock is also stopped while the ticket sits in a done status or a
-  // "Routed to X"/"Waiting for X" routing label: the person has finished
-  // with it, whatever the saved dates later say. Confirmed for real on
-  // CF-23245: routed to Migration in April, but the hand-off silently
-  // failed, so it officially stayed in Dev with Lakshmi Adabala until a
-  // September data-repair script completed the move (and a later backfill
-  // moved resolvedAt to September too). Without this, those ~5 months of
-  // nobody touching it counted as her resolution time. A move back to an
-  // active status (reopen) restarts the clock.
-  const isStopped = (s: string) => pauseStatuses.has(s) || DONE_STATUS_NAME_HINTS.has(s) || /^(routed\s+to|waiting\s+for)\s/.test(s);
-  const paused: Array<{ startMs: number; endMs: number }> = [];
-  {
-    let cur = statusHist.length ? norm(statusHist[0].oldValue) : norm(currentStatusName);
-    let curStart = new Date(issueCreatedAt).getTime();
-    for (const h of statusHist) {
-      const t = new Date(h.createdAt).getTime();
-      if (isStopped(cur) && t > curStart) paused.push({ startMs: curStart, endMs: t });
-      cur = norm(h.newValue);
-      curStart = t;
-    }
-    if (isStopped(cur)) paused.push({ startMs: curStart, endMs: Infinity });
+  const isStopped = (s: string) => pauseStatuses.has(s) || DONE_STATUS_NAME_HINTS.has(s) || ROUTING_LABEL_RE.test(s);
+  const stopped: Array<{ startMs: number; endMs: number }> = [];
+  let cur = statusHist.length ? norm(statusHist[0].oldValue) : norm(currentStatusName);
+  let curStart = new Date(issueCreatedAt).getTime();
+  for (const h of statusHist) {
+    const t = new Date(h.createdAt).getTime();
+    if (isStopped(cur) && t > curStart) stopped.push({ startMs: curStart, endMs: t });
+    cur = norm(h.newValue);
+    curStart = t;
   }
+  if (isStopped(cur)) stopped.push({ startMs: curStart, endMs: Infinity });
+  const deptSegs = segs.filter((sg) => sg.dept === d);
+  return {
+    activeMs: (fromMs, toMs) => {
+      let total = 0;
+      for (const sg of deptSegs) {
+        const start = Math.max(fromMs, sg.startMs);
+        const end = Math.min(toMs, sg.endMs);
+        if (end <= start) continue;
+        let span = end - start;
+        for (const p of stopped) {
+          const ps = Math.max(start, p.startMs);
+          const pe = Math.min(end, p.endMs);
+          if (pe > ps) span -= pe - ps;
+        }
+        if (span > 0) total += span;
+      }
+      return total;
+    },
+    inDeptAt: (ms) => deptSegs.some((sg) => ms >= sg.startMs && ms < sg.endMs),
+  };
+}
+
+// Avg. resolution's per-ticket value: the person's total active time on the
+// ticket in this queue, across every stint they held it, up to capMs.
+function timeWithPersonInDeptMs(stints: AssigneeStint[], email: string, capMs: number, clock: ActiveClock): number {
   let total = 0;
   for (const st of stints) {
     if (st.email !== email) continue;
-    for (const sg of segs) {
-      if (sg.dept !== d) continue;
-      const start = Math.max(st.startMs, sg.startMs);
-      const end = Math.min(st.endMs, sg.endMs, capMs);
-      if (end <= start) continue;
-      let span = end - start;
-      for (const p of paused) {
-        const ps = Math.max(start, p.startMs);
-        const pe = Math.min(end, p.endMs);
-        if (pe > ps) span -= pe - ps;
-      }
-      if (span > 0) total += span;
-    }
+    total += clock.activeMs(st.startMs, Math.min(st.endMs, capMs));
   }
   return total;
 }
 
-// Returns each person's response hours plus the assignment it was measured
-// from (startMs) -- Avg. resolution reuses that same start, so a person's
-// resolution time is never shorter than their response time on a ticket.
+// Avg. response time's per-ticket value: active time from the person's
+// assignment until they moved it into In Progress while it sat in this
+// queue. A stint where the ticket was already In Progress when they got it
+// (a mid-work hand-over) isn't a pickup; one that reaches a done/routing
+// status before ever going In Progress gives no response (it was finished
+// without being started -- a later reopen isn't a response). Status rows
+// within RESPONSE_ARRIVAL_WINDOW_MS of the assignment are written by the
+// hand-off request itself, not the person. Each person's first responded
+// stint counts; startMs is returned so resolution can share it.
 function computeAssigneeResponseTimes(
   statusHist: Array<{ oldValue: string | null; newValue: string; createdAt: Date | string }>,
-  stints: AssigneeStint[],
+  stints: AssigneeStint[], clock: ActiveClock, pauseStatuses: Set<string>,
 ): Map<string, { hours: number; startMs: number }> {
-  const isInProgress = (name: string | null | undefined) => IN_PROGRESS_STATUS_NAMES.has(String(name || '').trim().toLowerCase());
-
-  // Status as of a moment: the newValue of the last change at or before it,
-  // else the first change's oldValue (what it started as).
-  const statusAt = (ms: number): string | null => {
+  const norm = (s: string | null | undefined) => String(s || '').trim().toLowerCase();
+  const statusAt = (ms: number): string => {
     let s: string | null = statusHist.length ? statusHist[0].oldValue : null;
     for (const h of statusHist) {
       if (new Date(h.createdAt).getTime() > ms) break;
       s = h.newValue;
     }
-    return s;
+    return norm(s);
   };
-
   const result = new Map<string, { hours: number; startMs: number }>();
   for (const st of stints) {
     if (!st.email || result.has(st.email)) continue;
-    if (isInProgress(statusAt(st.startMs))) continue;
+    if (IN_PROGRESS_STATUS_NAMES.has(statusAt(st.startMs))) continue;
     for (const h of statusHist) {
       const t = new Date(h.createdAt).getTime();
       if (t < st.startMs + RESPONSE_ARRIVAL_WINDOW_MS) continue;
       if (t >= st.endMs) break;
-      if (!isInProgress(h.newValue)) continue;
-      result.set(st.email, { hours: Math.round((t - st.startMs) / 1000) / 3600, startMs: st.startMs });
-      break;
+      if (!clock.inDeptAt(t)) continue;
+      const name = norm(h.newValue);
+      if (IN_PROGRESS_STATUS_NAMES.has(name)) {
+        result.set(st.email, { hours: Math.round(clock.activeMs(st.startMs, t) / 1000) / 3600, startMs: st.startMs });
+        break;
+      }
+      if (!pauseStatuses.has(name) && (DONE_STATUS_NAME_HINTS.has(name) || ROUTING_LABEL_RE.test(name))) break;
     }
   }
   return result;
@@ -15473,16 +15496,36 @@ async function _handleJiraPgApi(
         if (inSummary) summaryRbBreached++;
       }
 
-      // Response time: assignment -> Open-to-In-Progress, credited to the
-      // person who was assigned (see computeAssigneeResponseTimes). Open
-      // tickets count too -- "how fast did you pick this up" doesn't need
-      // the ticket to be done. Only the ticket's owner is credited -- a
-      // person's average covers exactly the tickets in their own list.
+      // Both per-person time metrics run on the same active clock (see
+      // buildActiveClock): only time this ticket sat with the person, in this
+      // queue, outside pause/done/routing statuses. pauseSet = this
+      // department's own SLA policies' pause statuses (plus space-wide ones)
+      // on the ticket's board -- the same set computeSLAInstancesPure checks.
+      let pauseSet = pauseStatusesBySpace.get(row.spaceId);
+      if (!pauseSet) {
+        pauseSet = new Set<string>();
+        for (const p of slaPoliciesBySpace[row.spaceId] || []) {
+          const pDept = String(p.dept_name || '').trim().toLowerCase();
+          if (pDept && pDept !== dept.toLowerCase()) continue;
+          for (const s of Array.isArray(p.pauseStatuses) ? p.pauseStatuses : []) pauseSet.add(String(s).trim().toLowerCase());
+        }
+        pauseStatusesBySpace.set(row.spaceId, pauseSet);
+      }
       const stints = buildAssigneeStints(
         assigneeHistByIssue[row.id] || [], row.createdAt,
         row.assignee_email ? String(row.assignee_email) : null, responseNameToEmail,
       );
-      const responseByPerson = computeAssigneeResponseTimes(statusHistByIssue[row.id] || [], stints);
+      const clock = buildActiveClock(
+        buildDeptSegments(deptTransByIssue[row.id] || [], deptHistByIssue[row.id] || [], row.createdAt, row.current_department),
+        dept, statusHistByIssue[row.id] || [], row.createdAt, row.status_name, pauseSet,
+      );
+
+      // Response time: assignment -> Open-to-In-Progress (see
+      // computeAssigneeResponseTimes). Open tickets count too -- "how fast
+      // did you pick this up" doesn't need the ticket to be done. Only the
+      // ticket's owner is credited -- a person's average covers exactly the
+      // tickets in their own list.
+      const responseByPerson = computeAssigneeResponseTimes(statusHistByIssue[row.id] || [], stints, clock, pauseSet);
       const rosterResponses = new Map<string, number>();
       for (const [email, r] of Array.from(responseByPerson.entries())) {
         if (!emails.has(email)) continue;
@@ -15493,40 +15536,21 @@ async function _handleJiraPgApi(
       }
       responseHoursByIssue.set(row.id, rosterResponses);
 
-      // Resolution time, per explicit definition: the total time the ticket
-      // stood with its owner IN THIS QUEUE -- every stretch they were the
-      // assignee while it sat in this department, added up, ending when it
-      // was resolved (or left the department, or was reassigned), minus any
-      // time in this department's SLA pause statuses (pause time doesn't
-      // count, same as the SLA clock). Average =
-      // sum over their tickets / number of those tickets. Only tickets whose
-      // time in this queue is finished count: resolved (with a real
-      // resolvedAt), or already moved on to another department; a ticket
-      // still open here has no resolution time yet. A ticket where the
-      // owner's assignment can't be found in history (0 measurable time)
-      // is skipped rather than averaged in as 0.
+      // Resolution time: the owner's total active time on the ticket in this
+      // queue, across every stint they held it, ending when it was resolved
+      // (or left the department, or was reassigned). Average = sum over
+      // their tickets / number of those tickets. Only tickets whose time in
+      // this queue is finished count: resolved (with a real resolvedAt), or
+      // already moved on to another department; a ticket still open here
+      // has no resolution time yet. A ticket where the owner's assignment
+      // can't be found in history (0 measurable time) is skipped rather than
+      // averaged in as 0.
       const isDone = row.status_category === 'done' && !!row.resolvedAt;
       const leftDept = String(row.current_department || '').toLowerCase() !== dept.toLowerCase();
       if (isDone || leftDept) {
         const capMs = isDone ? new Date(row.resolvedAt).getTime() : Date.now();
-        const segs = buildDeptSegments(deptTransByIssue[row.id] || [], deptHistByIssue[row.id] || [], row.createdAt, row.current_department);
-        let pauseSet = pauseStatusesBySpace.get(row.spaceId);
-        if (!pauseSet) {
-          // This department's own SLA policies (plus space-wide ones) on the
-          // ticket's board -- the same set computeSLAInstancesPure checks.
-          pauseSet = new Set<string>();
-          for (const p of slaPoliciesBySpace[row.spaceId] || []) {
-            const pDept = String(p.dept_name || '').trim().toLowerCase();
-            if (pDept && pDept !== dept.toLowerCase()) continue;
-            for (const s of Array.isArray(p.pauseStatuses) ? p.pauseStatuses : []) pauseSet.add(String(s).trim().toLowerCase());
-          }
-          pauseStatusesBySpace.set(row.spaceId, pauseSet);
-        }
         for (const email of Array.from(emails)) {
-          const ms = timeWithPersonInDeptMs(
-            stints, segs, email, dept, capMs,
-            statusHistByIssue[row.id] || [], row.createdAt, row.status_name, pauseSet,
-          );
+          const ms = timeWithPersonInDeptMs(stints, email, capMs, clock);
           if (ms <= 0) continue;
           const acc = (peopleInProgress[email] ??= { sum: 0, count: 0 });
           const hours = Math.round(ms / 1000) / 3600;
