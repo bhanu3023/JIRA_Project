@@ -319,6 +319,12 @@ export default function WorklogPage() {
             <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Entries</p>
             <p className="text-[22px] font-bold text-gray-800">{filteredRows.length}</p>
           </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Avg per entry</p>
+            <p className="text-[22px] font-bold text-gray-800">
+              {filteredRows.length > 0 ? formatMinutes(Math.round(totalMinutes / filteredRows.length)) : '0m'}
+            </p>
+          </div>
         </div>
 
         {/* One table, real column headers, grouped by ticket via a merged
