@@ -458,7 +458,7 @@ export default function IssueDetailPage() {
     if (/<[a-z][\s\S]*>/i.test(body)) {
       // HTML content — render directly, intercept all link clicks to force new tab
       return <div
-        className="text-[14px] text-[#172B4D] leading-relaxed break-words [&_*]:![float:none] [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
+        className="text-[14px] text-[#172B4D] leading-relaxed break-words [&_*]:![float:none] [&_img]:max-w-full [&_img]:rounded-md [&_img]:my-1 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800 [&_code]:bg-slate-100 [&_code]:!text-slate-800 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
         dangerouslySetInnerHTML={{ __html: linkifyHtml(body) }}
         onClick={(e) => {
           const target = e.target as HTMLElement;
@@ -2212,8 +2212,8 @@ export default function IssueDetailPage() {
                     [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1
                     [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-1
                     [&_blockquote]:border-l-4 [&_blockquote]:border-gray-300 [&_blockquote]:pl-3 [&_blockquote]:text-gray-500 [&_blockquote]:italic
-                    [&_pre]:bg-gray-100 [&_pre]:rounded [&_pre]:px-2 [&_pre]:py-1 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:overflow-x-auto
-                    [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs
+                    [&_pre]:bg-gray-100 [&_pre]:!text-slate-800 [&_pre_*]:!text-slate-800 [&_pre]:rounded [&_pre]:px-2 [&_pre]:py-1 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:overflow-x-auto
+                    [&_code]:bg-slate-100 [&_code]:!text-slate-800 [&_code]:rounded [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs
                     [&_img]:max-w-full [&_img]:rounded [&_img]:my-1
                     [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer [&_a]:hover:text-blue-800
                     [&_p]:mb-2 [&_p:last-child]:mb-0

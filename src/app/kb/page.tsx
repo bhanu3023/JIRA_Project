@@ -354,7 +354,18 @@ function readStoredWidth() {
   } catch { return Q_WIDTH_DEFAULT; }
 }
 
-const ARTICLE_BODY_CLASS = 'break-words text-[14px] leading-relaxed text-[#172B4D] [&_a]:text-blue-600 [&_a]:underline [&_blockquote]:border-l-4 [&_blockquote]:border-gray-200 [&_blockquote]:pl-3 [&_blockquote]:text-gray-600 [&_code]:rounded [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_h1]:mb-2 [&_h1]:mt-5 [&_h1]:text-xl [&_h1]:font-bold [&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:mt-3 [&_h3]:font-semibold [&_img]:my-2 [&_img]:max-w-full [&_img]:rounded-md [&_li]:my-0.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-slate-100 [&_pre]:p-3 [&_table]:my-2 [&_td]:border [&_td]:border-gray-300 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-300 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc [&_ul]:pl-5';
+// [&_pre]:!text-slate-800 and [&_pre_*]:!text-slate-800 (the ! forces
+// Tailwind's own !important) exist specifically to beat an inline
+// color style on the original content itself -- a <pre>/<code> block
+// pasted in from elsewhere can carry its own light-gray inline text
+// color, meant for whatever background it was originally authored
+// against. Without overriding it, that inline color collides with the
+// bg-slate-100 background below and renders as close to invisible.
+// Confirmed for real: a KB article's GET/POST URL code blocks (pasted
+// content) displayed as blank-looking gray boxes with the actual text
+// unreadable. A plain Tailwind class can't win against an inline style
+// (inline always wins on specificity) -- only the !important form can.
+const ARTICLE_BODY_CLASS = 'break-words text-[14px] leading-relaxed text-[#172B4D] [&_a]:text-blue-600 [&_a]:underline [&_blockquote]:border-l-4 [&_blockquote]:border-gray-200 [&_blockquote]:pl-3 [&_blockquote]:text-gray-600 [&_code]:rounded [&_code]:bg-slate-100 [&_code]:!text-slate-800 [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_h1]:mb-2 [&_h1]:mt-5 [&_h1]:text-xl [&_h1]:font-bold [&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:mt-3 [&_h3]:font-semibold [&_img]:my-2 [&_img]:max-w-full [&_img]:rounded-md [&_li]:my-0.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-slate-100 [&_pre]:!text-slate-800 [&_pre_*]:!text-slate-800 [&_pre]:p-3 [&_table]:my-2 [&_td]:border [&_td]:border-gray-300 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-gray-300 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc [&_ul]:pl-5';
 
 function ArticleView({ id, onBack, onEdit }: { id: string; onBack: (kind: KbKind) => void; onEdit: () => void }) {
   const [article, setArticle] = useState<KbArticle | null>(null);
