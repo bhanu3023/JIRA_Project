@@ -15605,6 +15605,21 @@ async function _handleJiraPgApi(
       // done/routing status either way.
       if (finishedHere) {
         for (const email of Array.from(emails)) {
+          // Backlog carried in from before the selected range is left out of
+          // both time averages (it still counts in Total/Resolved tickets,
+          // same as Filters): a ticket the person was assigned before the
+          // range started is in range only because it was resolved in it,
+          // and its time mostly belongs to earlier months. Confirmed for
+          // real: CF-20171, assigned to K N V S Raj Kumar on Aug 11 and left
+          // Open until Sep 8, was 95.5% of his September resolution total
+          // (660h of 691h) -- per explicit request it shouldn't count. The
+          // assignment is the person's first stint actively held in this
+          // queue; the drill-down shows "—" for both values on such a ticket.
+          const firstHeld = stints.find((st) => st.email === email && clock.activeMs(st.startMs, Math.min(st.endMs, capMs)) > 0);
+          if (istFrom && firstHeld && firstHeld.startMs < istFrom.getTime()) {
+            rosterResponses.delete(email);
+            continue;
+          }
           const ms = timeWithPersonInDeptMs(stints, email, capMs, clock);
           if (ms <= 0) continue;
           const acc = (peopleInProgress[email] ??= { sum: 0, count: 0 });
