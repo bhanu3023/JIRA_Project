@@ -392,8 +392,8 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Total tickets</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Resolved tickets</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Resolution SLA breached</th>
-                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200" title="Total time each ticket stood with this person in this queue (until resolved or moved on, excluding SLA pause statuses), divided by the number of tickets. Tickets assigned to the person before the selected date range are left out.">Avg. resolution (hr:mm:sec)</th>
-                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200" title="Time from being assigned a ticket until first picking it up (moving it to In Progress, or resolving/routing it straight from Open), excluding pause time and time in other queues -- averaged over the same tickets as Avg. resolution (tickets assigned before the selected date range are left out)">Avg. response time (hr:mm:sec)</th>
+                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200" title="Total time each ticket stood with this person in this queue (until resolved or moved on, excluding SLA pause statuses), divided by the number of tickets. Tickets assigned to the person before the selected date range, or finished after it, are left out.">Avg. resolution (hr:mm:sec)</th>
+                  <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200" title="Time from being assigned a ticket until first picking it up (moving it to In Progress, or resolving/routing it straight from Open), excluding pause time and time in other queues -- averaged over the same tickets as Avg. resolution (tickets assigned before the selected date range, or finished after it, are left out)">Avg. response time (hr:mm:sec)</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Stale</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Missing details</th>
                   <th className="sticky top-0 z-[2] bg-gray-50 px-4 py-3 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-200">Overdue</th>
@@ -503,7 +503,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolved</th>
-                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Time from assignment until first picked up (In Progress, or resolved/routed straight from Open), excluding pause time">Response time (hrs)</th>
+                  <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Time from assignment until first picked up (In Progress, or resolved/routed straight from Open), excluding pause time">Response time (hr:mm:sec)</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Time this ticket stood with its owner in this queue, excluding SLA pause statuses (the per-ticket value behind Avg. resolution)">Resolution (hr:mm:sec)</th>
                   <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolution SLA breached</th>
                 </tr>
@@ -549,7 +549,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.resolved ? new Date(t.resolved).toLocaleDateString() : '—'}</td>
-                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.responseTimeHours === null || t.responseTimeHours === undefined ? '—' : t.responseTimeHours}</td>
+                    <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.responseTimeHours === null || t.responseTimeHours === undefined ? '—' : formatHms(t.responseTimeHours)}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.resolutionHours === null || t.resolutionHours === undefined ? '—' : formatHms(t.resolutionHours)}</td>
                     <td className="px-3 py-1.5 border-b border-gray-100">
                       {t.rb === true && <span className="font-semibold text-red-600">Yes</span>}
@@ -616,7 +616,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Created</th>
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Updated</th>
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200">Resolved</th>
-                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Time from assignment until first picked up (In Progress, or resolved/routed straight from Open), excluding pause time">Response time (hrs)</th>
+                      <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Time from assignment until first picked up (In Progress, or resolved/routed straight from Open), excluding pause time">Response time (hr:mm:sec)</th>
                       <th className="sticky top-0 z-[2] text-left px-3 py-2 bg-gray-50 font-semibold text-gray-500 uppercase text-[11px] tracking-wide border-b border-gray-200" title="Time this ticket stood with its owner in this queue, excluding SLA pause statuses (the per-ticket value behind Avg. resolution)">Resolution (hr:mm:sec)</th>
                     </tr>
                   </thead>
@@ -660,7 +660,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.created).toLocaleDateString()}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{new Date(t.updated).toLocaleDateString()}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.resolved ? new Date(t.resolved).toLocaleDateString() : '—'}</td>
-                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.responseTimeHours === null || t.responseTimeHours === undefined ? '—' : t.responseTimeHours}</td>
+                        <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.responseTimeHours === null || t.responseTimeHours === undefined ? '—' : formatHms(t.responseTimeHours)}</td>
                         <td className="px-3 py-1.5 border-b border-gray-100 text-gray-500">{t.resolutionHours === null || t.resolutionHours === undefined ? '—' : formatHms(t.resolutionHours)}</td>
                       </tr>
                     ))}

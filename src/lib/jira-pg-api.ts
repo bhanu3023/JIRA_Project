@@ -15628,8 +15628,30 @@ async function _handleJiraPgApi(
       // re-stamped it), which cut resolution off before the work it was
       // supposed to cover -- the clock itself already stops at the real
       // done/routing status either way.
+      // When the ticket's time in this queue ended: its resolution (capMs)
+      // if done, else the moment it last left this department.
+      let finishedAtMs = capMs;
+      if (!isDone && leftDept) {
+        const lower = dept.toLowerCase();
+        const lastOut = [...(deptTransByIssue[row.id] || [])].reverse().find((t) => String(t.from_dept || '').toLowerCase() === lower);
+        const lastOutHist = [...(deptHistByIssue[row.id] || [])].reverse().find((h) => String(h.oldValue || '').toLowerCase() === lower);
+        finishedAtMs = lastOut ? new Date(lastOut.moved_at).getTime()
+          : lastOutHist ? new Date(lastOutHist.createdAt).getTime()
+          : lastStatusMs || capMs;
+      }
       if (finishedHere) {
         for (const email of Array.from(emails)) {
+          // Work that finished AFTER the selected range is left out of both
+          // time averages too (it still counts in Total/Resolved tickets,
+          // same as Filters -- it's in range because it was created in it):
+          // its time mostly belongs to the next period. Confirmed for real:
+          // CF-33692, created Sep 30 and resolved Oct 6, put 142h resolution
+          // / 117h response into Pragati Pandey's September averages. The
+          // mirror image of the backlog rule just below.
+          if (istTo && finishedAtMs > istTo.getTime()) {
+            rosterResponses.delete(email);
+            continue;
+          }
           // Backlog carried in from before the selected range is left out of
           // both time averages (it still counts in Total/Resolved tickets,
           // same as Filters): a ticket the person was assigned before the
