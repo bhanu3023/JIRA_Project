@@ -824,8 +824,44 @@ export default function RichTextEditor({
       el?.replaceWith(wrap);
       emit();
     } catch {
-      document.getElementById(placeholderId)?.remove();
-      warn('Could not load a pasted image — it referenced another page and could not be copied here.');
+      // A blob: URL is a dead end no matter what -- it's an opaque handle
+      // into the ORIGINATING page's own blob store, meaningless outside
+      // that page's document (see dataUriToBlob's own comment above), so
+      // there's nothing to fall back to there. A real http(s) URL that
+      // merely failed to FETCH here (most commonly CORS: the remote server
+      // doesn't grant this origin permission to read its bytes via fetch)
+      // is a different story -- an <img src="https://..."> tag doesn't
+      // need that same permission to simply DISPLAY the image, only
+      // fetch()/canvas do. Falling back to the original remote URL instead
+      // of deleting the image keeps it visible (just not re-hosted on this
+      // app's own storage, so it'll break if the source page ever removes
+      // it) rather than silently losing content the user clearly intended
+      // to paste. Confirmed as a real, common case: screenshots copied
+      // from another website into a ticket/KB article/comment.
+      const el = document.getElementById(placeholderId);
+      if (el && /^https?:\/\//i.test(src)) {
+        const imgEl = document.createElement('img');
+        imgEl.src = src;
+        imgEl.alt = 'Pasted image';
+        imgEl.style.cssText = 'max-width:220px;max-height:160px;width:auto;height:auto;border-radius:6px;margin:6px 0;display:block;cursor:pointer;object-fit:contain;';
+        const wrap = document.createElement('span');
+        wrap.setAttribute('data-rte-img-wrap', '');
+        wrap.setAttribute('contenteditable', 'false');
+        wrap.className = 'group relative inline-block align-top';
+        wrap.appendChild(imgEl);
+        const removeBtn = document.createElement('span');
+        removeBtn.setAttribute('data-rte-img-remove', '');
+        removeBtn.title = 'Remove image';
+        removeBtn.className = 'hidden group-hover:flex';
+        removeBtn.style.cssText = 'position:absolute;top:4px;right:4px;width:20px;height:20px;align-items:center;justify-content:center;background:rgba(15,23,42,0.75);color:#fff;border-radius:9999px;font-size:13px;line-height:1;cursor:pointer;';
+        removeBtn.textContent = '×';
+        wrap.appendChild(removeBtn);
+        el.replaceWith(wrap);
+        warn('This image couldn’t be copied to our own storage (likely blocked by the source site), so it’s linked to its original page instead — it may stop showing if that page removes it.');
+      } else {
+        el?.remove();
+        warn('Could not load a pasted image — it referenced another page and could not be copied here.');
+      }
       emit();
     } finally {
       endUpload();
