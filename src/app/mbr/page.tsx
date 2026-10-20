@@ -111,9 +111,7 @@ function DownloadButton({ onClick, label = 'Download', busy }: { onClick: () => 
 // Customer Engineering / QA / Infra / Migration ENT / Migration SMB — live
 // from this app's own issues table, scoped to whatever date range is
 // selected above. This app doesn't track first-response SLA, so that count
-// always reads 0/0. RCA/Fix Description compliance will read 0% for
-// everyone until those fields actually start getting filled in on tickets —
-// the columns exist but are unpopulated in this data today.
+// always reads 0/0.
 function factorTooltip(factors: { label: string; score: number | null }[] | undefined): string {
   if (!factors || !factors.length) return '';
   return factors.map((f) => `${f.label}: ${f.score === null ? 'N.A.' : `${f.score}/10`}`).join('\n');
@@ -215,7 +213,7 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
   return (
     <div className="space-y-6">
       <p className="text-[12px] text-gray-400 -mt-2">
-        Live data, scoped to the date range above. First response SLA breached always reads 0/0 (not tracked in this app). RCA/Fix Description compliance will read 0% until those fields start getting filled in on tickets — the columns exist but are unpopulated today.
+        Live data, scoped to the date range above. First response SLA breached always reads 0/0 (not tracked in this app). Hygiene score starts at 100 and loses points for stale, missing-detail and overdue open tickets, and for resolved tickets without a proper closing status, a screenshot, an RCA/Fix Description or a real closing comment.
         {isEntSmb && ' Overall Score is an average of Summary Quality, Description Quality, SLA Compliance, Closing Comments, and Screenshot Evidence (0-10 each, /100 total) — hover a score for the breakdown. Its color tier (green ≥80, amber ≥60) and its Good/Poor label (≥85) use different cutoffs on purpose.'}
       </p>
 

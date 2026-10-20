@@ -14275,7 +14275,13 @@ async function _handleJiraPgApi(
         COUNT(*) FILTER (WHERE s.category != 'done' AND i."dueDate" < now()) AS overdue,
         COUNT(*) FILTER (WHERE s.category = 'done') AS closed,
         COUNT(*) FILTER (WHERE s.category = 'done' AND LOWER(s.name) NOT IN ('closed','resolved','done','cancelled','declined')) AS no_closure,
-        COUNT(*) FILTER (WHERE s.category = 'done' AND ${SCREENSHOT_EVIDENCE_SQL}) AS screenshots
+        COUNT(*) FILTER (WHERE s.category = 'done' AND ${SCREENSHOT_EVIDENCE_SQL}) AS screenshots,
+        -- Same two checks as reports/mbr-team's fullAgg, for the shared
+        -- hygiene deductions below.
+        COUNT(*) FILTER (WHERE s.category = 'done' AND LOWER(s.name) IN ('closed','resolved') AND EXISTS (
+          SELECT 1 FROM comments c WHERE c."issueId" = i.id AND length(trim(c.body)) > 10)) AS closing_good,
+        COUNT(*) FILTER (WHERE s.category = 'done' AND (
+          length(trim(COALESCE(i."rootCause", ''))) > 0 OR length(trim(COALESCE(i."fixDescription", ''))) > 0)) AS rca_fix_good
       FROM issues i
       LEFT JOIN statuses s ON i."statusId" = s.id
       LEFT JOIN users u ON u.id = i."assigneeId"
@@ -14367,12 +14373,18 @@ async function _handleJiraPgApi(
       const closed = Number(r.closed) || 0;
       const noClosure = Number(r.no_closure) || 0;
       const screenshots = Number(r.screenshots) || 0;
+      const closingGood = Number(r.closing_good) || 0;
+      const rcaFixGood = Number(r.rca_fix_good) || 0;
       let score = 100;
       score -= Math.min(30, stale * 5);
       score -= Math.min(20, missing * 5);
       score -= Math.min(24, overdue * 8);
       score -= Math.min(18, noClosure * 6);
       score -= Math.min(30, Math.max(0, closed - screenshots) * 10);
+      // RCA/Fix Description and closing comment -- same deductions as the
+      // team tabs' hygieneFrom (5 per resolved ticket missing each, max 20).
+      score -= Math.min(20, Math.max(0, closed - rcaFixGood) * 5);
+      score -= Math.min(20, Math.max(0, closed - closingGood) * 5);
       score = Math.max(0, Math.round(score));
       const grade = score >= 80 ? 'great' : score >= 55 ? 'ok' : 'poor';
       const name = `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.email || 'Unknown';
@@ -15217,6 +15229,13 @@ async function _handleJiraPgApi(
       score -= Math.min(24, overdue * 8);
       score -= Math.min(18, noClosure * 6);
       score -= Math.min(30, Math.max(0, closed - screenshots) * 10);
+      // Per explicit request: RCA/Fix Description and closing-comment
+      // quality now count toward the score too (5 points per resolved
+      // ticket missing each, capped at 20 apiece) -- they used to show only
+      // as separate cards, so 91% RCA/Fix compliance could sit next to a
+      // perfect 100 hygiene score. Same deductions on the By Department tab.
+      score -= Math.min(20, Math.max(0, closed - rcaFixGood) * 5);
+      score -= Math.min(20, Math.max(0, closed - closingGood) * 5);
       score = Math.max(0, Math.round(score));
       const grade = score >= 80 ? 'great' : score >= 55 ? 'ok' : 'poor';
       return {
