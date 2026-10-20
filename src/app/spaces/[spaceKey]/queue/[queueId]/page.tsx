@@ -1120,8 +1120,15 @@ export default function QueueSettingsPage() {
   const queueId = params?.queueId as string || '';
   const initialTab = (searchParams?.get('tab') || 'people') as 'people' | 'sla' | 'rr' | 'email' | 'notify' | 'workflow';
 
+  const currentUser = useStore((s) => s.user);
+  const isAdmin = currentUser?.role === 'admin';
+
   const [tab, setTab] = useState<'people' | 'sla' | 'rr' | 'email' | 'notify' | 'workflow'>(initialTab);
   const [queue, setQueue] = useState<CustomQueue | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState('');
+  const [renameSaving, setRenameSaving] = useState(false);
   const [notifyEmailDraft, setNotifyEmailDraft] = useState('');
   const [notifyEmailError, setNotifyEmailError] = useState('');
   const [spaceStatuses, setSpaceStatuses] = useState<{ id: string; name: string; color: string; category: string }[]>([]);
@@ -1219,6 +1226,34 @@ export default function QueueSettingsPage() {
       } catch {}
       setQueue(updated);
     } catch {}
+  };
+
+  // Unlike persistQueue's plain PATCH (which only ever updates the queue
+  // object's own fields), a rename needs the dedicated backend endpoint --
+  // the name is also stored as a freeform string directly on every ticket,
+  // inside per-ticket JSONB snapshots, on SLA policies, round-robin config,
+  // and linked email addresses, all of which that endpoint updates in one
+  // transaction. See its own comment in jira-pg-api.ts for the full list.
+  const handleRename = async () => {
+    if (!queue) return;
+    const next = renameValue.trim();
+    if (!next || next === queue.name) { setRenaming(false); return; }
+    setRenameSaving(true);
+    setRenameError('');
+    try {
+      await api.request(`custom-queues/${spaceKey}/${queueId}/rename`, { method: 'POST', body: JSON.stringify({ newName: next }) });
+      setQueue({ ...queue, name: next });
+      try {
+        const stored = localStorage.getItem(`custom_queues_${spaceKey}`);
+        const list: CustomQueue[] = stored ? JSON.parse(stored) : [];
+        localStorage.setItem(`custom_queues_${spaceKey}`, JSON.stringify(list.map(q => q.id === queueId ? { ...q, name: next } : q)));
+      } catch {}
+      setRenaming(false);
+    } catch (e: any) {
+      setRenameError(e?.message || 'Rename failed.');
+    } finally {
+      setRenameSaving(false);
+    }
   };
 
   const savePolicies = async (p: SLAPolicy[]) => {
@@ -1324,7 +1359,42 @@ export default function QueueSettingsPage() {
         </div>
         <div className="px-4 py-4 border-b border-gray-100">
           <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Queue</p>
-          <p className="text-[14px] font-bold text-gray-900">{queue.name}</p>
+          {renaming ? (
+            <div className="space-y-1.5">
+              <input
+                autoFocus
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleRename(); if (e.key === 'Escape') setRenaming(false); }}
+                disabled={renameSaving}
+                className="w-full border border-blue-400 rounded px-2 py-1 text-[13px] font-bold text-gray-900 focus:outline-none disabled:opacity-50"
+              />
+              {renameError && <p className="text-[10.5px] text-red-500">{renameError}</p>}
+              <div className="flex items-center gap-2">
+                <button onClick={handleRename} disabled={renameSaving}
+                  className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 disabled:opacity-50">
+                  {renameSaving ? 'Renaming…' : 'Save'}
+                </button>
+                <button onClick={() => { setRenaming(false); setRenameError(''); }} disabled={renameSaving}
+                  className="text-[11px] font-semibold text-gray-400 hover:text-gray-600 disabled:opacity-50">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 group">
+              <p className="text-[14px] font-bold text-gray-900">{queue.name}</p>
+              {isAdmin && (
+                <button
+                  onClick={() => { setRenameValue(queue.name); setRenameError(''); setRenaming(true); }}
+                  title="Rename queue"
+                  className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-gray-600 transition-opacity"
+                >
+                  <Edit2 size={12} />
+                </button>
+              )}
+            </div>
+          )}
           <p className="text-[11px] text-gray-400 mt-0.5">{queue.memberIds.length} member{queue.memberIds.length !== 1 ? 's' : ''}</p>
         </div>
         <nav className="flex-1 px-2 py-3 space-y-0.5">

@@ -17642,6 +17642,147 @@ async function _handleJiraPgApi(
     return json({ ok: true, queue: updated });
   }
 
+  // POST /custom-queues/:spaceKey/:queueId/rename — a true rename, not just
+  // the display label. A department/queue name is stored as a freeform
+  // STRING directly on every ticket (current_department, original_dept),
+  // inside three per-ticket JSONB snapshots keyed BY that name
+  // (dept_sla_log/dept_statuses/dept_assignees), on SLA policies
+  // (dept_name), in round-robin config, and on linked email addresses --
+  // simply editing the queue object's own name (the plain PATCH above)
+  // would silently orphan every existing ticket and config entry still
+  // carrying the old name, with nothing left correctly matching this queue
+  // going forward. By explicit request, this also rewrites historical
+  // tickets rather than leaving them on the old name (the opposite of
+  // issue_worklogs' own documented design -- see its CREATE TABLE comment
+  // -- which deliberately keeps department freeform specifically so a
+  // later rename does NOT need to touch history; this endpoint overrides
+  // that for current_department and the rest regardless, per that request).
+  // Admin-only given the blast radius. Wrapped in a transaction so a
+  // failure partway through rolls back cleanly instead of leaving some
+  // tables renamed and others not.
+  const customQueueRenameMatch = path.match(/^custom-queues\/([^/]+)\/([^/]+)\/rename$/);
+  if (customQueueRenameMatch && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    const spaceKey = customQueueRenameMatch[1];
+    const queueId = customQueueRenameMatch[2];
+    const body = await readJson(req);
+    const newName = String(body.newName || '').trim();
+    if (!newName) return json({ error: 'newName is required' }, 400);
+
+    const row = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey]);
+    const allQueues: any[] = row.rows[0]?.queues || [];
+    const target = allQueues.find((q: any) => q.id === queueId);
+    if (!target) return json({ error: 'Queue not found' }, 404);
+    const oldName: string = target.name;
+    if (oldName.toLowerCase() === newName.toLowerCase()) return json({ ok: true, renamed: 0 });
+    if (allQueues.some((q: any) => q.id !== queueId && q.name.toLowerCase() === newName.toLowerCase())) {
+      return json({ error: `A queue named "${newName}" already exists in this space.` }, 409);
+    }
+
+    const spaceRow = await pool.query(`SELECT id FROM spaces WHERE key = $1 LIMIT 1`, [spaceKey]);
+    const spaceId = spaceRow.rows[0]?.id;
+    if (!spaceId) return json({ error: 'Space not found' }, 404);
+
+    const client = await pool.connect();
+    const result = { issues: 0, slaPolicies: 0, worklogs: 0, workedOnRows: 0, emailConfigs: 0, roundRobin: false };
+    try {
+      await client.query('BEGIN');
+
+      // 1. The queue's own stored name.
+      const nextQueues = allQueues.map((q: any) => q.id === queueId ? { ...q, name: newName } : q);
+      await client.query(
+        `UPDATE custom_queues SET queues = $1, updated_at = NOW() WHERE space_key = $2`,
+        [JSON.stringify(nextQueues), spaceKey]
+      );
+
+      // 2. Plain string columns on issues.
+      const curDeptRes = await client.query(
+        `UPDATE issues SET current_department = $1 WHERE "spaceId" = $2 AND LOWER(current_department) = LOWER($3)`,
+        [newName, spaceId, oldName]
+      );
+      await client.query(
+        `UPDATE issues SET original_dept = $1 WHERE "spaceId" = $2 AND LOWER(original_dept) = LOWER($3)`,
+        [newName, spaceId, oldName]
+      );
+      result.issues = curDeptRes.rowCount || 0;
+
+      // 3. Rename the matching KEY (not just its value) inside the three
+      // per-ticket JSONB snapshots -- Postgres has no native "rename a
+      // jsonb key" operator, and the stored key's exact casing isn't
+      // guaranteed to match the queue's own name casing, so this is done
+      // in JS: find the real key case-insensitively, move its value under
+      // the new name, remove the old key.
+      const jsonbCols = ['dept_sla_log', 'dept_statuses', 'dept_assignees'] as const;
+      for (const col of jsonbCols) {
+        const rows = await client.query(
+          `SELECT id, ${col} FROM issues WHERE "spaceId" = $1 AND ${col} IS NOT NULL AND ${col} != '{}'::jsonb`,
+          [spaceId]
+        );
+        for (const r of rows.rows) {
+          const obj = r[col];
+          if (!obj || typeof obj !== 'object') continue;
+          const realKey = Object.keys(obj).find((k) => k.toLowerCase() === oldName.toLowerCase());
+          if (!realKey || realKey === newName) continue;
+          const next = { ...obj };
+          next[newName] = next[realKey];
+          delete next[realKey];
+          await client.query(`UPDATE issues SET ${col} = $1 WHERE id = $2`, [JSON.stringify(next), r.id]);
+        }
+      }
+
+      // 4. SLA policies scoped to this department.
+      const slaRes = await client.query(
+        `UPDATE sla_definitions SET dept_name = $1 WHERE "spaceId" = $2 AND LOWER(dept_name) = LOWER($3)`,
+        [newName, spaceId, oldName]
+      );
+      result.slaPolicies = slaRes.rowCount || 0;
+
+      // 5. Round-robin roster (rr_config.departments is a JSONB array of
+      // {name, ...} objects, same shape as custom_queues.queues).
+      const rrRow = await client.query(`SELECT departments FROM rr_config WHERE space_id = $1`, [spaceId]);
+      const rrDepts: any[] = rrRow.rows[0]?.departments || [];
+      const rrMatch = rrDepts.find((d: any) => (d.name || '').toLowerCase() === oldName.toLowerCase());
+      if (rrMatch) {
+        const nextRr = rrDepts.map((d: any) => d === rrMatch ? { ...d, name: newName } : d);
+        await client.query(`UPDATE rr_config SET departments = $1, updated_at = NOW() WHERE space_id = $2`, [JSON.stringify(nextRr), spaceId]);
+        result.roundRobin = true;
+      }
+
+      // 6. Linked email addresses.
+      const emailRes = await client.query(
+        `UPDATE email_configs SET department = $1 WHERE space_key = $2 AND LOWER(department) = LOWER($3)`,
+        [newName, spaceKey, oldName]
+      );
+      result.emailConfigs = emailRes.rowCount || 0;
+
+      // 7. Per-ticket worklog entries and worked-on credit rows, scoped via
+      // this space's own issue ids (both tables store department as a
+      // plain freeform string, not a space-scoped column of their own).
+      const worklogRes = await client.query(
+        `UPDATE issue_worklogs SET department = $1
+         WHERE LOWER(department) = LOWER($2) AND "issueId" IN (SELECT id FROM issues WHERE "spaceId" = $3)`,
+        [newName, oldName, spaceId]
+      );
+      result.worklogs = worklogRes.rowCount || 0;
+      const workedOnRes = await client.query(
+        `UPDATE user_worked_on_tickets SET dept = $1
+         WHERE LOWER(dept) = LOWER($2) AND issue_id IN (SELECT id FROM issues WHERE "spaceId" = $3)`,
+        [newName, oldName, spaceId]
+      );
+      result.workedOnRows = workedOnRes.rowCount || 0;
+
+      await client.query('COMMIT');
+    } catch (e: any) {
+      await client.query('ROLLBACK');
+      console.error('[Queue Rename] Failed, rolled back:', e?.message || e);
+      return json({ error: 'Rename failed and was rolled back. No changes were made.' }, 500);
+    } finally {
+      client.release();
+    }
+
+    return json({ ok: true, oldName, newName, ...result });
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ SLA routes Ã¢â‚¬â€ persisted to PostgreSQL via raw pg (avoids Prisma cache issues) Ã¢â€â‚¬
   const slaListMatch = path.match(/^sla\/([^/]+)$/);
   if (slaListMatch) {
