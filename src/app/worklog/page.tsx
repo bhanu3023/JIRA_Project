@@ -107,6 +107,11 @@ function UserSearchSelect({
 
 export default function WorklogPage() {
   const { spaces, user } = useStore((s) => ({ spaces: s.spaces, user: s.user }));
+  // "Ticket Worklog" starts as an empty placeholder, per explicit request --
+  // its own content/behavior to follow in a later instruction. Kept as a
+  // second top-level tab rather than a route so both share this page's
+  // header/layout shell.
+  const [mainTab, setMainTab] = useState<'worklog' | 'ticket'>('worklog');
 
   // Default to the last 30 days -- the full unfiltered history across every
   // ticket is rarely what anyone wants on first load, same reasoning as the
@@ -262,6 +267,29 @@ export default function WorklogPage() {
         <p className="text-[12.5px] text-gray-500 mt-0.5">Time logged against tickets, same as Jira's own Logged Work view.</p>
       </div>
 
+      {/* Tabs */}
+      <div className="bg-white border-b border-gray-200 px-8 flex-shrink-0">
+        <div className="flex gap-6">
+          <button onClick={() => setMainTab('worklog')}
+            className={`py-3 text-[13px] font-semibold border-b-2 transition-colors ${mainTab === 'worklog' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
+            Worklog
+          </button>
+          <button onClick={() => setMainTab('ticket')}
+            className={`py-3 text-[13px] font-semibold border-b-2 transition-colors ${mainTab === 'ticket' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
+            Ticket Worklog
+          </button>
+        </div>
+      </div>
+
+      {mainTab === 'ticket' && (
+        <div className="flex-1 overflow-auto px-8 py-6">
+          <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">
+            Ticket Worklog — coming soon.
+          </div>
+        </div>
+      )}
+
+      {mainTab === 'worklog' && (
       <div className="flex-1 overflow-auto px-8 py-6">
         {/* Filters */}
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex flex-wrap items-center gap-4">
@@ -444,6 +472,7 @@ export default function WorklogPage() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
