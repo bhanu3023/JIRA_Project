@@ -724,9 +724,7 @@ export default function Sidebar() {
             <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
             <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
             <GlobalNavItem href="/kb" icon={<BookOpen size={15} />} label="KB Articles" active={pathname.startsWith('/kb')} />
-            {user?.role === 'admin' && (
-              <GlobalNavItem href="/worklog" icon={<Clock size={15} />} label="Worklog" active={pathname.startsWith('/worklog')} />
-            )}
+            <GlobalNavItem href="/worklog" icon={<Clock size={15} />} label="Worklog" active={pathname.startsWith('/worklog')} />
             {canSeeMbr && (
               <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
             )}
