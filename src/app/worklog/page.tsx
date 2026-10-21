@@ -278,16 +278,34 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
   );
 }
 
-function TicketWorklogTab({ userId }: { userId: string | undefined }) {
+function TicketWorklogTab({ userId, isAdmin, allUsers }: {
+  userId: string | undefined;
+  isAdmin: boolean;
+  allUsers: { id: string; firstName?: string; lastName?: string; email?: string }[];
+}) {
   const [entries, setEntries] = useState<ActivityWorklogRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
 
+  // Default to the last 30 days, same reasoning as the Worklog tab's own
+  // date filter -- the full unfiltered history isn't what anyone wants on
+  // first load.
+  const [dateFrom, setDateFrom] = useState(() => isoDate(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000)));
+  const [dateTo, setDateTo] = useState(() => isoDate(new Date()));
+  const [userFilter, setUserFilter] = useState(''); // admin-only -- a non-admin only ever sees their own regardless
+  const [activityFilter, setActivityFilter] = useState('');
+
   const load = () => {
     setLoading(true);
-    api.getActivityWorklogs().then(setEntries).catch(() => {}).finally(() => setLoading(false));
+    api.getActivityWorklogs({
+      from: dateFrom ? `${dateFrom}T00:00:00` : undefined,
+      to: dateTo ? `${dateTo}T23:59:59` : undefined,
+      userId: isAdmin && userFilter ? userFilter : undefined,
+    }).then(setEntries).catch(() => {}).finally(() => setLoading(false));
   };
-  useEffect(load, []);
+  useEffect(load, [dateFrom, dateTo, userFilter]);
+
+  const visibleEntries = activityFilter ? entries.filter((e) => e.activityType === activityFilter) : entries;
 
   const handleDelete = async (id: string) => {
     setEntries((prev) => prev.filter((e) => e.id !== id));
@@ -304,11 +322,55 @@ function TicketWorklogTab({ userId }: { userId: string | undefined }) {
         </button>
       </div>
 
+      {/* Filters */}
+      <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2 text-[13px] font-medium text-gray-600">
+          <Calendar size={15} className="text-gray-400" />
+          Date Range
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">From</label>
+          <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">To</label>
+          <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        {isAdmin && (
+          <div className="flex items-center gap-2">
+            <label className="text-[12px] text-gray-400 font-medium">Reporter</label>
+            <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)}
+              className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+              <option value="">Everyone</option>
+              {allUsers.map((u) => (
+                <option key={u.id} value={u.id}>{`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">Activity</label>
+          <select value={activityFilter} onChange={(e) => setActivityFilter(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white max-w-[260px]">
+            <option value="">All activities</option>
+            {ACTIVITY_TYPES.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+        {(userFilter || activityFilter || dateFrom || dateTo) && (
+          <button onClick={() => { setUserFilter(''); setActivityFilter(''); setDateFrom(isoDate(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000))); setDateTo(isoDate(new Date())); }}
+            className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
+            <X size={11} /> Clear
+          </button>
+        )}
+      </div>
+
       {loading ? (
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">Loading…</div>
-      ) : entries.length === 0 ? (
+      ) : visibleEntries.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">
-          No activity logged yet. Click Create to log your first entry.
+          {entries.length === 0 ? 'No activity logged yet. Click Create to log your first entry.' : 'No entries match these filters.'}
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -325,7 +387,7 @@ function TicketWorklogTab({ userId }: { userId: string | undefined }) {
                 </tr>
               </thead>
               <tbody>
-                {entries.map((e) => (
+                {visibleEntries.map((e) => (
                   <tr key={e.id} className="border-b border-gray-100 last:border-0 group">
                     <td className="px-4 py-2.5 text-[12.5px] text-gray-500 whitespace-nowrap">
                       {new Date(e.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
@@ -533,7 +595,7 @@ export default function WorklogPage() {
         </div>
       </div>
 
-      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} />}
+      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} isAdmin={user?.role === 'admin'} allUsers={users} />}
 
       {mainTab === 'worklog' && (
       <div className="flex-1 overflow-auto px-8 py-6">
