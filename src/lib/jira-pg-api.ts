@@ -17847,7 +17847,31 @@ async function _handleJiraPgApi(
           const realKey = Object.keys(obj).find((k) => k.toLowerCase() === oldName.toLowerCase());
           if (!realKey || realKey === newName) continue;
           const next = { ...obj };
-          next[newName] = next[realKey];
+          // Same reasoning as the user_worked_on_tickets conflict above --
+          // a ticket that's already visited this exact department under
+          // BOTH the old and new name (e.g. an earlier rename of this same
+          // queue) would otherwise have the old key's value silently
+          // overwrite the new key's, losing real data instead of just
+          // failing loudly like the DB-level unique constraint does. For
+          // dept_sla_log specifically, elapsed_ms is additive (both
+          // entries are real time spent under what's now the same
+          // department identity); for the point-in-time status/assignee
+          // snapshots, keep whichever side is already under the new name
+          // (already the more current of the two) and drop the old one.
+          if (next[newName] !== undefined && next[newName] !== null) {
+            if (col === 'dept_sla_log') {
+              const oldEntry = next[realKey] || {};
+              const newEntry = next[newName] || {};
+              next[newName] = {
+                ...newEntry,
+                elapsed_ms: (Number(oldEntry.elapsed_ms) || 0) + (Number(newEntry.elapsed_ms) || 0),
+              };
+            }
+            // dept_statuses/dept_assignees: next[newName] already holds
+            // the value to keep -- no change needed, just drop the old key.
+          } else {
+            next[newName] = next[realKey];
+          }
           delete next[realKey];
           await client.query(`UPDATE issues SET ${col} = $1 WHERE id = $2`, [JSON.stringify(next), r.id]);
         }
@@ -17887,6 +17911,42 @@ async function _handleJiraPgApi(
         [newName, oldName, spaceId]
       );
       result.worklogs = worklogRes.rowCount || 0;
+
+      // user_worked_on_tickets has UNIQUE(user_id, issue_id, dept) -- a
+      // blind rename UPDATE throws a duplicate-key violation whenever a
+      // (user, issue) pair already has a row under BOTH the old name and
+      // the target new name (e.g. from an earlier rename attempt on this
+      // same queue: some tickets got a "newName" row logged after an
+      // earlier rename, while others still carry an "oldName" row from
+      // before it -- renaming back collides on exactly those). Confirmed
+      // for real on this exact queue ("Pre-Sales-Old" -> "Pre-Sales"):
+      // 'duplicate key value violates unique constraint
+      // "user_worked_on_tickets_user_id_issue_id_dept_key"'.
+      //
+      // Resolve each conflicting pair by keeping whichever row is the
+      // more significant record of real work (closed > worked > returned
+      // > passed; latest worked_at breaks a tie) merged onto the
+      // surviving (new-name) row, then dropping the old-name duplicate --
+      // instead of letting the DB arbitrarily reject the whole rename.
+      const REASON_RANK: Record<string, number> = { closed: 3, worked: 2, returned: 1, passed: 0 };
+      const conflicts = await client.query(
+        `SELECT o.id AS old_id, o.reason AS old_reason, o.worked_at AS old_worked_at,
+                n.id AS new_id, n.reason AS new_reason, n.worked_at AS new_worked_at
+         FROM user_worked_on_tickets o
+         JOIN user_worked_on_tickets n ON n.user_id = o.user_id AND n.issue_id = o.issue_id AND LOWER(n.dept) = LOWER($1)
+         WHERE LOWER(o.dept) = LOWER($2) AND o.issue_id IN (SELECT id FROM issues WHERE "spaceId" = $3)`,
+        [newName, oldName, spaceId]
+      );
+      for (const c of conflicts.rows) {
+        const oldRank = REASON_RANK[c.old_reason] ?? -1;
+        const newRank = REASON_RANK[c.new_reason] ?? -1;
+        const oldIsBetter = oldRank > newRank || (oldRank === newRank && new Date(c.old_worked_at).getTime() > new Date(c.new_worked_at).getTime());
+        if (oldIsBetter) {
+          await client.query(`UPDATE user_worked_on_tickets SET reason = $1, worked_at = $2 WHERE id = $3`, [c.old_reason, c.old_worked_at, c.new_id]);
+        }
+        await client.query(`DELETE FROM user_worked_on_tickets WHERE id = $1`, [c.old_id]);
+      }
+
       const workedOnRes = await client.query(
         `UPDATE user_worked_on_tickets SET dept = $1
          WHERE LOWER(dept) = LOWER($2) AND issue_id IN (SELECT id FROM issues WHERE "spaceId" = $3)`,
