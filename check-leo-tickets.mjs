@@ -24,7 +24,7 @@ async function main() {
 
   const reporterId = users[0]?.id;
   const { rows: tickets } = await pool.query(
-    `SELECT i.id, i.key, i.summary, i."createdAt", i.current_department, i."emailThreadId" AS email_thread_id,
+    `SELECT i.id, i.key, i.summary, i."createdAt", i.current_department, i.emailthreadid AS email_thread_id,
             i."reporterId", i.jira_reporter_name, i.description
      FROM issues i
      WHERE i."reporterId" = $1 OR LOWER(i.jira_reporter_name) LIKE '%leo%'
