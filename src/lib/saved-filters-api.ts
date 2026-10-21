@@ -90,8 +90,17 @@ export async function handleSavedFiltersApi(
     const criteria = parseCriteria(body.criteria);
     if ('error' in criteria) return json({ error: criteria.error }, 400);
     const ownerName = `${currentUser?.firstName || ''} ${currentUser?.lastName || ''}`.trim() || currentUser?.email || 'Unknown';
+    // createdAt/updatedAt set explicitly rather than relying on a DB-level
+    // DEFAULT -- the live table was created earlier via Prisma's own
+    // migration, where @updatedAt/@default(now()) are enforced by Prisma's
+    // client at the ORM layer, not as an actual Postgres column default.
+    // This raw pool.query() INSERT bypasses Prisma entirely, so without
+    // these the columns came through NULL and violated their NOT NULL
+    // constraint -- confirmed for real via "null value in column
+    // updatedAt... violates not-null constraint" on every save attempt.
     const row = await pool.query(
-      `INSERT INTO filters (id, name, criteria, "ownerId", "ownerName") VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      `INSERT INTO filters (id, name, criteria, "ownerId", "ownerName", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING *`,
       [rid(), name.slice(0, MAX_NAME), JSON.stringify(criteria), userId, ownerName],
     );
     return json(format(row.rows[0], userId), 201);
