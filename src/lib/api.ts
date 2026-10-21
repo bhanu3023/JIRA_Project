@@ -154,7 +154,14 @@ class ApiClient {
       throw new Error('That request is too large — the description or an attached image/file is too big. Try a smaller image or remove an attachment and try again.');
     }
 
-    if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
+    // data.detail is an opt-in extra some admin-only endpoints (e.g. queue
+    // rename) attach when server logs have proven unreliable to retrieve --
+    // appended here only when actually present, so every other error path
+    // is completely unaffected.
+    if (!res.ok) {
+      const base = typeof data.error === 'string' ? data.error : 'Request failed';
+      throw new Error(typeof data.detail === 'string' && data.detail ? `${base} (${data.detail})` : base);
+    }
     // DELETE and similar endpoints can legitimately return a 200/204 with no
     // body at all -- only GETs (which callers always expect real data back
     // from) need to fail loudly on an unparseable body; a DELETE returning

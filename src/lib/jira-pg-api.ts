@@ -17897,8 +17897,14 @@ async function _handleJiraPgApi(
       await client.query('COMMIT');
     } catch (e: any) {
       await client.query('ROLLBACK');
+      // Included directly in the response (not just server logs) -- this
+      // endpoint is already admin-only, and server logs have proven
+      // unreliable to retrieve in practice (every deploy restarts the
+      // container, wiping docker logs' history, and the email-poller's own
+      // constant background noise buries anything logged more than a
+      // minute or two ago).
       console.error('[Queue Rename] Failed, rolled back:', e?.message || e);
-      return json({ error: 'Rename failed and was rolled back. No changes were made.' }, 500);
+      return json({ error: 'Rename failed and was rolled back. No changes were made.', detail: e?.message || String(e) }, 500);
     } finally {
       client.release();
     }
