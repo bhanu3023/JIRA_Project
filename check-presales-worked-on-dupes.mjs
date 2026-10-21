@@ -12,7 +12,8 @@
 import pg from 'pg';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const OLD_NAME = 'Pre-Sales-Old';
+const OLD_NAME = 'Pre-Sales';
+const NEW_NAME = 'Pre-Sales-Old';
 const SPACE_KEY = 'TESTIN';
 
 async function main() {
@@ -43,16 +44,24 @@ async function main() {
   console.log(`\n(user,issue) pairs with MULTIPLE old-name-matching rows (different casing): ${multiOldRows.length}`);
   for (const g of multiOldRows.slice(0, 10)) console.log(' ', g);
 
-  // Also check: for each old-name row, does a "Pre-Sales" (new name) row
-  // already exist for the SAME (user, issue)?
+  // Also check: for each old-name row, does a NEW_NAME row already exist
+  // for the SAME (user, issue)?
   const { rows: newRows } = await pool.query(`
     SELECT user_id, issue_id, dept, reason, worked_at
     FROM user_worked_on_tickets
-    WHERE LOWER(dept) = LOWER('Pre-Sales') AND issue_id IN (SELECT id FROM issues WHERE "spaceId" = $1)
-  `, [spaceId]);
+    WHERE LOWER(dept) = LOWER($1) AND issue_id IN (SELECT id FROM issues WHERE "spaceId" = $2)
+  `, [NEW_NAME, spaceId]);
+  console.log(`\n${newRows.length} rows already match "${NEW_NAME}" case-insensitively (before any rename).`);
   const newPairs = new Set(newRows.map((r) => `${r.user_id}:${r.issue_id}`));
   const oldVsNewConflicts = Array.from(byPair.keys()).filter((k) => newPairs.has(k));
-  console.log(`\n(user,issue) pairs with BOTH an old-name row and a "Pre-Sales" row: ${oldVsNewConflicts.length}`);
+  console.log(`(user,issue) pairs with BOTH a "${OLD_NAME}" row and a "${NEW_NAME}" row: ${oldVsNewConflicts.length}`);
+  if (oldVsNewConflicts.length) {
+    console.log('Example conflicting pairs:');
+    for (const k of oldVsNewConflicts.slice(0, 10)) {
+      console.log('  old:', byPair.get(k));
+      console.log('  new:', newRows.filter((r) => `${r.user_id}:${r.issue_id}` === k));
+    }
+  }
 
   await pool.end();
 }
