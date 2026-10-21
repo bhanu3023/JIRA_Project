@@ -341,13 +341,15 @@ function TicketWorklogTab({ userId, isAdmin, allUsers }: {
         {isAdmin && (
           <div className="flex items-center gap-2">
             <label className="text-[12px] text-gray-400 font-medium">Reporter</label>
-            <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
-              <option value="">Everyone</option>
-              {allUsers.map((u) => (
-                <option key={u.id} value={u.id}>{`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email}</option>
-              ))}
-            </select>
+            <UserSearchSelect
+              value={userFilter}
+              onChange={setUserFilter}
+              placeholder="Everyone"
+              options={[
+                { value: '', label: 'Everyone' },
+                ...allUsers.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
+              ]}
+            />
           </div>
         )}
         <div className="flex items-center gap-2">
