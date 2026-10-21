@@ -18220,8 +18220,9 @@ async function _handleJiraPgApi(
       )
     `);
     if (method === 'GET') {
+      await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS auth_mode TEXT DEFAULT 'password'`).catch(() => {});
       const rows = await pool.query(
-        `SELECT id, address, imap_host, smtp_host, auto_reply, department, created_at FROM email_configs WHERE space_key = $1 ORDER BY created_at`,
+        `SELECT id, address, imap_host, smtp_host, auto_reply, department, created_at, auth_mode FROM email_configs WHERE space_key = $1 ORDER BY created_at`,
         [sk]
       );
       return json(rows.rows.map((r: any) => ({
@@ -18230,6 +18231,7 @@ async function _handleJiraPgApi(
         autoReply: r.auto_reply, department: r.department,
         requestType: 'Emailed request',
         createdAt: r.created_at,
+        authMode: r.auth_mode,
       })));
     }
 

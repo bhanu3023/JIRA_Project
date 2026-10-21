@@ -592,6 +592,27 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
     setRestarting(null);
   };
 
+  const addAndLinkAppOnly = async () => {
+    if (!form.email) { setTestResult({ ok: false, message: 'Enter your email address first' }); return; }
+    setAdding(true);
+    try {
+      const res = await fetch('/api/email/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: form.email, spaceKey, department: queueName, appUrl: window.location.origin, authMode: 'app_only' }),
+      });
+      const data = await res.json();
+      if (!data.ok) { setTestResult({ ok: false, message: data.error || 'Failed to add email' }); setAdding(false); return; }
+      const rows = await api.request<any[]>(`/email-addresses/${spaceKey}`).catch(() => []);
+      setAllEmails(rows || []);
+      setShowAddForm(false);
+      setForm({ email: '', password: '', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' });
+      setTestResult(null);
+      flash('Email added & linked');
+    } catch { setTestResult({ ok: false, message: 'Failed to add email' }); }
+    setAdding(false);
+  };
+
   const addAndLink = async () => {
     setAdding(true);
     try {
@@ -675,6 +696,13 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
                   </div>
                 </button>
               </div>
+              {/* No password/OAuth sign-in at all — uses tenant-wide Graph app
+                  access (set up once by an Azure admin). Meant for shared
+                  mailboxes/DLs nobody has individual login credentials for. */}
+              <button type="button" onClick={addAndLinkAppOnly} disabled={adding}
+                className="mt-2 w-full text-left text-[11.5px] text-gray-500 hover:text-blue-600 disabled:opacity-50 transition-colors">
+                {adding ? 'Connecting…' : "Don't know the password? Connect without one →"}
+              </button>
             </div>
 
             <div className="relative flex items-center gap-3">
@@ -758,6 +786,9 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
                 <p className="text-[13px] font-medium text-gray-800">{email.address}</p>
                 <p className="text-[11.5px] text-gray-400 flex items-center gap-1">
                   <Wifi size={11} className="text-emerald-500" /> Active · {email.requestType || 'Emailed request'}
+                  {email.authMode === 'app_only' && (
+                    <span className="ml-1 px-1.5 py-0.5 rounded bg-purple-50 text-purple-600 text-[10px] font-semibold">No password</span>
+                  )}
                 </p>
               </div>
             </div>

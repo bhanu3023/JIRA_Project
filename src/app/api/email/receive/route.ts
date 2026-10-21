@@ -78,6 +78,36 @@ async function sendGraphAutoReply(opts: {
     return;
   }
 
+  // Mailboxes connected with no per-mailbox sign-in at all (tenant-wide Graph
+  // app-only access, see oauth-service.ts's getGraphAppOnlyToken) have no
+  // stored refresh token for getGraphToken/getValidAccessToken below to find
+  // — check for that up front instead of falling through this function's
+  // per-mailbox-token branches, which would always correctly conclude "no
+  // token" and silently skip the reply.
+  try {
+    const { pgPool: poolAr } = await import('@/lib/pg-pool');
+    const { rows } = await poolAr.query(`SELECT auth_mode FROM email_configs WHERE LOWER(address) = LOWER($1)`, [opts.toAddress]);
+    if (rows[0]?.auth_mode === 'app_only') {
+      const { sendAutoReply } = await import('@/lib/email-service');
+      const appUrlAr   = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
+      await sendAutoReply({
+        smtp: { host: 'smtp.office365.com', port: 587, secure: false, user: opts.toAddress, password: '', appOnly: true },
+        from: opts.toAddress,
+        to: opts.fromEmail,
+        subject: opts.subject,
+        issueKey: opts.issueKey,
+        issueUrl: `${appUrlAr}/issues/${opts.issueKey}`,
+        autoReplyText: 'Thank you for contacting us. We have received your request and will get back to you shortly.',
+        inReplyTo: opts.messageId,
+        references: opts.messageId,
+      });
+      console.log(`[AutoReply] Sent via app-only Graph access (${opts.toAddress}) to ${opts.fromEmail} → ticket ${opts.issueKey}`);
+      return;
+    }
+  } catch (e) {
+    console.error('[AutoReply] app_only lookup/send failed, falling back to per-mailbox token path:', e);
+  }
+
   // Try Graph token first; if consent not granted, fall back to IMAP access token via SMTP
   let accessToken = await getGraphToken(opts.toAddress);
   let useSmtpFallback = false;
