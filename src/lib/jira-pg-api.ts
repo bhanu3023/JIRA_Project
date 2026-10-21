@@ -2676,7 +2676,31 @@ async function enrichSlaWithResolver(
     // verdict straight from resolvedAt vs dueTime. Confirmed for real:
     // CF-29697 waived by an admin still showed "Late" against Amulya A in
     // Resolution History.
-    const history = events.map((e) => ({ ...e, wasBreached: s.waived ? false : new Date(e.resolvedAt).getTime() > dueMs }));
+    //
+    // A plain resolvedAt > dueTime check is only correct for a department
+    // that held the ticket in one unbroken visit. s.dueTime is a FIXED
+    // display window (createdAt + goal -- see computeSLAInstancesPure's own
+    // comment on why), not adjusted for time this department's clock sat
+    // PAUSED while the ticket was elsewhere -- so for a ticket that bounced
+    // to another department and back, that naive comparison can flag a
+    // genuinely on-time resolution as breached. s.isBreached is already the
+    // correct, pause-aware verdict (computed from real cumulative elapsed
+    // time vs the goal, the same number the SLA card's own "within/past the
+    // SLA goal" text already trusts) -- use it for the event that IS this
+    // instance's own actual resolution (e.resolvedAt matching s.resolvedAt),
+    // falling back to the naive comparison only for an older, different
+    // resolution this instance doesn't have better data for (e.g. an
+    // intermediate resolve-then-reopen cycle). Confirmed for real: CF-34304
+    // -- Migration's own card correctly read "Resolved in 57m -- within the
+    // SLA goal" (its real cumulative time, after a 23h detour through Dev),
+    // but this exact history badge read "SLA Breached by 20h 17m --
+    // Migration" for that same resolution, straight from resolvedAt minus
+    // the fixed display dueTime with no pause adjustment at all.
+    const history = events.map((e) => {
+      const isOwnResolution = s.resolvedAt && new Date(e.resolvedAt).getTime() === new Date(s.resolvedAt).getTime();
+      const wasBreached = s.waived ? false : isOwnResolution ? s.isBreached === true : new Date(e.resolvedAt).getTime() > dueMs;
+      return { ...e, wasBreached };
+    });
     return { ...s, resolvedByName: resolvedByName || s.resolvedByName, history };
   });
 }
