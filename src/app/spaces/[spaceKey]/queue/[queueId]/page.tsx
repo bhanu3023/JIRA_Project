@@ -1248,6 +1248,11 @@ export default function QueueSettingsPage() {
         const list: CustomQueue[] = stored ? JSON.parse(stored) : [];
         localStorage.setItem(`custom_queues_${spaceKey}`, JSON.stringify(list.map(q => q.id === queueId ? { ...q, name: next } : q)));
       } catch {}
+      // The left-nav sidebar is a separate, always-mounted component that
+      // fetches its own copy of this space's queues once on mount -- it has
+      // no way to know this page just renamed one. Tell it to refetch so it
+      // doesn't keep showing the old name until a full reload.
+      try { window.dispatchEvent(new CustomEvent('custom-queues-changed', { detail: { spaceKey } })); } catch {}
       setRenaming(false);
     } catch (e: any) {
       setRenameError(e?.message || 'Rename failed.');
