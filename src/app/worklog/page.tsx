@@ -278,9 +278,8 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
   );
 }
 
-function TicketWorklogTab({ userId, isAdmin, allUsers }: {
+function TicketWorklogTab({ userId, allUsers }: {
   userId: string | undefined;
-  isAdmin: boolean;
   allUsers: { id: string; firstName?: string; lastName?: string; email?: string }[];
 }) {
   const [entries, setEntries] = useState<ActivityWorklogRow[]>([]);
@@ -292,7 +291,7 @@ function TicketWorklogTab({ userId, isAdmin, allUsers }: {
   // first load.
   const [dateFrom, setDateFrom] = useState(() => isoDate(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000)));
   const [dateTo, setDateTo] = useState(() => isoDate(new Date()));
-  const [userFilter, setUserFilter] = useState(''); // admin-only -- a non-admin only ever sees their own regardless
+  const [userFilter, setUserFilter] = useState(''); // open to everyone -- any user can filter to anyone else here
   const [activityFilter, setActivityFilter] = useState('');
 
   const load = () => {
@@ -300,7 +299,7 @@ function TicketWorklogTab({ userId, isAdmin, allUsers }: {
     api.getActivityWorklogs({
       from: dateFrom ? `${dateFrom}T00:00:00` : undefined,
       to: dateTo ? `${dateTo}T23:59:59` : undefined,
-      userId: isAdmin && userFilter ? userFilter : undefined,
+      userId: userFilter || undefined,
     }).then(setEntries).catch(() => {}).finally(() => setLoading(false));
   };
   useEffect(load, [dateFrom, dateTo, userFilter]);
@@ -338,20 +337,18 @@ function TicketWorklogTab({ userId, isAdmin, allUsers }: {
           <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
         </div>
-        {isAdmin && (
-          <div className="flex items-center gap-2">
-            <label className="text-[12px] text-gray-400 font-medium">Reporter</label>
-            <UserSearchSelect
-              value={userFilter}
-              onChange={setUserFilter}
-              placeholder="Everyone"
-              options={[
-                { value: '', label: 'Everyone' },
-                ...allUsers.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
-              ]}
-            />
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">Reporter</label>
+          <UserSearchSelect
+            value={userFilter}
+            onChange={setUserFilter}
+            placeholder="Everyone"
+            options={[
+              { value: '', label: 'Everyone' },
+              ...allUsers.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
+            ]}
+          />
+        </div>
         <div className="flex items-center gap-2">
           <label className="text-[12px] text-gray-400 font-medium">Activity</label>
           <select value={activityFilter} onChange={(e) => setActivityFilter(e.target.value)}
@@ -423,11 +420,13 @@ function TicketWorklogTab({ userId, isAdmin, allUsers }: {
 
 export default function WorklogPage() {
   const { spaces, user } = useStore((s) => ({ spaces: s.spaces, user: s.user }));
-  // "Ticket Worklog" starts as an empty placeholder, per explicit request --
-  // its own content/behavior to follow in a later instruction. Kept as a
-  // second top-level tab rather than a route so both share this page's
-  // header/layout shell.
-  const [mainTab, setMainTab] = useState<'worklog' | 'ticket'>('worklog');
+  const isAdminUser = user?.role === 'admin';
+  // "Worklog" (cross-ticket, every user's logged hours) is admin-only --
+  // reversed back after briefly opening it to everyone; "Ticket Worklog"
+  // (the non-ticket activity log) is the one meant for all users. A
+  // non-admin therefore starts on 'ticket' since 'worklog' isn't reachable
+  // for them at all.
+  const [mainTab, setMainTab] = useState<'worklog' | 'ticket'>(isAdminUser ? 'worklog' : 'ticket');
 
   // Default to the last 30 days -- the full unfiltered history across every
   // ticket is rarely what anyone wants on first load, same reasoning as the
@@ -586,10 +585,12 @@ export default function WorklogPage() {
       {/* Tabs */}
       <div className="bg-white border-b border-gray-200 px-8 flex-shrink-0">
         <div className="flex gap-6">
-          <button onClick={() => setMainTab('worklog')}
-            className={`py-3 text-[13px] font-semibold border-b-2 transition-colors ${mainTab === 'worklog' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
-            Worklog
-          </button>
+          {isAdminUser && (
+            <button onClick={() => setMainTab('worklog')}
+              className={`py-3 text-[13px] font-semibold border-b-2 transition-colors ${mainTab === 'worklog' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
+              Worklog
+            </button>
+          )}
           <button onClick={() => setMainTab('ticket')}
             className={`py-3 text-[13px] font-semibold border-b-2 transition-colors ${mainTab === 'ticket' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
             Ticket Worklog
@@ -597,9 +598,9 @@ export default function WorklogPage() {
         </div>
       </div>
 
-      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} isAdmin={user?.role === 'admin'} allUsers={users} />}
+      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} allUsers={users} />}
 
-      {mainTab === 'worklog' && (
+      {mainTab === 'worklog' && isAdminUser && (
       <div className="flex-1 overflow-auto px-8 py-6">
         {/* Filters */}
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex flex-wrap items-center gap-4">

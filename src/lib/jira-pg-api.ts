@@ -13425,14 +13425,13 @@ async function _handleJiraPgApi(
   }
 
   // GET /worklogs -- cross-ticket worklog report, Jira's own "Logged work"
-  // view. Previously admin-only ("a regular user never sees another
-  // person's logged hours across every space here, by explicit request") --
-  // that restriction was explicitly reversed: every signed-in user can now
-  // see everyone's logged hours here, same as the Worklog page's own
-  // "Logged by: Everyone" option already implied with no isAdmin gate on
-  // the frontend side.
+  // view. Admin-only -- a regular user never sees another person's logged
+  // hours across every space here, by explicit request. (Briefly opened to
+  // everyone, then explicitly reverted back to admin-only -- the "Ticket
+  // Worklog" tab/GET /activity-worklogs is the one meant for all users.)
   if (path === 'worklogs' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
+    if (!isAdmin) return json({ error: 'Admin access required' }, 403);
     const qs = url.searchParams;
     const from = qs.get('from');
     const to = qs.get('to');
@@ -13548,23 +13547,22 @@ async function _handleJiraPgApi(
   // GET /activity-worklogs -- an admin with no ?userId= sees EVERYONE's
   // entries (matching GET /worklogs' own admin-sees-everyone shape above),
   // each carrying its own authorName/authorEmail to show who logged it --
-  // "like a ticket, reporter shown" per explicit request. A non-admin
-  // always sees only their own, regardless of ?userId=; an admin can also
-  // pass ?userId= to narrow to one specific person.
+  // "like a ticket, reporter shown" per explicit request. Previously a
+  // non-admin always saw only their own, regardless of ?userId= -- opened
+  // to every user by explicit request ("2nd tab should show all users"),
+  // this being the tab meant for everyone (unlike GET /worklogs, which
+  // stayed admin-only). Any signed-in user can now pass ?userId= to narrow
+  // to one specific person, or omit it to see everyone.
   if (path === 'activity-worklogs' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     const qs = url.searchParams;
     const targetUserId = qs.get('userId');
-    if (targetUserId && targetUserId !== userId && !isAdmin) {
-      return json({ error: 'You can only view your own activity worklog.' }, 403);
-    }
     const from = qs.get('from');
     const to = qs.get('to');
     const conditions: string[] = [];
     const params: any[] = [];
     let n = 1;
-    const effectiveUserId = isAdmin ? targetUserId : userId;
-    if (effectiveUserId) { conditions.push(`"userId" = $${n}`); params.push(effectiveUserId); n++; }
+    if (targetUserId) { conditions.push(`"userId" = $${n}`); params.push(targetUserId); n++; }
     if (from) { conditions.push(`"workDate" >= $${n}`); params.push(new Date(from)); n++; }
     if (to) { conditions.push(`"workDate" <= $${n}`); params.push(new Date(to)); n++; }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
