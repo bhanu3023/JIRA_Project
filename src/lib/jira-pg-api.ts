@@ -8061,6 +8061,21 @@ async function _handleJiraPgApi(
     // when enrichedIssues still holds the FULL (thousands-of-rows)
     // candidate set, not just the final page.
     let prefilteredTotal: number | null = null;
+    // Per-id slaBreached/overdue as the prefilter pass itself computed them
+    // (see its own assignment below) -- carried forward so the final
+    // enrichment pass can reuse these frozen values for a prefiltered page
+    // instead of recomputing computeSlaBreachedAndOverdue a second time.
+    // That second, independent call used its own separately-fetched
+    // sla_definitions snapshot (policiesBySpace vs the prefilter's
+    // policiesBySpaceLight) and could legitimately resolve a ticket
+    // differently (e.g. flipping from a real boolean to null/"N/A" for a
+    // no-SLA-policy department like Infra), which showed up as "SLA
+    // Breached: Yes" matching a ticket whose own SLA BREACHED column then
+    // displayed "-" for that exact same request -- confirmed for real on
+    // Queue: Infra + SLA Breached: Yes. The two computations must use the
+    // SAME single result, not two separately-derived ones, so they can
+    // never disagree about a ticket this request already decided on.
+    const prefilterSlaById: Record<string, { slaBreached: boolean | null; overdue: boolean }> = {};
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
       let allSpaceIds: string[] = [];
@@ -8984,6 +8999,7 @@ async function _handleJiraPgApi(
           for (const r of lightRows.rows) {
             const shaped = { ...r, status: r.status_name ? { name: r.status_name, category: r.status_category } : null };
             const { slaBreached, overdue } = computeSlaBreachedAndOverdue(shaped, deptParam, policiesBySpaceLight, nowMsLight);
+            prefilterSlaById[r.id] = { slaBreached, overdue };
             // "No" = has an SLA and didn't breach it. A ticket with no SLA
             // policy at all (null, shown as "-") is neither Yes nor No.
             const matchesSla = !(slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no')
@@ -9415,7 +9431,14 @@ async function _handleJiraPgApi(
       // call the exact same computation on a small-column candidate row,
       // instead of duplicating it and risking the two drifting apart.
       enrichedIssues = enrichedIssues.map((i: any) => {
-        const { slaBreached, overdue } = computeSlaBreachedAndOverdue(i, deptParam, policiesBySpace, nowMs);
+        // Reuse the prefilter pass's own result for this exact ticket when
+        // it already computed one (see prefilterSlaById's declaration) --
+        // recomputing here via a second, independently-fetched policy
+        // snapshot is what let a ticket's displayed SLA BREACHED value
+        // (here) disagree with the "SLA Breached: Yes" filter decision
+        // (made by the prefilter above) for the same request.
+        const frozen = prefilterSlaById[i.id];
+        const { slaBreached, overdue } = frozen || computeSlaBreachedAndOverdue(i, deptParam, policiesBySpace, nowMs);
         return { ...i, sla_breached: slaBreached, overdue };
       });
       // Skipped when the dept branch's prefilter pass already chose exactly
