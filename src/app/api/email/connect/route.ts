@@ -108,7 +108,30 @@ export async function POST(req: NextRequest) {
       if (!token) {
         return NextResponse.json({ ok: false, error: 'App-only access isn\'t set up yet — needs MICROSOFT_TENANT_ID and admin-consented Application permissions (Mail.Read) in Azure AD.' });
       }
-      return NextResponse.json({ ok: true, message: 'Tenant app-only access is available.' });
+      // A token can be issued successfully even with zero Application
+      // permissions actually granted (client-credentials doesn't fail just
+      // because the scope ended up empty) — the "roles" claim in the token
+      // itself is the only reliable way to tell whether admin consent for
+      // Mail.Read really took effect, vs. was only added-but-not-consented
+      // or added as the wrong (Delegated) permission type.
+      let hasMailRead = false;
+      try {
+        const payload = JSON.parse(Buffer.from(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+        hasMailRead = (payload.roles || []).some((r: string) => r === 'Mail.Read' || r === 'Mail.ReadWrite');
+      } catch {}
+      if (!hasMailRead) {
+        return NextResponse.json({ ok: false, error: 'Token issued, but it has no Mail.Read permission on it. In Azure AD, check the app\'s API permissions: Mail.Read/Mail.Send need to be under "Application" (not "Delegated"), with admin consent actually clicked — it must say "Granted for cloudfuze.com".' });
+      }
+      // Confirm this specific mailbox actually resolves — a plain
+      // Distribution List has no inbox at all and will 404 here no matter
+      // how correct the permissions are.
+      const mbRes = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.imap.user)}/mailFolders/Inbox`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!mbRes.ok) {
+        return NextResponse.json({ ok: false, error: `"${config.imap.user}" isn't a real mailbox Graph can read (${mbRes.status}). If this is a plain Distribution List, it has no inbox — ask IT to convert it to a Shared Mailbox (same address) first.` });
+      }
+      return NextResponse.json({ ok: true, message: 'Tenant app-only access works for this mailbox.' });
     }
     if (isOAuth) return NextResponse.json({ ok: true, message: 'OAuth token is valid.' });
     const imapTest = await testImapConnection(config.imap);

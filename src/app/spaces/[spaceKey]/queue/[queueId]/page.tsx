@@ -595,7 +595,20 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
   const addAndLinkAppOnly = async () => {
     if (!form.email) { setTestResult({ ok: false, message: 'Enter your email address first' }); return; }
     setAdding(true);
+    setTestResult(null);
     try {
+      // Test first — an app-only config can otherwise "save" successfully
+      // while silently never working (wrong tenant permissions, or the
+      // address isn't a real mailbox), which looked like a false success
+      // before this check existed.
+      const testRes = await fetch('/api/email/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: form.email, spaceKey, department: queueName, appUrl: window.location.origin, authMode: 'app_only', testOnly: true }),
+      });
+      const testData = await testRes.json();
+      if (!testData.ok) { setTestResult({ ok: false, message: testData.error || 'Could not verify app-only access.' }); setAdding(false); return; }
+
       const res = await fetch('/api/email/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -703,6 +716,12 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
                 className="mt-2 w-full text-left text-[11.5px] text-gray-500 hover:text-blue-600 disabled:opacity-50 transition-colors">
                 {adding ? 'Connecting…' : "Don't know the password? Connect without one →"}
               </button>
+              {testResult && (
+                <div className={`mt-2 flex items-start gap-2 px-3 py-2 rounded-lg text-[12px] font-medium ${testResult.ok ? 'bg-emerald-50 border border-emerald-200 text-emerald-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+                  {testResult.ok ? <Wifi size={13} className="mt-0.5 shrink-0" /> : <WifiOff size={13} className="mt-0.5 shrink-0" />}
+                  <span>{testResult.message}</span>
+                </div>
+              )}
             </div>
 
             <div className="relative flex items-center gap-3">
