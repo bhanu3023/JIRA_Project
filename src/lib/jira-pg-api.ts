@@ -13425,11 +13425,14 @@ async function _handleJiraPgApi(
   }
 
   // GET /worklogs -- cross-ticket worklog report, Jira's own "Logged work"
-  // view. Admin-only -- a regular user never sees another person's logged
-  // hours across every space here, by explicit request.
+  // view. Previously admin-only ("a regular user never sees another
+  // person's logged hours across every space here, by explicit request") --
+  // that restriction was explicitly reversed: every signed-in user can now
+  // see everyone's logged hours here, same as the Worklog page's own
+  // "Logged by: Everyone" option already implied with no isAdmin gate on
+  // the frontend side.
   if (path === 'worklogs' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
-    if (!isAdmin) return json({ error: 'Admin access required' }, 403);
     const qs = url.searchParams;
     const from = qs.get('from');
     const to = qs.get('to');
