@@ -667,6 +667,26 @@ pool.query(`
   )
 `).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS issue_worklogs_issue_idx ON issue_worklogs ("issueId")`).catch(() => {});
+// Non-ticket activity worklog -- the Worklog page's "Ticket Worklog" tab.
+// Deliberately NOT tied to an issueId (unlike issue_worklogs above): this
+// logs general work (training, meetings, reports, etc. -- a fixed list of
+// activity types, plus a free-text "Others" reason) that doesn't belong
+// to any one ticket.
+pool.query(`
+  CREATE TABLE IF NOT EXISTS activity_worklogs (
+    id TEXT PRIMARY KEY,
+    "userId" TEXT,
+    "authorName" TEXT,
+    "authorEmail" TEXT,
+    "activityType" TEXT NOT NULL,
+    "customReason" TEXT,
+    "timeSpentMinutes" INTEGER NOT NULL,
+    description TEXT,
+    "workDate" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS activity_worklogs_user_idx ON activity_worklogs ("userId")`).catch(() => {});
 // Records every real (non-dev-mode) notification send attempt and its
 // outcome -- written by notification-service.ts's sendNotification, the
 // single choke point every notification email (status change, comment,
@@ -13460,6 +13480,81 @@ async function _handleJiraPgApi(
       return json({ error: 'You can only delete your own worklog entries.' }, 403);
     }
     await pool.query(`DELETE FROM issue_worklogs WHERE id = $1`, [worklogById[1]]);
+    return json({ ok: true });
+  }
+
+  // POST /activity-worklogs -- the Worklog page's "Ticket Worklog" tab Create
+  // form. One request, batched across every activity the person checked in
+  // that one form submission (one time entry per activity type selected),
+  // all sharing the same workDate.
+  if (path === 'activity-worklogs' && method === 'POST') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const body = await readJson(req);
+    const entries = Array.isArray(body.entries) ? body.entries : [];
+    if (!entries.length) return json({ error: 'At least one activity entry is required.' }, 400);
+    const workDate = body.workDate ? new Date(body.workDate) : new Date();
+    const authorUser = await getCachedUser(userId);
+    const authorName = authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : null;
+    const inserted: any[] = [];
+    for (const e of entries) {
+      const activityType = String(e.activityType || '').trim();
+      const timeSpentMinutes = Number(e.timeSpentMinutes) || 0;
+      if (!activityType || timeSpentMinutes <= 0) continue;
+      const id = rid();
+      const result = await pool.query(
+        `INSERT INTO activity_worklogs (id, "userId", "authorName", "authorEmail", "activityType", "customReason", "timeSpentMinutes", description, "workDate", "createdAt")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) RETURNING *`,
+        [
+          id, userId, authorName, authorUser?.email ?? null,
+          activityType,
+          activityType === 'Others' ? (e.customReason ? String(e.customReason).trim() : null) : null,
+          timeSpentMinutes,
+          e.description ? String(e.description).trim() : null,
+          workDate,
+        ]
+      );
+      inserted.push(result.rows[0]);
+    }
+    if (!inserted.length) return json({ error: 'Each selected activity needs time logged (greater than 0) to save.' }, 400);
+    return json({ ok: true, entries: inserted });
+  }
+
+  // GET /activity-worklogs -- the caller's own entries (admins can pass
+  // ?userId= to view someone else's, same access shape as GET /worklogs
+  // above but scoped to self by default rather than admin-only outright,
+  // since this is a person's own personal activity log, not a
+  // cross-team report).
+  if (path === 'activity-worklogs' && method === 'GET') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const qs = url.searchParams;
+    const targetUserId = qs.get('userId');
+    if (targetUserId && targetUserId !== userId && !isAdmin) {
+      return json({ error: 'You can only view your own activity worklog.' }, 403);
+    }
+    const from = qs.get('from');
+    const to = qs.get('to');
+    const conditions: string[] = [`"userId" = $1`];
+    const params: any[] = [targetUserId || userId];
+    let n = 2;
+    if (from) { conditions.push(`"workDate" >= $${n}`); params.push(new Date(from)); n++; }
+    if (to) { conditions.push(`"workDate" <= $${n}`); params.push(new Date(to)); n++; }
+    const rows = await pool.query(
+      `SELECT * FROM activity_worklogs WHERE ${conditions.join(' AND ')} ORDER BY "workDate" DESC, "createdAt" DESC LIMIT 500`,
+      params
+    );
+    return json(rows.rows);
+  }
+
+  // DELETE /activity-worklogs/:id -- the entry's own author, or an admin, only.
+  const activityWorklogById = path.match(/^activity-worklogs\/([^/]+)$/);
+  if (activityWorklogById && method === 'DELETE') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const row = await pool.query(`SELECT "userId" FROM activity_worklogs WHERE id = $1`, [activityWorklogById[1]]);
+    if (!row.rows[0]) return json({ ok: true });
+    if (!isAdmin && row.rows[0].userId !== userId) {
+      return json({ error: 'You can only delete your own worklog entries.' }, 403);
+    }
+    await pool.query(`DELETE FROM activity_worklogs WHERE id = $1`, [activityWorklogById[1]]);
     return json({ ok: true });
   }
 

@@ -304,6 +304,18 @@ class ApiClient {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return this.request<any>(`/worklogs${suffix}`);
   }
+  createActivityWorklog(data: { workDate: string; entries: Array<{ activityType: string; customReason?: string; timeSpentMinutes: number; description?: string }> }) {
+    return this.request<{ ok: true; entries: any[] }>(`/activity-worklogs`, { method: 'POST', body: JSON.stringify(data) });
+  }
+  getActivityWorklogs(params: { from?: string; to?: string; userId?: string } = {}) {
+    const qs = new URLSearchParams();
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.userId) qs.set('userId', params.userId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.request<any[]>(`/activity-worklogs${suffix}`);
+  }
+  deleteActivityWorklog(id: string) { return this.request<any>(`/activity-worklogs/${id}`, { method: 'DELETE' }); }
   resyncFromJira(key: string) { return this.request<any>(`/issues/${key}/resync-from-jira`, { method: 'POST' }); }
   addLink(key: string, data: any) { return this.request<any>(`/issues/${key}/links`, { method: 'POST', body: JSON.stringify(data) }); }
   addIssueLink(key: string, data: { targetKey: string; linkType: string }) { return this.addLink(key, data); }
