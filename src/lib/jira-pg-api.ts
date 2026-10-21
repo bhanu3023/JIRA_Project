@@ -13519,11 +13519,12 @@ async function _handleJiraPgApi(
     return json({ ok: true, entries: inserted });
   }
 
-  // GET /activity-worklogs -- the caller's own entries (admins can pass
-  // ?userId= to view someone else's, same access shape as GET /worklogs
-  // above but scoped to self by default rather than admin-only outright,
-  // since this is a person's own personal activity log, not a
-  // cross-team report).
+  // GET /activity-worklogs -- an admin with no ?userId= sees EVERYONE's
+  // entries (matching GET /worklogs' own admin-sees-everyone shape above),
+  // each carrying its own authorName/authorEmail to show who logged it --
+  // "like a ticket, reporter shown" per explicit request. A non-admin
+  // always sees only their own, regardless of ?userId=; an admin can also
+  // pass ?userId= to narrow to one specific person.
   if (path === 'activity-worklogs' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     const qs = url.searchParams;
@@ -13533,13 +13534,16 @@ async function _handleJiraPgApi(
     }
     const from = qs.get('from');
     const to = qs.get('to');
-    const conditions: string[] = [`"userId" = $1`];
-    const params: any[] = [targetUserId || userId];
-    let n = 2;
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let n = 1;
+    const effectiveUserId = isAdmin ? targetUserId : userId;
+    if (effectiveUserId) { conditions.push(`"userId" = $${n}`); params.push(effectiveUserId); n++; }
     if (from) { conditions.push(`"workDate" >= $${n}`); params.push(new Date(from)); n++; }
     if (to) { conditions.push(`"workDate" <= $${n}`); params.push(new Date(to)); n++; }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = await pool.query(
-      `SELECT * FROM activity_worklogs WHERE ${conditions.join(' AND ')} ORDER BY "workDate" DESC, "createdAt" DESC LIMIT 500`,
+      `SELECT * FROM activity_worklogs ${where} ORDER BY "workDate" DESC, "createdAt" DESC LIMIT 500`,
       params
     );
     return json(rows.rows);

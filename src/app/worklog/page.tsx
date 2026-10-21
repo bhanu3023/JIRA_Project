@@ -317,6 +317,7 @@ function TicketWorklogTab({ userId }: { userId: string | undefined }) {
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</th>
+                  <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Reporter</th>
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Activity</th>
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Time</th>
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Notes</th>
@@ -329,6 +330,7 @@ function TicketWorklogTab({ userId }: { userId: string | undefined }) {
                     <td className="px-4 py-2.5 text-[12.5px] text-gray-500 whitespace-nowrap">
                       {new Date(e.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
                     </td>
+                    <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{e.authorName || 'Unknown'}</td>
                     <td className="px-4 py-2.5 text-[13px] text-gray-800">
                       {e.activityType === 'Others' && e.customReason ? e.customReason : e.activityType}
                     </td>
