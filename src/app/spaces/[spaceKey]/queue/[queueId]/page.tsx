@@ -528,6 +528,9 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
   const [testing, setTesting]     = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [adding, setAdding]       = useState(false);
+  const [quickEmail, setQuickEmail]   = useState('');
+  const [quickAdding, setQuickAdding] = useState(false);
+  const [quickResult, setQuickResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const linked   = allEmails.filter(e => e.department?.toLowerCase() === queueName.toLowerCase());
   const unlinked = allEmails.filter(e => !e.department || e.department.toLowerCase() !== queueName.toLowerCase());
@@ -592,37 +595,51 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
     setRestarting(null);
   };
 
+  // Shared by both the quick-add box and the link inside the full provider
+  // form below — always saves immediately. The backend still checks
+  // readiness (tenant permissions, whether the address is a real mailbox)
+  // but only to report it back as a warning, never to refuse the add.
+  const submitAppOnly = async (email: string): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const res = await fetch('/api/email/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, spaceKey, department: queueName, appUrl: window.location.origin, authMode: 'app_only' }),
+      });
+      const data = await res.json();
+      if (!data.ok) return { ok: false, message: data.error || 'Failed to add email' };
+      const rows = await api.request<any[]>(`/email-addresses/${spaceKey}`).catch(() => []);
+      setAllEmails(rows || []);
+      if (data.warning) return { ok: false, message: `Added — but not fully working yet: ${data.warning}` };
+      return { ok: true, message: 'Added — ready to receive tickets' };
+    } catch {
+      return { ok: false, message: 'Failed to add email' };
+    }
+  };
+
+  const quickAdd = async () => {
+    if (!quickEmail.trim()) { setQuickResult({ ok: false, message: 'Enter an email address first' }); return; }
+    setQuickAdding(true);
+    setQuickResult(null);
+    const result = await submitAppOnly(quickEmail.trim());
+    setQuickResult(result);
+    if (result.ok) { setQuickEmail(''); flash(result.message); }
+    setQuickAdding(false);
+  };
+
   const addAndLinkAppOnly = async () => {
     if (!form.email) { setTestResult({ ok: false, message: 'Enter your email address first' }); return; }
     setAdding(true);
     setTestResult(null);
-    try {
-      // Always saves immediately — the backend still checks readiness
-      // (tenant permissions, whether the address is a real mailbox) but
-      // only to surface it as a non-blocking warning, never to refuse
-      // the add itself.
-      const res = await fetch('/api/email/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: form.email, spaceKey, department: queueName, appUrl: window.location.origin, authMode: 'app_only' }),
-      });
-      const data = await res.json();
-      if (!data.ok) { setTestResult({ ok: false, message: data.error || 'Failed to add email' }); setAdding(false); return; }
-      const rows = await api.request<any[]>(`/email-addresses/${spaceKey}`).catch(() => []);
-      setAllEmails(rows || []);
-      setForm({ email: '', password: '', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' });
-      if (data.warning) {
-        // Keep the form open so this stays visible — it already saved and
-        // shows up in "Linked to this queue" below either way, but closing
-        // the form here would hide the one message explaining why it won't
-        // actually receive tickets yet.
-        setTestResult({ ok: false, message: `Added — but not fully working yet: ${data.warning}` });
-      } else {
-        setShowAddForm(false);
-        setTestResult(null);
-        flash('Email added & linked — ready to receive tickets');
-      }
-    } catch { setTestResult({ ok: false, message: 'Failed to add email' }); }
+    const result = await submitAppOnly(form.email);
+    setForm({ email: '', password: '', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' });
+    if (result.ok) {
+      setShowAddForm(false);
+      setTestResult(null);
+      flash(result.message);
+    } else {
+      setTestResult(result);
+    }
     setAdding(false);
   };
 
@@ -666,6 +683,29 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
             {showAddForm ? 'Cancel' : 'Add Email'}
           </button>
         </div>
+      </div>
+
+      {/* ── Quick add: just an email address, no password, no provider choice ── */}
+      <div className="mb-6 border border-purple-200 bg-purple-50/40 rounded-xl px-5 py-4">
+        <p className="text-[13px] font-semibold text-purple-800 mb-1">Add a mailbox you don't have the password for</p>
+        <p className="text-[11.5px] text-gray-500 mb-3">Type the address and click Add — no password, no sign-in screen.</p>
+        <div className="flex items-center gap-2">
+          <input type="email" value={quickEmail} onChange={e => setQuickEmail(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') quickAdd(); }}
+            placeholder="presalesteam@cloudfuze.com" disabled={quickAdding}
+            className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-purple-300 disabled:opacity-50" />
+          <button onClick={quickAdd} disabled={quickAdding}
+            className="flex items-center gap-1.5 text-[12.5px] font-semibold text-white bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg transition-colors disabled:opacity-50 shrink-0">
+            {quickAdding ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+            {quickAdding ? 'Adding…' : 'Add'}
+          </button>
+        </div>
+        {quickResult && (
+          <div className={`mt-3 flex items-start gap-2 px-3 py-2 rounded-lg text-[12px] font-medium ${quickResult.ok ? 'bg-emerald-50 border border-emerald-200 text-emerald-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+            {quickResult.ok ? <Wifi size={13} className="mt-0.5 shrink-0" /> : <WifiOff size={13} className="mt-0.5 shrink-0" />}
+            <span>{quickResult.message}</span>
+          </div>
+        )}
       </div>
 
       {/* ── Add Email Form ── */}
