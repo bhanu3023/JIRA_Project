@@ -225,6 +225,36 @@ export async function POST(req: NextRequest) {
     console.error('[EmailConnect] Failed to persist email config to DB:', e);
   }
 
+  // app_only is always SAVED above regardless of whether it's actually
+  // ready yet (the user asked for "add it, I'll deal with whether it works
+  // separately" instead of this call refusing to save on a failed check) —
+  // but still worth telling them up front if tickets won't actually start
+  // flowing, instead of a silent "Connected!" that isn't true yet. Best
+  // effort only: never fails the save itself.
+  let warning: string | undefined;
+  if (isAppOnly) {
+    try {
+      const { getGraphAppOnlyToken } = await import('@/lib/oauth-service');
+      const token = await getGraphAppOnlyToken();
+      if (!token) {
+        warning = 'Saved, but tenant app-only access isn\'t set up yet (missing MICROSOFT_TENANT_ID or Azure admin consent) — no tickets will trigger until that\'s fixed.';
+      } else {
+        const payload = JSON.parse(Buffer.from(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+        const hasMailRead = (payload.roles || []).some((r: string) => r === 'Mail.Read' || r === 'Mail.ReadWrite');
+        if (!hasMailRead) {
+          warning = 'Saved, but the Azure app doesn\'t have Mail.Read as an Application permission with admin consent yet — no tickets will trigger until that\'s granted.';
+        } else {
+          const mbRes = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.imap.user)}/mailFolders/Inbox`, { headers: { Authorization: `Bearer ${token}` } });
+          if (!mbRes.ok) {
+            warning = `Saved, but "${config.imap.user}" isn't a real mailbox Graph can read (${mbRes.status}) — if it's a plain Distribution List, ask IT to convert it to a Shared Mailbox first.`;
+          }
+        }
+      }
+    } catch (e: any) {
+      warning = `Saved, but couldn't verify readiness: ${e?.message || e}`;
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     message: `Connected! Polling ${config.imap.user} every 30 seconds for space ${config.spaceKey}.`,
@@ -232,6 +262,7 @@ export async function POST(req: NextRequest) {
     address:       config.address,
     spaceKey:      config.spaceKey,
     activePollers: getActivePollers(),
+    warning,
   });
 }
 

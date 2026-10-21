@@ -597,18 +597,10 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
     setAdding(true);
     setTestResult(null);
     try {
-      // Test first — an app-only config can otherwise "save" successfully
-      // while silently never working (wrong tenant permissions, or the
-      // address isn't a real mailbox), which looked like a false success
-      // before this check existed.
-      const testRes = await fetch('/api/email/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: form.email, spaceKey, department: queueName, appUrl: window.location.origin, authMode: 'app_only', testOnly: true }),
-      });
-      const testData = await testRes.json();
-      if (!testData.ok) { setTestResult({ ok: false, message: testData.error || 'Could not verify app-only access.' }); setAdding(false); return; }
-
+      // Always saves immediately — the backend still checks readiness
+      // (tenant permissions, whether the address is a real mailbox) but
+      // only to surface it as a non-blocking warning, never to refuse
+      // the add itself.
       const res = await fetch('/api/email/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -618,10 +610,18 @@ function QueueEmailTab({ spaceKey, queueName }: { spaceKey: string; queueName: s
       if (!data.ok) { setTestResult({ ok: false, message: data.error || 'Failed to add email' }); setAdding(false); return; }
       const rows = await api.request<any[]>(`/email-addresses/${spaceKey}`).catch(() => []);
       setAllEmails(rows || []);
-      setShowAddForm(false);
       setForm({ email: '', password: '', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' });
-      setTestResult(null);
-      flash('Email added & linked');
+      if (data.warning) {
+        // Keep the form open so this stays visible — it already saved and
+        // shows up in "Linked to this queue" below either way, but closing
+        // the form here would hide the one message explaining why it won't
+        // actually receive tickets yet.
+        setTestResult({ ok: false, message: `Added — but not fully working yet: ${data.warning}` });
+      } else {
+        setShowAddForm(false);
+        setTestResult(null);
+        flash('Email added & linked — ready to receive tickets');
+      }
     } catch { setTestResult({ ok: false, message: 'Failed to add email' }); }
     setAdding(false);
   };
