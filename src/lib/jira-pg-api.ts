@@ -17844,35 +17844,38 @@ async function _handleJiraPgApi(
         for (const r of rows.rows) {
           const obj = r[col];
           if (!obj || typeof obj !== 'object') continue;
-          const realKey = Object.keys(obj).find((k) => k.toLowerCase() === oldName.toLowerCase());
-          if (!realKey || realKey === newName) continue;
+          // ALL keys matching the old name case-insensitively, not just the
+          // first -- a plain object can hold "Pre-sales" and "Pre-Sales" as
+          // two genuinely distinct keys (JS object keys are case-sensitive,
+          // same root cause as the user_worked_on_tickets duplicate-casing
+          // conflict above). .find() here would silently rename only
+          // whichever one happened to come first, leaving the other
+          // orphaned under its original casing instead of failing loudly --
+          // worse than the DB-constraint case since nothing would ever
+          // surface this incompleteness.
+          const matchingKeys = Object.keys(obj).filter((k) => k.toLowerCase() === oldName.toLowerCase() && k !== newName);
+          if (!matchingKeys.length) continue;
           const next = { ...obj };
-          // Same reasoning as the user_worked_on_tickets conflict above --
-          // a ticket that's already visited this exact department under
-          // BOTH the old and new name (e.g. an earlier rename of this same
-          // queue) would otherwise have the old key's value silently
-          // overwrite the new key's, losing real data instead of just
-          // failing loudly like the DB-level unique constraint does. For
-          // dept_sla_log specifically, elapsed_ms is additive (both
-          // entries are real time spent under what's now the same
-          // department identity); for the point-in-time status/assignee
-          // snapshots, keep whichever side is already under the new name
-          // (already the more current of the two) and drop the old one.
-          if (next[newName] !== undefined && next[newName] !== null) {
-            if (col === 'dept_sla_log') {
-              const oldEntry = next[realKey] || {};
-              const newEntry = next[newName] || {};
-              next[newName] = {
-                ...newEntry,
-                elapsed_ms: (Number(oldEntry.elapsed_ms) || 0) + (Number(newEntry.elapsed_ms) || 0),
-              };
+          // Merge every matching old-casing key, plus any value ALREADY
+          // under newName (e.g. from an earlier rename of this same
+          // queue), into one surviving newName entry. For dept_sla_log,
+          // elapsed_ms is additive (every entry is real time spent under
+          // what's now the same department identity); for the point-in-
+          // time status/assignee snapshots, the last one merged wins
+          // (arbitrary among equally "current" snapshots, but never loses
+          // the key entirely).
+          if (col === 'dept_sla_log') {
+            let totalElapsed = Number(next[newName]?.elapsed_ms) || 0;
+            let merged = next[newName] || {};
+            for (const k of matchingKeys) {
+              totalElapsed += Number(next[k]?.elapsed_ms) || 0;
+              merged = { ...merged, ...next[k] };
             }
-            // dept_statuses/dept_assignees: next[newName] already holds
-            // the value to keep -- no change needed, just drop the old key.
+            next[newName] = { ...merged, elapsed_ms: totalElapsed };
           } else {
-            next[newName] = next[realKey];
+            for (const k of matchingKeys) next[newName] = next[k];
           }
-          delete next[realKey];
+          for (const k of matchingKeys) delete next[k];
           await client.query(`UPDATE issues SET ${col} = $1 WHERE id = $2`, [JSON.stringify(next), r.id]);
         }
       }
@@ -17914,37 +17917,53 @@ async function _handleJiraPgApi(
 
       // user_worked_on_tickets has UNIQUE(user_id, issue_id, dept) -- a
       // blind rename UPDATE throws a duplicate-key violation whenever a
-      // (user, issue) pair already has a row under BOTH the old name and
-      // the target new name (e.g. from an earlier rename attempt on this
-      // same queue: some tickets got a "newName" row logged after an
-      // earlier rename, while others still carry an "oldName" row from
-      // before it -- renaming back collides on exactly those). Confirmed
-      // for real on this exact queue ("Pre-Sales-Old" -> "Pre-Sales"):
-      // 'duplicate key value violates unique constraint
-      // "user_worked_on_tickets_user_id_issue_id_dept_key"'.
+      // (user, issue) pair ends up with more than one row that would now
+      // share the target name. That happens two different ways, both
+      // confirmed for real on this exact queue: (1) an EARLIER rename
+      // attempt left some tickets with a "newName" row (logged after it)
+      // and others with an "oldName" row (from before it) -- renaming
+      // back collides on those; (2) completely independent of any rename,
+      // the SAME logical department was already stored under more than
+      // one casing (e.g. "Pre-sales" and "Pre-Sales" as genuinely separate
+      // rows -- the DB's unique constraint is case-SENSITIVE, so both
+      // coexist happily right up until a rename tries to collapse them
+      // onto the identical target string). A fix that only handled case
+      // (1) -- checking old-name rows against a pre-existing new-name row
+      // -- still failed with the same error from case (2) alone (24
+      // tickets, zero of which had anything to do with "Pre-Sales-Old" at
+      // all).
       //
-      // Resolve each conflicting pair by keeping whichever row is the
-      // more significant record of real work (closed > worked > returned
-      // > passed; latest worked_at breaks a tie) merged onto the
-      // surviving (new-name) row, then dropping the old-name duplicate --
-      // instead of letting the DB arbitrarily reject the whole rename.
+      // General fix: fetch EVERY row matching old-OR-new name (any casing)
+      // for this space, group by (user_id, issue_id) in JS, and for any
+      // group with more than one row, keep only the most significant
+      // record of real work (closed > worked > returned > passed; latest
+      // worked_at breaks a tie), deleting the rest -- before the final
+      // rename UPDATE ever runs, so it can never collide with itself.
       const REASON_RANK: Record<string, number> = { closed: 3, worked: 2, returned: 1, passed: 0 };
-      const conflicts = await client.query(
-        `SELECT o.id AS old_id, o.reason AS old_reason, o.worked_at AS old_worked_at,
-                n.id AS new_id, n.reason AS new_reason, n.worked_at AS new_worked_at
-         FROM user_worked_on_tickets o
-         JOIN user_worked_on_tickets n ON n.user_id = o.user_id AND n.issue_id = o.issue_id AND LOWER(n.dept) = LOWER($1)
-         WHERE LOWER(o.dept) = LOWER($2) AND o.issue_id IN (SELECT id FROM issues WHERE "spaceId" = $3)`,
-        [newName, oldName, spaceId]
+      const candidateRows = await client.query(
+        `SELECT id, user_id, issue_id, reason, worked_at FROM user_worked_on_tickets
+         WHERE (LOWER(dept) = LOWER($1) OR LOWER(dept) = LOWER($2))
+           AND issue_id IN (SELECT id FROM issues WHERE "spaceId" = $3)`,
+        [oldName, newName, spaceId]
       );
-      for (const c of conflicts.rows) {
-        const oldRank = REASON_RANK[c.old_reason] ?? -1;
-        const newRank = REASON_RANK[c.new_reason] ?? -1;
-        const oldIsBetter = oldRank > newRank || (oldRank === newRank && new Date(c.old_worked_at).getTime() > new Date(c.new_worked_at).getTime());
-        if (oldIsBetter) {
-          await client.query(`UPDATE user_worked_on_tickets SET reason = $1, worked_at = $2 WHERE id = $3`, [c.old_reason, c.old_worked_at, c.new_id]);
+      const groupedByPair = new Map<string, typeof candidateRows.rows>();
+      for (const r of candidateRows.rows) {
+        const key = `${r.user_id}:${r.issue_id}`;
+        if (!groupedByPair.has(key)) groupedByPair.set(key, []);
+        groupedByPair.get(key)!.push(r);
+      }
+      for (const group of groupedByPair.values()) {
+        if (group.length <= 1) continue;
+        group.sort((a, b) => {
+          const rankDiff = (REASON_RANK[b.reason] ?? -1) - (REASON_RANK[a.reason] ?? -1);
+          if (rankDiff !== 0) return rankDiff;
+          return new Date(b.worked_at).getTime() - new Date(a.worked_at).getTime();
+        });
+        const [survivor, ...losers] = group;
+        await client.query(`UPDATE user_worked_on_tickets SET reason = $1, worked_at = $2 WHERE id = $3`, [survivor.reason, survivor.worked_at, survivor.id]);
+        for (const loser of losers) {
+          await client.query(`DELETE FROM user_worked_on_tickets WHERE id = $1`, [loser.id]);
         }
-        await client.query(`DELETE FROM user_worked_on_tickets WHERE id = $1`, [c.old_id]);
       }
 
       const workedOnRes = await client.query(
