@@ -42,12 +42,12 @@ async function main() {
      LEFT JOIN statuses s ON i."statusId" = s.id
      LEFT JOIN users a ON i."assigneeId" = a.id
      LEFT JOIN users r ON i."reporterId" = r.id
-     WHERE i."spaceId" = $1 AND i.current_department = $2 AND i."createdAt" < $3
+     WHERE i."spaceId" = $1 AND i.current_department = $2 AND i."createdAt" < $3 AND s.category != 'done'
      ORDER BY RANDOM()
      LIMIT $4`,
     [spaceId, DEPT, CUTOFF, SAMPLE_SIZE]
   );
-  console.log(`Sampling ${tickets.length} "${DEPT}" tickets created before ${CUTOFF} (out of however many match total)\n`);
+  console.log(`Sampling ${tickets.length} "${DEPT}" tickets created before ${CUTOFF} that are currently NOT done locally\n`);
 
   const { base, authHdr } = await getJiraCreds();
 
