@@ -1461,27 +1461,15 @@ export default function IssueDetailPage() {
         return;
       }
     }
-    // Root Cause / Fix Description must also be filled before Dev hands a
-    // ticket off to Migration specifically (explicit request) -- these two
-    // fields are already required to RESOLVE a Dev ticket (see
-    // getMissingCoreFields above), now also required at the exact point
-    // Dev routes it onward to Migration, not just when closing it outright.
-    // Scoped to Migration only (not every department Dev might route to),
-    // matching exactly what was asked.
-    const isDevToMigrationHandoff = ((issue as any)?.current_department || '').trim().toLowerCase() === 'dev'
-      && /^(waiting\s+for|routed\s+to)\s+migration$/i.test((targetStatus?.name || '').trim());
-    if (isDevToMigrationHandoff && !isMandatoryFieldsExemptDept()) {
-      const handoffMissing: string[] = [];
-      for (const f of [{ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' }]) {
-        const cfEntry = customFields.find(cf => cf.name?.toLowerCase() === f.name.toLowerCase());
-        const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
-        if (!val || val.toString().trim() === '') handoffMissing.push(f.name);
-      }
-      if (handoffMissing.length > 0) {
-        setMandatoryModal({ missingFields: handoffMissing, pendingStatusId: statusId, context: 'department' });
-        return;
-      }
-    }
+    // Root Cause / Fix Description previously also blocked Dev handing a
+    // ticket off to Migration specifically, not just resolving it --
+    // reverted by explicit request: these two fields should only ever
+    // block at the point of actually resolving a ticket (the
+    // targetStatus?.category === 'done' check above), never at any other
+    // status/department transition. The red-asterisk indicator on the
+    // fields themselves (see renderCustomField's isRequiredNow) still
+    // shows early as a heads-up while the ticket sits in Dev/Migration --
+    // only the hard block at this handoff point is removed.
     // Custom queue status (qst_...) — can't set as issue.statusId (not a DB record).
     // Store in dept_statuses[current_department] instead.
     if (statusId.startsWith('qst_') && targetStatus) {
