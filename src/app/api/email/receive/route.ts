@@ -691,7 +691,19 @@ export async function POST(req: NextRequest) {
     } catch { /* non-critical */ }
   }
 
-  const openStatus = space.statuses[0];
+  // space.statuses[0] used to be grabbed directly -- an arbitrary
+  // first-in-whatever-order-Postgres-returns pick (every row's own "order"
+  // column is meaningless, all 0), never guaranteed to actually be "Open".
+  // Same bug class already fixed for manual ticket creation (see jira-pg-api.ts's
+  // "Final fallback" comment, CF-32995/CF-33015) -- never ported to this,
+  // the email-creation path. Confirmed for real: a Pre-Sales-Team ticket
+  // created from an incoming email landed on "Waiting for L3" instead of
+  // "Open". Same name-then-category preference order as that fix.
+  const openStatus = space.statuses.find((s) => s.name.toLowerCase() === 'open')
+    || space.statuses.find((s) => s.name.toLowerCase() === 'to do')
+    || space.statuses.find((s) => s.name.toLowerCase() === 'todo')
+    || space.statuses.find((s) => s.category === 'todo')
+    || space.statuses[0];
 
   // Resolve reporter by email — if not found, auto-create a guest user from sender info
   let reporter = await db.user.findFirst({
