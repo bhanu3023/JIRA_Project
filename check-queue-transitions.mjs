@@ -23,7 +23,9 @@ async function main() {
     console.log('Statuses:', statuses.map((s) => `${s.id}="${s.name}"`).join(', '));
     console.log(`Transitions (${transitions.length}):`);
     for (const t of transitions) {
-      console.log(`  ${byId[t.from] || t.from} -> ${byId[t.to] || t.to}`);
+      const fromId = t.fromStatusId ?? t.from;
+      const toId = t.toStatusId ?? t.to;
+      console.log(`  [raw keys: ${Object.keys(t).join(',')}]  ${byId[fromId] || fromId} (${fromId}) -> ${byId[toId] || toId} (${toId})`);
     }
   }
 
