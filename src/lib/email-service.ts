@@ -1040,7 +1040,7 @@ export function startImapPoller(
       const url = `https://graph.microsoft.com/v1.0${base}/mailFolders/Inbox/messages` +
         `?$top=25&$orderby=receivedDateTime desc` +
         `&$filter=receivedDateTime ge ${sinceStr}` +
-        `&$select=id,subject,from,toRecipients,ccRecipients,body,internetMessageId,receivedDateTime,hasAttachments`;
+        `&$select=id,subject,from,toRecipients,ccRecipients,body,internetMessageId,receivedDateTime,hasAttachments,internetMessageHeaders`;
 
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
@@ -1109,9 +1109,24 @@ export function startImapPoller(
           }
         }
 
-        console.log(`[EmailPoller] Graph email: "${subject}" from ${from} to ${to}`);
+        // Graph never puts In-Reply-To/References on the message object
+        // itself -- they're only available by explicitly requesting
+        // internetMessageHeaders ($select above) and finding them by name
+        // in that array, same as how the IMAP path below parses them out
+        // of the raw header block. Without this, every reply via a
+        // Graph-connected mailbox came through with these hardcoded empty,
+        // so the webhook's own thread-detection (In-Reply-To -> References
+        // -> subject, see receive/route.ts) could never recognize it as a
+        // reply and always created a brand-new duplicate ticket instead of
+        // adding a comment to the existing one.
+        const graphHeaders: Array<{ name: string; value: string }> = gm.internetMessageHeaders || [];
+        const findHeader = (name: string) => graphHeaders.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+        const inReplyTo = findHeader('In-Reply-To');
+        const references = findHeader('References');
+
+        console.log(`[EmailPoller] Graph email: "${subject}" from ${from} to ${to}${inReplyTo ? ` (reply to ${inReplyTo})` : ' (new)'}`);
         try {
-          await onEmail({ from, to, cc, subject, body, messageId: msgId, inReplyTo: '', references: '', attachments: [] });
+          await onEmail({ from, to, cc, subject, body, messageId: msgId, inReplyTo, references, attachments: [] });
           // permanent:true (e.g. "no space found for this address") means retrying
           // will never succeed — mark it processed instead of re-fetching this same
           // message (and its attachments) every single poll cycle forever.
