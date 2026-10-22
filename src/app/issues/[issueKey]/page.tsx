@@ -1429,6 +1429,13 @@ export default function IssueDetailPage() {
       const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
       if (!val || val.toString().trim() === '') missing.push(f.name);
     }
+    // Worklog -- same scope as Root Cause/Fix Description (Dev/Migration
+    // only, by explicit request): at least one time-logged entry must
+    // exist before resolving, so a ticket can't close with zero recorded
+    // work against it.
+    if ((deptLower === 'dev' || deptLower === 'migration') && worklogs.length === 0) {
+      missing.push('Worklog');
+    }
     return missing;
   };
 
