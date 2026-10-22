@@ -3055,7 +3055,17 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
       // instead of restarting it at the full duration. Still used for a
       // RUNNING (not yet resolved) ticket's live due time below -- only the
       // RESOLVED display changed, see next comment.
-      const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+      //
+      // Deliberately NOT clamped to 0 -- a ticket that re-enters this dept
+      // already over budget from an earlier stint (priorElapsedMs >=
+      // durationMs) needs dueTime to land BEFORE rawStartedAt (immediately,
+      // visibly overdue), not collapse to exactly rawStartedAt. Clamping to
+      // 0 made dueTime === rawStartedAt whenever this happened, which showed
+      // as identical Start/Due timestamps on the SLA panel and understated
+      // (or, right at the restart instant, could even transiently hide) how
+      // overdue it already was. Confirmed for real: CF-34348, QA re-entered
+      // already ~2h40m over its 6h goal from an earlier QA stint.
+      const remainingBudgetMs = durationMs - priorElapsedMs;
       // By explicit request: a resolved ticket's displayed Start/Due should
       // simply be "when the ticket was created" and "created + this
       // priority's configured goal duration" -- a fixed, always-forward
@@ -3212,7 +3222,11 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         if (histOverrideMs !== null) histDurationMs = histOverrideMs;
         const histElapsed: number = histEntry.elapsed_ms || 0;
         const histIsDone = histEntry.status === 'done';
-        const histRemainingMs = Math.max(0, histDurationMs - histElapsed);
+        // Not clamped to 0 -- same reasoning as the live branch's
+        // remainingBudgetMs above: a department already over its goal by
+        // the time it was paused needs dueTime before histStartedAt, not
+        // collapsed to exactly histStartedAt.
+        const histRemainingMs = histDurationMs - histElapsed;
         historicalInstances.push({
           id: `sla_${policy.id}_${issue.key}_${histDeptKey}`,
           policyId: policy.id,
@@ -4122,7 +4136,11 @@ function computeSlaBreachedAndOverdue(
         // after checking every applicable policy (see hasRealDeptTracking
         // below), rather than per-policy.
         const frozen = isResolved || !deptClockIsLive;
-        const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+        // Not clamped to 0 -- same fix/reasoning as computeSLAInstancesPure's
+        // own remainingBudgetMs (ticket detail page's SLA panel): a
+        // department re-entering already over its goal from an earlier
+        // visit needs dueTimeMs before slaStartedAt, not collapsed to it.
+        const remainingBudgetMs = durationMs - priorElapsedMs;
         const dueTimeMs = new Date(slaStartedAt).getTime() + remainingBudgetMs;
         const instanceBreached = isSlaInstanceBreached({
           isResolved: frozen,
