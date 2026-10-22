@@ -2835,7 +2835,15 @@ export default function IssueDetailPage() {
               {true && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
-                    <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">Root Cause</span>
+                    <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">
+                      Root Cause
+                      {(() => {
+                        const _dl = ((issue as any)?.current_department || '').trim().toLowerCase();
+                        return (_dl === 'dev' || _dl === 'migration') && !isMandatoryFieldsExemptDept()
+                          ? <span className="text-red-500 ml-0.5 normal-case" title="Required to resolve this ticket">*</span>
+                          : null;
+                      })()}
+                    </span>
                   </div>
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_rootCause' ? (
@@ -2879,7 +2887,15 @@ export default function IssueDetailPage() {
               {true && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
-                    <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">Fix Description</span>
+                    <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">
+                      Fix Description
+                      {(() => {
+                        const _dl = ((issue as any)?.current_department || '').trim().toLowerCase();
+                        return (_dl === 'dev' || _dl === 'migration') && !isMandatoryFieldsExemptDept()
+                          ? <span className="text-red-500 ml-0.5 normal-case" title="Required to resolve this ticket">*</span>
+                          : null;
+                      })()}
+                    </span>
                   </div>
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_fixDescription' ? (
