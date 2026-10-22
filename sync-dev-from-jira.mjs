@@ -15,7 +15,7 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const SPACE_KEY = 'TESTIN';
 const DEPT = 'Dev';
 const PROGRESS_FILE = '/app/sync-dev-progress.json';
-const DELAY_MS = 200; // ~5 req/sec
+const DELAY_MS = 40; // ~25 req/sec -- raised after 6800+ requests at 5 req/sec with zero errors showed real headroom
 
 function normalize(s) {
   return (s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
