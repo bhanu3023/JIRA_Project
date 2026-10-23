@@ -621,6 +621,43 @@ export async function POST(req: NextRequest) {
 
   // ── 4a. REPLY: add comment to existing ticket ─────────────────────────────
   if (existingTicketKey) {
+    // Same messageId dedup guard as the new-ticket path below (processedIds
+    // in-memory set + persistent processed_emails table) -- this branch
+    // used to return early with no dedup check at all, so the SAME reply
+    // (identical RFC Message-ID) created a SEPARATE duplicate comment every
+    // time a DIFFERENT mailbox independently received a copy of it -- e.g.
+    // a Distribution List forwarding the same reply to several real
+    // people's own mailboxes, each one already connected to this app.
+    // Confirmed for real: one reply produced 6 duplicate comments on the
+    // same ticket. Checked/marked processed BEFORE creating the comment
+    // (not after, unlike the new-ticket path) so a mailbox that's a few
+    // seconds behind another one polling the exact same message can't
+    // slip past the in-memory check before the first one finishes.
+    if (messageId) {
+      const mid = messageId.trim();
+      const processedIds: Set<string> = (globalThis as any).__processedMsgIds || new Set();
+      if (processedIds.has(mid)) {
+        console.log(`[EmailWebhook] Reply already processed (messageId ${mid}), skipping duplicate comment`);
+        return NextResponse.json({ ok: true, action: 'duplicate' });
+      }
+      try {
+        const { pgPool: pool } = await import('@/lib/pg-pool');
+        const dup = await pool.query(`SELECT message_id FROM processed_emails WHERE message_id = $1 LIMIT 1`, [mid]);
+        if (dup.rows[0]) {
+          processedIds.add(mid);
+          (globalThis as any).__processedMsgIds = processedIds;
+          console.log(`[EmailWebhook] Reply already processed (messageId ${mid} in processed_emails), skipping duplicate comment`);
+          return NextResponse.json({ ok: true, action: 'duplicate' });
+        }
+        processedIds.add(mid);
+        (globalThis as any).__processedMsgIds = processedIds;
+        await pool.query(`INSERT INTO processed_emails (message_id) VALUES ($1) ON CONFLICT (message_id) DO NOTHING`, [mid]);
+      } catch { /* non-critical -- falls through to in-memory-only guard */
+        processedIds.add(mid);
+        (globalThis as any).__processedMsgIds = processedIds;
+      }
+    }
+
     // Find author
     const author = await db.user.findFirst({
       where: { email: { equals: fromEmail, mode: 'insensitive' } },
@@ -677,6 +714,28 @@ export async function POST(req: NextRequest) {
         cleanBody = stripSignature(stripQuotedContent(body));
       }
       if (cleanBody) {
+        // Second, content-based dedup layer -- the messageId guard above
+        // only catches a true duplicate delivery of the exact same RFC
+        // Message-ID. A Distribution List forwarding the same reply to
+        // several real people's own mailboxes (each already connected to
+        // this app) isn't guaranteed to preserve an identical Message-ID
+        // across every recipient's copy, so this also skips if the same
+        // author already posted this exact same comment text on this
+        // exact same ticket within the last 10 minutes.
+        const recentDup = await db.comment.findFirst({
+          where: {
+            issueId: existingIssue.id,
+            body: cleanBody,
+            authorId: author?.id ?? null,
+            createdAt: { gte: new Date(Date.now() - 10 * 60 * 1000) },
+          },
+          select: { id: true },
+        });
+        if (recentDup) {
+          console.log(`[EmailWebhook] Skipping duplicate comment on ${existingTicketKey} (same author+body within 10 min, likely a DL-fanned-out copy of the same reply)`);
+          (globalThis as any).__lastWebhookResult = { ok: true };
+          return NextResponse.json({ ok: true, action: 'duplicate' });
+        }
         await db.comment.create({
           data: {
             id: rid(),
