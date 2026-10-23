@@ -11,7 +11,7 @@ const CF_KEY = 'CF-34438';
 async function main() {
   const { rows: issueRows } = await pool.query(
     `SELECT i.id, i.key, i.cf_key, i.summary, i.current_department, i.original_dept, i."spaceId",
-            sp.key AS space_key, i."reporterId", r.name AS reporter_name, r.email AS reporter_email
+            sp.key AS space_key, i."reporterId", r."firstName" AS reporter_first, r."lastName" AS reporter_last, r.email AS reporter_email
      FROM issues i
      JOIN spaces sp ON sp.id = i."spaceId"
      LEFT JOIN users r ON r.id = i."reporterId"
@@ -21,7 +21,7 @@ async function main() {
   if (!issueRows[0]) { console.log('Ticket not found for', CF_KEY); await pool.end(); return; }
   const issue = issueRows[0];
   console.log('--- Ticket ---');
-  console.log({ key: issue.key, cf_key: issue.cf_key, current_department: issue.current_department, original_dept: issue.original_dept, reporter: issue.reporter_name, reporter_email: issue.reporter_email, space: issue.space_key });
+  console.log({ key: issue.key, cf_key: issue.cf_key, current_department: issue.current_department, original_dept: issue.original_dept, reporter: `${issue.reporter_first || ''} ${issue.reporter_last || ''}`.trim(), reporter_email: issue.reporter_email, space: issue.space_key });
 
   const { rows: histRows } = await pool.query(
     `SELECT "oldValue", "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'department' ORDER BY "createdAt" ASC`,
@@ -30,9 +30,10 @@ async function main() {
   console.log('\n--- Department history ---');
   histRows.forEach((h) => console.log(`${h.createdAt}: ${h.oldValue} -> ${h.newValue}`));
 
-  const { rows: vRows } = await pool.query(
-    `SELECT id, name, email, role FROM users WHERE LOWER(name) LIKE '%vignesh%' OR LOWER(email) LIKE '%vignesh%'`
+  const { rows: vRowsRaw } = await pool.query(
+    `SELECT id, "firstName", "lastName", email, role FROM users WHERE LOWER("firstName") LIKE '%vignesh%' OR LOWER("lastName") LIKE '%vignesh%' OR LOWER(email) LIKE '%vignesh%'`
   );
+  const vRows = vRowsRaw.map((v) => ({ ...v, name: `${v.firstName || ''} ${v.lastName || ''}`.trim() }));
   console.log('\n--- Matching users named Vignesh ---');
   console.log(vRows);
 
