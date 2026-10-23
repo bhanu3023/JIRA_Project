@@ -684,6 +684,7 @@ export async function POST(req: NextRequest) {
       // reply testing for comment <PUA glyphs> Bhanu Prakash Software
       // Engineer Trainee +91 ... www.cloudfuze.com <address>" in full.
       const stripSignature = (t: string): string => {
+        console.log("[SigDebug] first 100 char codes:", Array.from(t.slice(0, 100)).map(function(c){return c.charCodeAt(0);}).join(","));
         const wideIdx = t.search(/[^\x00-\x7F\u00A0-\u024F\u2000-\u206F]/);
         const addrIdx = t.search(/centerview\s+dr/i);
         const phoneIdx = t.search(/\+\d{1,3}[\s-]?\d{6,}/);
