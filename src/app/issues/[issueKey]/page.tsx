@@ -1917,7 +1917,21 @@ export default function IssueDetailPage() {
   // opened it from. The "Showing X's own..." banners stay visible either way,
   // so an editing admin still sees they're looking at a historical snapshot.
   const isHistoricalDeptView = isHistoricalDeptViewForAssignee;
-  const isHistoricalDeptLocked = isHistoricalDeptViewForAssignee && user?.role !== 'admin';
+  // Always false now, same precedent as isHistoricalDeptLockedForStatus
+  // below (which was already fixed this same way, see its own comment) --
+  // this lock was keyed purely off whether the page's ?viewDept= URL param
+  // matched the ticket's live current_department, with no check for
+  // whether the viewer is actually a genuine, current member of wherever
+  // the ticket really is now. canEdit itself is unconditionally true for
+  // any authenticated user regardless of queue membership (see its own
+  // comment above) -- this lock contradicted that same governing decision
+  // and blocked real queue members, not just someone browsing a stale
+  // link. Confirmed for real: CF-34438, current_department "Pre-sales",
+  // opened by Vignesh T -- an actual member of the Pre-sales queue --
+  // showed read-only because whatever link he used carried a different
+  // ?viewDept= value. The "Showing X's own assignee..." banner itself is
+  // untouched and still displays correctly either way.
+  const isHistoricalDeptLocked = false && isHistoricalDeptViewForAssignee && user?.role !== 'admin';
   // Status-specific counterparts to the two above -- isHistoricalDeptView/
   // isHistoricalDeptLocked got reused for the Status banner and status
   // button's own read-only lock further down, which meant a ticket opened
