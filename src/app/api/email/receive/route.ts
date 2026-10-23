@@ -684,7 +684,6 @@ export async function POST(req: NextRequest) {
       // reply testing for comment <PUA glyphs> Bhanu Prakash Software
       // Engineer Trainee +91 ... www.cloudfuze.com <address>" in full.
       const stripSignature = (t: string): string => {
-        console.log("[SigDebug] first 100 char codes:", Array.from(t.slice(0, 100)).map(function(c){return c.charCodeAt(0);}).join(","));
         const wideIdx = t.search(/[^\x00-\x7F\u00A0-\u024F\u2000-\u206F]/);
         const addrIdx = t.search(/centerview\s+dr/i);
         const phoneIdx = t.search(/\+\d{1,3}[\s-]?\d{6,}/);
@@ -705,6 +704,18 @@ export async function POST(req: NextRequest) {
           .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
           .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
           .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+          // Numeric HTML entities (decimal &#NNNN; and hex &#xHHHH;) were
+          // never decoded by the named-entity replacements above, so an
+          // icon-font glyph encoded this way (Outlook signature generators
+          // commonly do this instead of embedding the raw character)
+          // survived as literal entity text -- e.g. "&#57619;" instead of
+          // the actual character it represents (U+E113, squarely inside
+          // the PUA range stripSignature's own wide-character check looks
+          // for), which meant that check could never match it. Confirmed
+          // for real via [SigDebug] logging: the untouched reply body
+          // contained literal "&#57619;&#57619;&#57619;&#57619;" text.
+          .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+          .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
           .replace(/\s{2,}/g, ' ').replace(/ \n/g, '\n').replace(/\n /g, '\n')
           .trim();
         const stripped = stripSignature(stripQuotedContent(plainText));
