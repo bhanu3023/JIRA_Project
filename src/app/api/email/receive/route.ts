@@ -648,7 +648,17 @@ export async function POST(req: NextRequest) {
       // Engineer Trainee +91 ... www.cloudfuze.com <address>" in full.
       const stripSignature = (t: string): string => {
         const m = t.match(/[-]/);
-        return m ? t.slice(0, m.index).trim() : t;
+        // Second, independent, plain-ASCII signal: CloudFuze's own fixed
+        // mailing address, identical across every employee's signature
+        // template (confirmed seen verbatim in multiple people's
+        // signatures this session) -- catches a signature using real
+        // <img> icons instead of an icon font (no PUA glyphs at all),
+        // and is immune to any Unicode-transcription risk since it's
+        // plain ASCII.
+        const addrIdx = t.search(/centerview\s+dr/i);
+        const candidates: number[] = [m && m.index !== undefined ? m.index : -1, addrIdx].filter((i) => i >= 0);
+        if (!candidates.length) return t;
+        return t.slice(0, Math.min(...candidates)).trim();
       };
 
       let cleanBody: string;
