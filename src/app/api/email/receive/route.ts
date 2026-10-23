@@ -632,6 +632,25 @@ export async function POST(req: NextRequest) {
       // For reply comments: extract plain text → run text-based quote stripper
       // (more reliable than HTML parsing — Outlook's reply HTML structure varies,
       // but the plain-text From:/Sent:/To:/Subject: block is always consistent)
+      // Signature blocks (name/title/phone/email/site/address) commonly use
+      // an icon font for the little phone/mail/globe/pin glyphs next to
+      // each line -- those glyphs are mapped to Unicode Private-Use-Area
+      // codepoints (U+E000-U+F8FF), meaningless without the icon font
+      // loaded. Stripping HTML tags above removes the <img>/styling but
+      // leaves these PUA codepoints behind as garbled characters, and the
+      // signature's own text (name, title, phone, email, address) survives
+      // right along with them since it's real text, not markup. A normal
+      // typed reply essentially never contains a PUA codepoint, so the
+      // first one found is a reliable "the signature starts here" marker —
+      // cut the body there instead of only stripping quoted/forwarded
+      // content. Confirmed for real: a reply's comment showed "Sending
+      // reply testing for comment <PUA glyphs> Bhanu Prakash Software
+      // Engineer Trainee +91 ... www.cloudfuze.com <address>" in full.
+      const stripSignature = (t: string): string => {
+        const m = t.match(/[-]/);
+        return m ? t.slice(0, m.index).trim() : t;
+      };
+
       let cleanBody: string;
       const isHtml = /<[a-zA-Z]/.test(body);
       if (isHtml) {
@@ -642,12 +661,12 @@ export async function POST(req: NextRequest) {
           .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
           .replace(/\s{2,}/g, ' ').replace(/ \n/g, '\n').replace(/\n /g, '\n')
           .trim();
-        const stripped = stripQuotedContent(plainText);
+        const stripped = stripSignature(stripQuotedContent(plainText));
         cleanBody = stripped.split(/\n\n+/)
           .map(p => p.trim() ? `<p>${p.trim().replace(/\n/g, '<br/>')}</p>` : '')
           .filter(Boolean).join('') || stripped;
       } else {
-        cleanBody = stripQuotedContent(body);
+        cleanBody = stripSignature(stripQuotedContent(body));
       }
       if (cleanBody) {
         await db.comment.create({
