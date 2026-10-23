@@ -647,19 +647,16 @@ export async function POST(req: NextRequest) {
       // reply testing for comment <PUA glyphs> Bhanu Prakash Software
       // Engineer Trainee +91 ... www.cloudfuze.com <address>" in full.
       const stripSignature = (t: string): string => {
-        console.log("[SigDebug] char codes:", Array.from(t.slice(0, 120)).map(function(c){return c.charCodeAt(0);}).join(","));
-        const m = t.match(/[^\x00-\x7F\u00A0-\u024F\u2000-\u206F]/);
-        // Second, independent, plain-ASCII signal: CloudFuze's own fixed
-        // mailing address, identical across every employee's signature
-        // template (confirmed seen verbatim in multiple people's
-        // signatures this session) -- catches a signature using real
-        // <img> icons instead of an icon font (no PUA glyphs at all),
-        // and is immune to any Unicode-transcription risk since it's
-        // plain ASCII.
+        const wideIdx = t.search(/[^\x00-\x7F\u00A0-\u024F\u2000-\u206F]/);
         const addrIdx = t.search(/centerview\s+dr/i);
-        const candidates: number[] = [m && m.index !== undefined ? m.index : -1, addrIdx].filter((i) => i >= 0);
+        const phoneIdx = t.search(/\+\d{1,3}[\s-]?\d{6,}/);
+        const ownEmailIdx = fromEmail ? t.toLowerCase().indexOf(fromEmail.toLowerCase()) : -1;
+        const webIdx = t.search(/www\.[a-z0-9-]+\.[a-z]{2,3}/i);
+        const candidates = [wideIdx, addrIdx, phoneIdx, ownEmailIdx, webIdx].filter(function (i) { return i >= 0; });
         if (!candidates.length) return t;
-        return t.slice(0, Math.min(...candidates)).trim();
+        const cut = Math.min.apply(Math, candidates);
+        console.log("[EmailWebhook] Signature stripped at index " + cut + " (wide=" + wideIdx + ", addr=" + addrIdx + ", phone=" + phoneIdx + ", email=" + ownEmailIdx + ", web=" + webIdx + ")");
+        return t.slice(0, cut).trim();
       };
 
       let cleanBody: string;
