@@ -647,6 +647,7 @@ export async function POST(req: NextRequest) {
       // reply testing for comment <PUA glyphs> Bhanu Prakash Software
       // Engineer Trainee +91 ... www.cloudfuze.com <address>" in full.
       const stripSignature = (t: string): string => {
+        console.log("[SigDebug] char codes:", Array.from(t.slice(0, 120)).map(function(c){return c.charCodeAt(0);}).join(","));
         const m = t.match(/[^\x00-\x7F\u00A0-\u024F\u2000-\u206F]/);
         // Second, independent, plain-ASCII signal: CloudFuze's own fixed
         // mailing address, identical across every employee's signature
