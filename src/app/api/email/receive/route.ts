@@ -698,6 +698,7 @@ export async function POST(req: NextRequest) {
 
       let cleanBody: string;
       const isHtml = /<[a-zA-Z]/.test(body);
+      console.log(`[EmailWebhook] Reply body isHtml=${isHtml}, first 80 chars: ${JSON.stringify(body.slice(0, 80))}`);
       if (isHtml) {
         const plainText = body
           .replace(/<[^>]+>/g, ' ')
@@ -723,7 +724,14 @@ export async function POST(req: NextRequest) {
           .map(p => p.trim() ? `<p>${p.trim().replace(/\n/g, '<br/>')}</p>` : '')
           .filter(Boolean).join('') || stripped;
       } else {
-        cleanBody = stripSignature(stripQuotedContent(body));
+        // Same numeric-entity decoding as the HTML branch above -- a
+        // "plain text" body from Graph can still carry literal HTML
+        // numeric entities if the signature itself is HTML-sourced, even
+        // when the overall message doesn't look like HTML overall.
+        const decodedBody = body
+          .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+          .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+        cleanBody = stripSignature(stripQuotedContent(decodedBody));
       }
       if (cleanBody) {
         // Second, content-based dedup layer -- the messageId guard above
