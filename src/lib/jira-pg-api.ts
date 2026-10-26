@@ -9515,23 +9515,36 @@ async function _handleJiraPgApi(
       // the ticket had long since moved to Dev and been reassigned to
       // Mayank Jain -- current_department correctly said "Dev" (that field
       // was never overridden), but the assignee name was stale/filtered.
-      enrichedIssues = enrichedIssues.map((i: any) =>
-        i.sla_breached
-          ? { ...i, sla_breached_by: i.true_assignee ? `${i.true_assignee.firstName} ${i.true_assignee.lastName}`.trim() || null : null }
-          : i
-      );
+      //
+      // EXCEPT when a Queue scope (deptParam) is actually active: the Yes/No
+      // verdict itself (computeSlaBreachedAndOverdue) is ALSO scoped to that
+      // queried department when deptParam is set -- a Dev-queue view can
+      // show "Yes" purely because DEV's own elapsed time blew its own
+      // budget, totally independent of whatever happened after the ticket
+      // moved on. Attributing that verdict to the ticket's CURRENT
+      // department/assignee (e.g. "by Vainateya Rasala in Migration") is
+      // actively misleading in that case -- it makes a Dev-caused breach
+      // look like someone else's fault. Confirmed for real: Queue=Dev,
+      // Assignee=srinu gudimitla, several Resolved tickets showed "SLA
+      // Breached: Yes" attributed to a different person in Migration, which
+      // read as "breached by someone else" under a filter scoped to Srinu's
+      // own Dev work. When deptParam is set, attribute to THAT department's
+      // own historical assignee snapshot (dept_assignees[deptParam]) instead
+      // -- the CF-33352 "always current" rule only applies to unscoped views
+      // (My Tickets, a plain Assignee filter with no Queue selected), where
+      // there's no department-scoped verdict to stay consistent with.
+      enrichedIssues = enrichedIssues.map((i: any) => {
+        if (!i.sla_breached) return i;
+        if (deptParam) {
+          const deptAssignees: Record<string, any> = i.dept_assignees || {};
+          const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
+          const snap = snapKey ? deptAssignees[snapKey] : null;
+          const name = snap ? `${snap.firstName || ''} ${snap.lastName || ''}`.trim() || snap.email || null : null;
+          return { ...i, sla_breached_by: name, sla_breached_dept: deptParam };
+        }
+        return { ...i, sla_breached_by: i.true_assignee ? `${i.true_assignee.firstName} ${i.true_assignee.lastName}`.trim() || null : null, sla_breached_dept: i.current_department || null };
+      });
     } catch { /* attribution is best-effort — never block the list on it */ }
-
-    // Which department a breach belongs to -- shown right alongside "by
-    // <name>" above, since a plain "SLA Breached: Yes" says nothing about
-    // where. Uses the ticket's CURRENT department, matching the exact same
-    // rule reports/mbr-team just adopted for its own SLA-breach counts (a
-    // breach belongs to whichever department the ticket is in now, not
-    // wherever it originated) -- Filters and MBR need to agree on this, not
-    // run two different definitions of "which dept" side by side.
-    enrichedIssues = enrichedIssues.map((i: any) =>
-      i.sla_breached ? { ...i, sla_breached_dept: i.current_department || null } : i
-    );
 
     if (includeTimeSpentParam && enrichedIssues.length) {
       try {
