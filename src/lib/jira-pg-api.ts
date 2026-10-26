@@ -9169,6 +9169,15 @@ async function _handleJiraPgApi(
         // Assignee column (deptOwnerSql) -- filter that column in Excel, not
         // this one, to reproduce its counts.
         let workedByNamesByIssue: Record<string, string> = {};
+        // Hoisted out of the try block below (was a local const there) so the
+        // assigneeOverride fallback further down can also use it: a ticket
+        // with no dept_assignees snapshot for the queried department should
+        // prefer whoever genuinely has a user_worked_on_tickets row for THAT
+        // department over the ticket's reporter -- see that fallback's own
+        // comment for why (CF-34234: reporter happened to be a Migration
+        // person with zero connection to the ticket's real Dev stint, while
+        // Soniya Paladugula had an actual dept=Dev worked-on row).
+        const peopleByIssue: Record<string, Map<string, string>> = {};
         if (rows.rows.length) {
           try {
             const issueIds = rows.rows.map((r: any) => r.id);
@@ -9180,7 +9189,6 @@ async function _handleJiraPgApi(
               [issueIds, deptParam]
             );
             // Keyed by user id so one person is listed once per ticket.
-            const peopleByIssue: Record<string, Map<string, string>> = {};
             for (const wr of allWorkedRows.rows) {
               const name = `${wr.firstName || ''} ${wr.lastName || ''}`.trim() || wr.user_id;
               (peopleByIssue[wr.issue_id] ??= new Map()).set(wr.user_id, name);
@@ -9206,11 +9214,14 @@ async function _handleJiraPgApi(
         // users for any snapshot whose id still exists.
         const snapshotUserNames: Record<string, { firstName: string; lastName: string; email: string | null; avatarUrl: string | null }> = {};
         try {
-          const snapIds = Array.from(new Set(rows.rows.map((r: any) => {
-            const da: Record<string, any> = r.dept_assignees || {};
-            const k = Object.keys(da).find((kk) => kk.toLowerCase() === deptParam.toLowerCase());
-            return k ? da[k]?.id : null;
-          }).filter(Boolean))) as string[];
+          const snapIds = Array.from(new Set([
+            ...rows.rows.map((r: any) => {
+              const da: Record<string, any> = r.dept_assignees || {};
+              const k = Object.keys(da).find((kk) => kk.toLowerCase() === deptParam.toLowerCase());
+              return k ? da[k]?.id : null;
+            }),
+            ...Object.values(peopleByIssue).flatMap((m) => Array.from(m.keys())),
+          ].filter(Boolean))) as string[];
           if (snapIds.length) {
             const userRows = await pool.query(`SELECT id, "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = ANY($1::text[])`, [snapIds]);
             for (const u of userRows.rows) snapshotUserNames[u.id] = { firstName: u.firstName || '', lastName: u.lastName || '', email: u.email || null, avatarUrl: u.avatarUrl || null };
@@ -9326,19 +9337,43 @@ async function _handleJiraPgApi(
               assigneeOverride = cur
                 ? { id: snap.id, firstName: cur.firstName, lastName: cur.lastName, email: cur.email, avatarUrl: cur.avatarUrl || avatarRef(snap.id, null) }
                 : { id: snap.id, firstName: snap.firstName || '', lastName: snap.lastName || '', email: snap.email || null, avatarUrl: snap.avatarUrl || avatarRef(snap.id, null) };
-            } else if (!snapExists && movedAwayFromQueue && row.reporter_id) {
+            } else if (!snapExists && movedAwayFromQueue) {
               // No per-dept assignee snapshot exists at all -- confirmed for
               // real on CF-29845: reported by a Dev-queue member, transferred
               // to Infra about a minute later, and never formally assigned to
               // anyone while it sat in Dev, so there's genuinely no assignee
               // to snapshot. Falling through to the raw current assignee here
               // showed the ticket's now-unrelated Infra owner as if they'd
-              // done Dev's work. The reporter is who actually handled it
-              // during its time in this dept (set root cause/fix description
-              // etc. before handing off), so credit them instead of a
-              // stranger to this dept, or leave the field blank if even the
-              // reporter is missing.
-              assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
+              // done Dev's work.
+              //
+              // Before falling back to the reporter, prefer someone with an
+              // actual user_worked_on_tickets row for THIS department
+              // (peopleByIssue, hoisted above) -- confirmed for real on
+              // CF-34234: no dept_assignees.Dev snapshot (every Dev stint had
+              // a null assignee the whole time), and the reporter happened to
+              // be Manoj B, a Migration person with zero connection to its
+              // Dev stints at all. Soniya Paladugula had a genuine
+              // user_worked_on_tickets(dept='Dev') row from actually working
+              // it during that exact stint -- crediting the reporter instead
+              // showed a completely unrelated Migration person's name
+              // labeled "in Dev".
+              const workedPeople = peopleByIssue[row.id];
+              const workedUserId = workedPeople && workedPeople.size ? Array.from(workedPeople.keys())[0] : null;
+              const workedInfo = workedUserId ? snapshotUserNames[workedUserId] : null;
+              if (workedUserId && workedInfo) {
+                assigneeOverride = { id: workedUserId, firstName: workedInfo.firstName, lastName: workedInfo.lastName, email: workedInfo.email, avatarUrl: workedInfo.avatarUrl || avatarRef(workedUserId, null) };
+              } else if (workedUserId) {
+                const rawName = workedPeople!.get(workedUserId) || '';
+                assigneeOverride = { id: workedUserId, firstName: rawName.split(' ')[0] || '', lastName: rawName.split(' ').slice(1).join(' '), email: null, avatarUrl: avatarRef(workedUserId, null) };
+              } else if (row.reporter_id) {
+                // Genuinely nobody from this dept ever touched it -- the
+                // reporter is who actually handled it during its time in
+                // this dept (set root cause/fix description etc. before
+                // handing off), so credit them instead of a stranger to
+                // this dept, or leave the field blank if even the reporter
+                // is missing.
+                assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
+              }
             }
           }
           // Surfaced to the frontend so the Filters table can flag it inline --
