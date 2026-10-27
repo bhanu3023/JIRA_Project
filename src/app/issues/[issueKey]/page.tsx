@@ -16,15 +16,22 @@ import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
 import * as XLSX from 'xlsx';
 
-// RichTextEditor's own paste/insertImage upload placeholders always use
-// id="up-<random>" (see insertImage / extractEmbeddedImages in
-// src/components/ui/RichTextEditor.tsx) -- matches a comment's raw HTML
-// still carrying an unresolved placeholder span (either an upload still in
-// flight, or one that silently never completed) as a last-resort check
-// alongside the isUploading* flags before submitting. Confirmed for real on
-// CF-34455: two separate comments got saved with their pasted image's
-// placeholder frozen in as literal text, never replaced by the real image.
-const HAS_PENDING_UPLOAD_PLACEHOLDER = /id="up-[a-z0-9]+"/i;
+// RichTextEditor's own paste/insertImage upload placeholders use
+// id="up-<random>" client-side (see insertImage / extractEmbeddedImages in
+// src/components/ui/RichTextEditor.tsx) while the upload is in flight --
+// matches a field's raw HTML still carrying an unresolved placeholder
+// (either an upload still running, or one that silently never completed)
+// as a last-resort check alongside the isUploading* flags before saving.
+// Also matches the plain <span>...Uploading...</span> shape with no id at
+// all: the backend's save-time sanitizer strips the id attribute (confirmed
+// via check-placeholder-raw.mjs), so a row that somehow already lost its id
+// client-side before this check runs would otherwise slip through. Confirmed
+// for real on CF-34455 (comments) and CF-29904/CF-34252 (descriptions): this
+// exact class of bug saved a frozen "Uploading pasted image…" placeholder
+// instead of the real image, across every one of these save paths --
+// comment, reply, description, and the Root Cause / Fix Description custom
+// fields.
+const HAS_PENDING_UPLOAD_PLACEHOLDER = /id="up-[a-z0-9]+"|<span[^>]*>Uploading[^<]*<\/span>/i;
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const XLS_MIME  = 'application/vnd.ms-excel';
@@ -2213,7 +2220,17 @@ export default function IssueDetailPage() {
                   onUploadingChange={setIsUploadingDescription}
                 />
                 <div className="flex gap-2 mt-2">
-                  <button onClick={() => handleUpdate('description', stripMigrationHeaderProtection(editValue))} disabled={isUploadingDescription}
+                  <button onClick={() => {
+                    // Same defense-in-depth as handleAddComment/handleSubmitReply --
+                    // the button's own disabled={isUploadingDescription} should
+                    // already prevent this, but the comment-save paths proved that
+                    // alone wasn't always enough in practice (CF-34455), and this
+                    // is the exact same class of bug (6 descriptions found stuck
+                    // the same way).
+                    if (isUploadingDescription) return;
+                    if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(editValue)) { alert('An image is still uploading — wait for it to finish before saving.'); return; }
+                    handleUpdate('description', stripMigrationHeaderProtection(editValue));
+                  }} disabled={isUploadingDescription}
                     className="bg-blue-600 text-white text-[13px] font-medium px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
                     {isUploadingDescription ? 'Uploading…' : 'Save'}
                   </button>
@@ -2906,7 +2923,7 @@ export default function IssueDetailPage() {
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField) return; setSavingCustomField(true); try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
+                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField || isUploadingCustomField) return; if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(customFieldEditValue)) { alert('An image is still uploading — wait for it to finish before saving.'); return; } setSavingCustomField(true); try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
                               className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : savingCustomField ? 'Saving…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
@@ -2958,7 +2975,7 @@ export default function IssueDetailPage() {
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField) return; setSavingCustomField(true); try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
+                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField || isUploadingCustomField) return; if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(customFieldEditValue)) { alert('An image is still uploading — wait for it to finish before saving.'); return; } setSavingCustomField(true); try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
                               className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : savingCustomField ? 'Saving…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
