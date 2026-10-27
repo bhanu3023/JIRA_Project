@@ -16,6 +16,16 @@ import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
 import * as XLSX from 'xlsx';
 
+// RichTextEditor's own paste/insertImage upload placeholders always use
+// id="up-<random>" (see insertImage / extractEmbeddedImages in
+// src/components/ui/RichTextEditor.tsx) -- matches a comment's raw HTML
+// still carrying an unresolved placeholder span (either an upload still in
+// flight, or one that silently never completed) as a last-resort check
+// alongside the isUploading* flags before submitting. Confirmed for real on
+// CF-34455: two separate comments got saved with their pasted image's
+// placeholder frozen in as literal text, never replaced by the real image.
+const HAS_PENDING_UPLOAD_PLACEHOLDER = /id="up-[a-z0-9]+"/i;
+
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const XLS_MIME  = 'application/vnd.ms-excel';
 import {
@@ -949,7 +959,15 @@ export default function IssueDetailPage() {
   // since both can't share one text/submitting state without one clobbering
   // the other if a reply and the main composer are both mid-flight.
   const handleSubmitReply = async () => {
-    if (!replyText.trim() || submittingReply) return;
+    // isUploadingReply is also what disables the Save button, but relying on
+    // that alone let a reply get saved mid-upload at least twice in
+    // practice (CF-34455): the composed HTML still had its literal
+    // "Uploading pasted image…" placeholder span frozen into it, never
+    // replaced by the real image, because submission went through before
+    // the embedded-image upload actually finished. Guard here too, matching
+    // handleSaveEditComment's own existing isUploadingEditComment check.
+    if (!replyText.trim() || submittingReply || isUploadingReply) return;
+    if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(replyText)) { alert('An image is still uploading — wait for it to finish before sending.'); return; }
     setSubmittingReply(true);
     const textToSubmit = replyText;
     const tempId = `opt-${Date.now()}`;
@@ -991,7 +1009,11 @@ export default function IssueDetailPage() {
   };
 
   const handleAddComment = async () => {
-    if (!commentText.trim() || submittingComment) return;
+    // Same defensive guard as handleSubmitReply/handleSaveEditComment --
+    // see handleSubmitReply's own comment for why relying solely on the
+    // Save button's disabled={isUploadingComment} wasn't enough in practice.
+    if (!commentText.trim() || submittingComment || isUploadingComment) return;
+    if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(commentText)) { alert('An image is still uploading — wait for it to finish before saving.'); return; }
     setSubmittingComment(true);
     const textToSubmit = commentText;
     const tempId = `opt-${Date.now()}`;
@@ -1049,6 +1071,7 @@ export default function IssueDetailPage() {
   // anything had gone wrong, so the natural next move was to click again.
   const handleSaveEditComment = async (commentId: string) => {
     if (!editingCommentText.trim() || isUploadingEditComment || submittingEditComment) return;
+    if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(editingCommentText)) { setEditCommentError('An image is still uploading — wait for it to finish before saving.'); return; }
     setEditCommentError('');
     setSubmittingEditComment(true);
     try {
