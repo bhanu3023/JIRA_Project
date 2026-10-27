@@ -1,13 +1,13 @@
 // One-time data repair for comments/descriptions whose embedded-image
 // upload got frozen mid-flight (see check-stuck-image-placeholders.mjs and
 // the handleAddComment/handleSubmitReply fix in issues/[issueKey]/page.tsx
-// that stops NEW ones from happening). Targets the EXACT placeholder markup
-// RichTextEditor inserts (id="up-<random>", see insertImage /
-// extractEmbeddedImages) -- never touches plain text that merely mentions
-// the word "uploading" (confirmed real case: CF-33897's comment literally
-// says "(image uploading is taking time)" as the user's own words, no
-// actual placeholder markup there at all, so this regex correctly leaves it
-// alone).
+// that stops NEW ones from happening). Targets the placeholder markup
+// RichTextEditor inserts (see insertImage / extractEmbeddedImages) --
+// never touches plain text that merely mentions the word "uploading"
+// (confirmed real case: CF-33897's comment literally says "(image
+// uploading is taking time)" as the user's own words, no actual
+// placeholder markup there at all, so this regex correctly leaves it
+// alone -- see PLACEHOLDER_RE's own comment for why).
 //
 // Two outcomes per match:
 //  - If a real <img>/data-rte-img-wrap already sits immediately after the
@@ -21,9 +21,17 @@ import pg from 'pg';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
-// Matches exactly RichTextEditor's placeholder span: id="up-..." and its
-// "Uploading ...…" text content, nothing else.
-const PLACEHOLDER_RE = /<span\s+id="up-[a-z0-9]+"[^>]*>Uploading[^<]*<\/span>/gi;
+// Was /<span\s+id="up-[a-z0-9]+"[^>]*>.../ -- matched ZERO rows for real,
+// confirmed via check-placeholder-raw.mjs: the backend's save-time
+// sanitizer strips the id attribute before storage (the live in-browser DOM
+// has it, for document.getElementById to find while resolving the upload,
+// but it never survives to the DB). Match on tag + text content instead --
+// safe because nothing else in this app wraps literal "Uploading..." text in
+// a <span>: a real file-upload placeholder resolves to an <a> tag on
+// success, and CF-33897's "(image uploading is taking time)" mention
+// (confirmed via the same raw dump) is plain text with <br/> separators, not
+// inside a <span> at all, so this correctly leaves it untouched.
+const PLACEHOLDER_RE = /<span[^>]*>Uploading[^<]*<\/span>/gi;
 const FAILED_NOTE = '<span style="display:inline-block;padding:4px 8px;background:#fef2f2;border-radius:6px;color:#b91c1c;font-size:12px;">[Image upload did not complete — original image unavailable]</span>';
 
 function repair(html) {
@@ -44,7 +52,7 @@ async function main() {
   const { rows: comments } = await pool.query(
     `SELECT c.id, c."issueId", i.key, i.cf_key, c.body
      FROM comments c JOIN issues i ON i.id = c."issueId"
-     WHERE c.body ~ 'id="up-[a-z0-9]+"'`
+     WHERE c.body ILIKE '%Uploading pasted image%' OR c.body ILIKE '%Uploading "%'`
   );
   console.log(`Checking ${comments.length} comment(s)...`);
   for (const c of comments) {
@@ -55,7 +63,7 @@ async function main() {
   }
 
   const { rows: issues } = await pool.query(
-    `SELECT id, key, cf_key, description FROM issues WHERE description ~ 'id="up-[a-z0-9]+"'`
+    `SELECT id, key, cf_key, description FROM issues WHERE description ILIKE '%Uploading pasted image%' OR description ILIKE '%Uploading "%'`
   );
   console.log(`\nChecking ${issues.length} issue description(s)...`);
   for (const i of issues) {
