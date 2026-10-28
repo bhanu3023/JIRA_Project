@@ -1480,7 +1480,25 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
         if (inst.startedAt && inst.dueTime && new Date(inst.dueTime).getTime() < new Date(inst.startedAt).getTime()) impossibleDue++;
         const isCurrentDeptInstance = (inst.deptName || '').trim().toLowerCase() === curDept;
         if (isCurrentDeptInstance && inst.isCompleted && curDeptKey && deptLog[curDeptKey]?.status === 'running') falseResolvedDept++;
-        if (typeof inst.actualElapsedMs === 'number' && typeof inst.goalDurationMs === 'number') {
+        // actualElapsedMs is only a REAL measurement when this app's own
+        // dept_sla_log genuinely tracked the instance's own department --
+        // otherwise it's just the 0 default computeSLAInstancesPure falls
+        // back to (see priorElapsedMs there), and the instance's isBreached
+        // came entirely from the imported jira_sla_breached flag instead
+        // (see isSlaInstanceBreached's own hasDeptLogEntry-gated fallback).
+        // Comparing that placeholder 0 against the goal as if it were a
+        // real elapsed time flagged 1491 genuinely-breached legacy QA
+        // tickets as "false positives" here -- confirmed for real against
+        // live Jira: every one of a 15-ticket sample had a real, deeply
+        // overdue (hundreds to 1700+ hours past goal) breached cycle in
+        // Jira's own native SLA metric, with no explicit Yes/No field set
+        // and no resolution date ever recorded in Jira either, so there is
+        // genuinely no reliable "actual time" to compare against for these
+        // -- not a bug in the breach verdict, a gap in this check's own
+        // assumption that actualElapsedMs is always a real measurement.
+        const instDeptKey = Object.keys(deptLog).find((k) => k.toLowerCase() === (inst.deptName || '').trim().toLowerCase());
+        const hasRealTrackingForInst = !!instDeptKey;
+        if (hasRealTrackingForInst && typeof inst.actualElapsedMs === 'number' && typeof inst.goalDurationMs === 'number') {
           if (inst.isBreached && !inst.waived && inst.actualElapsedMs < inst.goalDurationMs) falsePositiveBreach++;
           if (!inst.isBreached && !inst.waived && inst.actualElapsedMs >= inst.goalDurationMs) falseNegativeBreach++;
         }
