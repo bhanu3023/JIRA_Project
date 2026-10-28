@@ -38,6 +38,12 @@ const AUTOMATED_NOTIFICATION_SUBJECT_PATTERNS: RegExp[] = [
   /^Declined:\s/i,
   /^Tentative:\s/i,
   /^Canceled:\s/i,
+  // Microsoft Viva Engage's own recurring newsletter, forwarded into a
+  // monitored mailbox -- same "unambiguously automated, not a real request"
+  // reasoning as the Teams patterns above. Confirmed for real: CF-34522,
+  // "Voohalu Weekly Digest", a roundup of Viva Engage community posts with
+  // no actual request in it at all.
+  /^Voohalu Weekly Digest$/i,
 ];
 function isAutomatedNotificationEmail(subject: string, from: string): boolean {
   const s = (subject || '').trim();
@@ -45,6 +51,9 @@ function isAutomatedNotificationEmail(subject: string, from: string): boolean {
   if (AUTOMATED_NOTIFICATION_SUBJECT_PATTERNS.some((re) => re.test(s))) return true;
   const f = (from || '').toLowerCase();
   if (f.includes('noreply@email.teams.microsoft.com') || f.includes('teams-noreply@microsoft.com')) return true;
+  // Same Viva Engage digest sender as the subject pattern above -- covers it
+  // even if a future digest ever ships with a slightly different subject.
+  if (f.includes('@engage.mail.microsoft')) return true;
   return false;
 }
 
