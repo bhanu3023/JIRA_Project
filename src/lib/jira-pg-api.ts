@@ -5773,15 +5773,33 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
   // of work, and starving this one so the new-ticket loop could run longer
   // would leave this catch-up permanently unable to make progress on months
   // of backlog. Same 250ms-per-issue pacing as every loop above.
+  //
+  // This used to be ONE shared budget spent strictly in SYNC_PROJECTS array
+  // order (L2B, L3B, PSM, SOPS, QA), then CFITS last -- whichever project
+  // came first simply ate the entire budget every single run if its own
+  // backlog was big enough, leaving every project after it with exactly
+  // zero turns, forever. Confirmed for real: L2B (first in the array, with
+  // a backlog going back to 2020) had consumed its whole budget on every
+  // run for months, while QA/PSM/SOPS/L3B/CFITS never even got a single
+  // page processed -- their jira_sync_updated_checkpoint_* row never
+  // existed at all. A ticket whose assignee/status changed in Jira after
+  // import, in any project other than L2B, could never be caught up by
+  // this pass, no matter how long the app ran. Giving each project a fixed,
+  // equal slice of the total budget means a huge backlog in one project can
+  // slow its OWN progress, but can never block another project's turn.
   const refreshed: string[] = [];
-  let changedBudget = maxPerRun;
-  for (const { prefix, jiraProject } of SYNC_PROJECTS) {
-    if (changedBudget <= 0) break;
+  const changedCatchupTargets: { prefix: string; jiraProject: string; refreshFn: (key: string) => Promise<boolean> }[] = [
+    ...SYNC_PROJECTS.map(({ prefix, jiraProject }) => ({ prefix, jiraProject, refreshFn: refreshSyncProjectIssue })),
+    { prefix: 'CFITS', jiraProject: CFITS_JIRA_PROJECT, refreshFn: refreshCfitsIssue },
+  ];
+  const perProjectChangedBudget = Math.max(1, Math.floor(maxPerRun / changedCatchupTargets.length));
+  for (const { prefix, jiraProject, refreshFn } of changedCatchupTargets) {
+    let projectBudget = perProjectChangedBudget;
     let checkpoint = await getUpdatedSyncCheckpoint(prefix);
     let maxSeenUpdated = checkpoint;
     let pageToken: string | undefined;
     const jql = encodeURIComponent(`project = ${jiraProject} AND updated > "${getUpdatedSyncJqlFloor(checkpoint)}" ORDER BY updated ASC`);
-    while (changedBudget > 0) {
+    while (projectBudget > 0) {
       let url = `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=50&fields=updated`;
       if (pageToken) url += `&nextPageToken=${encodeURIComponent(pageToken)}`;
       const res = await fetch(url, {
@@ -5795,9 +5813,9 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
       const issues: any[] = data.issues || [];
       if (issues.length === 0) break;
       for (const ji of issues) {
-        if (changedBudget <= 0) break;
+        if (projectBudget <= 0) break;
         try {
-          const ok = await refreshSyncProjectIssue(ji.key);
+          const ok = await refreshFn(ji.key);
           if (ok) refreshed.push(ji.key);
           if (ji.fields?.updated) {
             const d = jiraUpdatedToYyyyMmDd(ji.fields.updated);
@@ -5806,51 +5824,12 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
         } catch (e: any) {
           errors.push(`${ji.key} (changed): ${e?.message || e}`);
         }
-        changedBudget--;
+        projectBudget--;
         await new Promise((r) => setTimeout(r, 250));
       }
       if (maxSeenUpdated !== checkpoint) { checkpoint = maxSeenUpdated; await setUpdatedSyncCheckpoint(prefix, checkpoint); }
       if (data.isLast || !data.nextPageToken) break;
       pageToken = data.nextPageToken;
-    }
-  }
-
-  if (changedBudget > 0) {
-    let cfitsChangedCheckpoint = await getUpdatedSyncCheckpoint('CFITS');
-    let cfitsMaxSeenUpdated = cfitsChangedCheckpoint;
-    let cfitsChangedPageToken: string | undefined;
-    const cfitsChangedJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND updated > "${getUpdatedSyncJqlFloor(cfitsChangedCheckpoint)}" ORDER BY updated ASC`);
-    while (changedBudget > 0) {
-      let url = `${creds.base}/rest/api/3/search/jql?jql=${cfitsChangedJql}&maxResults=50&fields=updated`;
-      if (cfitsChangedPageToken) url += `&nextPageToken=${encodeURIComponent(cfitsChangedPageToken)}`;
-      const res = await fetch(url, {
-        headers: { Authorization: creds.authHdr, Accept: 'application/json' },
-        signal: AbortSignal.timeout(15000),
-      }).catch((e) => { errors.push(`CFITS (changed): search fetch failed: ${e?.message || e}`); return null; });
-      if (!res) break;
-      if (!res.ok) { errors.push(`CFITS (changed): search HTTP ${res.status}`); break; }
-      const data: any = await res.json().catch(() => null);
-      if (!data) { errors.push('CFITS (changed): bad JSON from search'); break; }
-      const issues: any[] = data.issues || [];
-      if (issues.length === 0) break;
-      for (const ji of issues) {
-        if (changedBudget <= 0) break;
-        try {
-          const ok = await refreshCfitsIssue(ji.key);
-          if (ok) refreshed.push(ji.key);
-          if (ji.fields?.updated) {
-            const d = jiraUpdatedToYyyyMmDd(ji.fields.updated);
-            if (d > cfitsMaxSeenUpdated) cfitsMaxSeenUpdated = d;
-          }
-        } catch (e: any) {
-          errors.push(`${ji.key} (CFITS changed): ${e?.message || e}`);
-        }
-        changedBudget--;
-        await new Promise((r) => setTimeout(r, 250));
-      }
-      if (cfitsMaxSeenUpdated !== cfitsChangedCheckpoint) { cfitsChangedCheckpoint = cfitsMaxSeenUpdated; await setUpdatedSyncCheckpoint('CFITS', cfitsChangedCheckpoint); }
-      if (data.isLast || !data.nextPageToken) break;
-      cfitsChangedPageToken = data.nextPageToken;
     }
   }
 
