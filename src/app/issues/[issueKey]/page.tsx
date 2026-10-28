@@ -259,6 +259,19 @@ export default function IssueDetailPage() {
   const [spaceStatuses, setSpaceStatuses] = useState<any[]>([]);
   const [workflowTransitions, setWorkflowTransitions] = useState<any[]>([]);
   const [spaceMembers, setSpaceMembers] = useState<any[]>([]);
+  // Whether the SIGNED-IN viewer is a genuine member of the ticket's
+  // CURRENT department's own queue -- set alongside matchedQueue below,
+  // whichever path resolves it (cache or live API). Used to make the
+  // historical-dept-view swap (isHistoricalDeptViewForAssignee) apply only
+  // to someone viewing from OUTSIDE the ticket's current queue (e.g. a Dev
+  // person opening a link from before it moved on) -- a genuine CURRENT
+  // queue member should never see another department's banner/assignee no
+  // matter what stale ?viewDept= a link they clicked happens to carry.
+  // Confirmed for real: Bhuvana (a real QA member) opened CF-34455 (now
+  // sitting in QA) via a link still carrying viewDept=Dev from before the
+  // handoff, and saw "Showing Dev's own assignee" instead of being treated
+  // as the QA-queue member she actually is. null = not yet resolved.
+  const [isCurrentDeptQueueMember, setIsCurrentDeptQueueMember] = useState<boolean | null>(null);
   const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
   // Single combined work log against the whole ticket, matching real Jira --
   // department is still recorded on each entry (backend requires it) but is
@@ -643,6 +656,7 @@ export default function IssueDetailPage() {
       };
 
       if (dept) {
+        setIsCurrentDeptQueueMember(null); // reset for the new ticket/department until re-resolved below
         // Resolve which space's custom queue matches this department in ONE
         // targeted request (department-queue) instead of fetching
         // all-space-keys and then firing one custom-queues/:spaceKey request
@@ -669,6 +683,7 @@ export default function IssueDetailPage() {
               const queues: any[] = JSON.parse(stored);
               const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
               if (matchedQueue) {
+                setIsCurrentDeptQueueMember(!!user?.id && Array.isArray(matchedQueue.memberIds) && matchedQueue.memberIds.includes(user.id));
                 const qSt = matchedQueue.queueStatuses;
                 const qTr = matchedQueue.queueTransitions;
                 if (qSt?.length) {
@@ -699,6 +714,7 @@ export default function IssueDetailPage() {
             const matchedQueue = result?.queue;
             const spKey = result?.spaceKey;
             if (matchedQueue && spKey) {
+              setIsCurrentDeptQueueMember(!!user?.id && Array.isArray(matchedQueue.memberIds) && matchedQueue.memberIds.includes(user.id));
               try {
                 const existing: any[] = JSON.parse(localStorage.getItem(`custom_queues_${spKey}`) || '[]');
                 const others = existing.filter((q: any) => q.id !== matchedQueue.id);
@@ -727,10 +743,11 @@ export default function IssueDetailPage() {
           if (!resolvedFromCache) loadStatusesForSpace(currentIssue.spaceKey);
         })();
       } else {
+        setIsCurrentDeptQueueMember(null);
         loadStatusesForSpace(currentIssue.spaceKey);
       }
     }
-  }, [currentIssue?.spaceKey, currentIssue?.id, spaces, (currentIssue as any)?.current_department, (currentIssue as any)?.canResolveHere]);
+  }, [currentIssue?.spaceKey, currentIssue?.id, spaces, (currentIssue as any)?.current_department, (currentIssue as any)?.canResolveHere, user?.id]);
 
   useEffect(() => {
     // Always load members from the issue's own space (not the workflow space which may differ)
@@ -1939,7 +1956,20 @@ export default function IssueDetailPage() {
   // opening it via QA's own board/"Worked on" list (which already correctly
   // shows Bhuvana) landed on this page showing Hemadasu instead, contradicting
   // the queue list it was just opened from.
-  const isHistoricalDeptViewForAssignee = isHistoricalDeptViewBase;
+  //
+  // EXCEPT when the viewer is a genuine member of the ticket's CURRENT
+  // department queue (isCurrentDeptQueueMember) -- a real member of the
+  // owning queue should always see that queue's own live state, never
+  // another department's historical banner/assignee, no matter what stale
+  // ?viewDept= a link they clicked happens to carry. Confirmed for real:
+  // Bhuvana (a genuine QA member, not an admin) opened CF-34455 -- now
+  // sitting in QA -- via a link still carrying viewDept=Dev from before the
+  // handoff, and saw "Showing Dev's own assignee" instead of QA's own live
+  // one, even though she's exactly the kind of QA-queue member this page
+  // should treat as viewing normally. The admin-only zeroing of
+  // viewDeptParam above already covers the admin case; this covers the
+  // same thing for any regular member of the ticket's actual current queue.
+  const isHistoricalDeptViewForAssignee = isHistoricalDeptViewBase && isCurrentDeptQueueMember !== true;
   // Admins can still edit the live ticket while viewing another queue's frozen
   // snapshot -- the read-only lock below exists so a regular user can't mistake
   // a historical snapshot for the live ticket and edit it by accident, not to
