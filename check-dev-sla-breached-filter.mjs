@@ -61,25 +61,48 @@ async function main() {
   );
   console.log(`Active Dev-dept SLA polic(y/ies): ${devPolicies.map(p => `${p.name} (updated ${p.updatedAt?.toISOString?.() || p.updatedAt})`).join(', ') || 'NONE'}\n`);
 
+  const nowMs = Date.now();
   for (const issue of (data.issues || []).slice(0, 15)) {
     const { rows } = await pool.query(
-      `SELECT key, cf_key, priority, "createdAt", "resolvedAt", "updatedAt", dept_sla_log, dept_sla_started_at,
-              current_department, sla_waivers, sla_snapshot
-       FROM issues WHERE id = $1`, [issue.id]
+      `SELECT i.key, i.cf_key, i.priority, i."createdAt", i."resolvedAt", i."updatedAt", i.dept_sla_log, i.dept_sla_started_at,
+              i.current_department, i.sla_waivers, i.sla_snapshot, i."statusId", s.category AS status_category, s.name AS status_name
+       FROM issues i LEFT JOIN statuses s ON s.id = i."statusId"
+       WHERE i.id = $1`, [issue.id]
     );
     const row = rows[0];
     if (!row) continue;
     const deptLog = row.dept_sla_log || {};
     const devKey = Object.keys(deptLog).find((k) => k.toLowerCase() === 'dev');
     const devEntry = devKey ? deptLog[devKey] : null;
-    const elapsedMs = devEntry?.elapsed_ms ?? null;
+    const priorElapsedMs = devEntry?.elapsed_ms ?? 0;
     const priority = (row.priority || 'medium').toLowerCase();
-    const goalMs = devPolicies.length ? durationMsFromGoals(devPolicies[0], priority) : null;
-    const breachedByGoal = (elapsedMs != null && goalMs != null) ? elapsedMs >= goalMs : null;
+    const policy = devPolicies[0];
+    const goalMs = policy ? durationMsFromGoals(policy, priority) : null;
+    const isResolved = row.status_category === 'done';
+    const isCurrentDept = (row.current_department || '').trim().toLowerCase() === 'dev';
+    const pauseStatuses = (policy?.pauseStatuses || []).map((s) => s.trim().toLowerCase());
+    const isPausedStatus = pauseStatuses.includes((row.status_name || '').trim().toLowerCase());
+    const slaStartedAt = row.dept_sla_started_at || row.createdAt;
+
+    let recomputed;
+    if (goalMs == null) {
+      recomputed = 'n/a (no policy/removed tier)';
+    } else if (isPausedStatus && !isResolved) {
+      recomputed = false; // paused -- clock stopped
+    } else if (isResolved || !isCurrentDept) {
+      // frozen: compare total accumulated elapsed vs goal
+      recomputed = priorElapsedMs >= goalMs;
+    } else {
+      // live: project forward from dept_sla_started_at
+      const dueTimeMs = new Date(slaStartedAt).getTime() + (goalMs - priorElapsedMs);
+      recomputed = dueTimeMs < nowMs;
+    }
+
     console.log(
-      `${row.key} (${row.cf_key}) | priority=${priority} | app says sla_breached=${issue.sla_breached} by="${issue.sla_breached_by}" dept="${issue.sla_breached_dept}" | ` +
-      `Dev elapsed_ms=${elapsedMs} (${elapsedMs != null ? (elapsedMs/3600000).toFixed(1)+'h' : 'n/a'}) vs Dev goal=${goalMs != null ? (goalMs/3600000).toFixed(1)+'h' : 'n/a'} -> recomputed breach=${breachedByGoal} | ` +
-      `snapshot frozen=${Array.isArray(row.sla_snapshot) && row.sla_snapshot.length > 0} | waiver=${!!(row.sla_waivers && Object.keys(row.sla_waivers).length)}`
+      `${row.key} (${row.cf_key}) | priority=${priority} status="${row.status_name}"(${row.status_category}) currentDept="${row.current_department}" | ` +
+      `app says sla_breached=${issue.sla_breached} by="${issue.sla_breached_by}" | ` +
+      `Dev priorElapsed=${(priorElapsedMs/3600000).toFixed(1)}h goal=${goalMs!=null?(goalMs/3600000).toFixed(1)+'h':'n/a'} slaStartedAt=${new Date(slaStartedAt).toISOString()} -> recomputed breach=${recomputed} | ` +
+      `isCurrentDept=${isCurrentDept} isPausedStatus=${isPausedStatus} snapshotFrozen=${Array.isArray(row.sla_snapshot) && row.sla_snapshot.length > 0}`
     );
   }
 
