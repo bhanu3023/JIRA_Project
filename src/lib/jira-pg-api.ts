@@ -15624,8 +15624,17 @@ async function _handleJiraPgApi(
     // in_team_scope = counts toward the tab-wide totals/monthly rows; rows
     // pulled in only via ownerByIssue (a person's Filters-owned ticket
     // outside the tab-wide scope) count for that person alone.
+    // sla_snapshot included here specifically -- without it, computeSLAInstancesPure's
+    // resolved-ticket branch (see its own frozen-snapshot comment) falls through to its
+    // own per-row `SELECT sla_snapshot FROM issues WHERE id=$1` fallback for every single
+    // resolved candidate, one ticket at a time, inside the sequential per-ticket loop
+    // below -- 532 of 545 candidates on a real run, ~65ms each, entirely blocking
+    // (awaited) and entirely avoidable since this column rides along for free on a row
+    // already being fetched. Confirmed for real: this exact gap (same fix, same N+1
+    // shape) is what made Customer Engineering's MBR tab take 34-42s per request,
+    // consistently timing out the frontend's 20s give-up.
     const slaCandidateCols = `i.id, COALESCE(i.cf_key, i.key) AS key, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
-        i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
+        i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers, i.sla_snapshot,
         i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category,
         ${isEntSmbTeam ? 'i.summary, i.description' : 'NULL AS summary, NULL AS description'}`;
     const teamScopeRes = await pool.query(`
