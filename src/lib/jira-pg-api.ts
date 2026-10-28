@@ -4020,7 +4020,27 @@ function computeSlaBreachedAndOverdue(
     // table/export and MBR, even though the detail page itself now
     // correctly shows it waived.
     const snapshotWaivers: Record<string, any> = i.sla_waivers || {};
-    return { slaBreached: i.sla_snapshot.some((x: any) => !snapshotWaivers[x.policyId] && x.isBreached), overdue: false };
+    // Scoped to the QUERIED department (deptParam) when one is active --
+    // same reasoning as the live dept-scoping below (CF-30766). Before this,
+    // a resolved ticket's single project-wide snapshot answered "did it
+    // breach ANYWHERE on its journey" even under a Dev-scoped view, so a
+    // ticket that stayed well within budget in Dev but breached later in a
+    // different department still showed "Breached: Yes" under Queue: Dev.
+    // Confirmed for real: CF-34498 used only 5.5h of its 12h Dev goal
+    // (never breached there) but showed "Yes" under Queue: Dev + SLA
+    // Breached: Yes purely from a different department's breach on its
+    // frozen snapshot. A space-wide (no deptName) snapshot entry still
+    // applies under every department's view, same as hasApplicablePolicy's
+    // own !pDept rule a few lines down.
+    const relevantSnapshot = deptParam
+      ? i.sla_snapshot.filter((x: any) => !x.deptName || x.deptName.trim().toLowerCase() === deptParam.trim().toLowerCase())
+      : i.sla_snapshot;
+    // No snapshot entry at all for the queried department -- fall through to
+    // the live recompute below instead of guessing from an unrelated dept's
+    // entry.
+    if (!deptParam || relevantSnapshot.length) {
+      return { slaBreached: relevantSnapshot.some((x: any) => !snapshotWaivers[x.policyId] && x.isBreached), overdue: false };
+    }
   }
   // A department nobody has configured an SLA policy for (e.g. Infra, which
   // never had one set up) previously still showed a hard "No" in the SLA
