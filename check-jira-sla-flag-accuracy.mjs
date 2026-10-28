@@ -17,14 +17,16 @@ async function getJiraCreds() {
 }
 
 async function main() {
-  const { rows } = await pool.query(`
+  const { rows: allRows } = await pool.query(`
     SELECT id, key, cf_key, dept_sla_log, sla_snapshot
     FROM issues
     WHERE sla_snapshot IS NOT NULL AND jsonb_array_length(sla_snapshot) > 0 AND jira_sla_breached = true
-    ORDER BY RANDOM() LIMIT 10
   `);
-  const sample = rows.filter((r) => (r.sla_snapshot || []).some((x) => x.deptName === 'QA' && x.isBreached && x.actualElapsedMs === 0));
-  console.log(`Sampling ${sample.length} tickets flagged via the legacy jira_sla_breached fallback...\n`);
+  const sample = allRows
+    .filter((r) => (r.sla_snapshot || []).some((x) => x.deptName === 'QA' && x.isBreached && x.actualElapsedMs === 0))
+    .sort(() => Math.random() - 0.5)
+    .slice(0, 15);
+  console.log(`Found ${allRows.filter((r) => (r.sla_snapshot || []).some((x) => x.deptName === 'QA' && x.isBreached && x.actualElapsedMs === 0)).length} total matching tickets, sampling ${sample.length}...\n`);
 
   const { base, authHdr } = await getJiraCreds();
   // customfield_10917 = Dev/L2B/L3B's own "SLA Breached" field,
