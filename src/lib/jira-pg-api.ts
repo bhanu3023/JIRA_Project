@@ -5639,13 +5639,31 @@ async function refreshCfitsIssue(cfitsKey: string): Promise<boolean> {
 // same Jira ticket and both tried to create a local copy, one of them
 // failing on the key collision. This flag makes an overlapping call a no-op
 // instead of a second call actually racing the first.
+//
+// Had no expiry -- a run that genuinely wedges partway through (a Jira fetch
+// that doesn't honor its own AbortSignal, a DB pool stall waiting on a
+// connection with no acquire timeout, anything that doesn't go through this
+// function's own try/finally) left this true FOREVER, silently skipping
+// every future periodic tick with "sync already in progress" until the next
+// deploy/restart happened to reset it. Confirmed for real: after splitting
+// the changed-ticket catch-up budget evenly per project (see
+// changedCatchupTargets above), L3B/PSM/SOPS got fresh checkpoints on the
+// very first run, then the run stalled somewhere between SOPS and QA's turn
+// and never completed -- every periodic tick for 15+ minutes afterward just
+// logged the skip message, with no DB lock or long-running query to explain
+// it (checked via pg_stat_activity). A stale-run ceiling means a wedged run
+// can only ever block things for a bounded window, never indefinitely --
+// a legitimate run normally finishes in well under this.
 let _jiraSyncRunning = false;
+let _jiraSyncStartedAt = 0;
+const JIRA_SYNC_STALE_MS = 10 * 60 * 1000;
 
 export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ imported: string[]; errors: string[]; refreshed: string[] }> {
-  if (_jiraSyncRunning) {
+  if (_jiraSyncRunning && Date.now() - _jiraSyncStartedAt < JIRA_SYNC_STALE_MS) {
     return { imported: [], errors: ['sync already in progress in this process, skipped'], refreshed: [] };
   }
   _jiraSyncRunning = true;
+  _jiraSyncStartedAt = Date.now();
   try {
   const imported: string[] = [];
   const errors: string[] = [];
