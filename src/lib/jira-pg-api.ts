@@ -14349,16 +14349,20 @@ async function _handleJiraPgApi(
     const dateTo     = url.searchParams.get('dateTo') || '';
     const staleDays  = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
-    // Matches createdAt OR resolvedAt -- a ticket belongs to MBR's date range
-    // if it was raised in it, or resolved in it (e.g. created Aug 29, resolved
-    // Sep 5 counts for September). Used to be createdAt OR updatedAt, but
-    // updatedAt moves on ANY touch (a comment, a worklog, a hand-off), so
-    // months-old tickets merely commented on in range kept flooding every
-    // tab. Same rule as reports/mbr-team's team tabs below. A done ticket
-    // with no resolvedAt (old Jira imports with no resolutiondate) is
-    // deliberately NOT counted as resolved in range -- no evidence of when it
-    // was actually resolved, and guessing from history/import timestamps
-    // would put import-day noise into whatever month the import ran.
+    // Matches createdAt OR updatedAt -- same date-range rule Filters' own
+    // "Created"/"Updated" chips use (GET /issues), by explicit request: MBR
+    // used to match createdAt OR resolvedAt instead (a ticket belongs to the
+    // range if raised in it, or resolved in it), on the reasoning that
+    // updatedAt moves on ANY touch (a comment, a worklog, a hand-off) and
+    // would flood a tab with months-old tickets merely commented on in
+    // range. That tradeoff meant MBR and Filters permanently disagreed on
+    // ticket counts for the exact same department/date range whenever a
+    // ticket was resolved outside the range but touched inside it --
+    // confirmed for real (reports/mbr-team's own team tabs, same issue):
+    // CF-26109/CF-30766/CF-29905 and 10 more all resolved weeks before
+    // October but merely updated inside it, counted by Filters, invisible to
+    // MBR. Reporting parity with Filters is the priority now -- same rule
+    // everywhere a date range is applied in this app.
     // Anchored to IST (+05:30), not parsed as bare UTC -- a bare
     // "YYYY-MM-DD" string is parsed as UTC midnight by Date's ISO handling,
     // which is 5:30 AM IST, not midnight IST. This app's users operate in
@@ -14391,10 +14395,10 @@ async function _handleJiraPgApi(
     let dateClause = '';
     if (fromIdx || toIdx) {
       const createdConds: string[] = [];
-      const resolvedConds: string[] = [];
-      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); resolvedConds.push(`i."resolvedAt"::date >= $${fromIdx}::date`); }
-      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   resolvedConds.push(`i."resolvedAt"::date <= $${toIdx}::date`); }
-      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${resolvedConds.join(' AND ')}))`;
+      const updatedConds: string[] = [];
+      if (fromIdx) { createdConds.push(`i."createdAt"::date >= $${fromIdx}::date`); updatedConds.push(`i."updatedAt"::date >= $${fromIdx}::date`); }
+      if (toIdx)   { createdConds.push(`i."createdAt"::date <= $${toIdx}::date`);   updatedConds.push(`i."updatedAt"::date <= $${toIdx}::date`); }
+      dateClause = ` AND ((${createdConds.join(' AND ')}) OR (${updatedConds.join(' AND ')}))`;
     }
     let deptClause = '';
     let personDeptClause = '';
@@ -14953,15 +14957,22 @@ async function _handleJiraPgApi(
     const istTo   = dateTo   ? new Date(`${dateTo}T23:59:59.999+05:30`) : null;
     if (istFrom) { baseParams.push(istFrom); fromIdx = baseParams.length; }
     if (istTo)   { baseParams.push(istTo);   toIdx = baseParams.length; }
-    // Matches createdAt OR resolvedAt -- raised in range, or resolved in range
-    // -- same rule as reports/mbr above (see its comment for why updatedAt was
-    // dropped: any touch moves it, so old tickets merely commented on in
-    // range flooded every tab). dateMode=touched restores the old createdAt
-    // OR updatedAt union; only the daily MBR-vs-Filters consistency check
-    // uses it, since Filters itself has no resolved-date filter to compare
-    // the new rule against -- that check is about department/roster scope
-    // agreeing, not about which date field counts.
-    const dateMode = url.searchParams.get('dateMode') === 'touched' ? 'touched' : 'resolved';
+    // Matches createdAt OR updatedAt by default -- same date-range rule
+    // Filters' own "Created"/"Updated" chips use (GET /issues), and the same
+    // rule reports/mbr (By Department) now uses too, see its own comment.
+    // Used to default the OTHER way (createdAt OR resolvedAt), with this
+    // 'touched' mode as an opt-in used only by the daily MBR-vs-Filters
+    // consistency check -- which meant the real, user-facing Customer
+    // Engineering/QA/Infra/Migration tabs (api.ts's getMbrTeamData never
+    // passes dateMode at all) permanently disagreed with Filters' own count
+    // for the exact same department/date range whenever a ticket was
+    // resolved outside the range but merely touched inside it. Confirmed for
+    // real: CF-26109 and 12 more, all resolved weeks before October,
+    // reappeared in Filters' Queue: Dev count the moment anything about them
+    // changed in October, but stayed invisible to this tab the whole time.
+    // dateMode=resolved is kept as an explicit opt-in for anyone who
+    // specifically wants "created or resolved in range" instead.
+    const dateMode = url.searchParams.get('dateMode') === 'resolved' ? 'resolved' : 'touched';
     const secondDateCol = dateMode === 'touched' ? 'updatedAt' : 'resolvedAt';
     let dateClause = '';
     const createdConds: string[] = [];
