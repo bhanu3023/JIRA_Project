@@ -4950,6 +4950,33 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
               // by policy name instead and render ONE box per policy, with
               // each department as a row inside it.
               const deptAssignees: Record<string, any> = (issue as any)?.dept_assignees || {};
+              // dept_assignees[dept] is kept live-synced to whatever the
+              // CURRENT assignee is for as long as the dept stays current --
+              // including every reassignment made in the final seconds right
+              // up to a handoff. A rapid chain of reassignments right at
+              // handoff time can leave that snapshot naming whoever happened
+              // to be assigned for the last few seconds, not whoever actually
+              // held the ticket for the bulk of that department's stint.
+              // Confirmed for real on CF-34171: Giridhar K held Dev for
+              // essentially its whole ~13-day stint, but a ~20-second burst
+              // of reassignments during the Dev->QA handoff left
+              // dept_assignees.Dev reading Sujana Manapuram, who held it for
+              // about 10 seconds. For attributing a historical breach,
+              // what matters is who actually held the ticket at the moment
+              // this department's own SLA clock ran out (dueAt) -- found from
+              // the same assignee-change history the History tab already
+              // reads (issue.activity), not the handoff-time snapshot.
+              const assigneeHistory = Array.isArray(issue.activity)
+                ? issue.activity.filter((a: any) => a.field === 'assignee').slice().sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+                : [];
+              const assigneeNameAsOf = (atMs: number): string | null => {
+                let name: string | null = null;
+                for (const ev of assigneeHistory) {
+                  if (new Date(ev.createdAt).getTime() > atMs) break;
+                  name = ev.newValue && ev.newValue !== 'None' ? ev.newValue : null;
+                }
+                return name;
+              };
               const entries = finalEntries.map((s: any) => {
                 const startedAt = s.startedAt ? new Date(s.startedAt) : null;
                 const dueAt = new Date(s.dueTime);
@@ -5001,7 +5028,12 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                 const deptAssigneeName = deptAssigneeSnap
                   ? `${deptAssigneeSnap.firstName || deptAssigneeSnap.displayName || ''} ${deptAssigneeSnap.lastName || ''}`.trim() || null
                   : null;
-                return { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, baseName, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName };
+                // Prefer whoever was actually assigned right when this
+                // department's own SLA due time passed -- falls back to the
+                // handoff-time snapshot only when there's no assignee
+                // history to check against at all.
+                const breachedByName = assigneeNameAsOf(dueAt.getTime()) || deptAssigneeName;
+                return { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, baseName, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName, breachedByName };
               });
 
               const groups = new Map<string, typeof entries>();
@@ -5030,7 +5062,7 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                     </div>
 
                     {group.map((e, i) => {
-                      const { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName } = e;
+                      const { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, slaDept, isNotified, isBreachingSoon, showAsBreach, breachedByName } = e;
                       return (
                         <div key={s.id} className={i > 0 ? 'pt-3 mt-3 border-t border-gray-200' : ''}>
                           {/* Dept badge + goal + status badges */}
@@ -5157,7 +5189,7 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                               resolved the ticket. */}
                           {historicallyBreached && (
                             <p className="text-[10.5px] text-red-500 mt-2">
-                              Breached by <span className="font-semibold">{deptAssigneeName || 'Unassigned'}</span>
+                              Breached by <span className="font-semibold">{breachedByName || 'Unassigned'}</span>
                             </p>
                           )}
 
