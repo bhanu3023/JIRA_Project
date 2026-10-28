@@ -64,7 +64,7 @@ async function main() {
   for (const issue of (data.issues || []).slice(0, 15)) {
     const { rows } = await pool.query(
       `SELECT key, cf_key, priority, "createdAt", "resolvedAt", "updatedAt", dept_sla_log, dept_sla_started_at,
-              current_department, sla_waivers, sla_snapshot, sla_breached, sla_breached_by, sla_breached_dept
+              current_department, sla_waivers, sla_snapshot
        FROM issues WHERE id = $1`, [issue.id]
     );
     const row = rows[0];
@@ -77,7 +77,7 @@ async function main() {
     const goalMs = devPolicies.length ? durationMsFromGoals(devPolicies[0], priority) : null;
     const breachedByGoal = (elapsedMs != null && goalMs != null) ? elapsedMs >= goalMs : null;
     console.log(
-      `${row.key} (${row.cf_key}) | priority=${priority} | app says sla_breached=${row.sla_breached} by="${row.sla_breached_by}" dept="${row.sla_breached_dept}" | ` +
+      `${row.key} (${row.cf_key}) | priority=${priority} | app says sla_breached=${issue.sla_breached} by="${issue.sla_breached_by}" dept="${issue.sla_breached_dept}" | ` +
       `Dev elapsed_ms=${elapsedMs} (${elapsedMs != null ? (elapsedMs/3600000).toFixed(1)+'h' : 'n/a'}) vs Dev goal=${goalMs != null ? (goalMs/3600000).toFixed(1)+'h' : 'n/a'} -> recomputed breach=${breachedByGoal} | ` +
       `snapshot frozen=${Array.isArray(row.sla_snapshot) && row.sla_snapshot.length > 0} | waiver=${!!(row.sla_waivers && Object.keys(row.sla_waivers).length)}`
     );
