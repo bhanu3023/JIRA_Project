@@ -88,7 +88,7 @@ const PRODUCT_TYPE_OPTIONS = ['Content Migration', 'Email Migration', 'Message M
 // the 'productionTicket' custom-field entries in issues/[issueKey]/page.tsx
 // and CreateIssueModal.tsx) -- this filter didn't exist on the Filters page
 // at all before, per explicit request.
-const PRODUCTION_TICKET_OPTIONS = ['Operational Support', 'Code Fixes'];
+const PRODUCTION_TICKET_OPTIONS = ['Operational Support', 'Code Fixes', 'Permanent Fix'];
 const PRIORITY_LABELS: Record<string, string> = {
   highest: 'Highest', high: 'High', medium: 'Medium', low: 'Low', lowest: 'Lowest',
 };

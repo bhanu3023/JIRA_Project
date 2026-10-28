@@ -821,6 +821,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                     <option value="">Select Production Ticket</option>
                     <option value="Operational Support">Operational Support</option>
                     <option value="Code Fixes">Code Fixes</option>
+                    <option value="Permanent Fix">Permanent Fix</option>
                   </select>
                 </div>
 
