@@ -382,11 +382,22 @@ export async function handleKbApi(
   if (!userId) return json({ error: 'Unauthorized' }, 401);
   await kbSchemaReady;
 
+  // By explicit request: every migration_manager role user gets the same
+  // "Awaiting my approval" access as an admin, not just whoever happens to
+  // be set as someone's actual manager_id -- the same fallback this
+  // codebase already relies on elsewhere (Filters' assignee picker,
+  // my-dashboard, the Home dashboard's Migration Manager section) wherever
+  // the manager_id hierarchy itself isn't a reliable source of truth for
+  // who actually holds this role. A migration_manager approving a pending
+  // article they didn't personally submit is never their own article
+  // (row.author_id !== userId already guards that for every path here).
+  const isMigrationManager = currentUser?.role === 'migration_manager';
   const canManage = (row: any) => isAdmin || row.author_id === userId;
-  // A pending article waits on its manager (approver_id), or any admin when
-  // the author has no manager.
+  // A pending article waits on its manager (approver_id), any admin when
+  // the author has no manager, or any migration_manager role user.
   const canApprove = (row: any) =>
-    row.status === 'pending' && row.author_id !== userId && (isAdmin || (!!row.approver_id && row.approver_id === userId));
+    row.status === 'pending' && row.author_id !== userId &&
+    (isAdmin || isMigrationManager || (!!row.approver_id && row.approver_id === userId));
   const canRead = (row: any, myTeams: string[]) =>
     canManage(row) ||
     canApprove(row) ||
@@ -402,7 +413,7 @@ export async function handleKbApi(
     return json({
       publishesDirectly: isAdmin,
       approver: approver ? { id: approver.id, name: approver.name } : null,
-      reviews: isAdmin || reportCount > 0,
+      reviews: isAdmin || isMigrationManager || reportCount > 0,
     });
   }
 
