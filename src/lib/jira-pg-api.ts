@@ -1145,9 +1145,11 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
   // 1. SLA breach warnings (30 min before)
   try {
     const activeIssues = await pool.query(
-      `SELECT i.*, s.category AS status_category, s.name AS status_name
+      `SELECT i.*, s.category AS status_category, s.name AS status_name,
+              a."firstName" AS assignee_first, a."lastName" AS assignee_last
        FROM issues i
        LEFT JOIN statuses s ON i."statusId" = s.id
+       LEFT JOIN users a ON a.id = i."assigneeId"
        WHERE i.dept_sla_started_at IS NOT NULL
          AND (s.category IS NULL OR s.category != 'done')
        LIMIT 2000`
@@ -1200,7 +1202,18 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
       const byIssue = new Map<string, { row: any; policyName: string }>();
       for (const c of justBreached) { if (!byIssue.has(c.row.id)) byIssue.set(c.row.id, c); }
       for (const { row } of byIssue.values()) {
-        const label = `SLA breached — ${row.current_department || ''}`.trim();
+        // By explicit request: the breach entry itself should name who it
+        // breached under, not just the department -- the ticket's current
+        // assignee at the moment the SLA crossed its due time, same person
+        // sla_breached_by already surfaces on the Filters list for a live
+        // (non-dept-scoped) view. Confirmed for real on CF-34582: History
+        // only ever showed a breach attribution at resolve time, via the
+        // separate status-change badge -- this is the first record of it
+        // at the actual moment of breach.
+        const assigneeName = (row.assignee_first || row.assignee_last)
+          ? `${row.assignee_first || ''} ${row.assignee_last || ''}`.trim()
+          : null;
+        const label = `SLA breached — ${row.current_department || ''}${assigneeName ? ` (${assigneeName})` : ''}`.trim();
         try {
           const already = await (db as any).issueHistory.findFirst({ where: { issueId: row.id, field: 'sla', newValue: label } });
           if (already) continue;
@@ -11323,15 +11336,22 @@ async function _handleJiraPgApi(
       createdAt: a.createdAt?.toISOString() ?? nowIso(),
     }));
 
-    // SLA-waiver entries (field='sla', see logSlaHistory) include the admin's
-    // stated reason for overriding a breach -- e.g. "it's by mistake" -- which
-    // isn't something every viewer of a ticket's History tab should see.
-    // Confirmed for real on CF-29905: any regular user opening History could
-    // see exactly why/when an admin waived a breach. Admin-only, same
-    // isAdmin gate already used elsewhere in this handler (e.g. the
-    // queue-suspension check above).
+    // Only the WAIVER-specific sla entries (field='sla', see logSlaHistory)
+    // carry the admin's stated reason for overriding a breach -- e.g. "it's
+    // by mistake" -- which isn't something every viewer of a ticket's
+    // History tab should see. Confirmed for real on CF-29905: any regular
+    // user opening History could see exactly why/when an admin waived a
+    // breach. This used to blanket-hide EVERY field='sla' entry from
+    // non-admins, not just the waiver ones -- which meant the genuine
+    // "SLA breached — Dept (Name)" entry logged the moment a ticket
+    // actually crosses its due time (see runMonitorAgentScan/logSlaHistory)
+    // was invisible to the very reporter/assignee who needs to see it, and
+    // the only breach indicator a regular user ever saw was the separate
+    // status-change badge that only appears once the ticket is resolved.
+    // Confirmed for real on CF-34582. Only hide the waiver-reason ones.
+    const isSlaWaiverEntry = (h: any) => (h.field || '').toLowerCase() === 'sla' && /^SLA breach waiv/i.test(String(h.newValue || ''));
     const activity = dbHistory
-      .filter((h: any) => isAdmin || (h.field || '').toLowerCase() !== 'sla')
+      .filter((h: any) => isAdmin || !isSlaWaiverEntry(h))
       .map((h: any) => {
       const field: string = (h.field || '').toLowerCase();
       let action = 'updated';
