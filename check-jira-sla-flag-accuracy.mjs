@@ -43,8 +43,10 @@ async function main() {
       const f = ji.fields || {};
       const slaBreachField = f.customfield_10917?.value || f.customfield_10917 || null;
       const resolutionSlaField = f.customfield_10849?.value || f.customfield_10849 || null;
-      const nativeSla = f.customfield_10043 || null;
-      console.log(` - ${r.key} (${r.cf_key}): status="${f.status?.name}" resolved=${f.resolutiondate} | SLA Breached field="${JSON.stringify(slaBreachField)}" | Resolution SLA Breach field="${JSON.stringify(resolutionSlaField)}" | native SLA metric present=${!!nativeSla}`);
+      const native = f.customfield_10043 || null;
+      const cycles = native ? [...(Array.isArray(native.completedCycles) ? native.completedCycles : []), ...(native.ongoingCycle ? [native.ongoingCycle] : [])] : [];
+      const breachedCycle = cycles.find((c) => c.breached);
+      console.log(` - ${r.key} (${r.cf_key}): status="${f.status?.name}" resolved=${f.resolutiondate} | explicit fields both null=${!slaBreachField && !resolutionSlaField} | native cycles=${cycles.length}, breachedCycle=${!!breachedCycle} | raw cycles: ${JSON.stringify(cycles.map((c) => ({ breached: c.breached, goalDuration: c.goalDuration, remainingTime: c.remainingTime })))}`);
     } catch (e) {
       console.log(` - ${r.key}: fetch failed -- ${e?.message || e}`);
     }
