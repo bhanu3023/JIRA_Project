@@ -1420,10 +1420,24 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
       { team: 'qa', dept: 'QA' },
       { team: 'infra', dept: 'Infra' },
     ];
+    // Compares against Filters' "Created" + "Resolved date" chips specifically
+    // (resolvedRange, NOT updatedRange) -- by explicit follow-up request,
+    // that's the Filters configuration MBR must always agree with (confirmed
+    // for real: Created+Resolved date returned 545 for Dev/Oct 2026, exactly
+    // matching MBR's own createdAt-OR-resolvedAt default; Created+Updated
+    // returns a genuinely different 558). Used to compare MBR's dateMode=
+    // touched mode against Filters' createdRange+updatedRange instead --
+    // which meant this check could report "clean" every single day while
+    // validating a pairing nobody in the real app actually compares, exactly
+    // how the Customer Engineering tab silently disagreed with Filters (on
+    // the resolved-date comparison that actually matters) for as long as it
+    // did without this check ever catching it. Now exercises MBR's actual
+    // default (no dateMode param) against the actual Filters chip it's
+    // meant to match.
     for (const { team, dept } of oneToOneChecks) {
       const [mbr, filters] = await Promise.all([
-        get(`/reports/mbr-team?team=${team}&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
-        get(`/issues?spaceKey=TESTIN&dept=${dept}&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`),
+        get(`/reports/mbr-team?team=${team}&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+        get(`/issues?spaceKey=TESTIN&dept=${dept}&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&resolvedRange=${encodeURIComponent(dateParam)}&limit=1`),
       ]);
       const mbrTotal = mbr?.summary?.total;
       const filtersTotal = filters?.total;
@@ -1433,9 +1447,9 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
     }
 
     const [ent, smb, migrationFilters] = await Promise.all([
-      get(`/reports/mbr-team?team=ent&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
-      get(`/reports/mbr-team?team=smb&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
-      get(`/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`),
+      get(`/reports/mbr-team?team=ent&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+      get(`/reports/mbr-team?team=smb&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+      get(`/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&resolvedRange=${encodeURIComponent(dateParam)}&limit=1`),
     ]);
     const entTotal: number = ent?.summary?.total ?? 0;
     const smbTotal: number = smb?.summary?.total ?? 0;
