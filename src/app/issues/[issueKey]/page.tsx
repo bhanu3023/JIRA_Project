@@ -5036,7 +5036,25 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                 // department's own SLA due time passed -- falls back to the
                 // handoff-time snapshot only when there's no assignee
                 // history to check against at all.
-                const breachedByName = assigneeNameAsOf(dueAt.getTime()) || deptAssigneeName;
+                //
+                // Only trust that lookup when dueAt actually falls within
+                // this department's own tenure (dueAt >= startedAt) -- a
+                // historical (already moved-on) department that was already
+                // over its goal by the time it got paused has its dueTime
+                // deliberately computed as startedAt + a NEGATIVE remaining
+                // budget (see the historicalInstances' dueTime comment in
+                // jira-pg-api.ts), landing BEFORE this department even
+                // started holding the ticket, sometimes before it was even
+                // routed here. Looking up "who was assigned at that earlier
+                // moment" then returns whoever held it during a PRIOR
+                // department's stint, not this one's real worker. The
+                // dept_assignees snapshot is always correct for that case.
+                // Confirmed for real: CF-34629 -- QA's and Infra's own
+                // frozen assignees are Asma Karim and Ravi Teja respectively,
+                // but both historical cards read "Breached by Sadia Shaik"
+                // (the ticket's assignee from an earlier, unrelated moment).
+                const dueAtWithinTenure = !!startedAt && dueAt.getTime() >= startedAt.getTime();
+                const breachedByName = dueAtWithinTenure ? (assigneeNameAsOf(dueAt.getTime()) || deptAssigneeName) : deptAssigneeName;
                 return { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, baseName, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName, breachedByName };
               });
 
