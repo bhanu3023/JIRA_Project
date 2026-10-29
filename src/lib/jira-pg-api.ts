@@ -2632,10 +2632,10 @@ async function getDoneStatusNames(spaceId: string | null | undefined, currentDep
 // getLastStatusChangeAuthor and getResolutionHistoryEvents used to each run
 // their own separate query against the exact same issue_history rows (one
 // DESC LIMIT 1, one ASC) -- fetched once here and reused for both.
-async function getStatusHistoryRows(issueId: string): Promise<Array<{ authorName: string | null; newValue: string | null; createdAt: any }>> {
+async function getStatusHistoryRows(issueId: string): Promise<Array<{ authorName: string | null; oldValue: string | null; newValue: string | null; createdAt: any }>> {
   try {
     const r = await pool.query(
-      `SELECT "authorName", "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'status' ORDER BY "createdAt" ASC`,
+      `SELECT "authorName", "oldValue", "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'status' ORDER BY "createdAt" ASC`,
       [issueId]
     );
     return r.rows;
@@ -2709,6 +2709,17 @@ async function enrichSlaWithResolver(
   const resolvedByName = statusHistory.length ? (statusHistory[statusHistory.length - 1].authorName || null) : null;
   const events = statusHistory
     .filter((row) => doneNames.has((row.newValue || '').trim().toLowerCase()))
+    // A done-to-done transition (e.g. Resolved -> Closed, seconds after the
+    // actual resolution) is the SAME resolution being finalized, not a
+    // second one -- the issue's own `resolvedAt` column only ever gets set
+    // on the FIRST not-done-to-done transition (see willBeResolved &&
+    // !wasResolved above), never updated again on a later done-to-done
+    // move. Without this, a ticket resolved then closed (or Done then
+    // Archived, etc.) showed up TWICE in Resolution History for one real
+    // event. Confirmed for real: CF-28248 -- "In Progress -> Resolved" then
+    // "Resolved -> Closed" 3 seconds later both counted as separate
+    // resolutions, each independently flagged "Late".
+    .filter((row) => !doneNames.has((row.oldValue || '').trim().toLowerCase()))
     // Drop a "resolved" transition the SAME person reverted within minutes --
     // e.g. an admin toggling status while investigating a ticket they don't
     // actually own, not a settled resolution attempt. Without this, Resolution
