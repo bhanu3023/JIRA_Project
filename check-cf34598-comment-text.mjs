@@ -6,15 +6,14 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 async function main() {
   const { rows } = await pool.query(`
-    SELECT h.id, h."createdAt", h."newValue", u."firstName", u."lastName"
+    SELECT h.id, h."createdAt", h."newValue", h."authorName"
     FROM issue_history h
     JOIN issues i ON i.id = h."issueId"
-    LEFT JOIN users u ON u.id = h."userId"
     WHERE (i.cf_key = 'CF-34598' OR i.key = 'CF-34598') AND h.field = 'comment'
     ORDER BY h."createdAt" ASC
   `);
   for (const r of rows) {
-    console.log(`\n[${r.createdAt.toISOString()}] ${r.firstName || ''} ${r.lastName || ''}:`);
+    console.log(`\n[${r.createdAt.toISOString()}] ${r.authorName || ''}:`);
     console.log(JSON.stringify(r.newValue));
   }
   await pool.end();
