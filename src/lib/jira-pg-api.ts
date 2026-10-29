@@ -2893,10 +2893,105 @@ function getHistoricalOverrideDurationMs(deptName: string, priority: string, per
 
 async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean): Promise<any[]> {
   try {
+    const issueDept = ((issue as any).current_department || '').trim().toLowerCase();
+
+    // The status badge shown to the user can come from EITHER the ticket's
+    // global status OR its per-department dept_statuses snapshot (see
+    // issueStat in the issue detail page) -- whichever one the UI is
+    // currently reading from. Checking only the global status here let a
+    // ticket that visibly shows "Resolved" (via dept_statuses, e.g. a
+    // queue-scoped status whose done-ness never made it back to the real
+    // statusId column) keep ticking its SLA overdue counter forever, even
+    // though it plainly reads as resolved everywhere else in the UI.
+    const deptStatuses: Record<string, any> = (issue as any).dept_statuses || {};
+    const deptStatusKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === issueDept);
+    const deptStatusCategory = deptStatusKey ? deptStatuses[deptStatusKey]?.category : undefined;
+    // The moment ANY department resolves a ticket via its own queue status,
+    // that done status gets copied into every OTHER department's
+    // dept_statuses too (see the cross-department propagation in the
+    // queueStatusId handler), including a department that hasn't even
+    // received the ticket yet. When that department is later actually
+    // handed the ticket, performDeptHandoff's own "restore this dept's
+    // prior status" logic finds that stale propagated "done" entry and
+    // restores it as if it were genuinely earned -- so a brand-new handoff
+    // can land already marked "done" despite having done no real work at
+    // all, even while the ticket's real global status moments later reads
+    // something else entirely (e.g. "Waiting for Migration"). Confirmed for
+    // real on CF-29397: Migration's SLA card showed "RESOLVED, within goal"
+    // while dept_sla_log.Migration itself still read status:"running",
+    // paused_at:null -- a department whose own clock was never stopped
+    // can't simultaneously be resolved, no matter what the (possibly stale)
+    // dept_statuses snapshot claims. Only trust the dept_statuses fallback
+    // when this department's own SLA bookkeeping agrees it's actually been
+    // stopped -- never when it's still actively running.
+    const deptSlaLogForResolvedCheck: Record<string, any> = (issue as any).dept_sla_log || {};
+    const deptLogKeyForResolvedCheck = Object.keys(deptSlaLogForResolvedCheck).find((k) => k.toLowerCase() === issueDept);
+    const deptLogEntryForResolvedCheck = deptLogKeyForResolvedCheck ? deptSlaLogForResolvedCheck[deptLogKeyForResolvedCheck] : null;
+    const deptClockGenuinelyStopped = !deptLogEntryForResolvedCheck || deptLogEntryForResolvedCheck.status !== 'running';
+    const isResolved = issue.status?.category === 'done' || (deptStatusCategory === 'done' && deptClockGenuinelyStopped);
+
+    // By explicit request: editing an SLA policy (e.g. tightening Migration's
+    // Medium target from 8h to 6h) was silently changing the breach verdict
+    // of every ALREADY-RESOLVED ticket ever handled under that department,
+    // because this function always recomputes from whatever sla_definitions
+    // currently says -- there was no memory of what the target used to be.
+    // Confirmed for real on CF-32756: resolved weeks before a Sep 28 policy
+    // edit, its breach status (and displayed Due time) still shifted to
+    // match the NEW target the moment anyone looked at it again. A resolved
+    // ticket's outcome shouldn't retroactively change because someone edited
+    // a setting after the fact -- once resolved, freeze the computed result
+    // the first time it's computed post-fix, and always return that frozen
+    // snapshot afterward regardless of any later policy edits. (The true
+    // pre-edit value for tickets resolved before this fix shipped is
+    // unrecoverable -- sla_definitions never kept history -- so the first
+    // freeze uses whatever the policy says as of right now; going forward,
+    // no further edits can ever move it again.)
+    //
+    // Deliberately checked BEFORE any allPolicies/dept-based policy
+    // filtering below (which can legitimately end up empty -- e.g. zero
+    // active policies at all, or none scoped to this ticket's CURRENT
+    // department) -- a resolved ticket's frozen snapshot must never depend
+    // on whether a policy still targets wherever the ticket happens to sit
+    // today. Confirmed for real: CF-33699/CF-33837, both resolved with a
+    // real historical Dev breach already frozen into sla_snapshot, were
+    // later moved to "Pre-Sales-Old" (a department no active SLA policy is
+    // scoped to) -- the old ordering hit `if (!policies.length) return [];`
+    // below before ever reaching this check, silently discarding a
+    // perfectly valid frozen result and reporting "no SLA data" instead.
+    if (isResolved) {
+      const existingSnapshot = issue.sla_snapshot !== undefined
+        ? issue.sla_snapshot
+        : (await pool.query(`SELECT sla_snapshot FROM issues WHERE id=$1`, [issue.id]).catch(() => null))?.rows[0]?.sla_snapshot;
+      if (Array.isArray(existingSnapshot) && existingSnapshot.length) {
+        // A waiver applied AFTER the snapshot was frozen (an admin deciding
+        // later that a breach was a mistake) only ever wrote to sla_waivers
+        // -- the "SLA Breach Waiver" endpoint never touches sla_snapshot --
+        // so returning the frozen array as-is kept showing "Breached"
+        // forever afterward, no matter how many times it got waived.
+        // Confirmed for real on CF-29905: waived 2026-09-11 ("it's by
+        // mistake"), still read Breached on the ticket detail page
+        // indefinitely after. Re-apply whatever sla_waivers says right now
+        // on top of the frozen numbers -- due time/elapsed/etc. stay
+        // frozen, only the breach verdict and waiver metadata go live.
+        const waivers: Record<string, any> = (issue as any).sla_waivers || {};
+        return existingSnapshot.map((inst: any) => {
+          const waiver = waivers[inst.policyId] || null;
+          if (!waiver) return inst;
+          return {
+            ...inst,
+            isBreached: false,
+            waived: true,
+            waivedByName: waiver.waivedByName || null,
+            waivedAt: waiver.waivedAt || null,
+            waivedReason: waiver.reason || null,
+          };
+        });
+      }
+    }
+
     if (!allPolicies.length) return [];
 
     // Only apply policies that target this issue's dept (or have no dept restriction)
-    const issueDept = ((issue as any).current_department || '').trim().toLowerCase();
     let policies = allPolicies.filter((p: any) => {
       const pDept = (p.dept_name || '').trim().toLowerCase();
       return !pDept || pDept === issueDept;
@@ -2939,88 +3034,7 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     const dedupedPolicies = Array.from(policyByName.values());
 
     const priority = (issue.priority || 'medium').toLowerCase();
-    // The status badge shown to the user can come from EITHER the ticket's
-    // global status OR its per-department dept_statuses snapshot (see
-    // issueStat in the issue detail page) -- whichever one the UI is
-    // currently reading from. Checking only the global status here let a
-    // ticket that visibly shows "Resolved" (via dept_statuses, e.g. a
-    // queue-scoped status whose done-ness never made it back to the real
-    // statusId column) keep ticking its SLA overdue counter forever, even
-    // though it plainly reads as resolved everywhere else in the UI.
-    const deptStatuses: Record<string, any> = (issue as any).dept_statuses || {};
-    const deptStatusKey = Object.keys(deptStatuses).find((k) => k.toLowerCase() === issueDept);
-    const deptStatusCategory = deptStatusKey ? deptStatuses[deptStatusKey]?.category : undefined;
-    // The moment ANY department resolves a ticket via its own queue status,
-    // that done status gets copied into every OTHER department's
-    // dept_statuses too (see the cross-department propagation in the
-    // queueStatusId handler), including a department that hasn't even
-    // received the ticket yet. When that department is later actually
-    // handed the ticket, performDeptHandoff's own "restore this dept's
-    // prior status" logic finds that stale propagated "done" entry and
-    // restores it as if it were genuinely earned -- so a brand-new handoff
-    // can land already marked "done" despite having done no real work at
-    // all, even while the ticket's real global status moments later reads
-    // something else entirely (e.g. "Waiting for Migration"). Confirmed for
-    // real on CF-29397: Migration's SLA card showed "RESOLVED, within goal"
-    // while dept_sla_log.Migration itself still read status:"running",
-    // paused_at:null -- a department whose own clock was never stopped
-    // can't simultaneously be resolved, no matter what the (possibly stale)
-    // dept_statuses snapshot claims. Only trust the dept_statuses fallback
-    // when this department's own SLA bookkeeping agrees it's actually been
-    // stopped -- never when it's still actively running.
-    const deptSlaLogForResolvedCheck: Record<string, any> = (issue as any).dept_sla_log || {};
-    const deptLogKeyForResolvedCheck = Object.keys(deptSlaLogForResolvedCheck).find((k) => k.toLowerCase() === issueDept);
-    const deptLogEntryForResolvedCheck = deptLogKeyForResolvedCheck ? deptSlaLogForResolvedCheck[deptLogKeyForResolvedCheck] : null;
-    const deptClockGenuinelyStopped = !deptLogEntryForResolvedCheck || deptLogEntryForResolvedCheck.status !== 'running';
-    const isResolved = issue.status?.category === 'done' || (deptStatusCategory === 'done' && deptClockGenuinelyStopped);
     const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
-
-    // By explicit request: editing an SLA policy (e.g. tightening Migration's
-    // Medium target from 8h to 6h) was silently changing the breach verdict
-    // of every ALREADY-RESOLVED ticket ever handled under that department,
-    // because this function always recomputes from whatever sla_definitions
-    // currently says -- there was no memory of what the target used to be.
-    // Confirmed for real on CF-32756: resolved weeks before a Sep 28 policy
-    // edit, its breach status (and displayed Due time) still shifted to
-    // match the NEW target the moment anyone looked at it again. A resolved
-    // ticket's outcome shouldn't retroactively change because someone edited
-    // a setting after the fact -- once resolved, freeze the computed result
-    // the first time it's computed post-fix, and always return that frozen
-    // snapshot afterward regardless of any later policy edits. (The true
-    // pre-edit value for tickets resolved before this fix shipped is
-    // unrecoverable -- sla_definitions never kept history -- so the first
-    // freeze uses whatever the policy says as of right now; going forward,
-    // no further edits can ever move it again.)
-    if (isResolved) {
-      const existingSnapshot = issue.sla_snapshot !== undefined
-        ? issue.sla_snapshot
-        : (await pool.query(`SELECT sla_snapshot FROM issues WHERE id=$1`, [issue.id]).catch(() => null))?.rows[0]?.sla_snapshot;
-      if (Array.isArray(existingSnapshot) && existingSnapshot.length) {
-        // A waiver applied AFTER the snapshot was frozen (an admin deciding
-        // later that a breach was a mistake) only ever wrote to sla_waivers
-        // -- the "SLA Breach Waiver" endpoint never touches sla_snapshot --
-        // so returning the frozen array as-is kept showing "Breached"
-        // forever afterward, no matter how many times it got waived.
-        // Confirmed for real on CF-29905: waived 2026-09-11 ("it's by
-        // mistake"), still read Breached on the ticket detail page
-        // indefinitely after. Re-apply whatever sla_waivers says right now
-        // on top of the frozen numbers -- due time/elapsed/etc. stay
-        // frozen, only the breach verdict and waiver metadata go live.
-        const waivers: Record<string, any> = (issue as any).sla_waivers || {};
-        return existingSnapshot.map((inst: any) => {
-          const waiver = waivers[inst.policyId] || null;
-          if (!waiver) return inst;
-          return {
-            ...inst,
-            isBreached: false,
-            waived: true,
-            waivedByName: waiver.waivedByName || null,
-            waivedAt: waiver.waivedAt || null,
-            waivedReason: waiver.reason || null,
-          };
-        });
-      }
-    }
 
     // dept_sla_started_at is reset to NOW() on every department handoff --
     // including a RETURN to a dept that already spent some of its SLA
