@@ -13398,7 +13398,12 @@ async function _handleJiraPgApi(
     // Track in history
     try {
       const aName = authorUser ? (`${authorUser.firstName ?? ''} ${authorUser.lastName ?? ''}`.trim() || authorUser.email) : 'Unknown';
-      await (db as any).issueHistory.create({ data: { issueId: issue.id, field: 'comment', oldValue: null, newValue: comment.body.slice(0, 500), authorName: aName, authorEmail: authorUser?.email ?? null, createdAt: new Date() } });
+      // Full body, untruncated -- this is the permanent history record of
+      // what the comment said, not a preview. A fixed-length slice() here
+      // used to cut the raw HTML off mid-tag (e.g. mid `style="..."`
+      // attribute), corrupting the markup and truncating the rendered text
+      // well before the actual end of the comment.
+      await (db as any).issueHistory.create({ data: { issueId: issue.id, field: 'comment', oldValue: null, newValue: comment.body, authorName: aName, authorEmail: authorUser?.email ?? null, createdAt: new Date() } });
     } catch (_e) {}
 
     // Record that this user did real work on the ticket -- same 'worked'
@@ -13781,9 +13786,12 @@ async function _handleJiraPgApi(
   const commentById = path.match(/^comments\/([^/]+)$/);
   if (commentById) {
     const commentId = commentById[1];
-    // Strips HTML/entities down to a short readable preview -- same approach
-    // used for the comment-added notification preview above; a raw HTML
-    // comment body in a history row would read as unrendered markup.
+    // Strips HTML/entities down to plain, readable text -- a raw HTML comment
+    // body in a history row would read as unrendered markup. This is the
+    // PERMANENT record of what the comment said before/after an edit or
+    // delete, so (unlike a push-notification preview) it must keep the full
+    // text -- an earlier 80-char slice() here froze every edited comment's
+    // history at 80 characters forever, cut off mid-word.
     const previewComment = (raw: string) => (raw || '')
       .replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/g, ' ')
@@ -13792,8 +13800,7 @@ async function _handleJiraPgApi(
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 80);
+      .trim();
     if (method === 'PATCH') {
       const body = await readJson(req);
       // Comment edits previously replaced the body with no trace of the
