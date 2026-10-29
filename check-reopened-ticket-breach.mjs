@@ -25,19 +25,7 @@ async function main() {
     console.log('dept_sla_log.Dev:', JSON.stringify(row.dept_sla_log?.Dev));
     const devSnap = (row.sla_snapshot || []).find((x) => (x.deptName || '').toLowerCase() === 'dev');
     console.log('frozen snapshot Dev entry:', JSON.stringify(devSnap));
-
-    // Fetch the CURRENT Dev policy the live recompute would use (newest by
-    // name, per policy name, same selection computeSLAInstancesPure's
-    // historicalInstances loop uses).
-    const { rows: policies } = await pool.query(`
-      SELECT id, name, dept_name, goals, "updatedAt" FROM sla_policies
-      WHERE "spaceId" = $1 AND LOWER(dept_name) = 'dev'
-      ORDER BY "updatedAt" DESC
-    `, [row.spaceId]);
-    console.log(`Current Dev policies in this space (${policies.length}):`);
-    for (const p of policies) {
-      console.log(`  - "${p.name}" updatedAt=${p.updatedAt.toISOString()} goals=${JSON.stringify(p.goals)}`);
-    }
+    console.log('full snapshot:', JSON.stringify(row.sla_snapshot));
   }
 
   await pool.end();
