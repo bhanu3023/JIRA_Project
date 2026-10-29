@@ -3012,7 +3012,21 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
       }
     }
     policies = [...newestByName.values()];
-    if (!policies.length) return [];
+    // Deliberately NOT an early return when this comes up empty (e.g. the
+    // ticket's CURRENT department has no SLA policy assigned at all, like a
+    // retired/parking department) -- dedupedPolicies below just ends up []
+    // and currentDeptInstances naturally comes back empty, which is correct:
+    // there's genuinely no live SLA for wherever this ticket sits today.
+    // Bailing out here used to also throw away historicalInstances further
+    // below, which reconstructs OTHER departments' SLA instances straight
+    // from allPolicies (the full, unfiltered set) and dept_sla_log -- those
+    // don't depend on the CURRENT department having a policy at all.
+    // Confirmed for real: CF-33699, moved to "Pre-Sales-Old" (no policy
+    // assigned) after a genuine ~4.9-day Dev breach recorded in
+    // dept_sla_log.Dev, had no sla_snapshot ever frozen (so the earlier,
+    // isResolved-first fix above had nothing to return) -- this same early
+    // return was ALSO silently discarding the one other code path that
+    // could still recover that real Dev breach.
 
     // When a department-specific policy shares its name with a space-wide
     // one (dept_name null) -- e.g. both literally called "Time to
