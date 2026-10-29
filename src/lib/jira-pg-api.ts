@@ -15896,18 +15896,6 @@ async function _handleJiraPgApi(
       const breached = instances.some((x: any) => x.isBreached && (
         x.deptName ? x.deptName.toLowerCase() === dept.toLowerCase() : inThisDeptNow
       ));
-      // TEMPORARY debug instrumentation -- tracing why CF-33837/CF-33699/
-      // CF-34598/CF-34629 show breached in Filters but not here, despite
-      // every offline SQL replay saying they should. Remove once resolved.
-      if (['CF-33837', 'CF-33699', 'CF-34598', 'CF-34629'].includes(row.key)) {
-        console.log('[MBR-DEBUG]', row.key, JSON.stringify({
-          in_team_scope: row.in_team_scope,
-          dept,
-          current_department: row.current_department,
-          instances: instances.map((x: any) => ({ deptName: x.deptName, isBreached: x.isBreached })),
-          breached,
-        }));
-      }
       slaById.set(row.id, breached);
 
       // One person per ticket: its Filters owner (see ownerByIssue).
