@@ -3338,12 +3338,16 @@ export default function IssueDetailPage() {
                                 )}
                               </div>
                             )}
-                            {/* Comment preview -- skipped for a delete event, whose newValue
-                                is the literal marker "[deleted]", not real comment text */}
+                            {/* Full comment text -- skipped for a delete event, whose newValue
+                                is the literal marker "[deleted]", not real comment text.
+                                Used to be single-line-truncated to 120 chars, which cut
+                                comments off mid-word ("half half showing") since the CSS
+                                `truncate` class clips by pixel width before that character
+                                limit is ever reached. Now shown in full, wrapped. */}
                             {a.field === 'comment' && a.newValue && a.newValue !== '[deleted]' && (() => {
                               const plain = stripHtmlToText(a.newValue).trim();
                               return (
-                                <div className="text-[12px] text-gray-500 italic truncate max-w-sm">"{plain.slice(0, 120)}{plain.length > 120 ? '…' : ''}"</div>
+                                <div className="text-[12px] text-gray-500 italic whitespace-pre-wrap break-words max-w-xl">"{plain}"</div>
                               );
                             })()}
                             {/* SLA lifecycle event (started/resumed/paused/resolved/breached) */}
