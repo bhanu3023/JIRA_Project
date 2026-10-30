@@ -2236,7 +2236,7 @@ export default function FiltersPage() {
         {/* Row 1: fixed filters */}
         <div className="flex items-center gap-2 px-4 py-3 flex-wrap border-b border-gray-100">
           {/* search */}
-          <div className="flex items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-1.5 min-w-[180px] flex-1 max-w-xs">
+          <div className="flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-1.5 min-w-[180px] flex-1 max-w-xs">
             <Search size={13} className="text-gray-400 flex-shrink-0" />
             <input
               value={text}
@@ -2289,14 +2289,14 @@ export default function FiltersPage() {
                 // in a flex-wrap toolbar (see Row 1 above), a width change on
                 // any one button can shift where the whole row wraps,
                 // visible as the toolbar jumping the moment Export is clicked.
-                className="flex items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-[12.5px] font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[92px]"
+                className="flex items-center justify-center gap-1.5 rounded border border-gray-300 px-3 py-1.5 text-[12.5px] font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[92px]"
               >
                 <Download size={13} /> {exporting ? `Exporting… ${exportProgress}` : 'Export'}
               </button>
             )}
             <button
               onClick={() => { setEditingFilter(null); setShowSaveModal(true); }}
-              className="flex items-center gap-1.5 rounded-md border border-blue-500 px-3 py-1.5 text-[12.5px] font-semibold text-blue-600 hover:bg-blue-50 transition-colors whitespace-nowrap"
+              className="flex items-center gap-1.5 rounded border border-blue-500 px-3 py-1.5 text-[12.5px] font-medium text-blue-600 hover:bg-blue-50 transition-colors whitespace-nowrap"
             >
               <Bookmark size={13} /> Save filter
             </button>
