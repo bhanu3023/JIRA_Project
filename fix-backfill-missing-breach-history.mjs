@@ -87,12 +87,18 @@ async function main() {
       if (already.length) continue;
 
       const { rows } = await pool.query(`
-        SELECT i.id, COALESCE(i.cf_key,i.key) AS key, i.dept_sla_log, i.priority, i."spaceId", i.sla_snapshot
+        SELECT i.id, COALESCE(i.cf_key,i.key) AS key, i.dept_sla_log, i.priority, i."spaceId", i.sla_snapshot,
+               i."createdAt", i.dept_sla_started_at
         FROM issues i WHERE i.id = $1
       `, [issue.id]);
       const r = rows[0];
       const deptLogKey = Object.keys(r.dept_sla_log || {}).find((k) => k.toLowerCase() === dept.toLowerCase());
       const entry = deptLogKey ? r.dept_sla_log[deptLogKey] : null;
+      const priority = (r.priority || 'medium').toLowerCase();
+      const policies = (policiesBySpace[r.spaceId] || []).filter((p) => {
+        const pDept = (p.dept_name || '').trim().toLowerCase();
+        return !pDept || pDept === dept.toLowerCase();
+      });
 
       // Prefer the frozen snapshot's own dueTime for this department when
       // it exists -- that's the authoritative, already-computed value.
@@ -101,16 +107,18 @@ async function main() {
       if (snapEntry?.dueTime) {
         dueTimeMs = new Date(snapEntry.dueTime).getTime();
       } else if (entry?.started_at) {
-        const priority = (r.priority || 'medium').toLowerCase();
-        const policies = (policiesBySpace[r.spaceId] || []).filter((p) => {
-          const pDept = (p.dept_name || '').trim().toLowerCase();
-          return !pDept || pDept === dept.toLowerCase();
-        });
         const goalMs = getGoalMs(policies, priority);
         const priorElapsedMs = entry.elapsed_ms || 0;
         dueTimeMs = new Date(entry.started_at).getTime() + (goalMs - priorElapsedMs);
+      } else {
+        // No dept_sla_log entry at all for this department -- same
+        // createdAt/dept_sla_started_at fallback the live breach check
+        // itself uses for a ticket that's never had a formal department
+        // handoff recorded.
+        const goalMs = getGoalMs(policies, priority);
+        const startMs = r.dept_sla_started_at ? new Date(r.dept_sla_started_at).getTime() : new Date(r.createdAt).getTime();
+        dueTimeMs = startMs + goalMs;
       }
-      if (dueTimeMs === null) continue; // no real basis to compute a due time -- skip, don't guess
 
       const { rows: histRows } = await pool.query(
         `SELECT "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'assignee' ORDER BY "createdAt" ASC`,
