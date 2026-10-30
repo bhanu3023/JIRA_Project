@@ -438,9 +438,16 @@ export async function handleKbApi(
     where.push(`a.kind = ${p(parseKind(url.searchParams.get('kind')))}`);
 
     if (scope === 'approvals') {
-      // Articles waiting on me: as the author's manager, or as an admin.
+      // Articles waiting on me: as the author's manager, as an admin, or as
+      // any migration_manager role user (same blanket access canApprove and
+      // kb/me's `reviews` flag already grant them above) -- without this,
+      // the "Awaiting my approval" tab correctly appeared for a migration
+      // manager (reviews: true) but the list itself stayed narrowed to only
+      // articles where THEY specifically were the assigned approver_id,
+      // same as an ordinary manager, leaving it empty for everyone except
+      // whoever happened to be set as that particular author's manager.
       where.push(`status = 'pending' AND author_id <> ${p(userId)}`);
-      if (!isAdmin) where.push(`approver_id = ${p(userId)}`);
+      if (!isAdmin && !isMigrationManager) where.push(`approver_id = ${p(userId)}`);
     } else if (scope === 'drafts') {
       // Drafts include the ones submitted and waiting for approval.
       where.push(`status IN ('draft', 'pending')`);
