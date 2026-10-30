@@ -455,18 +455,12 @@ export async function handleKbApi(
   // (row.author_id !== userId already guards that for every path here).
   const isMigrationManager = currentUser?.role === 'migration_manager';
   const canManage = (row: any) => isAdmin || row.author_id === userId;
-<<<<<<< HEAD
   // A pending article waits on any of its author's managers (approver_ids),
-  // or any admin when the author has no manager.
-  const canApprove = (row: any) =>
-    row.status === 'pending' && row.author_id !== userId && (isAdmin || (row.approver_ids || []).includes(userId));
-=======
-  // A pending article waits on its manager (approver_id), any admin when
-  // the author has no manager, or any migration_manager role user.
+  // any admin when the author has no manager, or any migration_manager role
+  // user (same blanket access as an admin -- see isMigrationManager above).
   const canApprove = (row: any) =>
     row.status === 'pending' && row.author_id !== userId &&
-    (isAdmin || isMigrationManager || (!!row.approver_id && row.approver_id === userId));
->>>>>>> a2c0caa5b8dbec955e44dfbe3b647b7e50e0f0dc
+    (isAdmin || isMigrationManager || (row.approver_ids || []).includes(userId));
   const canRead = (row: any, myTeams: string[]) =>
     canManage(row) ||
     canApprove(row) ||
@@ -481,13 +475,8 @@ export async function handleKbApi(
     const reportCount = Number((await pool.query(`SELECT COUNT(*) FROM users WHERE $1 = ANY(manager_ids)`, [userId])).rows[0]?.count || 0);
     return json({
       publishesDirectly: isAdmin,
-<<<<<<< HEAD
       approvers: approvers.map((a) => ({ id: a.id, name: a.name })),
-      reviews: isAdmin || reportCount > 0,
-=======
-      approver: approver ? { id: approver.id, name: approver.name } : null,
       reviews: isAdmin || isMigrationManager || reportCount > 0,
->>>>>>> a2c0caa5b8dbec955e44dfbe3b647b7e50e0f0dc
     });
   }
 
@@ -521,11 +510,7 @@ export async function handleKbApi(
       // same as an ordinary manager, leaving it empty for everyone except
       // whoever happened to be set as that particular author's manager.
       where.push(`status = 'pending' AND author_id <> ${p(userId)}`);
-<<<<<<< HEAD
-      if (!isAdmin) where.push(`${p(userId)} = ANY(approver_ids)`);
-=======
-      if (!isAdmin && !isMigrationManager) where.push(`approver_id = ${p(userId)}`);
->>>>>>> a2c0caa5b8dbec955e44dfbe3b647b7e50e0f0dc
+      if (!isAdmin && !isMigrationManager) where.push(`${p(userId)} = ANY(approver_ids)`);
     } else if (scope === 'drafts') {
       // Drafts include the ones submitted and waiting for approval.
       where.push(`status IN ('draft', 'pending')`);
