@@ -654,13 +654,15 @@ function DateDropBtn({
         )}
       >
         {active ? `${label}: ${decodeDateLabel(selected)}` : label}
-        {active ? (
-          <span onClick={(e) => { e.stopPropagation(); onChange(''); }} className="ml-0.5 text-blue-400 hover:text-blue-700 cursor-pointer">
-            <X size={11} />
-          </span>
-        ) : (
-          <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
-        )}
+        {/* No inline clear-X here -- when this filter lives in the Active
+            Filters row (every call site does), it already sits right next
+            to that row's own remove-from-bar X, and showing both produced
+            two different-looking close icons stacked next to each other
+            for the same chip. The panel's own Clear button (in its footer)
+            still clears the value without removing the chip; the row's own
+            X removes it from the bar entirely -- one visible X per chip,
+            one unambiguous job each. */}
+        <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
       </button>
 
       {open && dropPos && createPortal(
@@ -841,9 +843,12 @@ function TextFilterBtn({ label, value, onChange }: { label: string; value: strin
         className={cn('flex items-center gap-1 rounded border px-3 py-1.5 text-[12.5px] font-medium transition-colors whitespace-nowrap',
           active ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 hover:bg-gray-50')}>
         {active ? `${label}: ${value}` : label}
-        {active
-          ? <span onClick={(e) => { e.stopPropagation(); onChange(''); }} className="ml-0.5 text-blue-400 hover:text-blue-700 cursor-pointer"><X size={11} /></span>
-          : <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />}
+        {/* No inline clear-X -- see the matching comment on DateDropBtn's
+            own trigger button for why: this chip always sits next to the
+            Active Filters row's own remove-from-bar X, and showing two
+            different-looking X's on one chip read as visual clutter. The
+            panel's own Clear button still clears the value in place. */}
+        <ChevronDown size={12} className={cn('ml-0.5 text-gray-400 transition-transform', open && 'rotate-180')} />
       </button>
       {open && dropPos && createPortal(
         <div
