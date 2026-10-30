@@ -2216,14 +2216,22 @@ function SettingsContent() {
                 <button onClick={() => setOpenUserMenu(openUserMenu === '__status__' ? null : '__status__')}
                   className={`flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md bg-white transition-colors ${userStatusFilter ? 'border-blue-400 text-blue-700 bg-blue-50' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>
                   <Filter size={13} className={userStatusFilter ? 'text-blue-500' : 'text-gray-400'} />
-                  {userStatusFilter === 'active' ? 'Active' : userStatusFilter === 'inactive' ? 'Inactive' : 'Status'}
+                  {userStatusFilter === 'active' ? 'Active' : userStatusFilter === 'inactive' ? 'Inactive' : userStatusFilter === 'invited' ? 'Invited' : 'Status'}
                   <ChevronDown size={13} className="text-gray-400" />
                 </button>
                 {openUserMenu === '__status__' && (
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setOpenUserMenu(null)} />
                     <div className="absolute left-0 top-full mt-1 w-36 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50">
-                      {[{ val: '', label: 'All status' }, { val: 'active', label: 'Active' }, { val: 'inactive', label: 'Inactive' }].map(item => (
+                      {/* "Invited" is a genuine third status (its own yellow
+                          badge in the table below, distinct from green
+                          Active / gray Inactive) -- without its own filter
+                          option here, every invited-but-not-yet-active user
+                          fell through both "Active" and "Inactive" (status
+                          'invited' matches neither), only ever visible
+                          under "All status". Confirmed for real: 14 of 162
+                          users were invisible under either filter. */}
+                      {[{ val: '', label: 'All status' }, { val: 'active', label: 'Active' }, { val: 'inactive', label: 'Inactive' }, { val: 'invited', label: 'Invited' }].map(item => (
                         <button key={item.val} onClick={() => { setUserStatusFilter(item.val); setOpenUserMenu(null); }}
                           className={`w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-gray-50 transition-colors ${userStatusFilter === item.val ? 'text-blue-600 font-medium' : 'text-gray-700'}`}>
                           {item.label}
