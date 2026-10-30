@@ -7228,9 +7228,18 @@ async function _handleJiraPgApi(
               { ...r, current_department: dept, status: { name: r.status_name, category: r.status_category } },
               slaPolicies, false
             );
+            // Same dueDate/real-SLA-breach conflation fix as
+            // computeSlaBreachedAndOverdue (see its own long comment) --
+            // zero instances means no SLA policy genuinely applies here at
+            // all (e.g. a priority tier explicitly disabled via a 0h goal
+            // row), so a generic, manually-set Due Date crossing into the
+            // past is not evidence of an SLA miss. Only the honest,
+            // legacy-imported jira_sla_breached flag is trusted as a
+            // fallback in that case -- never an inferred guess from an
+            // unrelated field.
             const currentBreached = currentInstances.length
               ? currentInstances.some((x: any) => x.isBreached)
-              : !!(r.jira_sla_breached || (r.dueDate && new Date(r.dueDate).getTime() < Date.now()));
+              : !!r.jira_sla_breached;
             if (currentBreached) bucket.slaBreached++;
           }
 
