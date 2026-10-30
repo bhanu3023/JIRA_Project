@@ -5560,7 +5560,7 @@ function getUpdatedSyncJqlFloor(checkpointYyyyMmDd: string): string {
 async function refreshSyncProjectIssue(localKey: string): Promise<boolean> {
   try {
     const existing = await pool.query(
-      `SELECT id, "assigneeId", "reporterId", "parentKey", labels, "customerName", "clientName",
+      `SELECT id, summary, type, priority, "assigneeId", "reporterId", "parentKey", labels, "customerName", "clientName",
               "projectManager", "productType", combination, "productionTicket", "rootCause",
               "fixDescription", "statusId", "updatedAt", "spaceId"
        FROM issues WHERE key = $1 LIMIT 1`,
@@ -5600,6 +5600,43 @@ async function refreshSyncProjectIssue(localKey: string): Promise<boolean> {
     };
     const [assigneeId, reporterId] = await Promise.all([resolveByDisplayName(f.assignee), resolveByDisplayName(f.reporter)]);
 
+    const next = {
+      summary: f.summary || localKey,
+      type: (f.issuetype?.name || 'task').toLowerCase(),
+      priority: (f.priority?.name || 'medium').toLowerCase(),
+      statusId: localStatus?.id ?? row.statusId,
+      assigneeId: assigneeId ?? row.assigneeId,
+      reporterId: reporterId ?? row.reporterId,
+      parentKey: f.parent?.key ?? row.parentKey,
+      labels: Array.isArray(f.labels) ? f.labels : row.labels,
+      customerName: extractJiraValue(f.customfield_10401) ?? row.customerName,
+      clientName: extractJiraValue(f.customfield_10883) ?? row.clientName,
+      projectManager: extractJiraValue(f.customfield_11380) ?? row.projectManager,
+      productType: extractJiraValue(f.customfield_10203) ?? row.productType,
+      combination: extractJiraValue(f.customfield_10236) ?? row.combination,
+      productionTicket: extractJiraValue(f.customfield_10665) ?? row.productionTicket,
+      rootCause: extractJiraValue(f.customfield_10059) ?? row.rootCause,
+      fixDescription: extractJiraValue(f.customfield_10402) ?? row.fixDescription,
+    };
+    // Jira's own `updated` timestamp ticks for all sorts of reasons that
+    // have nothing to do with any field this sync actually tracks (a
+    // watcher change, a linked-issue touch, Jira's own internal
+    // bookkeeping) -- blindly copying it onto our local updatedAt on every
+    // refresh cycle meant an old, already-resolved, untouched-by-anyone
+    // ticket could silently jump to "updated today" with zero trace in its
+    // own History tab, polluting every "recently updated" Filters/MBR query
+    // across the whole app with phantom activity. Confirmed for real:
+    // CF-29552, created and resolved in August, updatedAt read 28/Oct with
+    // no issue_history row anywhere near that timestamp and no DB trigger
+    // on the issues table to explain it either -- this unconditional write
+    // was the only thing that could have done it. Only adopt Jira's
+    // timestamp when at least one of the fields THIS sync actually tracks
+    // genuinely changed; otherwise keep the existing updatedAt untouched.
+    const changed = Object.keys(next).some((k) => {
+      const a = (next as any)[k];
+      const b = (row as any)[k];
+      return Array.isArray(a) ? JSON.stringify(a) !== JSON.stringify(b) : a !== b;
+    });
     await pool.query(
       `UPDATE issues SET
          summary=$1, type=$2, priority=$3, "statusId"=$4, "assigneeId"=$5, "reporterId"=$6,
@@ -5608,23 +5645,11 @@ async function refreshSyncProjectIssue(localKey: string): Promise<boolean> {
          "rootCause"=$15, "fixDescription"=$16, "updatedAt"=$17
        WHERE id=$18`,
       [
-        f.summary || localKey,
-        (f.issuetype?.name || 'task').toLowerCase(),
-        (f.priority?.name || 'medium').toLowerCase(),
-        localStatus?.id ?? row.statusId,
-        assigneeId ?? row.assigneeId,
-        reporterId ?? row.reporterId,
-        f.parent?.key ?? row.parentKey,
-        Array.isArray(f.labels) ? f.labels : row.labels,
-        extractJiraValue(f.customfield_10401) ?? row.customerName,
-        extractJiraValue(f.customfield_10883) ?? row.clientName,
-        extractJiraValue(f.customfield_11380) ?? row.projectManager,
-        extractJiraValue(f.customfield_10203) ?? row.productType,
-        extractJiraValue(f.customfield_10236) ?? row.combination,
-        extractJiraValue(f.customfield_10665) ?? row.productionTicket,
-        extractJiraValue(f.customfield_10059) ?? row.rootCause,
-        extractJiraValue(f.customfield_10402) ?? row.fixDescription,
-        f.updated ? new Date(f.updated) : row.updatedAt,
+        next.summary, next.type, next.priority, next.statusId, next.assigneeId, next.reporterId,
+        next.parentKey, next.labels, next.customerName, next.clientName,
+        next.projectManager, next.productType, next.combination, next.productionTicket,
+        next.rootCause, next.fixDescription,
+        changed && f.updated ? new Date(f.updated) : row.updatedAt,
         row.id,
       ]
     );
@@ -5655,7 +5680,7 @@ async function refreshSyncProjectIssue(localKey: string): Promise<boolean> {
 async function refreshCfitsIssue(cfitsKey: string): Promise<boolean> {
   try {
     const existing = await pool.query(
-      `SELECT id, "assigneeId", "reporterId", labels, "customerName", "clientName", "projectManager",
+      `SELECT id, summary, type, priority, "assigneeId", "reporterId", labels, "customerName", "clientName", "projectManager",
               "productType", combination, "productionTicket", "rootCause", "fixDescription",
               "statusId", "updatedAt"
        FROM issues WHERE jira_source_key = $1 LIMIT 1`,
@@ -5695,6 +5720,31 @@ async function refreshCfitsIssue(cfitsKey: string): Promise<boolean> {
     };
     const [assigneeId, reporterId] = await Promise.all([resolveByDisplayName(f.assignee), resolveByDisplayName(f.reporter)]);
 
+    const next = {
+      summary: f.summary || cfitsKey,
+      type: (f.issuetype?.name || 'task').toLowerCase(),
+      priority: (f.priority?.name || 'medium').toLowerCase(),
+      statusId: localStatus?.id ?? row.statusId,
+      assigneeId: assigneeId ?? row.assigneeId,
+      reporterId: reporterId ?? row.reporterId,
+      labels: Array.isArray(f.labels) ? f.labels : row.labels,
+      customerName: extractJiraValue(f.customfield_10401) ?? row.customerName,
+      clientName: extractJiraValue(f.customfield_10883) ?? row.clientName,
+      projectManager: extractJiraValue(f.customfield_11380) ?? row.projectManager,
+      productType: extractJiraValue(f.customfield_10203) ?? row.productType,
+      combination: extractJiraValue(f.customfield_10236) ?? row.combination,
+      productionTicket: extractJiraValue(f.customfield_10665) ?? row.productionTicket,
+      rootCause: extractJiraValue(f.customfield_10059) ?? row.rootCause,
+      fixDescription: extractJiraValue(f.customfield_10402) ?? row.fixDescription,
+    };
+    // Same "don't adopt Jira's own updated timestamp unless something this
+    // sync actually tracks really changed" fix as refreshSyncProjectIssue --
+    // see its own long comment for the CF-29552 case this was built for.
+    const changed = Object.keys(next).some((k) => {
+      const a = (next as any)[k];
+      const b = (row as any)[k];
+      return Array.isArray(a) ? JSON.stringify(a) !== JSON.stringify(b) : a !== b;
+    });
     await pool.query(
       `UPDATE issues SET
          summary=$1, type=$2, priority=$3, "statusId"=$4, "assigneeId"=$5, "reporterId"=$6,
@@ -5703,22 +5753,11 @@ async function refreshCfitsIssue(cfitsKey: string): Promise<boolean> {
          "rootCause"=$14, "fixDescription"=$15, "updatedAt"=$16
        WHERE id=$17`,
       [
-        f.summary || cfitsKey,
-        (f.issuetype?.name || 'task').toLowerCase(),
-        (f.priority?.name || 'medium').toLowerCase(),
-        localStatus?.id ?? row.statusId,
-        assigneeId ?? row.assigneeId,
-        reporterId ?? row.reporterId,
-        Array.isArray(f.labels) ? f.labels : row.labels,
-        extractJiraValue(f.customfield_10401) ?? row.customerName,
-        extractJiraValue(f.customfield_10883) ?? row.clientName,
-        extractJiraValue(f.customfield_11380) ?? row.projectManager,
-        extractJiraValue(f.customfield_10203) ?? row.productType,
-        extractJiraValue(f.customfield_10236) ?? row.combination,
-        extractJiraValue(f.customfield_10665) ?? row.productionTicket,
-        extractJiraValue(f.customfield_10059) ?? row.rootCause,
-        extractJiraValue(f.customfield_10402) ?? row.fixDescription,
-        f.updated ? new Date(f.updated) : row.updatedAt,
+        next.summary, next.type, next.priority, next.statusId, next.assigneeId, next.reporterId,
+        next.labels, next.customerName, next.clientName, next.projectManager,
+        next.productType, next.combination, next.productionTicket,
+        next.rootCause, next.fixDescription,
+        changed && f.updated ? new Date(f.updated) : row.updatedAt,
         row.id,
       ]
     );
