@@ -7,18 +7,31 @@
 import pg from 'pg';
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
+// last_real now also considers comments (createdAt AND updatedAt, since an
+// edited comment bumps its own updatedAt without a new createdAt),
+// attachments, and worklog entries -- none of those show up in
+// issue_history (which only tracks field changes), but all are genuine
+// activity that legitimately bumps updatedAt. Without this, a ticket with
+// a real recent comment but no field change would be wrongly flagged as
+// "phantom."
+const LAST_REAL_CTE = `
+  WITH last_real_activity AS (
+    SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i."createdAt", i."resolvedAt", i."updatedAt",
+           GREATEST(
+             i."createdAt",
+             COALESCE(i."resolvedAt", i."createdAt"),
+             COALESCE((SELECT MAX(h."createdAt") FROM issue_history h WHERE h."issueId" = i.id), i."createdAt"),
+             COALESCE((SELECT MAX(GREATEST(c."createdAt", c."updatedAt")) FROM comments c WHERE c."issueId" = i.id), i."createdAt"),
+             COALESCE((SELECT MAX(a."createdAt") FROM attachments a WHERE a."issueId" = i.id), i."createdAt"),
+             COALESCE((SELECT MAX(w."createdAt") FROM issue_worklogs w WHERE w."issueId" = i.id), i."createdAt")
+           ) AS last_real
+    FROM issues i
+  )
+`;
+
 async function main() {
   const { rows } = await pool.query(`
-    WITH last_real_activity AS (
-      SELECT i.id,
-             GREATEST(
-               i."createdAt",
-               COALESCE(i."resolvedAt", i."createdAt"),
-               COALESCE((SELECT MAX(h."createdAt") FROM issue_history h WHERE h."issueId" = i.id), i."createdAt")
-             ) AS last_real,
-             i."updatedAt"
-      FROM issues i
-    )
+    ${LAST_REAL_CTE}
     SELECT COUNT(*) AS total,
            COUNT(*) FILTER (WHERE "updatedAt" > last_real + INTERVAL '1 hour') AS phantom_1h,
            COUNT(*) FILTER (WHERE "updatedAt" > last_real + INTERVAL '1 day') AS phantom_1d,
@@ -28,15 +41,7 @@ async function main() {
   console.log(rows[0]);
 
   const { rows: sample } = await pool.query(`
-    WITH last_real_activity AS (
-      SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i."createdAt", i."resolvedAt", i."updatedAt",
-             GREATEST(
-               i."createdAt",
-               COALESCE(i."resolvedAt", i."createdAt"),
-               COALESCE((SELECT MAX(h."createdAt") FROM issue_history h WHERE h."issueId" = i.id), i."createdAt")
-             ) AS last_real
-      FROM issues i
-    )
+    ${LAST_REAL_CTE}
     SELECT key, "createdAt", "resolvedAt", last_real, "updatedAt",
            EXTRACT(EPOCH FROM ("updatedAt" - last_real)) / 86400 AS gap_days
     FROM last_real_activity
