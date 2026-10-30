@@ -4171,7 +4171,24 @@ function computeSlaBreachedAndOverdue(
   // what hid the real per-department tracked data (deptLogEntry below) that
   // should have taken priority over it.
   if (!breached) {
-    if (!isResolved && i.dueDate && new Date(i.dueDate).getTime() < nowMs) breached = true;
+    // A generic, manually-set "Due Date" custom field crossing into the
+    // past is a totally different concept from an actual SLA policy
+    // breach -- it's already its own separate, correctly-computed signal
+    // (`overdue`, returned below from the exact same isOverdue expression).
+    // This used to ALSO fold it into `breached` itself, meaning a ticket
+    // with no applicable SLA policy at all for its department/priority
+    // (e.g. a priority tier explicitly disabled via a 0h goal row) still
+    // showed "SLA Breached: Yes" purely because its unrelated Due Date
+    // field was in the past -- and, under a department-scoped Filters
+    // view, got attributed to whoever historically held THAT department,
+    // blaming them for a "breach" that was never a real SLA miss at all.
+    // Confirmed for real: CF-33117, priority "lowest" with Dev's own
+    // policy explicitly listing 0h for that tier (priority tier removed
+    // from SLA tracking, never breached), showed "SLA Breached: Yes, by
+    // Mayank Jain" under a Dev-scoped view -- Mayank held it for a
+    // genuine ~6 minutes before handing off to QA, where it later
+    // breached for real; the generic Due Date field was the only thing
+    // that ever called Dev's stint "breached".
     // Same fallback as computeIssueSLAsFromDb: tickets never routed through
     // a department transfer have no dept_sla_started_at, so measure from
     // creation.
