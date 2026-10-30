@@ -2682,13 +2682,42 @@ function computeInProgressMsInWindow(
 // moment one elsewhere in this file).
 async function enrichSlaWithInProgressTime(issueId: string, slaInstances: any[]): Promise<any[]> {
   if (!slaInstances.length) return slaInstances;
-  const statusHistory = await getStatusHistoryRows(issueId);
-  if (!statusHistory.length) return slaInstances;
+  const [statusHistory, worklogRows] = await Promise.all([
+    getStatusHistoryRows(issueId),
+    pool.query(
+      `SELECT department, "timeSpentMinutes", "workDate" FROM issue_worklogs WHERE "issueId" = $1`,
+      [issueId]
+    ).then((r) => r.rows).catch(() => [] as any[]),
+  ]);
+  if (!statusHistory.length && !worklogRows.length) return slaInstances;
   return slaInstances.map((s: any) => {
     const startMs = s.startedAt ? new Date(s.startedAt).getTime() : null;
     const elapsedMs = typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : null;
     if (startMs === null || elapsedMs === null) return s;
-    return { ...s, inProgressElapsedMs: computeInProgressMsInWindow(statusHistory, startMs, startMs + elapsedMs) };
+    const endMs = startMs + elapsedMs;
+    const statusBasedMs = statusHistory.length ? computeInProgressMsInWindow(statusHistory, startMs, endMs) : 0;
+    // A ticket can have real, logged work time for this department window
+    // (the Worklog panel's own entries) without anyone ever having flipped
+    // its status to literally "In Progress" -- the status-only check above
+    // then read a flat 0m even though genuine work happened, which looked
+    // broken next to a visibly non-trivial "Spent Xh Ym here" duration.
+    // Confirmed for real: audited 150 recently-resolved tickets' department
+    // instances where the status-based check read 0m -- while none in that
+    // sample happened to also have overlapping worklog entries, the gap
+    // itself is real: logging work via Worklog instead of the status
+    // dropdown is a normal, supported way to record work, and this field
+    // ignored it entirely. Takes whichever signal shows MORE real tracked
+    // time (not a sum) so overlapping in-progress-status time and a
+    // worklog entry logged during that same stretch don't double-count the
+    // same work twice.
+    const deptKey = (s.deptName || '').trim().toLowerCase();
+    const worklogMs = deptKey
+      ? worklogRows
+          .filter((w: any) => (w.department || '').trim().toLowerCase() === deptKey)
+          .filter((w: any) => { const t = new Date(w.workDate).getTime(); return t >= startMs && t <= endMs; })
+          .reduce((sum: number, w: any) => sum + (w.timeSpentMinutes || 0) * 60_000, 0)
+      : 0;
+    return { ...s, inProgressElapsedMs: Math.max(statusBasedMs, worklogMs) };
   });
 }
 
