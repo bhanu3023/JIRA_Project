@@ -3113,8 +3113,19 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     const priorElapsedMs: number = deptLogEntry ? (deptLogEntry.elapsed_ms || 0) : 0;
 
     const currentDeptInstances = dedupedPolicies.map((policy: any) => {
+      // Same dept_sla_started_at/dept_sla_log[dept].started_at desync fix
+      // as computeSlaBreachedAndOverdue (see its own long comment) -- a
+      // ticket resolved and later reopened can have this department's own
+      // log correctly restarted while the top-level dept_sla_started_at
+      // column stays stale or null, falling all the way back to the
+      // ticket's original creation date and showing a wildly wrong
+      // Start/Due on this very SLA panel (and, for a ticket that gets
+      // re-resolved afterward, permanently freezing that wrong value into
+      // sla_snapshot).
       const periodStartMs = (issue as any).dept_sla_started_at
         ? new Date((issue as any).dept_sla_started_at).getTime()
+        : deptLogEntry?.started_at
+        ? new Date(deptLogEntry.started_at).getTime()
         : (issue.createdAt ? new Date(issue.createdAt).getTime() : Date.now());
       let durationMs = 8 * 60 * 60 * 1000; // default 8h
       // A priorityRow that EXISTS for this priority but whose value is
@@ -3162,6 +3173,8 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
 
       const rawStartedAt = (issue as any).dept_sla_started_at
         ? new Date((issue as any).dept_sla_started_at).toISOString()
+        : deptLogEntry?.started_at
+        ? new Date(deptLogEntry.started_at).toISOString()
         : (issue.createdAt ? new Date(issue.createdAt).toISOString() : new Date().toISOString());
       // Remaining budget = full goal minus whatever this dept already burned
       // across earlier visits, so resuming here continues the countdown
@@ -4192,8 +4205,25 @@ function computeSlaBreachedAndOverdue(
     // that ever called Dev's stint "breached".
     // Same fallback as computeIssueSLAsFromDb: tickets never routed through
     // a department transfer have no dept_sla_started_at, so measure from
-    // creation.
-    const slaStartedAt = i.dept_sla_started_at || i.createdAt;
+    // creation -- UNLESS this department's own dept_sla_log already
+    // records when its current stint actually began, which is more
+    // accurate whenever it exists. dept_sla_started_at (the top-level
+    // column) and dept_sla_log[dept].started_at (this department's own
+    // per-department record) can drift out of sync -- specifically, a
+    // ticket resolved and later REOPENED can have its per-department log
+    // correctly restarted (pauseDeptSLA/startDeptSLA both write it on every
+    // transition) while the top-level column stays stuck at whatever it
+    // was before, or null. Falling all the way back to the ticket's
+    // original creation date in that case massively overstated how long
+    // this stint has actually run. Confirmed for real: CF-19862, resolved
+    // then reopened, had dept_sla_log.QA.started_at correctly read
+    // "today" (its real reopened stint), but dept_sla_started_at was null
+    // -- falling back to createdAt (over 5,500 hours earlier) made a
+    // freshly-reopened ticket with a 6h goal look wildly, wrongly overdue.
+    const deptSlaLogTop: Record<string, any> = (i as any).dept_sla_log || {};
+    const deptLogKeyTop = Object.keys(deptSlaLogTop).find((k) => k.toLowerCase() === dept);
+    const deptLogEntryTop = deptLogKeyTop ? deptSlaLogTop[deptLogKeyTop] : null;
+    const slaStartedAt = i.dept_sla_started_at || deptLogEntryTop?.started_at || i.createdAt;
     if (!breached && slaStartedAt) {
       const priority = (i.priority || 'medium').toLowerCase();
       const currentStatusName = (i.status?.name || '').trim().toLowerCase();
