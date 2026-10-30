@@ -630,7 +630,8 @@ export type KbArticle = {
   canApprove: boolean;
 };
 // How publishing works for the signed-in user.
-export type KbMe = { publishesDirectly: boolean; approver: { id: string; name: string } | null; reviews: boolean };
+// `approvers` empty = any admin approves.
+export type KbMe = { publishesDirectly: boolean; approvers: { id: string; name: string }[]; reviews: boolean };
 export type KbFile = { id: string; filename: string; mime: string | null; size: number; createdAt: string };
 export type KbQuestion = {
   id: string;

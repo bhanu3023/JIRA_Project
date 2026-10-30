@@ -12,9 +12,10 @@
  * Drafts are visible only to their author and to admins.
  *
  * Publishing needs approval: a non-admin's "publish" submits the article
- * (status 'pending') to their manager -- users.manager_id, set by an admin in
- * Settings > Users -- or, if they have no manager, to any admin. Only once
- * the approver approves does it go live and notify the chosen audience.
+ * (status 'pending') to their managers -- users.manager_ids, set by an admin
+ * in Settings > Users; a user can have several, and any one of them may
+ * approve -- or, if they have no manager, to any admin. Only once an
+ * approver approves does it go live and notify the chosen audience.
  * Admins publish directly. A rejected article goes back to draft with the
  * approver's note.
  */
@@ -29,7 +30,7 @@ const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_QA_CHARS = 4000;
 const INLINE_MIME = new Set(['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
-const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
+export const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   body_html TEXT NOT NULL DEFAULT '',
@@ -81,8 +82,9 @@ const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
   // documents and questions, just listed separately.
   .then(() => pool.query(`ALTER TABLE kb_articles ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'kb'`))
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS kb_articles_kind_idx ON kb_articles(kind)`))
-  // Approval workflow. approver_id is the manager the request went to (NULL =
-  // any admin); review_note is the reason given when changes were requested.
+  // Approval workflow. approver_id was the manager the request went to (now
+  // approver_ids, below); review_note is the reason given when changes were
+  // requested.
   .then(() => pool.query(`ALTER TABLE kb_articles
     ADD COLUMN IF NOT EXISTS approver_id TEXT,
     ADD COLUMN IF NOT EXISTS approver_name TEXT,
@@ -90,6 +92,13 @@ const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles (
     ADD COLUMN IF NOT EXISTS review_note TEXT,
     ADD COLUMN IF NOT EXISTS reviewed_by_name TEXT`))
   .then(() => pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_id TEXT`))
+  // A user can have several managers, and a pending article waits on all of
+  // them. The single-id columns above are superseded; move anything still in
+  // them over (and clear them, so this runs once).
+  .then(() => pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_ids TEXT[] NOT NULL DEFAULT '{}'`))
+  .then(() => pool.query(`UPDATE users SET manager_ids = ARRAY[manager_id], manager_id = NULL WHERE manager_id IS NOT NULL`))
+  .then(() => pool.query(`ALTER TABLE kb_articles ADD COLUMN IF NOT EXISTS approver_ids TEXT[] NOT NULL DEFAULT '{}'`))
+  .then(() => pool.query(`UPDATE kb_articles SET approver_ids = ARRAY[approver_id], approver_id = NULL WHERE approver_id IS NOT NULL`))
   .catch((e) => { console.error('[kb] schema setup failed:', e?.message || e); });
 
 // Same row the bell in Header.tsx polls for. KB_* notifications carry the
@@ -273,7 +282,8 @@ function formatArticle(row: any, teams: Map<string, Team>, canManage: boolean, i
     fileCount: Number(row.file_count || 0),
     questionCount: Number(row.question_count || 0),
     openQuestionCount: Number(row.open_question_count || 0),
-    // Approval: who it's waiting on (null name = any admin) while pending, and
+    // Approval: who it's waiting on (null name = any admin; several managers
+    // are joined with "or") while pending, and
     // the approver's note after changes were requested.
     approverName: row.status === 'pending' ? row.approver_name || null : null,
     submittedAt: row.status === 'pending' ? row.submitted_at : null,
@@ -284,17 +294,69 @@ function formatArticle(row: any, teams: Map<string, Team>, canManage: boolean, i
   };
 }
 
-// Who approves `authorId`'s articles: their manager (users.manager_id) when
-// that's an active user other than themselves, otherwise null = any admin.
-async function resolveApprover(authorId: string): Promise<{ id: string; name: string; email: string } | null> {
-  const managerId = (await pool.query(`SELECT manager_id FROM users WHERE id = $1`, [authorId])).rows[0]?.manager_id;
-  if (!managerId || managerId === authorId) return null;
-  const manager = await db.user.findFirst({ where: { id: managerId, isActive: true } });
-  return manager ? { id: manager.id, name: displayNameOf(manager), email: manager.email } : null;
+type Approver = { id: string; name: string; email: string };
+
+// Who approves `authorId`'s articles: their managers (users.manager_ids) that
+// are active users other than themselves. Empty = any admin.
+async function resolveApprovers(authorId: string): Promise<Approver[]> {
+  const ids: string[] = (await pool.query(`SELECT manager_ids FROM users WHERE id = $1`, [authorId])).rows[0]?.manager_ids || [];
+  const others = ids.filter((id) => id && id !== authorId);
+  if (!others.length) return [];
+  const managers = await db.user.findMany({ where: { id: { in: others }, isActive: true } });
+  return managers
+    .map((m) => ({ id: m.id, name: displayNameOf(m), email: m.email }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function approverNames(approvers: Approver[]): string | null {
+  return approvers.length ? approvers.map((a) => a.name).join(' or ') : null;
 }
 
 async function activeAdmins() {
   return db.user.findMany({ where: { isActive: true, role: 'admin' }, select: { id: true, email: true } });
+}
+
+// Asks `reviewers` to approve a pending article: bell notification + email.
+async function requestApproval(article: any, reviewers: { id: string; email: string }[]) {
+  const recipients = reviewers.filter((r) => r.id !== article.author_id);
+  if (!recipients.length) return;
+  const authorName = article.author_name || 'Someone';
+  const kindLabel = article.kind === 'release' ? 'release note' : 'article';
+  for (const r of recipients) {
+    await notify(r.id, 'KB_APPROVAL', `${authorName} needs your approval to publish the ${kindLabel} "${clip(article.title, 80)}"`, excerptOf(article.body_html, 140), article.id);
+  }
+  notifyKbApproval({
+    recipientEmails: recipients.map((r) => r.email),
+    event: 'requested', articleId: article.id, title: article.title,
+    kind: article.kind === 'release' ? 'release' : 'article', actorName: authorName,
+  }).catch((e) => console.error('[KB] Approval request email failed:', e?.message || e));
+}
+
+/**
+ * Called when an author's managers change. Their pending articles move to the
+ * new managers (or to any admin when none are left), and whoever newly has to
+ * approve one is asked to, so a request never sits with someone who is no
+ * longer responsible for it.
+ */
+export async function rerouteKbApprovals(authorId: string) {
+  await kbSchemaReady;
+  const pending = (await pool.query(`SELECT * FROM kb_articles WHERE author_id = $1 AND status = 'pending'`, [authorId])).rows;
+  if (!pending.length) return;
+  const approvers = await resolveApprovers(authorId);
+  const ids = approvers.map((a) => a.id);
+  for (const article of pending) {
+    await pool.query(
+      `UPDATE kb_articles SET approver_ids = $2, approver_name = $3 WHERE id = $1 AND status = 'pending'`,
+      [article.id, ids, approverNames(approvers)],
+    );
+    const before = new Set<string>(article.approver_ids || []);
+    // Admins were already asked when it had no manager, so going back to
+    // admins only notifies them if it had been with a manager until now.
+    const reviewers = approvers.length
+      ? approvers.filter((a) => !before.has(a.id))
+      : before.size ? await activeAdmins() : [];
+    await requestApproval(article, reviewers);
+  }
 }
 
 // Announces a newly published article by email and in-app notification,
@@ -383,10 +445,10 @@ export async function handleKbApi(
   await kbSchemaReady;
 
   const canManage = (row: any) => isAdmin || row.author_id === userId;
-  // A pending article waits on its manager (approver_id), or any admin when
-  // the author has no manager.
+  // A pending article waits on any of its author's managers (approver_ids),
+  // or any admin when the author has no manager.
   const canApprove = (row: any) =>
-    row.status === 'pending' && row.author_id !== userId && (isAdmin || (!!row.approver_id && row.approver_id === userId));
+    row.status === 'pending' && row.author_id !== userId && (isAdmin || (row.approver_ids || []).includes(userId));
   const canRead = (row: any, myTeams: string[]) =>
     canManage(row) ||
     canApprove(row) ||
@@ -394,14 +456,14 @@ export async function handleKbApi(
       (row.visibility === 'org' || (row.teams || []).some((t: string) => myTeams.includes(t))));
 
   // GET kb/me -- how publishing works for the current user: admins publish
-  // directly; everyone else submits to `approver` (null = any admin).
+  // directly; everyone else submits to `approvers` (empty = any admin).
   // `reviews` is true when the user may have articles to approve.
   if (path === 'kb/me' && method === 'GET') {
-    const approver = isAdmin ? null : await resolveApprover(userId);
-    const reportCount = Number((await pool.query(`SELECT COUNT(*) FROM users WHERE manager_id = $1`, [userId])).rows[0]?.count || 0);
+    const approvers = isAdmin ? [] : await resolveApprovers(userId);
+    const reportCount = Number((await pool.query(`SELECT COUNT(*) FROM users WHERE $1 = ANY(manager_ids)`, [userId])).rows[0]?.count || 0);
     return json({
       publishesDirectly: isAdmin,
-      approver: approver ? { id: approver.id, name: approver.name } : null,
+      approvers: approvers.map((a) => ({ id: a.id, name: a.name })),
       reviews: isAdmin || reportCount > 0,
     });
   }
@@ -429,7 +491,7 @@ export async function handleKbApi(
     if (scope === 'approvals') {
       // Articles waiting on me: as the author's manager, or as an admin.
       where.push(`status = 'pending' AND author_id <> ${p(userId)}`);
-      if (!isAdmin) where.push(`approver_id = ${p(userId)}`);
+      if (!isAdmin) where.push(`${p(userId)} = ANY(approver_ids)`);
     } else if (scope === 'drafts') {
       // Drafts include the ones submitted and waiting for approval.
       where.push(`status IN ('draft', 'pending')`);
@@ -821,28 +883,18 @@ export async function handleKbApi(
       return json(formatArticle({ ...article, ...published }, await loadTeams(), true, true));
     }
 
-    const approver = await resolveApprover(article.author_id);
+    const approvers = await resolveApprovers(article.author_id);
     const row = await pool.query(
-      `UPDATE kb_articles SET status = 'pending', visibility = $2, teams = $3, approver_id = $4, approver_name = $5,
+      `UPDATE kb_articles SET status = 'pending', visibility = $2, teams = $3, approver_ids = $4, approver_name = $5,
          submitted_at = NOW(), review_note = NULL, reviewed_by_name = NULL, updated_at = NOW()
        WHERE id = $1 RETURNING *`,
-      [id, access.visibility, access.teams, approver?.id || null, approver?.name || null],
+      [id, access.visibility, access.teams, approvers.map((a) => a.id), approverNames(approvers)],
     );
     const pending = row.rows[0];
 
-    // Tell whoever has to approve it: the manager, or every admin when the
-    // author has no manager set.
-    const reviewers = (approver ? [approver] : await activeAdmins()).filter((r) => r.id !== userId);
-    const authorName = displayNameOf(currentUser);
-    const kindLabel = pending.kind === 'release' ? 'release note' : 'article';
-    for (const r of reviewers) {
-      await notify(r.id, 'KB_APPROVAL', `${authorName} needs your approval to publish the ${kindLabel} "${clip(pending.title, 80)}"`, excerptOf(pending.body_html, 140), id);
-    }
-    notifyKbApproval({
-      recipientEmails: reviewers.map((r) => r.email),
-      event: 'requested', articleId: id, title: pending.title,
-      kind: pending.kind === 'release' ? 'release' : 'article', actorName: authorName,
-    }).catch((e) => console.error('[KB] Approval request email failed:', e?.message || e));
+    // Tell whoever has to approve it: every one of the author's managers, or
+    // every admin when the author has no manager set.
+    await requestApproval(pending, approvers.length ? approvers : await activeAdmins());
 
     return json(formatArticle({ ...article, ...pending }, await loadTeams(), true, true));
   }

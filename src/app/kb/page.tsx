@@ -41,7 +41,7 @@ function KindIcon({ kind, size }: { kind: KbKind; size: number }) {
 function useKbMe() {
   const [me, setMe] = useState<KbMe | null>(null);
   useEffect(() => {
-    api.getKbMe().then(setMe).catch(() => setMe({ publishesDirectly: false, approver: null, reviews: false }));
+    api.getKbMe().then(setMe).catch(() => setMe({ publishesDirectly: false, approvers: [], reviews: false }));
   }, []);
   return me;
 }
@@ -139,7 +139,9 @@ function AccessDialog({
             <p className="flex items-start gap-2 rounded-lg bg-orange-50 px-3 py-2 text-[12.5px] text-orange-800">
               <Clock size={14} className="mt-0.5 flex-shrink-0" />
               <span>
-                {me?.approver ? <><b>{me.approver.name}</b> (your manager)</> : 'An admin (you have no manager set)'} will review this {KINDS[kind].one}.
+                {me?.approvers.length
+                  ? <>{me.approvers.map((a, i) => <span key={a.id}>{i > 0 && ' or '}<b>{a.name}</b></span>)} ({me.approvers.length > 1 ? 'your managers' : 'your manager'})</>
+                  : 'An admin (you have no manager set)'} will review this {KINDS[kind].one}.
                 It’s published, and the readers you choose below are notified, only once it’s approved.
               </span>
             </p>

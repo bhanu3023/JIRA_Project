@@ -14,7 +14,7 @@ import { fireConnectorEvent, listConnectors, getConnector, createConnector, upda
 import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
-import { handleKbApi } from '@/lib/kb-api';
+import { handleKbApi, kbSchemaReady, rerouteKbApprovals } from '@/lib/kb-api';
 import { handleSavedFiltersApi } from '@/lib/saved-filters-api';
 import sanitizeHtml from 'sanitize-html';
 
@@ -6112,18 +6112,18 @@ async function _handleJiraPgApi(
     // All authenticated users can list users (needed for queue member search)
     const [users, statusRows] = await Promise.all([
       db.user.findMany({ orderBy: { firstName: 'asc' } }),
-      pool.query(`SELECT id, status, manager_id FROM users`)
+      kbSchemaReady.then(() => pool.query(`SELECT id, status, manager_ids FROM users`))
         .catch(() => pool.query(`SELECT id, status FROM users`))
         .catch(() => ({ rows: [] as any[] })),
     ]);
     const statusMap: Record<string, string> = {};
-    const managerMap: Record<string, string | null> = {};
-    for (const r of statusRows.rows) { statusMap[r.id] = r.status; managerMap[r.id] = r.manager_id || null; }
+    const managerMap: Record<string, string[]> = {};
+    for (const r of statusRows.rows) { statusMap[r.id] = r.status; managerMap[r.id] = r.manager_ids || []; }
     return json(users.map(u => ({
       ...formatUser(u),
       status: statusMap[u.id] || (u.isActive ? 'active' : 'inactive'),
       // Who approves this user's KB articles (raw column, added in kb-api.ts).
-      managerId: managerMap[u.id] || null,
+      managerIds: managerMap[u.id] || [],
     })));
   }
 
@@ -6168,24 +6168,27 @@ async function _handleJiraPgApi(
     if (body.displayName !== undefined) data.displayName = String(body.displayName);
     if (body.avatarUrl !== undefined) data.avatarUrl = body.avatarUrl ? String(body.avatarUrl) : null;
     if (body.password !== undefined) data.password = await hashPassword(String(body.password));
-    // Manager = who approves this user's KB articles. Admin-only; raw column.
-    let managerId: string | null | undefined;
-    if (body.managerId !== undefined) {
-      if (!isAdmin) return json({ error: 'Only admins can change a manager' }, 403);
-      managerId = body.managerId ? String(body.managerId) : null;
-      if (managerId === id) return json({ error: 'Someone can’t be their own manager' }, 400);
-      if (managerId && !(await db.user.findUnique({ where: { id: managerId }, select: { id: true } }))) {
-        return json({ error: 'Manager not found' }, 400);
-      }
+    // Managers = who approve this user's KB articles (any one of them can).
+    // Admin-only; raw column.
+    let managerIds: string[] | undefined;
+    if (body.managerIds !== undefined) {
+      if (!isAdmin) return json({ error: 'Only admins can change managers' }, 403);
+      if (!Array.isArray(body.managerIds)) return json({ error: 'managerIds must be a list' }, 400);
+      managerIds = Array.from(new Set<string>(body.managerIds.map((m: unknown) => String(m)).filter(Boolean)));
+      if (managerIds.includes(id)) return json({ error: 'Someone can’t be their own manager' }, 400);
+      const found = await db.user.count({ where: { id: { in: managerIds } } });
+      if (found !== managerIds.length) return json({ error: 'Manager not found' }, 400);
     }
     try {
       const user = Object.keys(data).length
         ? await db.user.update({ where: { id }, data })
         : await db.user.findUniqueOrThrow({ where: { id } });
-      if (managerId !== undefined) {
-        await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_id TEXT`);
-        await pool.query(`UPDATE users SET manager_id = $1 WHERE id = $2`, [managerId, id]);
-        return json({ ...formatUser(user), managerId });
+      if (managerIds !== undefined) {
+        await kbSchemaReady;
+        await pool.query(`UPDATE users SET manager_ids = $1 WHERE id = $2`, [managerIds, id]);
+        // Anything they already submitted moves to the new managers.
+        rerouteKbApprovals(id).catch((e) => console.error('[KB] Re-routing approvals failed:', e?.message || e));
+        return json({ ...formatUser(user), managerIds });
       }
       return json(formatUser(user));
     } catch {

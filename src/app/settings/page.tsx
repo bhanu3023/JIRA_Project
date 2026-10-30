@@ -211,6 +211,7 @@ function SettingsContent() {
   const usersLastFetchRef = useRef(0);
   const [openUserMenu, setOpenUserMenu] = useState<string | null>(null);
   const [roleMenuPos, setRoleMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const [managerSearch, setManagerSearch] = useState('');
   const [selectedUser, setSelectedUser] = useState<any | null>(null);
   const [resendingUserId, setResendingUserId] = useState<string | null>(null);
   const [resendToast, setResendToast] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -376,17 +377,22 @@ function SettingsContent() {
     }
   };
 
-  // Manager = who approves this user's KB articles before they're published.
-  const handleManagerChange = async (userId: string, managerId: string | null) => {
+  // Managers = who approve this user's KB articles before they're published.
+  // A user can have several; any one of them can approve.
+  const handleManagerToggle = async (userId: string, managerId: string) => {
     const target = users.find(u => u.id === userId);
     const name = target ? `${target.firstName} ${target.lastName}`.trim() : 'User';
     const manager = users.find(u => u.id === managerId);
+    const managerName = manager ? `${manager.firstName} ${manager.lastName}`.trim() || manager.email : 'Manager';
+    const current: string[] = target?.managerIds || [];
+    const adding = !current.includes(managerId);
+    const managerIds = adding ? [...current, managerId] : current.filter(id => id !== managerId);
     try {
-      await api.updateUser(userId, { managerId });
-      setUsers(prev => prev.map(u => u.id === userId ? { ...u, managerId } : u));
-      pushUserToast(manager ? `${name}'s manager set to ${manager.firstName} ${manager.lastName}`.trim() : `${name} has no manager now`);
+      await api.updateUser(userId, { managerIds });
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, managerIds } : u));
+      pushUserToast(adding ? `${managerName} now approves ${name}'s articles` : `${managerName} no longer approves ${name}'s articles`);
     } catch (err: any) {
-      pushUserToast(err?.message || 'Failed to update manager', 'error');
+      pushUserToast(err?.message || 'Failed to update managers', 'error');
     }
   };
 
@@ -2302,17 +2308,62 @@ function SettingsContent() {
                         </div>
                       </td>
                       <td className="px-4 py-2.5 w-[180px]">
-                        <select
-                          value={u.managerId || ''}
-                          onChange={(e) => handleManagerChange(u.id, e.target.value || null)}
-                          title="Approves this user's KB articles and release notes"
-                          className={`w-full max-w-[180px] truncate rounded border border-transparent bg-transparent py-1 text-sm hover:border-gray-300 focus:border-blue-500 focus:outline-none ${u.managerId ? 'text-gray-700' : 'text-gray-400'}`}
-                        >
-                          <option value="">No manager</option>
-                          {users
-                            .filter(m => m.id !== u.id && (m.isActive !== false || m.id === u.managerId))
-                            .map(m => <option key={m.id} value={m.id}>{`${m.firstName} ${m.lastName}`.trim() || m.email}</option>)}
-                        </select>
+                        {(() => {
+                          const menuKey = `${u.id}_mgr`;
+                          const ids: string[] = u.managerIds || [];
+                          const nameOf = (m: any) => `${m.firstName} ${m.lastName}`.trim() || m.email;
+                          const label = ids.map(id => users.find(m => m.id === id)).filter(Boolean).map(nameOf).join(', ');
+                          const q = managerSearch.trim().toLowerCase();
+                          const options = users
+                            .filter(m => m.id !== u.id && (m.isActive !== false || ids.includes(m.id)))
+                            .filter(m => !q || nameOf(m).toLowerCase().includes(q) || String(m.email || '').toLowerCase().includes(q))
+                            // Current managers first, then alphabetical.
+                            .sort((a, b) => Number(ids.includes(b.id)) - Number(ids.includes(a.id)) || nameOf(a).localeCompare(nameOf(b)));
+                          return (
+                            <>
+                              <button
+                                onClick={(e) => {
+                                  if (openUserMenu === menuKey) { setOpenUserMenu(null); setRoleMenuPos(null); return; }
+                                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                  setRoleMenuPos({ top: rect.bottom + 4, left: rect.left });
+                                  setManagerSearch('');
+                                  setOpenUserMenu(menuKey);
+                                }}
+                                title={label ? `Approved by ${label}` : "Approves this user's KB articles and release notes"}
+                                className={`flex w-full max-w-[180px] items-center gap-1 rounded border border-transparent py-1 text-left text-sm hover:border-gray-300 ${ids.length ? 'text-gray-700' : 'text-gray-400'}`}>
+                                <span className="truncate">{label || 'No manager'}</span>
+                                <ChevronDown size={12} className="flex-shrink-0 text-gray-400" />
+                              </button>
+                              {openUserMenu === menuKey && roleMenuPos && (
+                                <>
+                                  <div className="fixed inset-0 z-40" onClick={() => { setOpenUserMenu(null); setRoleMenuPos(null); }} />
+                                  <div className="fixed z-50 w-64 rounded-lg border border-gray-200 bg-white py-1 shadow-xl"
+                                    style={{ top: roleMenuPos.top, left: roleMenuPos.left }}>
+                                    <div className="px-2 pb-1">
+                                      <input
+                                        autoFocus
+                                        value={managerSearch}
+                                        onChange={(e) => setManagerSearch(e.target.value)}
+                                        placeholder="Search people…"
+                                        className="w-full rounded border border-gray-200 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
+                                      />
+                                    </div>
+                                    <div className="max-h-64 overflow-y-auto">
+                                      {options.length === 0 && <p className="px-3 py-2 text-sm text-gray-400">No one matches</p>}
+                                      {options.map(m => (
+                                        <button key={m.id} onClick={() => handleManagerToggle(u.id, m.id)}
+                                          className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-gray-50 ${ids.includes(m.id) ? 'font-medium text-blue-600' : 'text-gray-700'}`}>
+                                          <span className="truncate">{nameOf(m)}</span>
+                                          {ids.includes(m.id) && <Check size={12} className="flex-shrink-0 text-blue-600" />}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </>
+                              )}
+                            </>
+                          );
+                        })()}
                       </td>
                       <td className="px-4 py-2.5 w-[100px] whitespace-nowrap">
                         {(() => {
