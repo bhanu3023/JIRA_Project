@@ -30,10 +30,11 @@ async function main() {
   const { token, tokenHash } = await makeSessionToken('bhanu.srikakulam@cloudfuze.com');
   const authHeader = { Authorization: `Bearer ${token}` };
 
-  for (const name of ['Manoj B', 'Vainateya Rasala', 'Chandra Mouli', 'Hymavathi']) {
-    const { rows } = await pool.query(`SELECT id, email FROM users WHERE CONCAT("firstName",' ',"lastName") ILIKE $1 LIMIT 1`, [name]);
-    if (!rows.length) { console.log(`${name}: no matching user found`); continue; }
-    const url = `${APP_URL}/api/issues?spaceKey=TESTIN&assignees=${encodeURIComponent(name)}&page=1&limit=500`;
+  for (const email of ['manoj.bathula@cloudfuze.com', 'vainateya.rasala@cloudfuze.com', 'chandra.mouli@cloudfuze.com', 'hymavathi@cloudfuze.com']) {
+    const { rows } = await pool.query(`SELECT id, email, "firstName", "lastName" FROM users WHERE email = $1 LIMIT 1`, [email]);
+    const name = rows.length ? `${rows[0].firstName} ${rows[0].lastName}` : email;
+    if (!rows.length) { console.log(`${email}: no matching user found`); continue; }
+    const url = `${APP_URL}/api/issues?spaceKey=TESTIN&assignees=${encodeURIComponent(rows[0].id)}&page=1&limit=500`;
     const res = await fetch(url, { headers: authHeader, signal: AbortSignal.timeout(30000) }).catch(() => null);
     const data = res ? await res.json().catch(() => ({})) : {};
     const issue = (data.issues || []).find((i) => (i.cfKey || i.key) === 'CF-34234');
