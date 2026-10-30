@@ -4102,6 +4102,7 @@ function computeSlaBreachedAndOverdue(
   // it's applied after the live computation runs.
   let breached = false;
   let hasRealDeptTracking = false;
+  let priorityExplicitlyRemoved = false;
   // Same frozen-snapshot rule computeSLAInstancesPure now applies for the
   // ticket detail page (see its own long comment) -- a resolved ticket's
   // breach verdict shouldn't keep shifting every time an SLA policy gets
@@ -4209,6 +4210,20 @@ function computeSlaBreachedAndOverdue(
       // e.g. in the Filters-page export. Confirmed for real: CF-30920,
       // CF-30911, CF-29386.
       const waivers: Record<string, any> = i.sla_waivers || {};
+      // An explicit 0h priority-removed row below `continue`s past the rest
+      // of the loop BEFORE ever reaching the hasRealDeptTracking check --
+      // so a priority tier an admin deliberately took out of SLA tracking
+      // looked exactly like "this app's own data never tracked this
+      // department at all", letting the legacy jira_sla_breached fallback
+      // override that explicit decision. Confirmed for real: 18 Dev-queue,
+      // Lowest-priority tickets (CF-19908, CF-21703, CF-21694, and others)
+      // had genuine dept_sla_log.Dev tracking -- Dev really did hold them --
+      // but still showed "SLA Breached: Yes" purely from an old Jira-
+      // imported flag, because Dev's own policy explicitly lists Lowest as
+      // 0h (not tracked). priorityExplicitlyRemoved (declared above,
+      // alongside hasRealDeptTracking) tracks this across the loop so it
+      // can suppress that fallback below, the same way real tracked data
+      // already does.
       for (const policy of policies) {
         const pauseStatuses: string[] = Array.isArray(policy.pauseStatuses)
           ? policy.pauseStatuses.map((s: string) => s.trim().toLowerCase())
@@ -4236,7 +4251,7 @@ function computeSlaBreachedAndOverdue(
             break;
           }
         }
-        if (priorityRemoved) continue;
+        if (priorityRemoved) { priorityExplicitlyRemoved = true; continue; }
         const overrideMs = getHistoricalOverrideDurationMs(dept, priority, new Date(slaStartedAt).getTime());
         if (overrideMs !== null) durationMs = overrideMs;
         // dept_sla_started_at resets to NOW() on every department handoff,
@@ -4310,7 +4325,7 @@ function computeSlaBreachedAndOverdue(
   // data gap, not a disagreement with real tracked data). This is what
   // stops the imported flag from overriding a resolution this app's own
   // clock can already prove was on time.
-  if (!breached && !hasRealDeptTracking && i.jira_sla_breached) breached = true;
+  if (!breached && !hasRealDeptTracking && !priorityExplicitlyRemoved && i.jira_sla_breached) breached = true;
   // No policy configured for this department, and nothing else (a real
   // imported Jira breach) already forced a true -- there's genuinely no SLA
   // to have breached or not, so report that honestly (frontend renders this
