@@ -78,6 +78,36 @@ async function sendGraphAutoReply(opts: {
     return;
   }
 
+  // Mailboxes connected with no per-mailbox sign-in at all (tenant-wide Graph
+  // app-only access, see oauth-service.ts's getGraphAppOnlyToken) have no
+  // stored refresh token for getGraphToken/getValidAccessToken below to find
+  // — check for that up front instead of falling through this function's
+  // per-mailbox-token branches, which would always correctly conclude "no
+  // token" and silently skip the reply.
+  try {
+    const { pgPool: poolAr } = await import('@/lib/pg-pool');
+    const { rows } = await poolAr.query(`SELECT auth_mode FROM email_configs WHERE LOWER(address) = LOWER($1)`, [opts.toAddress]);
+    if (rows[0]?.auth_mode === 'app_only') {
+      const { sendAutoReply } = await import('@/lib/email-service');
+      const appUrlAr   = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
+      await sendAutoReply({
+        smtp: { host: 'smtp.office365.com', port: 587, secure: false, user: opts.toAddress, password: '', appOnly: true },
+        from: opts.toAddress,
+        to: opts.fromEmail,
+        subject: opts.subject,
+        issueKey: opts.issueKey,
+        issueUrl: `${appUrlAr}/issues/${opts.issueKey}`,
+        autoReplyText: 'Thank you for contacting us. We have received your request and will get back to you shortly.',
+        inReplyTo: opts.messageId,
+        references: opts.messageId,
+      });
+      console.log(`[AutoReply] Sent via app-only Graph access (${opts.toAddress}) to ${opts.fromEmail} → ticket ${opts.issueKey}`);
+      return;
+    }
+  } catch (e) {
+    console.error('[AutoReply] app_only lookup/send failed, falling back to per-mailbox token path:', e);
+  }
+
   // Try Graph token first; if consent not granted, fall back to IMAP access token via SMTP
   let accessToken = await getGraphToken(opts.toAddress);
   let useSmtpFallback = false;
@@ -591,6 +621,43 @@ export async function POST(req: NextRequest) {
 
   // ── 4a. REPLY: add comment to existing ticket ─────────────────────────────
   if (existingTicketKey) {
+    // Same messageId dedup guard as the new-ticket path below (processedIds
+    // in-memory set + persistent processed_emails table) -- this branch
+    // used to return early with no dedup check at all, so the SAME reply
+    // (identical RFC Message-ID) created a SEPARATE duplicate comment every
+    // time a DIFFERENT mailbox independently received a copy of it -- e.g.
+    // a Distribution List forwarding the same reply to several real
+    // people's own mailboxes, each one already connected to this app.
+    // Confirmed for real: one reply produced 6 duplicate comments on the
+    // same ticket. Checked/marked processed BEFORE creating the comment
+    // (not after, unlike the new-ticket path) so a mailbox that's a few
+    // seconds behind another one polling the exact same message can't
+    // slip past the in-memory check before the first one finishes.
+    if (messageId) {
+      const mid = messageId.trim();
+      const processedIds: Set<string> = (globalThis as any).__processedMsgIds || new Set();
+      if (processedIds.has(mid)) {
+        console.log(`[EmailWebhook] Reply already processed (messageId ${mid}), skipping duplicate comment`);
+        return NextResponse.json({ ok: true, action: 'duplicate' });
+      }
+      try {
+        const { pgPool: pool } = await import('@/lib/pg-pool');
+        const dup = await pool.query(`SELECT message_id FROM processed_emails WHERE message_id = $1 LIMIT 1`, [mid]);
+        if (dup.rows[0]) {
+          processedIds.add(mid);
+          (globalThis as any).__processedMsgIds = processedIds;
+          console.log(`[EmailWebhook] Reply already processed (messageId ${mid} in processed_emails), skipping duplicate comment`);
+          return NextResponse.json({ ok: true, action: 'duplicate' });
+        }
+        processedIds.add(mid);
+        (globalThis as any).__processedMsgIds = processedIds;
+        await pool.query(`INSERT INTO processed_emails (message_id) VALUES ($1) ON CONFLICT (message_id) DO NOTHING`, [mid]);
+      } catch { /* non-critical -- falls through to in-memory-only guard */
+        processedIds.add(mid);
+        (globalThis as any).__processedMsgIds = processedIds;
+      }
+    }
+
     // Find author
     const author = await db.user.findFirst({
       where: { email: { equals: fromEmail, mode: 'insensitive' } },
@@ -602,24 +669,93 @@ export async function POST(req: NextRequest) {
       // For reply comments: extract plain text → run text-based quote stripper
       // (more reliable than HTML parsing — Outlook's reply HTML structure varies,
       // but the plain-text From:/Sent:/To:/Subject: block is always consistent)
+      // Signature blocks (name/title/phone/email/site/address) commonly use
+      // an icon font for the little phone/mail/globe/pin glyphs next to
+      // each line -- those glyphs are mapped to Unicode Private-Use-Area
+      // codepoints (U+E000-U+F8FF), meaningless without the icon font
+      // loaded. Stripping HTML tags above removes the <img>/styling but
+      // leaves these PUA codepoints behind as garbled characters, and the
+      // signature's own text (name, title, phone, email, address) survives
+      // right along with them since it's real text, not markup. A normal
+      // typed reply essentially never contains a PUA codepoint, so the
+      // first one found is a reliable "the signature starts here" marker —
+      // cut the body there instead of only stripping quoted/forwarded
+      // content. Confirmed for real: a reply's comment showed "Sending
+      // reply testing for comment <PUA glyphs> Bhanu Prakash Software
+      // Engineer Trainee +91 ... www.cloudfuze.com <address>" in full.
+      const stripSignature = (t: string): string => {
+        const wideIdx = t.search(/[^\x00-\x7F\u00A0-\u024F\u2000-\u206F]/);
+        const addrIdx = t.search(/centerview\s+dr/i);
+        const phoneIdx = t.search(/\+\d{1,3}[\s-]?\d{6,}/);
+        const ownEmailIdx = fromEmail ? t.toLowerCase().indexOf(fromEmail.toLowerCase()) : -1;
+        const webIdx = t.search(/www\.[a-z0-9-]+\.[a-z]{2,3}/i);
+        const candidates = [wideIdx, addrIdx, phoneIdx, ownEmailIdx, webIdx].filter(function (i) { return i >= 0; });
+        if (!candidates.length) return t;
+        const cut = Math.min.apply(Math, candidates);
+        console.log("[EmailWebhook] Signature stripped at index " + cut + " (wide=" + wideIdx + ", addr=" + addrIdx + ", phone=" + phoneIdx + ", email=" + ownEmailIdx + ", web=" + webIdx + ")");
+        return t.slice(0, cut).trim();
+      };
+
       let cleanBody: string;
       const isHtml = /<[a-zA-Z]/.test(body);
+      console.log(`[EmailWebhook] Reply body isHtml=${isHtml}, first 80 chars: ${JSON.stringify(body.slice(0, 80))}`);
       if (isHtml) {
         const plainText = body
           .replace(/<[^>]+>/g, ' ')
           .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
           .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
           .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+          // Numeric HTML entities (decimal &#NNNN; and hex &#xHHHH;) were
+          // never decoded by the named-entity replacements above, so an
+          // icon-font glyph encoded this way (Outlook signature generators
+          // commonly do this instead of embedding the raw character)
+          // survived as literal entity text -- e.g. "&#57619;" instead of
+          // the actual character it represents (U+E113, squarely inside
+          // the PUA range stripSignature's own wide-character check looks
+          // for), which meant that check could never match it. Confirmed
+          // for real via [SigDebug] logging: the untouched reply body
+          // contained literal "&#57619;&#57619;&#57619;&#57619;" text.
+          .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+          .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
           .replace(/\s{2,}/g, ' ').replace(/ \n/g, '\n').replace(/\n /g, '\n')
           .trim();
-        const stripped = stripQuotedContent(plainText);
+        const stripped = stripSignature(stripQuotedContent(plainText));
         cleanBody = stripped.split(/\n\n+/)
           .map(p => p.trim() ? `<p>${p.trim().replace(/\n/g, '<br/>')}</p>` : '')
           .filter(Boolean).join('') || stripped;
       } else {
-        cleanBody = stripQuotedContent(body);
+        // Same numeric-entity decoding as the HTML branch above -- a
+        // "plain text" body from Graph can still carry literal HTML
+        // numeric entities if the signature itself is HTML-sourced, even
+        // when the overall message doesn't look like HTML overall.
+        const decodedBody = body
+          .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+          .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+        cleanBody = stripSignature(stripQuotedContent(decodedBody));
       }
       if (cleanBody) {
+        // Second, content-based dedup layer -- the messageId guard above
+        // only catches a true duplicate delivery of the exact same RFC
+        // Message-ID. A Distribution List forwarding the same reply to
+        // several real people's own mailboxes (each already connected to
+        // this app) isn't guaranteed to preserve an identical Message-ID
+        // across every recipient's copy, so this also skips if the same
+        // author already posted this exact same comment text on this
+        // exact same ticket within the last 10 minutes.
+        const recentDup = await db.comment.findFirst({
+          where: {
+            issueId: existingIssue.id,
+            body: cleanBody,
+            authorId: author?.id ?? null,
+            createdAt: { gte: new Date(Date.now() - 10 * 60 * 1000) },
+          },
+          select: { id: true },
+        });
+        if (recentDup) {
+          console.log(`[EmailWebhook] Skipping duplicate comment on ${existingTicketKey} (same author+body within 10 min, likely a DL-fanned-out copy of the same reply)`);
+          (globalThis as any).__lastWebhookResult = { ok: true };
+          return NextResponse.json({ ok: true, action: 'duplicate' });
+        }
         await db.comment.create({
           data: {
             id: rid(),
@@ -661,7 +797,19 @@ export async function POST(req: NextRequest) {
     } catch { /* non-critical */ }
   }
 
-  const openStatus = space.statuses[0];
+  // space.statuses[0] used to be grabbed directly -- an arbitrary
+  // first-in-whatever-order-Postgres-returns pick (every row's own "order"
+  // column is meaningless, all 0), never guaranteed to actually be "Open".
+  // Same bug class already fixed for manual ticket creation (see jira-pg-api.ts's
+  // "Final fallback" comment, CF-32995/CF-33015) -- never ported to this,
+  // the email-creation path. Confirmed for real: a Pre-Sales-Team ticket
+  // created from an incoming email landed on "Waiting for L3" instead of
+  // "Open". Same name-then-category preference order as that fix.
+  const openStatus = space.statuses.find((s) => s.name.toLowerCase() === 'open')
+    || space.statuses.find((s) => s.name.toLowerCase() === 'to do')
+    || space.statuses.find((s) => s.name.toLowerCase() === 'todo')
+    || space.statuses.find((s) => s.category === 'todo')
+    || space.statuses[0];
 
   // Resolve reporter by email — if not found, auto-create a guest user from sender info
   let reporter = await db.user.findFirst({

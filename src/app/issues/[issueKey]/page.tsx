@@ -16,6 +16,23 @@ import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
 import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
 import * as XLSX from 'xlsx';
 
+// RichTextEditor's own paste/insertImage upload placeholders use
+// id="up-<random>" client-side (see insertImage / extractEmbeddedImages in
+// src/components/ui/RichTextEditor.tsx) while the upload is in flight --
+// matches a field's raw HTML still carrying an unresolved placeholder
+// (either an upload still running, or one that silently never completed)
+// as a last-resort check alongside the isUploading* flags before saving.
+// Also matches the plain <span>...Uploading...</span> shape with no id at
+// all: the backend's save-time sanitizer strips the id attribute (confirmed
+// via check-placeholder-raw.mjs), so a row that somehow already lost its id
+// client-side before this check runs would otherwise slip through. Confirmed
+// for real on CF-34455 (comments) and CF-29904/CF-34252 (descriptions): this
+// exact class of bug saved a frozen "Uploading pasted image…" placeholder
+// instead of the real image, across every one of these save paths --
+// comment, reply, description, and the Root Cause / Fix Description custom
+// fields.
+const HAS_PENDING_UPLOAD_PLACEHOLDER = /id="up-[a-z0-9]+"|<span[^>]*>Uploading[^<]*<\/span>/i;
+
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const XLS_MIME  = 'application/vnd.ms-excel';
 import {
@@ -242,6 +259,19 @@ export default function IssueDetailPage() {
   const [spaceStatuses, setSpaceStatuses] = useState<any[]>([]);
   const [workflowTransitions, setWorkflowTransitions] = useState<any[]>([]);
   const [spaceMembers, setSpaceMembers] = useState<any[]>([]);
+  // Whether the SIGNED-IN viewer is a genuine member of the ticket's
+  // CURRENT department's own queue -- set alongside matchedQueue below,
+  // whichever path resolves it (cache or live API). Used to make the
+  // historical-dept-view swap (isHistoricalDeptViewForAssignee) apply only
+  // to someone viewing from OUTSIDE the ticket's current queue (e.g. a Dev
+  // person opening a link from before it moved on) -- a genuine CURRENT
+  // queue member should never see another department's banner/assignee no
+  // matter what stale ?viewDept= a link they clicked happens to carry.
+  // Confirmed for real: Bhuvana (a real QA member) opened CF-34455 (now
+  // sitting in QA) via a link still carrying viewDept=Dev from before the
+  // handoff, and saw "Showing Dev's own assignee" instead of being treated
+  // as the QA-queue member she actually is. null = not yet resolved.
+  const [isCurrentDeptQueueMember, setIsCurrentDeptQueueMember] = useState<boolean | null>(null);
   const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
   // Single combined work log against the whole ticket, matching real Jira --
   // department is still recorded on each entry (backend requires it) but is
@@ -626,6 +656,7 @@ export default function IssueDetailPage() {
       };
 
       if (dept) {
+        setIsCurrentDeptQueueMember(null); // reset for the new ticket/department until re-resolved below
         // Resolve which space's custom queue matches this department in ONE
         // targeted request (department-queue) instead of fetching
         // all-space-keys and then firing one custom-queues/:spaceKey request
@@ -652,6 +683,7 @@ export default function IssueDetailPage() {
               const queues: any[] = JSON.parse(stored);
               const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
               if (matchedQueue) {
+                setIsCurrentDeptQueueMember(!!user?.id && Array.isArray(matchedQueue.memberIds) && matchedQueue.memberIds.includes(user.id));
                 const qSt = matchedQueue.queueStatuses;
                 const qTr = matchedQueue.queueTransitions;
                 if (qSt?.length) {
@@ -682,6 +714,7 @@ export default function IssueDetailPage() {
             const matchedQueue = result?.queue;
             const spKey = result?.spaceKey;
             if (matchedQueue && spKey) {
+              setIsCurrentDeptQueueMember(!!user?.id && Array.isArray(matchedQueue.memberIds) && matchedQueue.memberIds.includes(user.id));
               try {
                 const existing: any[] = JSON.parse(localStorage.getItem(`custom_queues_${spKey}`) || '[]');
                 const others = existing.filter((q: any) => q.id !== matchedQueue.id);
@@ -710,10 +743,11 @@ export default function IssueDetailPage() {
           if (!resolvedFromCache) loadStatusesForSpace(currentIssue.spaceKey);
         })();
       } else {
+        setIsCurrentDeptQueueMember(null);
         loadStatusesForSpace(currentIssue.spaceKey);
       }
     }
-  }, [currentIssue?.spaceKey, currentIssue?.id, spaces, (currentIssue as any)?.current_department, (currentIssue as any)?.canResolveHere]);
+  }, [currentIssue?.spaceKey, currentIssue?.id, spaces, (currentIssue as any)?.current_department, (currentIssue as any)?.canResolveHere, user?.id]);
 
   useEffect(() => {
     // Always load members from the issue's own space (not the workflow space which may differ)
@@ -949,7 +983,15 @@ export default function IssueDetailPage() {
   // since both can't share one text/submitting state without one clobbering
   // the other if a reply and the main composer are both mid-flight.
   const handleSubmitReply = async () => {
-    if (!replyText.trim() || submittingReply) return;
+    // isUploadingReply is also what disables the Save button, but relying on
+    // that alone let a reply get saved mid-upload at least twice in
+    // practice (CF-34455): the composed HTML still had its literal
+    // "Uploading pasted image…" placeholder span frozen into it, never
+    // replaced by the real image, because submission went through before
+    // the embedded-image upload actually finished. Guard here too, matching
+    // handleSaveEditComment's own existing isUploadingEditComment check.
+    if (!replyText.trim() || submittingReply || isUploadingReply) return;
+    if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(replyText)) { alert('An image is still uploading — wait for it to finish before sending.'); return; }
     setSubmittingReply(true);
     const textToSubmit = replyText;
     const tempId = `opt-${Date.now()}`;
@@ -991,7 +1033,11 @@ export default function IssueDetailPage() {
   };
 
   const handleAddComment = async () => {
-    if (!commentText.trim() || submittingComment) return;
+    // Same defensive guard as handleSubmitReply/handleSaveEditComment --
+    // see handleSubmitReply's own comment for why relying solely on the
+    // Save button's disabled={isUploadingComment} wasn't enough in practice.
+    if (!commentText.trim() || submittingComment || isUploadingComment) return;
+    if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(commentText)) { alert('An image is still uploading — wait for it to finish before saving.'); return; }
     setSubmittingComment(true);
     const textToSubmit = commentText;
     const tempId = `opt-${Date.now()}`;
@@ -1049,6 +1095,7 @@ export default function IssueDetailPage() {
   // anything had gone wrong, so the natural next move was to click again.
   const handleSaveEditComment = async (commentId: string) => {
     if (!editingCommentText.trim() || isUploadingEditComment || submittingEditComment) return;
+    if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(editingCommentText)) { setEditCommentError('An image is still uploading — wait for it to finish before saving.'); return; }
     setEditCommentError('');
     setSubmittingEditComment(true);
     try {
@@ -1429,6 +1476,13 @@ export default function IssueDetailPage() {
       const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
       if (!val || val.toString().trim() === '') missing.push(f.name);
     }
+    // Worklog -- same scope as Root Cause/Fix Description (Dev/Migration
+    // only, by explicit request): at least one time-logged entry must
+    // exist before resolving, so a ticket can't close with zero recorded
+    // work against it.
+    if ((deptLower === 'dev' || deptLower === 'migration') && worklogs.length === 0) {
+      missing.push('Worklog');
+    }
     return missing;
   };
 
@@ -1461,27 +1515,15 @@ export default function IssueDetailPage() {
         return;
       }
     }
-    // Root Cause / Fix Description must also be filled before Dev hands a
-    // ticket off to Migration specifically (explicit request) -- these two
-    // fields are already required to RESOLVE a Dev ticket (see
-    // getMissingCoreFields above), now also required at the exact point
-    // Dev routes it onward to Migration, not just when closing it outright.
-    // Scoped to Migration only (not every department Dev might route to),
-    // matching exactly what was asked.
-    const isDevToMigrationHandoff = ((issue as any)?.current_department || '').trim().toLowerCase() === 'dev'
-      && /^(waiting\s+for|routed\s+to)\s+migration$/i.test((targetStatus?.name || '').trim());
-    if (isDevToMigrationHandoff && !isMandatoryFieldsExemptDept()) {
-      const handoffMissing: string[] = [];
-      for (const f of [{ name: 'Root Cause', key: 'rootCause' }, { name: 'Fix Description', key: 'fixDescription' }]) {
-        const cfEntry = customFields.find(cf => cf.name?.toLowerCase() === f.name.toLowerCase());
-        const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
-        if (!val || val.toString().trim() === '') handoffMissing.push(f.name);
-      }
-      if (handoffMissing.length > 0) {
-        setMandatoryModal({ missingFields: handoffMissing, pendingStatusId: statusId, context: 'department' });
-        return;
-      }
-    }
+    // Root Cause / Fix Description previously also blocked Dev handing a
+    // ticket off to Migration specifically, not just resolving it --
+    // reverted by explicit request: these two fields should only ever
+    // block at the point of actually resolving a ticket (the
+    // targetStatus?.category === 'done' check above), never at any other
+    // status/department transition. The red-asterisk indicator on the
+    // fields themselves (see renderCustomField's isRequiredNow) still
+    // shows early as a heads-up while the ticket sits in Dev/Migration --
+    // only the hard block at this handoff point is removed.
     // Custom queue status (qst_...) — can't set as issue.statusId (not a DB record).
     // Store in dept_statuses[current_department] instead.
     if (statusId.startsWith('qst_') && targetStatus) {
@@ -1914,7 +1956,20 @@ export default function IssueDetailPage() {
   // opening it via QA's own board/"Worked on" list (which already correctly
   // shows Bhuvana) landed on this page showing Hemadasu instead, contradicting
   // the queue list it was just opened from.
-  const isHistoricalDeptViewForAssignee = isHistoricalDeptViewBase;
+  //
+  // EXCEPT when the viewer is a genuine member of the ticket's CURRENT
+  // department queue (isCurrentDeptQueueMember) -- a real member of the
+  // owning queue should always see that queue's own live state, never
+  // another department's historical banner/assignee, no matter what stale
+  // ?viewDept= a link they clicked happens to carry. Confirmed for real:
+  // Bhuvana (a genuine QA member, not an admin) opened CF-34455 -- now
+  // sitting in QA -- via a link still carrying viewDept=Dev from before the
+  // handoff, and saw "Showing Dev's own assignee" instead of QA's own live
+  // one, even though she's exactly the kind of QA-queue member this page
+  // should treat as viewing normally. The admin-only zeroing of
+  // viewDeptParam above already covers the admin case; this covers the
+  // same thing for any regular member of the ticket's actual current queue.
+  const isHistoricalDeptViewForAssignee = isHistoricalDeptViewBase && isCurrentDeptQueueMember !== true;
   // Admins can still edit the live ticket while viewing another queue's frozen
   // snapshot -- the read-only lock below exists so a regular user can't mistake
   // a historical snapshot for the live ticket and edit it by accident, not to
@@ -1922,7 +1977,21 @@ export default function IssueDetailPage() {
   // opened it from. The "Showing X's own..." banners stay visible either way,
   // so an editing admin still sees they're looking at a historical snapshot.
   const isHistoricalDeptView = isHistoricalDeptViewForAssignee;
-  const isHistoricalDeptLocked = isHistoricalDeptViewForAssignee && user?.role !== 'admin';
+  // Always false now, same precedent as isHistoricalDeptLockedForStatus
+  // below (which was already fixed this same way, see its own comment) --
+  // this lock was keyed purely off whether the page's ?viewDept= URL param
+  // matched the ticket's live current_department, with no check for
+  // whether the viewer is actually a genuine, current member of wherever
+  // the ticket really is now. canEdit itself is unconditionally true for
+  // any authenticated user regardless of queue membership (see its own
+  // comment above) -- this lock contradicted that same governing decision
+  // and blocked real queue members, not just someone browsing a stale
+  // link. Confirmed for real: CF-34438, current_department "Pre-sales",
+  // opened by Vignesh T -- an actual member of the Pre-sales queue --
+  // showed read-only because whatever link he used carried a different
+  // ?viewDept= value. The "Showing X's own assignee..." banner itself is
+  // untouched and still displays correctly either way.
+  const isHistoricalDeptLocked = false && isHistoricalDeptViewForAssignee && user?.role !== 'admin';
   // Status-specific counterparts to the two above -- isHistoricalDeptView/
   // isHistoricalDeptLocked got reused for the Status banner and status
   // button's own read-only lock further down, which meant a ticket opened
@@ -2181,7 +2250,17 @@ export default function IssueDetailPage() {
                   onUploadingChange={setIsUploadingDescription}
                 />
                 <div className="flex gap-2 mt-2">
-                  <button onClick={() => handleUpdate('description', stripMigrationHeaderProtection(editValue))} disabled={isUploadingDescription}
+                  <button onClick={() => {
+                    // Same defense-in-depth as handleAddComment/handleSubmitReply --
+                    // the button's own disabled={isUploadingDescription} should
+                    // already prevent this, but the comment-save paths proved that
+                    // alone wasn't always enough in practice (CF-34455), and this
+                    // is the exact same class of bug (6 descriptions found stuck
+                    // the same way).
+                    if (isUploadingDescription) return;
+                    if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(editValue)) { alert('An image is still uploading — wait for it to finish before saving.'); return; }
+                    handleUpdate('description', stripMigrationHeaderProtection(editValue));
+                  }} disabled={isUploadingDescription}
                     className="bg-blue-600 text-white text-[13px] font-medium px-4 py-1.5 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
                     {isUploadingDescription ? 'Uploading…' : 'Save'}
                   </button>
@@ -2847,7 +2926,15 @@ export default function IssueDetailPage() {
               {true && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
-                    <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">Root Cause</span>
+                    <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">
+                      Root Cause
+                      {(() => {
+                        const _dl = ((issue as any)?.current_department || '').trim().toLowerCase();
+                        return (_dl === 'dev' || _dl === 'migration') && !isMandatoryFieldsExemptDept()
+                          ? <span className="text-red-500 ml-0.5 normal-case" title="Required to resolve this ticket">*</span>
+                          : null;
+                      })()}
+                    </span>
                   </div>
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_rootCause' ? (
@@ -2866,7 +2953,7 @@ export default function IssueDetailPage() {
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField) return; setSavingCustomField(true); try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
+                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField || isUploadingCustomField) return; if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(customFieldEditValue)) { alert('An image is still uploading — wait for it to finish before saving.'); return; } setSavingCustomField(true); try { await api.updateIssue(issueKey, { rootCause: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save rootCause failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
                               className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : savingCustomField ? 'Saving…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
@@ -2891,7 +2978,15 @@ export default function IssueDetailPage() {
               {true && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <div className="bg-gray-50 px-4 py-2 border-b border-gray-200 flex items-center gap-2">
-                    <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">Fix Description</span>
+                    <span className="text-[12px] font-semibold text-gray-600 uppercase tracking-wide">
+                      Fix Description
+                      {(() => {
+                        const _dl = ((issue as any)?.current_department || '').trim().toLowerCase();
+                        return (_dl === 'dev' || _dl === 'migration') && !isMandatoryFieldsExemptDept()
+                          ? <span className="text-red-500 ml-0.5 normal-case" title="Required to resolve this ticket">*</span>
+                          : null;
+                      })()}
+                    </span>
                   </div>
                   <div className="px-4 py-3">
                     {editingCustomField === 'l2b_fixDescription' ? (
@@ -2910,7 +3005,7 @@ export default function IssueDetailPage() {
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] text-gray-400">{customFieldEditValue.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length} / 500 words</span>
                           <div className="flex gap-2">
-                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField) return; setSavingCustomField(true); try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
+                            <button disabled={isUploadingCustomField || savingCustomField} onClick={async () => { if (savingCustomField || isUploadingCustomField) return; if (HAS_PENDING_UPLOAD_PLACEHOLDER.test(customFieldEditValue)) { alert('An image is still uploading — wait for it to finish before saving.'); return; } setSavingCustomField(true); try { await api.updateIssue(issueKey, { fixDescription: customFieldEditValue }); await loadIssue(issueKey); setEditingCustomField(null); } catch(e) { console.error('Save fixDescription failed', e); alert('Failed to save. Please try again.'); } finally { setSavingCustomField(false); } }}
                               className="text-[12px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">{isUploadingCustomField ? 'Uploading…' : savingCustomField ? 'Saving…' : 'Save'}</button>
                             <button onClick={() => setEditingCustomField(null)}
                               className="text-[12px] text-gray-500 px-3 py-1 rounded hover:bg-gray-100">Cancel</button>
@@ -3243,12 +3338,16 @@ export default function IssueDetailPage() {
                                 )}
                               </div>
                             )}
-                            {/* Comment preview -- skipped for a delete event, whose newValue
-                                is the literal marker "[deleted]", not real comment text */}
+                            {/* Full comment text -- skipped for a delete event, whose newValue
+                                is the literal marker "[deleted]", not real comment text.
+                                Used to be single-line-truncated to 120 chars, which cut
+                                comments off mid-word ("half half showing") since the CSS
+                                `truncate` class clips by pixel width before that character
+                                limit is ever reached. Now shown in full, wrapped. */}
                             {a.field === 'comment' && a.newValue && a.newValue !== '[deleted]' && (() => {
                               const plain = stripHtmlToText(a.newValue).trim();
                               return (
-                                <div className="text-[12px] text-gray-500 italic truncate max-w-sm">"{plain.slice(0, 120)}{plain.length > 120 ? '…' : ''}"</div>
+                                <div className="text-[12px] text-gray-500 italic whitespace-pre-wrap break-words max-w-xl">"{plain}"</div>
                               );
                             })()}
                             {/* SLA lifecycle event (started/resumed/paused/resolved/breached) */}
@@ -4023,7 +4122,7 @@ export default function IssueDetailPage() {
               // Root Cause & Fix Description moved to main body (below Linked Work Items)
               const l2bFields: { key: string; label: string; type: 'select' | 'multiselect' | 'textarea'; options?: string[] }[] = [
                 { key: 'productType',    label: 'Product Type',    type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
-                { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes'] },
+                { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes','Permanent Fix'] },
                 { key: 'projectPool',    label: 'Project Pool',    type: 'select',      options: ['ENT', 'SMB'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: ['Box - OneDrive','Box - SharePoint','Box - MyDrive','Box - Shared Drive','Box - Dropbox','Box - Box','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox- MyDrive','Dropbox - Shared Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive - Dropbox','MyDrive - Egnyte','MyDrive - Box','My Drive - My Drive','MyDrive - MyDrive','Shared Drive- Shared Drive','Shared Drive- SharePoint ','Citrix - OneDrive','Citrix - SharePoint','Citrix - MyDrive','Citrix - Shared Drive','Egnyte - Onedrive','Egnyte - SharePoint','Egnyte - MyDrive','Egnyte - Shared Drive','Box - Citrix','DropBox - Azure','Dropbox - Box','DropBox - Egnyte','Citrix - Citrix','Shared Drive - Egnyte','Shared Drive - Onedrive','SharePoint -  Shared Drive','SharePoint - Mydrive','SharePoint - SharePoint ','SharePoint - Egnyte','NFS - Onedrive','NFS - SharePoint','NFS - MyDrive','NFS - Shared Drive','OneDrive - Amazon S3','Box - Amazon S3','Share Point - Amazon S3','Shared Drive - Amazon S3','Sharefile - Amazon S3','SharePoint - Azure','Shared Drive - Azure','Sharefile - Azure','Egnyte - Azure','Amazon S3 - SharePoint','Onedrive - Onedrive','Onedrive - MyDrive','Amazon workdocs - NFS','Slack to Slack','Chat to Chat','Teams to Teams','Meta to Chat','Meta to Viva','Meta to Teams','Slack to Teams','Slack to Chat','Teams to Chat','Chat to Teams','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Outlook - Gmail','Other','Amazon workdocs - Onedrive/SharePoint','MyDrive to MyDrive','ShareFile to SharePoint','ShareFile to ShareDrive','Drive Change','Box - Microsoft','Chat to Team','Teams to Slack','Chat To Slack'] },
                 { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: projectManagerOptions },
@@ -4052,7 +4151,7 @@ export default function IssueDetailPage() {
               // Root Cause & Fix Description shown in main body (below Linked Work Items)
               const l3bFields: { key: string; label: string; type: 'select' | 'multiselect'; options?: string[] }[] = [
                 { key: 'productType', label: 'Product Type', type: 'select',      options: ['Content Migration','Email Migration','Message Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
-                { key: 'productionTicket', label: 'Production Ticket', type: 'select', options: ['Operational Support','Code Fixes'] },
+                { key: 'productionTicket', label: 'Production Ticket', type: 'select', options: ['Operational Support','Code Fixes','Permanent Fix'] },
                 { key: 'projectPool',    label: 'Project Pool',    type: 'select',      options: ['ENT', 'SMB'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: ['Box - OneDrive','Box - SharePoint','Box - Teams','Box - Google Drive','Dropbox - Onedrive','Dropbox - SharePoint','Dropbox - Google Drive','MyDrive - Onedrive','MyDrive - SharePoint','MyDrive to MyDrive','Shared Drive - Shared Drive','Shared Drive - Onedrive','Shared Drive - SharePoint','Egnyte - Onedrive','Egnyte - SharePoint','NFS - Onedrive','NFS - SharePoint','Slack to Slack','Chat to Chat','Teams to Teams','Slack to Teams','Teams to Slack','Gmail - Gmail','Gmail - Outlook','Outlook - Outlook','Other','Others'] },
                 { key: 'projectManager', label: 'Project Manager',  type: 'multiselect', options: projectManagerOptions },
@@ -4089,7 +4188,7 @@ export default function IssueDetailPage() {
               const L1_CLIENT_OPTIONS = ['ab-inbev','cloudfuze','MarmicFire','global-v','manypets','medifast','cms','epiq-global','computer_headquarters','groundedpackaging','nfl','realtimecloudservicesllc','capmation/aaron.salazar@capmation.com','365datacenters','icf','amputeecoalitionofamerica','concertai','xica','digantararesearchandtechnologiespvtltd','utopia','oassetmanagement','hyland','bluebeaminc','secloudexperts','tandemengineeringgroup','astoundbroadband','cadence','manhattanassociates','ovo','noahmedical','lighthouselearning','insight','roccoforte','phillipsexeteracademy','kbcadvisors','palmettotechnologygroup','convergetechnologysolutions','traditionone','tvsebike','alphabest','cheilagencynetwork','steelecanvasbasket','viasuninternal','rpmtechnologies','caseware','foundationcitizengo','curtlandryministries','nferenceinc.(pramana)','aplazame','alexandriarealeestateequitiesinc','warnermedia','atlasprimary','cuorementelab','curtlandryindustries','aresmanagement','kizantechnologies','instituteofinternationaleducation(iie)','ivyrehabnetworkinc','adventinternationalltd','exactsciencescorporation','glenno.hawbaker','barrattassetmanagementllc','aqueity','ontarionursesassociation','xavier','nationalgeographic','harvardbusinesspublishing','thirdpackettechnologies','butlercohen','alliancetechnologysolutions','Washington Post','schott','roccoforte&family','wegochemicalgroup','pilottravelcenters','aptlogix','nextiva','gearboxsoftware','nozominetworks','twelvebenefitcorporation','casepoint','jamessteelelaw','trevitherapeutics','restorixhealth','wheeleezinc','getweave','None','regala_consulting','binaryevolution','softmax','gearbox','nubius','IVYREHAB-Network-Inc.','MIG','goh-inc','bossdesigncenter','onespan','lgads','savvymoney','phoenixgamesholding','todaydentalnetwork','phillipseexeter','cheil','Chryselis','papereducation','synergygatewayverified','blackeducatordevelopment','morrisconsultinggroup','convergetechnologies','tunneltotowersfoundation','gadero','wasteprosUSA','krishservices','ForvisMazars'];
               const l1bFields: { key: string; label: string; type: 'select' | 'multiselect' | 'tags'; options?: string[]; allowOther?: boolean }[] = [
                 { key: 'productType',    label: 'Product Type',    type: 'select',      options: ['Content Migration','Message Migration','Email Migration','Board Migration','CF Connect','CF Manage','UI','others','Others'] },
-                { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes'] },
+                { key: 'productionTicket', label: 'Production Ticket', type: 'select',  options: ['Operational Support','Code Fixes','Permanent Fix'] },
                 { key: 'projectPool',    label: 'Project Pool',    type: 'select',      options: ['ENT', 'SMB'] },
                 { key: 'combination',    label: 'Combination',     type: 'multiselect', options: L1_COMBO_OPTIONS },
                 { key: 'projectManager', label: 'Project Manager', type: 'multiselect', options: projectManagerOptions },
@@ -4855,6 +4954,33 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
               // by policy name instead and render ONE box per policy, with
               // each department as a row inside it.
               const deptAssignees: Record<string, any> = (issue as any)?.dept_assignees || {};
+              // dept_assignees[dept] is kept live-synced to whatever the
+              // CURRENT assignee is for as long as the dept stays current --
+              // including every reassignment made in the final seconds right
+              // up to a handoff. A rapid chain of reassignments right at
+              // handoff time can leave that snapshot naming whoever happened
+              // to be assigned for the last few seconds, not whoever actually
+              // held the ticket for the bulk of that department's stint.
+              // Confirmed for real on CF-34171: Giridhar K held Dev for
+              // essentially its whole ~13-day stint, but a ~20-second burst
+              // of reassignments during the Dev->QA handoff left
+              // dept_assignees.Dev reading Sujana Manapuram, who held it for
+              // about 10 seconds. For attributing a historical breach,
+              // what matters is who actually held the ticket at the moment
+              // this department's own SLA clock ran out (dueAt) -- found from
+              // the same assignee-change history the History tab already
+              // reads (issue.activity), not the handoff-time snapshot.
+              const assigneeHistory = Array.isArray(issue.activity)
+                ? issue.activity.filter((a: any) => a.field === 'assignee').slice().sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+                : [];
+              const assigneeNameAsOf = (atMs: number): string | null => {
+                let name: string | null = null;
+                for (const ev of assigneeHistory) {
+                  if (new Date(ev.createdAt).getTime() > atMs) break;
+                  name = ev.newValue && ev.newValue !== 'None' ? ev.newValue : null;
+                }
+                return name;
+              };
               const entries = finalEntries.map((s: any) => {
                 const startedAt = s.startedAt ? new Date(s.startedAt) : null;
                 const dueAt = new Date(s.dueTime);
@@ -4906,7 +5032,30 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                 const deptAssigneeName = deptAssigneeSnap
                   ? `${deptAssigneeSnap.firstName || deptAssigneeSnap.displayName || ''} ${deptAssigneeSnap.lastName || ''}`.trim() || null
                   : null;
-                return { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, baseName, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName };
+                // Prefer whoever was actually assigned right when this
+                // department's own SLA due time passed -- falls back to the
+                // handoff-time snapshot only when there's no assignee
+                // history to check against at all.
+                //
+                // Only trust that lookup when dueAt actually falls within
+                // this department's own tenure (dueAt >= startedAt) -- a
+                // historical (already moved-on) department that was already
+                // over its goal by the time it got paused has its dueTime
+                // deliberately computed as startedAt + a NEGATIVE remaining
+                // budget (see the historicalInstances' dueTime comment in
+                // jira-pg-api.ts), landing BEFORE this department even
+                // started holding the ticket, sometimes before it was even
+                // routed here. Looking up "who was assigned at that earlier
+                // moment" then returns whoever held it during a PRIOR
+                // department's stint, not this one's real worker. The
+                // dept_assignees snapshot is always correct for that case.
+                // Confirmed for real: CF-34629 -- QA's and Infra's own
+                // frozen assignees are Asma Karim and Ravi Teja respectively,
+                // but both historical cards read "Breached by Sadia Shaik"
+                // (the ticket's assignee from an earlier, unrelated moment).
+                const dueAtWithinTenure = !!startedAt && dueAt.getTime() >= startedAt.getTime();
+                const breachedByName = dueAtWithinTenure ? (assigneeNameAsOf(dueAt.getTime()) || deptAssigneeName) : deptAssigneeName;
+                return { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, baseName, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName, breachedByName };
               });
 
               const groups = new Map<string, typeof entries>();
@@ -4935,7 +5084,7 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                     </div>
 
                     {group.map((e, i) => {
-                      const { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName } = e;
+                      const { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, slaDept, isNotified, isBreachingSoon, showAsBreach, breachedByName } = e;
                       return (
                         <div key={s.id} className={i > 0 ? 'pt-3 mt-3 border-t border-gray-200' : ''}>
                           {/* Dept badge + goal + status badges */}
@@ -5062,7 +5211,7 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                               resolved the ticket. */}
                           {historicallyBreached && (
                             <p className="text-[10.5px] text-red-500 mt-2">
-                              Breached by <span className="font-semibold">{deptAssigneeName || 'Unassigned'}</span>
+                              Breached by <span className="font-semibold">{breachedByName || 'Unassigned'}</span>
                             </p>
                           )}
 

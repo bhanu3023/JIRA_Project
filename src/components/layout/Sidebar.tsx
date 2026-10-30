@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
@@ -724,9 +724,7 @@ export default function Sidebar() {
             <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
             <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
             <GlobalNavItem href="/kb" icon={<BookOpen size={15} />} label="KB Articles" active={pathname.startsWith('/kb')} />
-            {user?.role === 'admin' && (
-              <GlobalNavItem href="/worklog" icon={<Clock size={15} />} label="Worklog" active={pathname.startsWith('/worklog')} />
-            )}
+            <GlobalNavItem href="/worklog" icon={<Clock size={15} />} label="Worklog" active={pathname.startsWith('/worklog')} />
             {canSeeMbr && (
               <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
             )}
@@ -936,7 +934,7 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
     );
 
   // Load custom queues from DB.
-  useEffect(() => {
+  const loadQueues = useCallback(() => {
     if (!spaceKey) return;
     api.request<any[]>(`custom-queues/${spaceKey}`).then((q) => {
       if (Array.isArray(q) && q.length > 0) {
@@ -984,6 +982,22 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
       } catch {}
     });
   }, [spaceKey, user?.role]);
+
+  useEffect(() => { loadQueues(); }, [loadQueues]);
+
+  // Queue names/members/etc. can be changed from a different page (e.g. the
+  // queue settings page's rename control) while this Sidebar instance stays
+  // mounted, so its own one-time fetch above never sees the change. That
+  // page dispatches this event right after a successful write; listen for
+  // it here and refetch so the tree doesn't keep showing stale data.
+  useEffect(() => {
+    const onQueuesChanged = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (!detail || detail.spaceKey === spaceKey) loadQueues();
+    };
+    window.addEventListener('custom-queues-changed', onQueuesChanged);
+    return () => window.removeEventListener('custom-queues-changed', onQueuesChanged);
+  }, [spaceKey, loadQueues]);
 
   // Load space members for the create-queue form
   useEffect(() => {

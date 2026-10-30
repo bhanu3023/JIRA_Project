@@ -4,7 +4,42 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
-import { Clock, Calendar, X, Search, ChevronDown } from 'lucide-react';
+import { Clock, Calendar, X, Search, ChevronDown, Plus, Trash2 } from 'lucide-react';
+
+// The fixed activity list for the "Ticket Worklog" tab's Create form --
+// non-ticket work that still deserves a logged, reportable time entry.
+// "Others" is the one type that also needs a free-text reason, handled
+// specially wherever this list is used.
+const ACTIVITY_TYPES = [
+  'Monitor migrations and retry failed items from the UI',
+  'Analyse reports and send them to the customer',
+  'Work on automation',
+  'Attend the weekly communication training',
+  'Complete courses',
+  'Validate mappings and start migrations',
+  'Attend the daily meeting on updates',
+  'Hand off to the next shift',
+  'Create tickets',
+  'Write KB articles',
+  'Investigate issues',
+  'Join client calls',
+  'Join internal calls',
+  'PMO tracker update',
+  'Others',
+] as const;
+
+type ActivityWorklogRow = {
+  id: string;
+  userId: string;
+  authorName: string | null;
+  authorEmail: string | null;
+  activityType: string;
+  customReason: string | null;
+  timeSpentMinutes: number;
+  description: string | null;
+  workDate: string;
+  createdAt: string;
+};
 
 type WorklogRow = {
   id: string;
@@ -105,8 +140,293 @@ function UserSearchSelect({
   );
 }
 
+// ── Ticket Worklog tab ──────────────────────────────────────────────────
+// A personal, non-ticket activity log (training, meetings, reports, etc.)
+// -- separate from the ticket-scoped Worklog tab above. Self-contained
+// (own state/fetching/modal) so it doesn't need to touch WorklogPage's
+// already-large existing state.
+
+type DraftEntry = { activityType: string; hours: string; minutes: string; customReason: string; description: string };
+
+function emptyDraft(activityType: string): DraftEntry {
+  return { activityType, hours: '', minutes: '', customReason: '', description: '' };
+}
+
+function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [workDate, setWorkDate] = useState(() => isoDate(new Date()));
+  const [selected, setSelected] = useState<Record<string, DraftEntry>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const toggle = (activityType: string) => {
+    setSelected((prev) => {
+      const next = { ...prev };
+      if (next[activityType]) delete next[activityType];
+      else next[activityType] = emptyDraft(activityType);
+      return next;
+    });
+  };
+
+  const updateDraft = (activityType: string, patch: Partial<DraftEntry>) => {
+    setSelected((prev) => ({ ...prev, [activityType]: { ...prev[activityType], ...patch } }));
+  };
+
+  const handleSave = async () => {
+    const drafts = Object.values(selected);
+    if (!drafts.length) { setError('Select at least one activity.'); return; }
+    const entries: Array<{ activityType: string; customReason?: string; timeSpentMinutes: number; description?: string }> = [];
+    for (const d of drafts) {
+      const h = Math.max(0, parseInt(d.hours, 10) || 0);
+      const m = Math.max(0, parseInt(d.minutes, 10) || 0);
+      const total = h * 60 + m;
+      if (total <= 0) { setError(`Enter time spent for "${d.activityType}".`); return; }
+      if (d.activityType === 'Others' && !d.customReason.trim()) { setError('Enter a reason for "Others".'); return; }
+      entries.push({
+        activityType: d.activityType,
+        customReason: d.activityType === 'Others' ? d.customReason.trim() : undefined,
+        timeSpentMinutes: total,
+        description: d.description.trim() || undefined,
+      });
+    }
+    setSaving(true);
+    setError('');
+    try {
+      await api.createActivityWorklog({ workDate: `${workDate}T12:00:00`, entries });
+      onSaved();
+      onClose();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to save.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+          <h2 className="text-[15px] font-bold text-gray-800">Log work</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+
+        <div className="px-5 py-4 overflow-y-auto flex-1">
+          <div className="mb-4">
+            <label className="text-[12px] text-gray-500 font-medium block mb-1">Date</label>
+            <input type="date" value={workDate} onChange={(e) => setWorkDate(e.target.value)}
+              className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+
+          <p className="text-[12px] text-gray-500 font-medium mb-2">Select what you worked on — check each one that applies, then log time for it.</p>
+          <div className="space-y-2">
+            {ACTIVITY_TYPES.map((activityType) => {
+              const checked = !!selected[activityType];
+              const draft = selected[activityType];
+              return (
+                <div key={activityType} className={`rounded-lg border ${checked ? 'border-blue-300 bg-blue-50/40' : 'border-gray-200'}`}>
+                  <label className="flex items-center gap-2.5 px-3 py-2.5 cursor-pointer">
+                    <input type="checkbox" checked={checked} onChange={() => toggle(activityType)}
+                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 flex-shrink-0" />
+                    <span className="text-[13px] text-gray-800">{activityType}</span>
+                  </label>
+                  {checked && draft && (
+                    <div className="px-3 pb-3 pt-1 space-y-2 border-t border-blue-100">
+                      <div className="flex items-center gap-2">
+                        <label className="text-[11px] text-gray-500 font-medium w-20">Time spent</label>
+                        <input type="number" min={0} placeholder="h" value={draft.hours}
+                          onChange={(e) => updateDraft(activityType, { hours: e.target.value })}
+                          className="w-16 border border-gray-300 rounded px-2 py-1 text-[12.5px] focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        <span className="text-[11px] text-gray-400">h</span>
+                        <input type="number" min={0} max={59} placeholder="m" value={draft.minutes}
+                          onChange={(e) => updateDraft(activityType, { minutes: e.target.value })}
+                          className="w-16 border border-gray-300 rounded px-2 py-1 text-[12.5px] focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        <span className="text-[11px] text-gray-400">m</span>
+                      </div>
+                      {activityType === 'Others' && (
+                        <div className="flex items-center gap-2">
+                          <label className="text-[11px] text-gray-500 font-medium w-20 flex-shrink-0">Reason</label>
+                          <input type="text" placeholder="What did you work on?" value={draft.customReason}
+                            onChange={(e) => updateDraft(activityType, { customReason: e.target.value })}
+                            className="flex-1 border border-gray-300 rounded px-2 py-1 text-[12.5px] focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <label className="text-[11px] text-gray-500 font-medium w-20 flex-shrink-0">Notes</label>
+                        <input type="text" placeholder="Optional" value={draft.description}
+                          onChange={(e) => updateDraft(activityType, { description: e.target.value })}
+                          className="flex-1 border border-gray-300 rounded px-2 py-1 text-[12.5px] focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="px-5 py-3 border-t border-gray-200 flex items-center justify-between flex-shrink-0">
+          {error ? <p className="text-[12px] text-red-500">{error}</p> : <span />}
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="px-3 py-1.5 text-[12.5px] font-medium text-gray-500 hover:text-gray-800">Cancel</button>
+            <button onClick={handleSave} disabled={saving}
+              className="px-4 py-1.5 bg-blue-600 text-white text-[12.5px] font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-50">
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TicketWorklogTab({ userId, allUsers }: {
+  userId: string | undefined;
+  allUsers: { id: string; firstName?: string; lastName?: string; email?: string }[];
+}) {
+  const [entries, setEntries] = useState<ActivityWorklogRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+
+  // Default to the last 30 days, same reasoning as the Worklog tab's own
+  // date filter -- the full unfiltered history isn't what anyone wants on
+  // first load.
+  const [dateFrom, setDateFrom] = useState(() => isoDate(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000)));
+  const [dateTo, setDateTo] = useState(() => isoDate(new Date()));
+  const [userFilter, setUserFilter] = useState(''); // open to everyone -- any user can filter to anyone else here
+  const [activityFilter, setActivityFilter] = useState('');
+
+  const load = () => {
+    setLoading(true);
+    api.getActivityWorklogs({
+      from: dateFrom ? `${dateFrom}T00:00:00` : undefined,
+      to: dateTo ? `${dateTo}T23:59:59` : undefined,
+      userId: userFilter || undefined,
+    }).then(setEntries).catch(() => {}).finally(() => setLoading(false));
+  };
+  useEffect(load, [dateFrom, dateTo, userFilter]);
+
+  const visibleEntries = activityFilter ? entries.filter((e) => e.activityType === activityFilter) : entries;
+
+  const handleDelete = async (id: string) => {
+    setEntries((prev) => prev.filter((e) => e.id !== id));
+    try { await api.deleteActivityWorklog(id); } catch { load(); }
+  };
+
+  return (
+    <div className="flex-1 overflow-auto px-8 py-6">
+      <div className="flex items-center justify-between mb-5">
+        <p className="text-[13px] text-gray-500">Non-ticket work — training, meetings, reports, and other activities worth logging.</p>
+        <button onClick={() => setShowCreate(true)}
+          className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white text-[12.5px] font-semibold rounded-lg hover:bg-blue-700">
+          <Plus size={14} /> Create
+        </button>
+      </div>
+
+      {/* Filters */}
+      <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2 text-[13px] font-medium text-gray-600">
+          <Calendar size={15} className="text-gray-400" />
+          Date Range
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">From</label>
+          <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">To</label>
+          <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">Reporter</label>
+          <UserSearchSelect
+            value={userFilter}
+            onChange={setUserFilter}
+            placeholder="Everyone"
+            options={[
+              { value: '', label: 'Everyone' },
+              ...allUsers.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
+            ]}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">Activity</label>
+          <select value={activityFilter} onChange={(e) => setActivityFilter(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white max-w-[260px]">
+            <option value="">All activities</option>
+            {ACTIVITY_TYPES.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+        {(userFilter || activityFilter || dateFrom || dateTo) && (
+          <button onClick={() => { setUserFilter(''); setActivityFilter(''); setDateFrom(isoDate(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000))); setDateTo(isoDate(new Date())); }}
+            className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
+            <X size={11} /> Clear
+          </button>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">Loading…</div>
+      ) : visibleEntries.length === 0 ? (
+        <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">
+          {entries.length === 0 ? 'No activity logged yet. Click Create to log your first entry.' : 'No entries match these filters.'}
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</th>
+                  <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Reporter</th>
+                  <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Activity</th>
+                  <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Time</th>
+                  <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Notes</th>
+                  <th className="px-4 py-2.5 w-10" />
+                </tr>
+              </thead>
+              <tbody>
+                {visibleEntries.map((e) => (
+                  <tr key={e.id} className="border-b border-gray-100 last:border-0 group">
+                    <td className="px-4 py-2.5 text-[12.5px] text-gray-500 whitespace-nowrap">
+                      {new Date(e.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                    </td>
+                    <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{e.authorName || 'Unknown'}</td>
+                    <td className="px-4 py-2.5 text-[13px] text-gray-800">
+                      {e.activityType === 'Others' && e.customReason ? e.customReason : e.activityType}
+                    </td>
+                    <td className="px-4 py-2.5 text-[12.5px] font-semibold text-gray-800 whitespace-nowrap">{formatMinutes(e.timeSpentMinutes)}</td>
+                    <td className="px-4 py-2.5 text-[12.5px] text-gray-500 max-w-[280px] truncate">{e.description || '—'}</td>
+                    <td className="px-4 py-2.5">
+                      {e.userId === userId && (
+                        <button onClick={() => handleDelete(e.id)} title="Delete"
+                          className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-500 transition-opacity">
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {showCreate && <CreateActivityWorklogModal onClose={() => setShowCreate(false)} onSaved={load} />}
+    </div>
+  );
+}
+
 export default function WorklogPage() {
   const { spaces, user } = useStore((s) => ({ spaces: s.spaces, user: s.user }));
+  const isAdminUser = user?.role === 'admin';
+  // "Worklog" (cross-ticket, every user's logged hours) is admin-only --
+  // reversed back after briefly opening it to everyone; "Ticket Worklog"
+  // (the non-ticket activity log) is the one meant for all users. A
+  // non-admin therefore starts on 'ticket' since 'worklog' isn't reachable
+  // for them at all.
+  const [mainTab, setMainTab] = useState<'worklog' | 'ticket'>(isAdminUser ? 'worklog' : 'ticket');
 
   // Default to the last 30 days -- the full unfiltered history across every
   // ticket is rarely what anyone wants on first load, same reasoning as the
@@ -262,6 +582,25 @@ export default function WorklogPage() {
         <p className="text-[12.5px] text-gray-500 mt-0.5">Time logged against tickets, same as Jira's own Logged Work view.</p>
       </div>
 
+      {/* Tabs */}
+      <div className="bg-white border-b border-gray-200 px-8 flex-shrink-0">
+        <div className="flex gap-6">
+          {isAdminUser && (
+            <button onClick={() => setMainTab('worklog')}
+              className={`py-3 text-[13px] font-semibold border-b-2 transition-colors ${mainTab === 'worklog' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
+              Worklog
+            </button>
+          )}
+          <button onClick={() => setMainTab('ticket')}
+            className={`py-3 text-[13px] font-semibold border-b-2 transition-colors ${mainTab === 'ticket' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
+            Ticket Worklog
+          </button>
+        </div>
+      </div>
+
+      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} allUsers={users} />}
+
+      {mainTab === 'worklog' && isAdminUser && (
       <div className="flex-1 overflow-auto px-8 py-6">
         {/* Filters */}
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex flex-wrap items-center gap-4">
@@ -444,6 +783,7 @@ export default function WorklogPage() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

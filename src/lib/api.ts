@@ -154,7 +154,14 @@ class ApiClient {
       throw new Error('That request is too large — the description or an attached image/file is too big. Try a smaller image or remove an attachment and try again.');
     }
 
-    if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
+    // data.detail is an opt-in extra some admin-only endpoints (e.g. queue
+    // rename) attach when server logs have proven unreliable to retrieve --
+    // appended here only when actually present, so every other error path
+    // is completely unaffected.
+    if (!res.ok) {
+      const base = typeof data.error === 'string' ? data.error : 'Request failed';
+      throw new Error(typeof data.detail === 'string' && data.detail ? `${base} (${data.detail})` : base);
+    }
     // DELETE and similar endpoints can legitimately return a 200/204 with no
     // body at all -- only GETs (which callers always expect real data back
     // from) need to fail loudly on an unparseable body; a DELETE returning
@@ -304,6 +311,18 @@ class ApiClient {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return this.request<any>(`/worklogs${suffix}`);
   }
+  createActivityWorklog(data: { workDate: string; entries: Array<{ activityType: string; customReason?: string; timeSpentMinutes: number; description?: string }> }) {
+    return this.request<{ ok: true; entries: any[] }>(`/activity-worklogs`, { method: 'POST', body: JSON.stringify(data) });
+  }
+  getActivityWorklogs(params: { from?: string; to?: string; userId?: string } = {}) {
+    const qs = new URLSearchParams();
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.userId) qs.set('userId', params.userId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.request<any[]>(`/activity-worklogs${suffix}`);
+  }
+  deleteActivityWorklog(id: string) { return this.request<any>(`/activity-worklogs/${id}`, { method: 'DELETE' }); }
   resyncFromJira(key: string) { return this.request<any>(`/issues/${key}/resync-from-jira`, { method: 'POST' }); }
   addLink(key: string, data: any) { return this.request<any>(`/issues/${key}/links`, { method: 'POST', body: JSON.stringify(data) }); }
   addIssueLink(key: string, data: { targetKey: string; linkType: string }) { return this.addLink(key, data); }

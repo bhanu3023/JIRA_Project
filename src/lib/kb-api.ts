@@ -444,11 +444,29 @@ export async function handleKbApi(
   if (!userId) return json({ error: 'Unauthorized' }, 401);
   await kbSchemaReady;
 
+  // By explicit request: every migration_manager role user gets the same
+  // "Awaiting my approval" access as an admin, not just whoever happens to
+  // be set as someone's actual manager_id -- the same fallback this
+  // codebase already relies on elsewhere (Filters' assignee picker,
+  // my-dashboard, the Home dashboard's Migration Manager section) wherever
+  // the manager_id hierarchy itself isn't a reliable source of truth for
+  // who actually holds this role. A migration_manager approving a pending
+  // article they didn't personally submit is never their own article
+  // (row.author_id !== userId already guards that for every path here).
+  const isMigrationManager = currentUser?.role === 'migration_manager';
   const canManage = (row: any) => isAdmin || row.author_id === userId;
+<<<<<<< HEAD
   // A pending article waits on any of its author's managers (approver_ids),
   // or any admin when the author has no manager.
   const canApprove = (row: any) =>
     row.status === 'pending' && row.author_id !== userId && (isAdmin || (row.approver_ids || []).includes(userId));
+=======
+  // A pending article waits on its manager (approver_id), any admin when
+  // the author has no manager, or any migration_manager role user.
+  const canApprove = (row: any) =>
+    row.status === 'pending' && row.author_id !== userId &&
+    (isAdmin || isMigrationManager || (!!row.approver_id && row.approver_id === userId));
+>>>>>>> a2c0caa5b8dbec955e44dfbe3b647b7e50e0f0dc
   const canRead = (row: any, myTeams: string[]) =>
     canManage(row) ||
     canApprove(row) ||
@@ -463,8 +481,13 @@ export async function handleKbApi(
     const reportCount = Number((await pool.query(`SELECT COUNT(*) FROM users WHERE $1 = ANY(manager_ids)`, [userId])).rows[0]?.count || 0);
     return json({
       publishesDirectly: isAdmin,
+<<<<<<< HEAD
       approvers: approvers.map((a) => ({ id: a.id, name: a.name })),
       reviews: isAdmin || reportCount > 0,
+=======
+      approver: approver ? { id: approver.id, name: approver.name } : null,
+      reviews: isAdmin || isMigrationManager || reportCount > 0,
+>>>>>>> a2c0caa5b8dbec955e44dfbe3b647b7e50e0f0dc
     });
   }
 
@@ -489,9 +512,20 @@ export async function handleKbApi(
     where.push(`a.kind = ${p(parseKind(url.searchParams.get('kind')))}`);
 
     if (scope === 'approvals') {
-      // Articles waiting on me: as the author's manager, or as an admin.
+      // Articles waiting on me: as the author's manager, as an admin, or as
+      // any migration_manager role user (same blanket access canApprove and
+      // kb/me's `reviews` flag already grant them above) -- without this,
+      // the "Awaiting my approval" tab correctly appeared for a migration
+      // manager (reviews: true) but the list itself stayed narrowed to only
+      // articles where THEY specifically were the assigned approver_id,
+      // same as an ordinary manager, leaving it empty for everyone except
+      // whoever happened to be set as that particular author's manager.
       where.push(`status = 'pending' AND author_id <> ${p(userId)}`);
+<<<<<<< HEAD
       if (!isAdmin) where.push(`${p(userId)} = ANY(approver_ids)`);
+=======
+      if (!isAdmin && !isMigrationManager) where.push(`approver_id = ${p(userId)}`);
+>>>>>>> a2c0caa5b8dbec955e44dfbe3b647b7e50e0f0dc
     } else if (scope === 'drafts') {
       // Drafts include the ones submitted and waiting for approval.
       where.push(`status IN ('draft', 'pending')`);

@@ -175,6 +175,55 @@ export async function getValidAccessToken(email: string): Promise<string | null>
 const GRAPH_SCOPE    = 'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access email openid profile';
 const EXCHANGE_SCOPE = 'https://outlook.office365.com/IMAP.AccessAsUser.All https://outlook.office365.com/SMTP.Send offline_access email openid profile';
 
+// ── App-only Graph access (client-credentials grant) ──────────────────────────
+// No per-mailbox sign-in, no password, no per-user consent screen at all — one
+// tenant-wide token (scoped by the Azure app registration's ADMIN-CONSENTED
+// *Application* permissions, a separate grant from the Delegated permissions
+// above) can read/send mail for ANY mailbox in the tenant via Graph's
+// /users/{address}/... endpoints. Requires MICROSOFT_TENANT_ID (client-
+// credentials tokens are tenant-specific — unlike the delegated flow above,
+// the /common/ multi-tenant endpoint does not accept this grant type) and the
+// app registration having Mail.Read + Mail.Send as *Application* permissions
+// with admin consent granted — a one-time Azure AD admin action, not
+// something this app can request for itself.
+let appOnlyTokenCache: { token: string; expiresAt: number } | null = null;
+
+export async function getGraphAppOnlyToken(): Promise<string | null> {
+  if (appOnlyTokenCache && appOnlyTokenCache.expiresAt > Date.now() + 60_000) {
+    return appOnlyTokenCache.token;
+  }
+  const clientId     = process.env.MICROSOFT_CLIENT_ID;
+  const clientSecret  = process.env.MICROSOFT_CLIENT_SECRET;
+  const tenantId      = process.env.MICROSOFT_TENANT_ID;
+  if (!clientId || !clientSecret || !tenantId) {
+    console.error('[OAuthService] getGraphAppOnlyToken: missing MICROSOFT_CLIENT_ID/CLIENT_SECRET/TENANT_ID');
+    return null;
+  }
+  try {
+    const res = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    new URLSearchParams({
+        grant_type:    'client_credentials',
+        client_id:     clientId,
+        client_secret: clientSecret,
+        scope:         'https://graph.microsoft.com/.default',
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      console.error(`[OAuthService] App-only token request FAILED (${res.status}): ${err}`);
+      return null;
+    }
+    const data = await res.json();
+    appOnlyTokenCache = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000 };
+    return appOnlyTokenCache.token;
+  } catch (e: any) {
+    console.error('[OAuthService] App-only token request error:', e?.message || e);
+    return null;
+  }
+}
+
 async function requestMicrosoftToken(refreshToken: string, scope: string): Promise<{ ok: true; data: any } | { ok: false; status: number; body: string }> {
   const clientId     = process.env.MICROSOFT_CLIENT_ID!;
   const clientSecret = process.env.MICROSOFT_CLIENT_SECRET!;

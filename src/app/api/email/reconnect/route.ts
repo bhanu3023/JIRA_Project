@@ -170,6 +170,7 @@ export async function POST(req: NextRequest) {
         UNIQUE(space_key, address)
       )
     `);
+    await pool2.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS auth_mode TEXT DEFAULT 'password'`);
 
     const dbResult = await pool2.query('SELECT * FROM email_configs ORDER BY created_at');
 
@@ -184,22 +185,29 @@ export async function POST(req: NextRequest) {
         return;
       }
 
+      const isAppOnly = row.auth_mode === 'app_only';
+
       // Try to get OAuth token first
       let accessToken: string | undefined;
       let oauthProvider: string | undefined;
       let refreshToken: string | undefined;
-      try {
-        const { getValidAccessToken: gvat, getOAuthTokens: got } = await import('@/lib/oauth-service');
-        const stored = got(emailAddr);
-        if (stored) {
-          accessToken   = await gvat(emailAddr) ?? stored.accessToken ?? undefined;
-          oauthProvider = stored.provider;
-          refreshToken  = stored.refreshToken;
-        }
-      } catch {}
+      if (!isAppOnly) {
+        try {
+          const { getValidAccessToken: gvat, getOAuthTokens: got } = await import('@/lib/oauth-service');
+          const stored = got(emailAddr);
+          if (stored) {
+            accessToken   = await gvat(emailAddr) ?? stored.accessToken ?? undefined;
+            oauthProvider = stored.provider;
+            refreshToken  = stored.refreshToken;
+          }
+        } catch {}
+      }
 
       const hasPassword = !!(row.password_enc);
-      if (!accessToken && !hasPassword) {
+      // app_only configs have no per-mailbox token or password at all — that's
+      // the point — so they skip this gate entirely and rely on the shared
+      // tenant-wide token fetched fresh on every poll.
+      if (!isAppOnly && !accessToken && !hasPassword) {
         console.log(`[Reconnect] No credentials for ${emailAddr} — skipping`);
         return;
       }
@@ -216,18 +224,20 @@ export async function POST(req: NextRequest) {
             port:              row.imap_port,
             secure:            true,
             user:              emailAddr,
-            password:          isOAuth ? '' : (row.password_enc || ''),
+            password:          (isOAuth || isAppOnly) ? '' : (row.password_enc || ''),
             oauthAccessToken:  accessToken,
             oauthRefreshToken: refreshToken,
             oauthProvider:     oauthProvider as any,
+            appOnly:           isAppOnly || undefined,
           },
           smtp: {
             host:             row.smtp_host,
             port:             row.smtp_port,
             secure:           false,
             user:             emailAddr,
-            password:         isOAuth ? '' : (row.password_enc || ''),
+            password:         (isOAuth || isAppOnly) ? '' : (row.password_enc || ''),
             oauthAccessToken: accessToken,
+            appOnly:          isAppOnly || undefined,
           },
           spaceKey:      row.space_key,
           address:       emailAddr,

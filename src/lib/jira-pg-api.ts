@@ -667,6 +667,26 @@ pool.query(`
   )
 `).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS issue_worklogs_issue_idx ON issue_worklogs ("issueId")`).catch(() => {});
+// Non-ticket activity worklog -- the Worklog page's "Ticket Worklog" tab.
+// Deliberately NOT tied to an issueId (unlike issue_worklogs above): this
+// logs general work (training, meetings, reports, etc. -- a fixed list of
+// activity types, plus a free-text "Others" reason) that doesn't belong
+// to any one ticket.
+pool.query(`
+  CREATE TABLE IF NOT EXISTS activity_worklogs (
+    id TEXT PRIMARY KEY,
+    "userId" TEXT,
+    "authorName" TEXT,
+    "authorEmail" TEXT,
+    "activityType" TEXT NOT NULL,
+    "customReason" TEXT,
+    "timeSpentMinutes" INTEGER NOT NULL,
+    description TEXT,
+    "workDate" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS activity_worklogs_user_idx ON activity_worklogs ("userId")`).catch(() => {});
 // Records every real (non-dev-mode) notification send attempt and its
 // outcome -- written by notification-service.ts's sendNotification, the
 // single choke point every notification email (status change, comment,
@@ -1125,9 +1145,11 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
   // 1. SLA breach warnings (30 min before)
   try {
     const activeIssues = await pool.query(
-      `SELECT i.*, s.category AS status_category, s.name AS status_name
+      `SELECT i.*, s.category AS status_category, s.name AS status_name,
+              a."firstName" AS assignee_first, a."lastName" AS assignee_last
        FROM issues i
        LEFT JOIN statuses s ON i."statusId" = s.id
+       LEFT JOIN users a ON a.id = i."assigneeId"
        WHERE i.dept_sla_started_at IS NOT NULL
          AND (s.category IS NULL OR s.category != 'done')
        LIMIT 2000`
@@ -1180,7 +1202,18 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
       const byIssue = new Map<string, { row: any; policyName: string }>();
       for (const c of justBreached) { if (!byIssue.has(c.row.id)) byIssue.set(c.row.id, c); }
       for (const { row } of byIssue.values()) {
-        const label = `SLA breached — ${row.current_department || ''}`.trim();
+        // By explicit request: the breach entry itself should name who it
+        // breached under, not just the department -- the ticket's current
+        // assignee at the moment the SLA crossed its due time, same person
+        // sla_breached_by already surfaces on the Filters list for a live
+        // (non-dept-scoped) view. Confirmed for real on CF-34582: History
+        // only ever showed a breach attribution at resolve time, via the
+        // separate status-change badge -- this is the first record of it
+        // at the actual moment of breach.
+        const assigneeName = (row.assignee_first || row.assignee_last)
+          ? `${row.assignee_first || ''} ${row.assignee_last || ''}`.trim()
+          : null;
+        const label = `SLA breached — ${row.current_department || ''}${assigneeName ? ` (${assigneeName})` : ''}`.trim();
         try {
           const already = await (db as any).issueHistory.findFirst({ where: { issueId: row.id, field: 'sla', newValue: label } });
           if (already) continue;
@@ -1387,10 +1420,24 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
       { team: 'qa', dept: 'QA' },
       { team: 'infra', dept: 'Infra' },
     ];
+    // Compares against Filters' "Created" + "Resolved date" chips specifically
+    // (resolvedRange, NOT updatedRange) -- by explicit follow-up request,
+    // that's the Filters configuration MBR must always agree with (confirmed
+    // for real: Created+Resolved date returned 545 for Dev/Oct 2026, exactly
+    // matching MBR's own createdAt-OR-resolvedAt default; Created+Updated
+    // returns a genuinely different 558). Used to compare MBR's dateMode=
+    // touched mode against Filters' createdRange+updatedRange instead --
+    // which meant this check could report "clean" every single day while
+    // validating a pairing nobody in the real app actually compares, exactly
+    // how the Customer Engineering tab silently disagreed with Filters (on
+    // the resolved-date comparison that actually matters) for as long as it
+    // did without this check ever catching it. Now exercises MBR's actual
+    // default (no dateMode param) against the actual Filters chip it's
+    // meant to match.
     for (const { team, dept } of oneToOneChecks) {
       const [mbr, filters] = await Promise.all([
-        get(`/reports/mbr-team?team=${team}&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
-        get(`/issues?spaceKey=TESTIN&dept=${dept}&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`),
+        get(`/reports/mbr-team?team=${team}&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+        get(`/issues?spaceKey=TESTIN&dept=${dept}&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&resolvedRange=${encodeURIComponent(dateParam)}&limit=1`),
       ]);
       const mbrTotal = mbr?.summary?.total;
       const filtersTotal = filters?.total;
@@ -1400,9 +1447,9 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
     }
 
     const [ent, smb, migrationFilters] = await Promise.all([
-      get(`/reports/mbr-team?team=ent&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
-      get(`/reports/mbr-team?team=smb&dateFrom=${dateFrom}&dateTo=${dateTo}&dateMode=touched`),
-      get(`/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&updatedRange=${encodeURIComponent(dateParam)}&limit=1`),
+      get(`/reports/mbr-team?team=ent&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+      get(`/reports/mbr-team?team=smb&dateFrom=${dateFrom}&dateTo=${dateTo}`),
+      get(`/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true&createdRange=${encodeURIComponent(dateParam)}&resolvedRange=${encodeURIComponent(dateParam)}&limit=1`),
     ]);
     const entTotal: number = ent?.summary?.total ?? 0;
     const smbTotal: number = smb?.summary?.total ?? 0;
@@ -1433,7 +1480,25 @@ async function runDailyConsistencyCheck(): Promise<{ mbrFiltersIssues: string[];
         if (inst.startedAt && inst.dueTime && new Date(inst.dueTime).getTime() < new Date(inst.startedAt).getTime()) impossibleDue++;
         const isCurrentDeptInstance = (inst.deptName || '').trim().toLowerCase() === curDept;
         if (isCurrentDeptInstance && inst.isCompleted && curDeptKey && deptLog[curDeptKey]?.status === 'running') falseResolvedDept++;
-        if (typeof inst.actualElapsedMs === 'number' && typeof inst.goalDurationMs === 'number') {
+        // actualElapsedMs is only a REAL measurement when this app's own
+        // dept_sla_log genuinely tracked the instance's own department --
+        // otherwise it's just the 0 default computeSLAInstancesPure falls
+        // back to (see priorElapsedMs there), and the instance's isBreached
+        // came entirely from the imported jira_sla_breached flag instead
+        // (see isSlaInstanceBreached's own hasDeptLogEntry-gated fallback).
+        // Comparing that placeholder 0 against the goal as if it were a
+        // real elapsed time flagged 1491 genuinely-breached legacy QA
+        // tickets as "false positives" here -- confirmed for real against
+        // live Jira: every one of a 15-ticket sample had a real, deeply
+        // overdue (hundreds to 1700+ hours past goal) breached cycle in
+        // Jira's own native SLA metric, with no explicit Yes/No field set
+        // and no resolution date ever recorded in Jira either, so there is
+        // genuinely no reliable "actual time" to compare against for these
+        // -- not a bug in the breach verdict, a gap in this check's own
+        // assumption that actualElapsedMs is always a real measurement.
+        const instDeptKey = Object.keys(deptLog).find((k) => k.toLowerCase() === (inst.deptName || '').trim().toLowerCase());
+        const hasRealTrackingForInst = !!instDeptKey;
+        if (hasRealTrackingForInst && typeof inst.actualElapsedMs === 'number' && typeof inst.goalDurationMs === 'number') {
           if (inst.isBreached && !inst.waived && inst.actualElapsedMs < inst.goalDurationMs) falsePositiveBreach++;
           if (!inst.isBreached && !inst.waived && inst.actualElapsedMs >= inst.goalDurationMs) falseNegativeBreach++;
         }
@@ -2567,10 +2632,10 @@ async function getDoneStatusNames(spaceId: string | null | undefined, currentDep
 // getLastStatusChangeAuthor and getResolutionHistoryEvents used to each run
 // their own separate query against the exact same issue_history rows (one
 // DESC LIMIT 1, one ASC) -- fetched once here and reused for both.
-async function getStatusHistoryRows(issueId: string): Promise<Array<{ authorName: string | null; newValue: string | null; createdAt: any }>> {
+async function getStatusHistoryRows(issueId: string): Promise<Array<{ authorName: string | null; oldValue: string | null; newValue: string | null; createdAt: any }>> {
   try {
     const r = await pool.query(
-      `SELECT "authorName", "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'status' ORDER BY "createdAt" ASC`,
+      `SELECT "authorName", "oldValue", "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'status' ORDER BY "createdAt" ASC`,
       [issueId]
     );
     return r.rows;
@@ -2617,13 +2682,42 @@ function computeInProgressMsInWindow(
 // moment one elsewhere in this file).
 async function enrichSlaWithInProgressTime(issueId: string, slaInstances: any[]): Promise<any[]> {
   if (!slaInstances.length) return slaInstances;
-  const statusHistory = await getStatusHistoryRows(issueId);
-  if (!statusHistory.length) return slaInstances;
+  const [statusHistory, worklogRows] = await Promise.all([
+    getStatusHistoryRows(issueId),
+    pool.query(
+      `SELECT department, "timeSpentMinutes", "workDate" FROM issue_worklogs WHERE "issueId" = $1`,
+      [issueId]
+    ).then((r) => r.rows).catch(() => [] as any[]),
+  ]);
+  if (!statusHistory.length && !worklogRows.length) return slaInstances;
   return slaInstances.map((s: any) => {
     const startMs = s.startedAt ? new Date(s.startedAt).getTime() : null;
     const elapsedMs = typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : null;
     if (startMs === null || elapsedMs === null) return s;
-    return { ...s, inProgressElapsedMs: computeInProgressMsInWindow(statusHistory, startMs, startMs + elapsedMs) };
+    const endMs = startMs + elapsedMs;
+    const statusBasedMs = statusHistory.length ? computeInProgressMsInWindow(statusHistory, startMs, endMs) : 0;
+    // A ticket can have real, logged work time for this department window
+    // (the Worklog panel's own entries) without anyone ever having flipped
+    // its status to literally "In Progress" -- the status-only check above
+    // then read a flat 0m even though genuine work happened, which looked
+    // broken next to a visibly non-trivial "Spent Xh Ym here" duration.
+    // Confirmed for real: audited 150 recently-resolved tickets' department
+    // instances where the status-based check read 0m -- while none in that
+    // sample happened to also have overlapping worklog entries, the gap
+    // itself is real: logging work via Worklog instead of the status
+    // dropdown is a normal, supported way to record work, and this field
+    // ignored it entirely. Takes whichever signal shows MORE real tracked
+    // time (not a sum) so overlapping in-progress-status time and a
+    // worklog entry logged during that same stretch don't double-count the
+    // same work twice.
+    const deptKey = (s.deptName || '').trim().toLowerCase();
+    const worklogMs = deptKey
+      ? worklogRows
+          .filter((w: any) => (w.department || '').trim().toLowerCase() === deptKey)
+          .filter((w: any) => { const t = new Date(w.workDate).getTime(); return t >= startMs && t <= endMs; })
+          .reduce((sum: number, w: any) => sum + (w.timeSpentMinutes || 0) * 60_000, 0)
+      : 0;
+    return { ...s, inProgressElapsedMs: Math.max(statusBasedMs, worklogMs) };
   });
 }
 
@@ -2644,6 +2738,17 @@ async function enrichSlaWithResolver(
   const resolvedByName = statusHistory.length ? (statusHistory[statusHistory.length - 1].authorName || null) : null;
   const events = statusHistory
     .filter((row) => doneNames.has((row.newValue || '').trim().toLowerCase()))
+    // A done-to-done transition (e.g. Resolved -> Closed, seconds after the
+    // actual resolution) is the SAME resolution being finalized, not a
+    // second one -- the issue's own `resolvedAt` column only ever gets set
+    // on the FIRST not-done-to-done transition (see willBeResolved &&
+    // !wasResolved above), never updated again on a later done-to-done
+    // move. Without this, a ticket resolved then closed (or Done then
+    // Archived, etc.) showed up TWICE in Resolution History for one real
+    // event. Confirmed for real: CF-28248 -- "In Progress -> Resolved" then
+    // "Resolved -> Closed" 3 seconds later both counted as separate
+    // resolutions, each independently flagged "Late".
+    .filter((row) => !doneNames.has((row.oldValue || '').trim().toLowerCase()))
     // Drop a "resolved" transition the SAME person reverted within minutes --
     // e.g. an admin toggling status while investigating a ticket they don't
     // actually own, not a settled resolution attempt. Without this, Resolution
@@ -2676,7 +2781,31 @@ async function enrichSlaWithResolver(
     // verdict straight from resolvedAt vs dueTime. Confirmed for real:
     // CF-29697 waived by an admin still showed "Late" against Amulya A in
     // Resolution History.
-    const history = events.map((e) => ({ ...e, wasBreached: s.waived ? false : new Date(e.resolvedAt).getTime() > dueMs }));
+    //
+    // A plain resolvedAt > dueTime check is only correct for a department
+    // that held the ticket in one unbroken visit. s.dueTime is a FIXED
+    // display window (createdAt + goal -- see computeSLAInstancesPure's own
+    // comment on why), not adjusted for time this department's clock sat
+    // PAUSED while the ticket was elsewhere -- so for a ticket that bounced
+    // to another department and back, that naive comparison can flag a
+    // genuinely on-time resolution as breached. s.isBreached is already the
+    // correct, pause-aware verdict (computed from real cumulative elapsed
+    // time vs the goal, the same number the SLA card's own "within/past the
+    // SLA goal" text already trusts) -- use it for the event that IS this
+    // instance's own actual resolution (e.resolvedAt matching s.resolvedAt),
+    // falling back to the naive comparison only for an older, different
+    // resolution this instance doesn't have better data for (e.g. an
+    // intermediate resolve-then-reopen cycle). Confirmed for real: CF-34304
+    // -- Migration's own card correctly read "Resolved in 57m -- within the
+    // SLA goal" (its real cumulative time, after a 23h detour through Dev),
+    // but this exact history badge read "SLA Breached by 20h 17m --
+    // Migration" for that same resolution, straight from resolvedAt minus
+    // the fixed display dueTime with no pause adjustment at all.
+    const history = events.map((e) => {
+      const isOwnResolution = s.resolvedAt && new Date(e.resolvedAt).getTime() === new Date(s.resolvedAt).getTime();
+      const wasBreached = s.waived ? false : isOwnResolution ? s.isBreached === true : new Date(e.resolvedAt).getTime() > dueMs;
+      return { ...e, wasBreached };
+    });
     return { ...s, resolvedByName: resolvedByName || s.resolvedByName, history };
   });
 }
@@ -2793,52 +2922,8 @@ function getHistoricalOverrideDurationMs(deptName: string, priority: string, per
 
 async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean): Promise<any[]> {
   try {
-    if (!allPolicies.length) return [];
-
-    // Only apply policies that target this issue's dept (or have no dept restriction)
     const issueDept = ((issue as any).current_department || '').trim().toLowerCase();
-    let policies = allPolicies.filter((p: any) => {
-      const pDept = (p.dept_name || '').trim().toLowerCase();
-      return !pDept || pDept === issueDept;
-    });
-    // Two ACTIVE policies with the same name targeting the same department
-    // (e.g. two "Time to Resolution" policies both scoped to Dev) are
-    // effectively duplicate configuration, not two distinct SLAs -- mapping
-    // one instance per policy below rendered the identical countdown twice
-    // on the issue detail page. Keep only the most recently updated policy
-    // per unique name so a misconfigured duplicate never shows twice,
-    // regardless of how many active rows exist for that name.
-    const newestByName = new Map<string, any>();
-    for (const p of policies) {
-      const nameKey = (p.name || '').trim().toLowerCase();
-      const existing = newestByName.get(nameKey);
-      if (!existing || new Date(p.updatedAt).getTime() > new Date(existing.updatedAt).getTime()) {
-        newestByName.set(nameKey, p);
-      }
-    }
-    policies = [...newestByName.values()];
-    if (!policies.length) return [];
 
-    // When a department-specific policy shares its name with a space-wide
-    // one (dept_name null) -- e.g. both literally called "Time to
-    // resolution" -- prefer the department-specific one instead of
-    // returning both as separate instances. Without this, adding a
-    // department override for an existing space-wide metric silently
-    // doubled that metric's SLA badge on every ticket in that department.
-    // Mirrors the "prefer dept-specific policy, fall back to space-wide"
-    // rule computePausedDeptSLA already uses above, generalized to every
-    // name instead of picking one policy for the whole issue.
-    const policyByName = new Map<string, any>();
-    for (const p of policies) {
-      const key = (p.name || '').trim().toLowerCase();
-      const current = policyByName.get(key);
-      if (!current || (!!(p.dept_name || '').trim() && !(current.dept_name || '').trim())) {
-        policyByName.set(key, p);
-      }
-    }
-    const dedupedPolicies = Array.from(policyByName.values());
-
-    const priority = (issue.priority || 'medium').toLowerCase();
     // The status badge shown to the user can come from EITHER the ticket's
     // global status OR its per-department dept_statuses snapshot (see
     // issueStat in the issue detail page) -- whichever one the UI is
@@ -2873,7 +2958,6 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     const deptLogEntryForResolvedCheck = deptLogKeyForResolvedCheck ? deptSlaLogForResolvedCheck[deptLogKeyForResolvedCheck] : null;
     const deptClockGenuinelyStopped = !deptLogEntryForResolvedCheck || deptLogEntryForResolvedCheck.status !== 'running';
     const isResolved = issue.status?.category === 'done' || (deptStatusCategory === 'done' && deptClockGenuinelyStopped);
-    const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
 
     // By explicit request: editing an SLA policy (e.g. tightening Migration's
     // Medium target from 8h to 6h) was silently changing the breach verdict
@@ -2891,6 +2975,18 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     // unrecoverable -- sla_definitions never kept history -- so the first
     // freeze uses whatever the policy says as of right now; going forward,
     // no further edits can ever move it again.)
+    //
+    // Deliberately checked BEFORE any allPolicies/dept-based policy
+    // filtering below (which can legitimately end up empty -- e.g. zero
+    // active policies at all, or none scoped to this ticket's CURRENT
+    // department) -- a resolved ticket's frozen snapshot must never depend
+    // on whether a policy still targets wherever the ticket happens to sit
+    // today. Confirmed for real: CF-33699/CF-33837, both resolved with a
+    // real historical Dev breach already frozen into sla_snapshot, were
+    // later moved to "Pre-Sales-Old" (a department no active SLA policy is
+    // scoped to) -- the old ordering hit `if (!policies.length) return [];`
+    // below before ever reaching this check, silently discarding a
+    // perfectly valid frozen result and reporting "no SLA data" instead.
     if (isResolved) {
       const existingSnapshot = issue.sla_snapshot !== undefined
         ? issue.sla_snapshot
@@ -2921,6 +3017,67 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         });
       }
     }
+
+    if (!allPolicies.length) return [];
+
+    // Only apply policies that target this issue's dept (or have no dept restriction)
+    let policies = allPolicies.filter((p: any) => {
+      const pDept = (p.dept_name || '').trim().toLowerCase();
+      return !pDept || pDept === issueDept;
+    });
+    // Two ACTIVE policies with the same name targeting the same department
+    // (e.g. two "Time to Resolution" policies both scoped to Dev) are
+    // effectively duplicate configuration, not two distinct SLAs -- mapping
+    // one instance per policy below rendered the identical countdown twice
+    // on the issue detail page. Keep only the most recently updated policy
+    // per unique name so a misconfigured duplicate never shows twice,
+    // regardless of how many active rows exist for that name.
+    const newestByName = new Map<string, any>();
+    for (const p of policies) {
+      const nameKey = (p.name || '').trim().toLowerCase();
+      const existing = newestByName.get(nameKey);
+      if (!existing || new Date(p.updatedAt).getTime() > new Date(existing.updatedAt).getTime()) {
+        newestByName.set(nameKey, p);
+      }
+    }
+    policies = [...newestByName.values()];
+    // Deliberately NOT an early return when this comes up empty (e.g. the
+    // ticket's CURRENT department has no SLA policy assigned at all, like a
+    // retired/parking department) -- dedupedPolicies below just ends up []
+    // and currentDeptInstances naturally comes back empty, which is correct:
+    // there's genuinely no live SLA for wherever this ticket sits today.
+    // Bailing out here used to also throw away historicalInstances further
+    // below, which reconstructs OTHER departments' SLA instances straight
+    // from allPolicies (the full, unfiltered set) and dept_sla_log -- those
+    // don't depend on the CURRENT department having a policy at all.
+    // Confirmed for real: CF-33699, moved to "Pre-Sales-Old" (no policy
+    // assigned) after a genuine ~4.9-day Dev breach recorded in
+    // dept_sla_log.Dev, had no sla_snapshot ever frozen (so the earlier,
+    // isResolved-first fix above had nothing to return) -- this same early
+    // return was ALSO silently discarding the one other code path that
+    // could still recover that real Dev breach.
+
+    // When a department-specific policy shares its name with a space-wide
+    // one (dept_name null) -- e.g. both literally called "Time to
+    // resolution" -- prefer the department-specific one instead of
+    // returning both as separate instances. Without this, adding a
+    // department override for an existing space-wide metric silently
+    // doubled that metric's SLA badge on every ticket in that department.
+    // Mirrors the "prefer dept-specific policy, fall back to space-wide"
+    // rule computePausedDeptSLA already uses above, generalized to every
+    // name instead of picking one policy for the whole issue.
+    const policyByName = new Map<string, any>();
+    for (const p of policies) {
+      const key = (p.name || '').trim().toLowerCase();
+      const current = policyByName.get(key);
+      if (!current || (!!(p.dept_name || '').trim() && !(current.dept_name || '').trim())) {
+        policyByName.set(key, p);
+      }
+    }
+    const dedupedPolicies = Array.from(policyByName.values());
+
+    const priority = (issue.priority || 'medium').toLowerCase();
+    const currentStatusName = (issue.status?.name || '').trim().toLowerCase();
 
     // dept_sla_started_at is reset to NOW() on every department handoff --
     // including a RETURN to a dept that already spent some of its SLA
@@ -3011,7 +3168,17 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
       // instead of restarting it at the full duration. Still used for a
       // RUNNING (not yet resolved) ticket's live due time below -- only the
       // RESOLVED display changed, see next comment.
-      const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+      //
+      // Deliberately NOT clamped to 0 -- a ticket that re-enters this dept
+      // already over budget from an earlier stint (priorElapsedMs >=
+      // durationMs) needs dueTime to land BEFORE rawStartedAt (immediately,
+      // visibly overdue), not collapse to exactly rawStartedAt. Clamping to
+      // 0 made dueTime === rawStartedAt whenever this happened, which showed
+      // as identical Start/Due timestamps on the SLA panel and understated
+      // (or, right at the restart instant, could even transiently hide) how
+      // overdue it already was. Confirmed for real: CF-34348, QA re-entered
+      // already ~2h40m over its 6h goal from an earlier QA stint.
+      const remainingBudgetMs = durationMs - priorElapsedMs;
       // By explicit request: a resolved ticket's displayed Start/Due should
       // simply be "when the ticket was created" and "created + this
       // priority's configured goal duration" -- a fixed, always-forward
@@ -3168,7 +3335,11 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         if (histOverrideMs !== null) histDurationMs = histOverrideMs;
         const histElapsed: number = histEntry.elapsed_ms || 0;
         const histIsDone = histEntry.status === 'done';
-        const histRemainingMs = Math.max(0, histDurationMs - histElapsed);
+        // Not clamped to 0 -- same reasoning as the live branch's
+        // remainingBudgetMs above: a department already over its goal by
+        // the time it was paused needs dueTime before histStartedAt, not
+        // collapsed to exactly histStartedAt.
+        const histRemainingMs = histDurationMs - histElapsed;
         historicalInstances.push({
           id: `sla_${policy.id}_${issue.key}_${histDeptKey}`,
           policyId: policy.id,
@@ -3949,7 +4120,27 @@ function computeSlaBreachedAndOverdue(
     // table/export and MBR, even though the detail page itself now
     // correctly shows it waived.
     const snapshotWaivers: Record<string, any> = i.sla_waivers || {};
-    return { slaBreached: i.sla_snapshot.some((x: any) => !snapshotWaivers[x.policyId] && x.isBreached), overdue: false };
+    // Scoped to the QUERIED department (deptParam) when one is active --
+    // same reasoning as the live dept-scoping below (CF-30766). Before this,
+    // a resolved ticket's single project-wide snapshot answered "did it
+    // breach ANYWHERE on its journey" even under a Dev-scoped view, so a
+    // ticket that stayed well within budget in Dev but breached later in a
+    // different department still showed "Breached: Yes" under Queue: Dev.
+    // Confirmed for real: CF-34498 used only 5.5h of its 12h Dev goal
+    // (never breached there) but showed "Yes" under Queue: Dev + SLA
+    // Breached: Yes purely from a different department's breach on its
+    // frozen snapshot. A space-wide (no deptName) snapshot entry still
+    // applies under every department's view, same as hasApplicablePolicy's
+    // own !pDept rule a few lines down.
+    const relevantSnapshot = deptParam
+      ? i.sla_snapshot.filter((x: any) => !x.deptName || x.deptName.trim().toLowerCase() === deptParam.trim().toLowerCase())
+      : i.sla_snapshot;
+    // No snapshot entry at all for the queried department -- fall through to
+    // the live recompute below instead of guessing from an unrelated dept's
+    // entry.
+    if (!deptParam || relevantSnapshot.length) {
+      return { slaBreached: relevantSnapshot.some((x: any) => !snapshotWaivers[x.policyId] && x.isBreached), overdue: false };
+    }
   }
   // A department nobody has configured an SLA policy for (e.g. Infra, which
   // never had one set up) previously still showed a hard "No" in the SLA
@@ -4078,7 +4269,11 @@ function computeSlaBreachedAndOverdue(
         // after checking every applicable policy (see hasRealDeptTracking
         // below), rather than per-policy.
         const frozen = isResolved || !deptClockIsLive;
-        const remainingBudgetMs = Math.max(0, durationMs - priorElapsedMs);
+        // Not clamped to 0 -- same fix/reasoning as computeSLAInstancesPure's
+        // own remainingBudgetMs (ticket detail page's SLA panel): a
+        // department re-entering already over its goal from an earlier
+        // visit needs dueTimeMs before slaStartedAt, not collapsed to it.
+        const remainingBudgetMs = durationMs - priorElapsedMs;
         const dueTimeMs = new Date(slaStartedAt).getTime() + remainingBudgetMs;
         const instanceBreached = isSlaInstanceBreached({
           isResolved: frozen,
@@ -5564,13 +5759,31 @@ async function refreshCfitsIssue(cfitsKey: string): Promise<boolean> {
 // same Jira ticket and both tried to create a local copy, one of them
 // failing on the key collision. This flag makes an overlapping call a no-op
 // instead of a second call actually racing the first.
+//
+// Had no expiry -- a run that genuinely wedges partway through (a Jira fetch
+// that doesn't honor its own AbortSignal, a DB pool stall waiting on a
+// connection with no acquire timeout, anything that doesn't go through this
+// function's own try/finally) left this true FOREVER, silently skipping
+// every future periodic tick with "sync already in progress" until the next
+// deploy/restart happened to reset it. Confirmed for real: after splitting
+// the changed-ticket catch-up budget evenly per project (see
+// changedCatchupTargets above), L3B/PSM/SOPS got fresh checkpoints on the
+// very first run, then the run stalled somewhere between SOPS and QA's turn
+// and never completed -- every periodic tick for 15+ minutes afterward just
+// logged the skip message, with no DB lock or long-running query to explain
+// it (checked via pg_stat_activity). A stale-run ceiling means a wedged run
+// can only ever block things for a bounded window, never indefinitely --
+// a legitimate run normally finishes in well under this.
 let _jiraSyncRunning = false;
+let _jiraSyncStartedAt = 0;
+const JIRA_SYNC_STALE_MS = 10 * 60 * 1000;
 
 export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ imported: string[]; errors: string[]; refreshed: string[] }> {
-  if (_jiraSyncRunning) {
+  if (_jiraSyncRunning && Date.now() - _jiraSyncStartedAt < JIRA_SYNC_STALE_MS) {
     return { imported: [], errors: ['sync already in progress in this process, skipped'], refreshed: [] };
   }
   _jiraSyncRunning = true;
+  _jiraSyncStartedAt = Date.now();
   try {
   const imported: string[] = [];
   const errors: string[] = [];
@@ -5698,15 +5911,33 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
   // of work, and starving this one so the new-ticket loop could run longer
   // would leave this catch-up permanently unable to make progress on months
   // of backlog. Same 250ms-per-issue pacing as every loop above.
+  //
+  // This used to be ONE shared budget spent strictly in SYNC_PROJECTS array
+  // order (L2B, L3B, PSM, SOPS, QA), then CFITS last -- whichever project
+  // came first simply ate the entire budget every single run if its own
+  // backlog was big enough, leaving every project after it with exactly
+  // zero turns, forever. Confirmed for real: L2B (first in the array, with
+  // a backlog going back to 2020) had consumed its whole budget on every
+  // run for months, while QA/PSM/SOPS/L3B/CFITS never even got a single
+  // page processed -- their jira_sync_updated_checkpoint_* row never
+  // existed at all. A ticket whose assignee/status changed in Jira after
+  // import, in any project other than L2B, could never be caught up by
+  // this pass, no matter how long the app ran. Giving each project a fixed,
+  // equal slice of the total budget means a huge backlog in one project can
+  // slow its OWN progress, but can never block another project's turn.
   const refreshed: string[] = [];
-  let changedBudget = maxPerRun;
-  for (const { prefix, jiraProject } of SYNC_PROJECTS) {
-    if (changedBudget <= 0) break;
+  const changedCatchupTargets: { prefix: string; jiraProject: string; refreshFn: (key: string) => Promise<boolean> }[] = [
+    ...SYNC_PROJECTS.map(({ prefix, jiraProject }) => ({ prefix, jiraProject, refreshFn: refreshSyncProjectIssue })),
+    { prefix: 'CFITS', jiraProject: CFITS_JIRA_PROJECT, refreshFn: refreshCfitsIssue },
+  ];
+  const perProjectChangedBudget = Math.max(1, Math.floor(maxPerRun / changedCatchupTargets.length));
+  for (const { prefix, jiraProject, refreshFn } of changedCatchupTargets) {
+    let projectBudget = perProjectChangedBudget;
     let checkpoint = await getUpdatedSyncCheckpoint(prefix);
     let maxSeenUpdated = checkpoint;
     let pageToken: string | undefined;
     const jql = encodeURIComponent(`project = ${jiraProject} AND updated > "${getUpdatedSyncJqlFloor(checkpoint)}" ORDER BY updated ASC`);
-    while (changedBudget > 0) {
+    while (projectBudget > 0) {
       let url = `${creds.base}/rest/api/3/search/jql?jql=${jql}&maxResults=50&fields=updated`;
       if (pageToken) url += `&nextPageToken=${encodeURIComponent(pageToken)}`;
       const res = await fetch(url, {
@@ -5720,9 +5951,9 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
       const issues: any[] = data.issues || [];
       if (issues.length === 0) break;
       for (const ji of issues) {
-        if (changedBudget <= 0) break;
+        if (projectBudget <= 0) break;
         try {
-          const ok = await refreshSyncProjectIssue(ji.key);
+          const ok = await refreshFn(ji.key);
           if (ok) refreshed.push(ji.key);
           if (ji.fields?.updated) {
             const d = jiraUpdatedToYyyyMmDd(ji.fields.updated);
@@ -5731,51 +5962,12 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
         } catch (e: any) {
           errors.push(`${ji.key} (changed): ${e?.message || e}`);
         }
-        changedBudget--;
+        projectBudget--;
         await new Promise((r) => setTimeout(r, 250));
       }
       if (maxSeenUpdated !== checkpoint) { checkpoint = maxSeenUpdated; await setUpdatedSyncCheckpoint(prefix, checkpoint); }
       if (data.isLast || !data.nextPageToken) break;
       pageToken = data.nextPageToken;
-    }
-  }
-
-  if (changedBudget > 0) {
-    let cfitsChangedCheckpoint = await getUpdatedSyncCheckpoint('CFITS');
-    let cfitsMaxSeenUpdated = cfitsChangedCheckpoint;
-    let cfitsChangedPageToken: string | undefined;
-    const cfitsChangedJql = encodeURIComponent(`project = ${CFITS_JIRA_PROJECT} AND updated > "${getUpdatedSyncJqlFloor(cfitsChangedCheckpoint)}" ORDER BY updated ASC`);
-    while (changedBudget > 0) {
-      let url = `${creds.base}/rest/api/3/search/jql?jql=${cfitsChangedJql}&maxResults=50&fields=updated`;
-      if (cfitsChangedPageToken) url += `&nextPageToken=${encodeURIComponent(cfitsChangedPageToken)}`;
-      const res = await fetch(url, {
-        headers: { Authorization: creds.authHdr, Accept: 'application/json' },
-        signal: AbortSignal.timeout(15000),
-      }).catch((e) => { errors.push(`CFITS (changed): search fetch failed: ${e?.message || e}`); return null; });
-      if (!res) break;
-      if (!res.ok) { errors.push(`CFITS (changed): search HTTP ${res.status}`); break; }
-      const data: any = await res.json().catch(() => null);
-      if (!data) { errors.push('CFITS (changed): bad JSON from search'); break; }
-      const issues: any[] = data.issues || [];
-      if (issues.length === 0) break;
-      for (const ji of issues) {
-        if (changedBudget <= 0) break;
-        try {
-          const ok = await refreshCfitsIssue(ji.key);
-          if (ok) refreshed.push(ji.key);
-          if (ji.fields?.updated) {
-            const d = jiraUpdatedToYyyyMmDd(ji.fields.updated);
-            if (d > cfitsMaxSeenUpdated) cfitsMaxSeenUpdated = d;
-          }
-        } catch (e: any) {
-          errors.push(`${ji.key} (CFITS changed): ${e?.message || e}`);
-        }
-        changedBudget--;
-        await new Promise((r) => setTimeout(r, 250));
-      }
-      if (cfitsMaxSeenUpdated !== cfitsChangedCheckpoint) { cfitsChangedCheckpoint = cfitsMaxSeenUpdated; await setUpdatedSyncCheckpoint('CFITS', cfitsChangedCheckpoint); }
-      if (data.isLast || !data.nextPageToken) break;
-      cfitsChangedPageToken = data.nextPageToken;
     }
   }
 
@@ -8020,6 +8212,21 @@ async function _handleJiraPgApi(
     // when enrichedIssues still holds the FULL (thousands-of-rows)
     // candidate set, not just the final page.
     let prefilteredTotal: number | null = null;
+    // Per-id slaBreached/overdue as the prefilter pass itself computed them
+    // (see its own assignment below) -- carried forward so the final
+    // enrichment pass can reuse these frozen values for a prefiltered page
+    // instead of recomputing computeSlaBreachedAndOverdue a second time.
+    // That second, independent call used its own separately-fetched
+    // sla_definitions snapshot (policiesBySpace vs the prefilter's
+    // policiesBySpaceLight) and could legitimately resolve a ticket
+    // differently (e.g. flipping from a real boolean to null/"N/A" for a
+    // no-SLA-policy department like Infra), which showed up as "SLA
+    // Breached: Yes" matching a ticket whose own SLA BREACHED column then
+    // displayed "-" for that exact same request -- confirmed for real on
+    // Queue: Infra + SLA Breached: Yes. The two computations must use the
+    // SAME single result, not two separately-derived ones, so they can
+    // never disagree about a ticket this request already decided on.
+    const prefilterSlaById: Record<string, { slaBreached: boolean | null; overdue: boolean }> = {};
     if (deptParam) {
       // Resolve all space IDs to query: current space + any configured sub-boards
       let allSpaceIds: string[] = [];
@@ -8943,6 +9150,7 @@ async function _handleJiraPgApi(
           for (const r of lightRows.rows) {
             const shaped = { ...r, status: r.status_name ? { name: r.status_name, category: r.status_category } : null };
             const { slaBreached, overdue } = computeSlaBreachedAndOverdue(shaped, deptParam, policiesBySpaceLight, nowMsLight);
+            prefilterSlaById[r.id] = { slaBreached, overdue };
             // "No" = has an SLA and didn't breach it. A ticket with no SLA
             // policy at all (null, shown as "-") is neither Yes nor No.
             const matchesSla = !(slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no')
@@ -9094,6 +9302,15 @@ async function _handleJiraPgApi(
         // Assignee column (deptOwnerSql) -- filter that column in Excel, not
         // this one, to reproduce its counts.
         let workedByNamesByIssue: Record<string, string> = {};
+        // Hoisted out of the try block below (was a local const there) so the
+        // assigneeOverride fallback further down can also use it: a ticket
+        // with no dept_assignees snapshot for the queried department should
+        // prefer whoever genuinely has a user_worked_on_tickets row for THAT
+        // department over the ticket's reporter -- see that fallback's own
+        // comment for why (CF-34234: reporter happened to be a Migration
+        // person with zero connection to the ticket's real Dev stint, while
+        // Soniya Paladugula had an actual dept=Dev worked-on row).
+        const peopleByIssue: Record<string, Map<string, string>> = {};
         if (rows.rows.length) {
           try {
             const issueIds = rows.rows.map((r: any) => r.id);
@@ -9105,7 +9322,6 @@ async function _handleJiraPgApi(
               [issueIds, deptParam]
             );
             // Keyed by user id so one person is listed once per ticket.
-            const peopleByIssue: Record<string, Map<string, string>> = {};
             for (const wr of allWorkedRows.rows) {
               const name = `${wr.firstName || ''} ${wr.lastName || ''}`.trim() || wr.user_id;
               (peopleByIssue[wr.issue_id] ??= new Map()).set(wr.user_id, name);
@@ -9131,11 +9347,14 @@ async function _handleJiraPgApi(
         // users for any snapshot whose id still exists.
         const snapshotUserNames: Record<string, { firstName: string; lastName: string; email: string | null; avatarUrl: string | null }> = {};
         try {
-          const snapIds = Array.from(new Set(rows.rows.map((r: any) => {
-            const da: Record<string, any> = r.dept_assignees || {};
-            const k = Object.keys(da).find((kk) => kk.toLowerCase() === deptParam.toLowerCase());
-            return k ? da[k]?.id : null;
-          }).filter(Boolean))) as string[];
+          const snapIds = Array.from(new Set([
+            ...rows.rows.map((r: any) => {
+              const da: Record<string, any> = r.dept_assignees || {};
+              const k = Object.keys(da).find((kk) => kk.toLowerCase() === deptParam.toLowerCase());
+              return k ? da[k]?.id : null;
+            }),
+            ...Object.values(peopleByIssue).flatMap((m) => Array.from(m.keys())),
+          ].filter(Boolean))) as string[];
           if (snapIds.length) {
             const userRows = await pool.query(`SELECT id, "firstName", "lastName", email, "avatarUrl" FROM users WHERE id = ANY($1::text[])`, [snapIds]);
             for (const u of userRows.rows) snapshotUserNames[u.id] = { firstName: u.firstName || '', lastName: u.lastName || '', email: u.email || null, avatarUrl: u.avatarUrl || null };
@@ -9251,19 +9470,43 @@ async function _handleJiraPgApi(
               assigneeOverride = cur
                 ? { id: snap.id, firstName: cur.firstName, lastName: cur.lastName, email: cur.email, avatarUrl: cur.avatarUrl || avatarRef(snap.id, null) }
                 : { id: snap.id, firstName: snap.firstName || '', lastName: snap.lastName || '', email: snap.email || null, avatarUrl: snap.avatarUrl || avatarRef(snap.id, null) };
-            } else if (!snapExists && movedAwayFromQueue && row.reporter_id) {
+            } else if (!snapExists && movedAwayFromQueue) {
               // No per-dept assignee snapshot exists at all -- confirmed for
               // real on CF-29845: reported by a Dev-queue member, transferred
               // to Infra about a minute later, and never formally assigned to
               // anyone while it sat in Dev, so there's genuinely no assignee
               // to snapshot. Falling through to the raw current assignee here
               // showed the ticket's now-unrelated Infra owner as if they'd
-              // done Dev's work. The reporter is who actually handled it
-              // during its time in this dept (set root cause/fix description
-              // etc. before handing off), so credit them instead of a
-              // stranger to this dept, or leave the field blank if even the
-              // reporter is missing.
-              assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
+              // done Dev's work.
+              //
+              // Before falling back to the reporter, prefer someone with an
+              // actual user_worked_on_tickets row for THIS department
+              // (peopleByIssue, hoisted above) -- confirmed for real on
+              // CF-34234: no dept_assignees.Dev snapshot (every Dev stint had
+              // a null assignee the whole time), and the reporter happened to
+              // be Manoj B, a Migration person with zero connection to its
+              // Dev stints at all. Soniya Paladugula had a genuine
+              // user_worked_on_tickets(dept='Dev') row from actually working
+              // it during that exact stint -- crediting the reporter instead
+              // showed a completely unrelated Migration person's name
+              // labeled "in Dev".
+              const workedPeople = peopleByIssue[row.id];
+              const workedUserId = workedPeople && workedPeople.size ? Array.from(workedPeople.keys())[0] : null;
+              const workedInfo = workedUserId ? snapshotUserNames[workedUserId] : null;
+              if (workedUserId && workedInfo) {
+                assigneeOverride = { id: workedUserId, firstName: workedInfo.firstName, lastName: workedInfo.lastName, email: workedInfo.email, avatarUrl: workedInfo.avatarUrl || avatarRef(workedUserId, null) };
+              } else if (workedUserId) {
+                const rawName = workedPeople!.get(workedUserId) || '';
+                assigneeOverride = { id: workedUserId, firstName: rawName.split(' ')[0] || '', lastName: rawName.split(' ').slice(1).join(' '), email: null, avatarUrl: avatarRef(workedUserId, null) };
+              } else if (row.reporter_id) {
+                // Genuinely nobody from this dept ever touched it -- the
+                // reporter is who actually handled it during its time in
+                // this dept (set root cause/fix description etc. before
+                // handing off), so credit them instead of a stranger to
+                // this dept, or leave the field blank if even the reporter
+                // is missing.
+                assigneeOverride = { id: row.reporter_id, firstName: (row.reporter_name || '').split(' ')[0], lastName: (row.reporter_name || '').split(' ').slice(1).join(' '), email: row.reporter_email || null, avatarUrl: avatarRef(row.reporter_id, row.reporter_avatar) };
+              }
             }
           }
           // Surfaced to the frontend so the Filters table can flag it inline --
@@ -9374,7 +9617,14 @@ async function _handleJiraPgApi(
       // call the exact same computation on a small-column candidate row,
       // instead of duplicating it and risking the two drifting apart.
       enrichedIssues = enrichedIssues.map((i: any) => {
-        const { slaBreached, overdue } = computeSlaBreachedAndOverdue(i, deptParam, policiesBySpace, nowMs);
+        // Reuse the prefilter pass's own result for this exact ticket when
+        // it already computed one (see prefilterSlaById's declaration) --
+        // recomputing here via a second, independently-fetched policy
+        // snapshot is what let a ticket's displayed SLA BREACHED value
+        // (here) disagree with the "SLA Breached: Yes" filter decision
+        // (made by the prefilter above) for the same request.
+        const frozen = prefilterSlaById[i.id];
+        const { slaBreached, overdue } = frozen || computeSlaBreachedAndOverdue(i, deptParam, policiesBySpace, nowMs);
         return { ...i, sla_breached: slaBreached, overdue };
       });
       // Skipped when the dept branch's prefilter pass already chose exactly
@@ -9433,23 +9683,36 @@ async function _handleJiraPgApi(
       // the ticket had long since moved to Dev and been reassigned to
       // Mayank Jain -- current_department correctly said "Dev" (that field
       // was never overridden), but the assignee name was stale/filtered.
-      enrichedIssues = enrichedIssues.map((i: any) =>
-        i.sla_breached
-          ? { ...i, sla_breached_by: i.true_assignee ? `${i.true_assignee.firstName} ${i.true_assignee.lastName}`.trim() || null : null }
-          : i
-      );
+      //
+      // EXCEPT when a Queue scope (deptParam) is actually active: the Yes/No
+      // verdict itself (computeSlaBreachedAndOverdue) is ALSO scoped to that
+      // queried department when deptParam is set -- a Dev-queue view can
+      // show "Yes" purely because DEV's own elapsed time blew its own
+      // budget, totally independent of whatever happened after the ticket
+      // moved on. Attributing that verdict to the ticket's CURRENT
+      // department/assignee (e.g. "by Vainateya Rasala in Migration") is
+      // actively misleading in that case -- it makes a Dev-caused breach
+      // look like someone else's fault. Confirmed for real: Queue=Dev,
+      // Assignee=srinu gudimitla, several Resolved tickets showed "SLA
+      // Breached: Yes" attributed to a different person in Migration, which
+      // read as "breached by someone else" under a filter scoped to Srinu's
+      // own Dev work. When deptParam is set, attribute to THAT department's
+      // own historical assignee snapshot (dept_assignees[deptParam]) instead
+      // -- the CF-33352 "always current" rule only applies to unscoped views
+      // (My Tickets, a plain Assignee filter with no Queue selected), where
+      // there's no department-scoped verdict to stay consistent with.
+      enrichedIssues = enrichedIssues.map((i: any) => {
+        if (!i.sla_breached) return i;
+        if (deptParam) {
+          const deptAssignees: Record<string, any> = i.dept_assignees || {};
+          const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
+          const snap = snapKey ? deptAssignees[snapKey] : null;
+          const name = snap ? `${snap.firstName || ''} ${snap.lastName || ''}`.trim() || snap.email || null : null;
+          return { ...i, sla_breached_by: name, sla_breached_dept: deptParam };
+        }
+        return { ...i, sla_breached_by: i.true_assignee ? `${i.true_assignee.firstName} ${i.true_assignee.lastName}`.trim() || null : null, sla_breached_dept: i.current_department || null };
+      });
     } catch { /* attribution is best-effort — never block the list on it */ }
-
-    // Which department a breach belongs to -- shown right alongside "by
-    // <name>" above, since a plain "SLA Breached: Yes" says nothing about
-    // where. Uses the ticket's CURRENT department, matching the exact same
-    // rule reports/mbr-team just adopted for its own SLA-breach counts (a
-    // breach belongs to whichever department the ticket is in now, not
-    // wherever it originated) -- Filters and MBR need to agree on this, not
-    // run two different definitions of "which dept" side by side.
-    enrichedIssues = enrichedIssues.map((i: any) =>
-      i.sla_breached ? { ...i, sla_breached_dept: i.current_department || null } : i
-    );
 
     if (includeTimeSpentParam && enrichedIssues.length) {
       try {
@@ -11193,15 +11456,22 @@ async function _handleJiraPgApi(
       createdAt: a.createdAt?.toISOString() ?? nowIso(),
     }));
 
-    // SLA-waiver entries (field='sla', see logSlaHistory) include the admin's
-    // stated reason for overriding a breach -- e.g. "it's by mistake" -- which
-    // isn't something every viewer of a ticket's History tab should see.
-    // Confirmed for real on CF-29905: any regular user opening History could
-    // see exactly why/when an admin waived a breach. Admin-only, same
-    // isAdmin gate already used elsewhere in this handler (e.g. the
-    // queue-suspension check above).
+    // Only the WAIVER-specific sla entries (field='sla', see logSlaHistory)
+    // carry the admin's stated reason for overriding a breach -- e.g. "it's
+    // by mistake" -- which isn't something every viewer of a ticket's
+    // History tab should see. Confirmed for real on CF-29905: any regular
+    // user opening History could see exactly why/when an admin waived a
+    // breach. This used to blanket-hide EVERY field='sla' entry from
+    // non-admins, not just the waiver ones -- which meant the genuine
+    // "SLA breached — Dept (Name)" entry logged the moment a ticket
+    // actually crosses its due time (see runMonitorAgentScan/logSlaHistory)
+    // was invisible to the very reporter/assignee who needs to see it, and
+    // the only breach indicator a regular user ever saw was the separate
+    // status-change badge that only appears once the ticket is resolved.
+    // Confirmed for real on CF-34582. Only hide the waiver-reason ones.
+    const isSlaWaiverEntry = (h: any) => (h.field || '').toLowerCase() === 'sla' && /^SLA breach waiv/i.test(String(h.newValue || ''));
     const activity = dbHistory
-      .filter((h: any) => isAdmin || (h.field || '').toLowerCase() !== 'sla')
+      .filter((h: any) => isAdmin || !isSlaWaiverEntry(h))
       .map((h: any) => {
       const field: string = (h.field || '').toLowerCase();
       let action = 'updated';
@@ -13199,7 +13469,12 @@ async function _handleJiraPgApi(
     // Track in history
     try {
       const aName = authorUser ? (`${authorUser.firstName ?? ''} ${authorUser.lastName ?? ''}`.trim() || authorUser.email) : 'Unknown';
-      await (db as any).issueHistory.create({ data: { issueId: issue.id, field: 'comment', oldValue: null, newValue: comment.body.slice(0, 500), authorName: aName, authorEmail: authorUser?.email ?? null, createdAt: new Date() } });
+      // Full body, untruncated -- this is the permanent history record of
+      // what the comment said, not a preview. A fixed-length slice() here
+      // used to cut the raw HTML off mid-tag (e.g. mid `style="..."`
+      // attribute), corrupting the markup and truncating the rendered text
+      // well before the actual end of the comment.
+      await (db as any).issueHistory.create({ data: { issueId: issue.id, field: 'comment', oldValue: null, newValue: comment.body, authorName: aName, authorEmail: authorUser?.email ?? null, createdAt: new Date() } });
     } catch (_e) {}
 
     // Record that this user did real work on the ticket -- same 'worked'
@@ -13362,7 +13637,9 @@ async function _handleJiraPgApi(
 
   // GET /worklogs -- cross-ticket worklog report, Jira's own "Logged work"
   // view. Admin-only -- a regular user never sees another person's logged
-  // hours across every space here, by explicit request.
+  // hours across every space here, by explicit request. (Briefly opened to
+  // everyone, then explicitly reverted back to admin-only -- the "Ticket
+  // Worklog" tab/GET /activity-worklogs is the one meant for all users.)
   if (path === 'worklogs' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
     if (!isAdmin) return json({ error: 'Admin access required' }, 403);
@@ -13442,6 +13719,84 @@ async function _handleJiraPgApi(
     return json({ ok: true });
   }
 
+  // POST /activity-worklogs -- the Worklog page's "Ticket Worklog" tab Create
+  // form. One request, batched across every activity the person checked in
+  // that one form submission (one time entry per activity type selected),
+  // all sharing the same workDate.
+  if (path === 'activity-worklogs' && method === 'POST') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const body = await readJson(req);
+    const entries = Array.isArray(body.entries) ? body.entries : [];
+    if (!entries.length) return json({ error: 'At least one activity entry is required.' }, 400);
+    const workDate = body.workDate ? new Date(body.workDate) : new Date();
+    const authorUser = await getCachedUser(userId);
+    const authorName = authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : null;
+    const inserted: any[] = [];
+    for (const e of entries) {
+      const activityType = String(e.activityType || '').trim();
+      const timeSpentMinutes = Number(e.timeSpentMinutes) || 0;
+      if (!activityType || timeSpentMinutes <= 0) continue;
+      const id = rid();
+      const result = await pool.query(
+        `INSERT INTO activity_worklogs (id, "userId", "authorName", "authorEmail", "activityType", "customReason", "timeSpentMinutes", description, "workDate", "createdAt")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) RETURNING *`,
+        [
+          id, userId, authorName, authorUser?.email ?? null,
+          activityType,
+          activityType === 'Others' ? (e.customReason ? String(e.customReason).trim() : null) : null,
+          timeSpentMinutes,
+          e.description ? String(e.description).trim() : null,
+          workDate,
+        ]
+      );
+      inserted.push(result.rows[0]);
+    }
+    if (!inserted.length) return json({ error: 'Each selected activity needs time logged (greater than 0) to save.' }, 400);
+    return json({ ok: true, entries: inserted });
+  }
+
+  // GET /activity-worklogs -- an admin with no ?userId= sees EVERYONE's
+  // entries (matching GET /worklogs' own admin-sees-everyone shape above),
+  // each carrying its own authorName/authorEmail to show who logged it --
+  // "like a ticket, reporter shown" per explicit request. Previously a
+  // non-admin always saw only their own, regardless of ?userId= -- opened
+  // to every user by explicit request ("2nd tab should show all users"),
+  // this being the tab meant for everyone (unlike GET /worklogs, which
+  // stayed admin-only). Any signed-in user can now pass ?userId= to narrow
+  // to one specific person, or omit it to see everyone.
+  if (path === 'activity-worklogs' && method === 'GET') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const qs = url.searchParams;
+    const targetUserId = qs.get('userId');
+    const from = qs.get('from');
+    const to = qs.get('to');
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let n = 1;
+    if (targetUserId) { conditions.push(`"userId" = $${n}`); params.push(targetUserId); n++; }
+    if (from) { conditions.push(`"workDate" >= $${n}`); params.push(new Date(from)); n++; }
+    if (to) { conditions.push(`"workDate" <= $${n}`); params.push(new Date(to)); n++; }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const rows = await pool.query(
+      `SELECT * FROM activity_worklogs ${where} ORDER BY "workDate" DESC, "createdAt" DESC LIMIT 500`,
+      params
+    );
+    return json(rows.rows);
+  }
+
+  // DELETE /activity-worklogs/:id -- the entry's own author, or an admin, only.
+  const activityWorklogById = path.match(/^activity-worklogs\/([^/]+)$/);
+  if (activityWorklogById && method === 'DELETE') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const row = await pool.query(`SELECT "userId" FROM activity_worklogs WHERE id = $1`, [activityWorklogById[1]]);
+    if (!row.rows[0]) return json({ ok: true });
+    if (!isAdmin && row.rows[0].userId !== userId) {
+      return json({ error: 'You can only delete your own worklog entries.' }, 403);
+    }
+    await pool.query(`DELETE FROM activity_worklogs WHERE id = $1`, [activityWorklogById[1]]);
+    return json({ ok: true });
+  }
+
   // Ã¢â€â‚¬Ã¢â€â‚¬ Comment Update / Delete Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
   // POST /comments/:id/reactions -- toggle an emoji reaction for the caller.
@@ -13502,9 +13857,12 @@ async function _handleJiraPgApi(
   const commentById = path.match(/^comments\/([^/]+)$/);
   if (commentById) {
     const commentId = commentById[1];
-    // Strips HTML/entities down to a short readable preview -- same approach
-    // used for the comment-added notification preview above; a raw HTML
-    // comment body in a history row would read as unrendered markup.
+    // Strips HTML/entities down to plain, readable text -- a raw HTML comment
+    // body in a history row would read as unrendered markup. This is the
+    // PERMANENT record of what the comment said before/after an edit or
+    // delete, so (unlike a push-notification preview) it must keep the full
+    // text -- an earlier 80-char slice() here froze every edited comment's
+    // history at 80 characters forever, cut off mid-word.
     const previewComment = (raw: string) => (raw || '')
       .replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/g, ' ')
@@ -13513,8 +13871,7 @@ async function _handleJiraPgApi(
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 80);
+      .trim();
     if (method === 'PATCH') {
       const body = await readJson(req);
       // Comment edits previously replaced the body with no trace of the
@@ -14102,15 +14459,19 @@ async function _handleJiraPgApi(
     const dateTo     = url.searchParams.get('dateTo') || '';
     const staleDays  = Math.max(1, parseInt(url.searchParams.get('staleDays') || '7', 10) || 7);
 
-    // Matches createdAt OR resolvedAt -- a ticket belongs to MBR's date range
-    // if it was raised in it, or resolved in it (e.g. created Aug 29, resolved
-    // Sep 5 counts for September). Used to be createdAt OR updatedAt, but
-    // updatedAt moves on ANY touch (a comment, a worklog, a hand-off), so
-    // months-old tickets merely commented on in range kept flooding every
-    // tab. Same rule as reports/mbr-team's team tabs below. A done ticket
+    // Matches createdAt OR resolvedAt -- by explicit follow-up request, MBR
+    // should agree with Filters' "Created" + "Resolved date" chips
+    // specifically (GET /issues' own resolvedRange param), not its "Created"
+    // + "Updated" chips -- confirmed for real: Filters scoped to
+    // Created+Resolved date (Oct 2026) returned 545 for Dev, exactly
+    // matching this rule, while Created+Updated returned a genuinely
+    // different 558 (tickets merely touched in range without being created
+    // or resolved in it). This briefly matched createdAt OR updatedAt
+    // instead -- reverted once it became clear "Resolved date" is the
+    // Filters chip the business actually wants MBR held to. A done ticket
     // with no resolvedAt (old Jira imports with no resolutiondate) is
-    // deliberately NOT counted as resolved in range -- no evidence of when it
-    // was actually resolved, and guessing from history/import timestamps
+    // deliberately NOT counted as resolved in range -- no evidence of when
+    // it was actually resolved, and guessing from history/import timestamps
     // would put import-day noise into whatever month the import ran.
     // Anchored to IST (+05:30), not parsed as bare UTC -- a bare
     // "YYYY-MM-DD" string is parsed as UTC midnight by Date's ISO handling,
@@ -14706,14 +15067,21 @@ async function _handleJiraPgApi(
     const istTo   = dateTo   ? new Date(`${dateTo}T23:59:59.999+05:30`) : null;
     if (istFrom) { baseParams.push(istFrom); fromIdx = baseParams.length; }
     if (istTo)   { baseParams.push(istTo);   toIdx = baseParams.length; }
-    // Matches createdAt OR resolvedAt -- raised in range, or resolved in range
-    // -- same rule as reports/mbr above (see its comment for why updatedAt was
-    // dropped: any touch moves it, so old tickets merely commented on in
-    // range flooded every tab). dateMode=touched restores the old createdAt
-    // OR updatedAt union; only the daily MBR-vs-Filters consistency check
-    // uses it, since Filters itself has no resolved-date filter to compare
-    // the new rule against -- that check is about department/roster scope
-    // agreeing, not about which date field counts.
+    // Matches createdAt OR resolvedAt by default -- by explicit follow-up
+    // request, MBR should agree with Filters' "Created" + "Resolved date"
+    // chips specifically (GET /issues' own resolvedRange param), NOT its
+    // "Created" + "Updated" chips -- confirmed for real: Filters scoped to
+    // Created+Resolved date (Oct 2026) returned 545, exactly matching this
+    // mode, while Created+Updated returned 558, a genuinely different
+    // ticket set (a ticket merely touched in range without being created or
+    // resolved in it). This briefly defaulted to 'touched' (createdAt OR
+    // updatedAt) instead, matching Filters' Created+Updated chips -- reverted
+    // once it became clear "Resolved date" is the comparison the business
+    // actually wants MBR held to. dateMode=touched is kept as an explicit
+    // opt-in for the internal MBR-vs-Filters consistency check, which
+    // compares against Filters' Created+Updated chips specifically (the two
+    // checks are deliberately comparing against two different Filters
+    // configurations, matching each one's own default).
     const dateMode = url.searchParams.get('dateMode') === 'touched' ? 'touched' : 'resolved';
     const secondDateCol = dateMode === 'touched' ? 'updatedAt' : 'resolvedAt';
     let dateClause = '';
@@ -15377,8 +15745,17 @@ async function _handleJiraPgApi(
     // in_team_scope = counts toward the tab-wide totals/monthly rows; rows
     // pulled in only via ownerByIssue (a person's Filters-owned ticket
     // outside the tab-wide scope) count for that person alone.
+    // sla_snapshot included here specifically -- without it, computeSLAInstancesPure's
+    // resolved-ticket branch (see its own frozen-snapshot comment) falls through to its
+    // own per-row `SELECT sla_snapshot FROM issues WHERE id=$1` fallback for every single
+    // resolved candidate, one ticket at a time, inside the sequential per-ticket loop
+    // below -- 532 of 545 candidates on a real run, ~65ms each, entirely blocking
+    // (awaited) and entirely avoidable since this column rides along for free on a row
+    // already being fetched. Confirmed for real: this exact gap (same fix, same N+1
+    // shape) is what made Customer Engineering's MBR tab take 34-42s per request,
+    // consistently timing out the frontend's 20s give-up.
     const slaCandidateCols = `i.id, COALESCE(i.cf_key, i.key) AS key, i.priority, i.current_department, i."spaceId", i."createdAt", i."updatedAt", i."resolvedAt",
-        i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers,
+        i.dept_sla_started_at, i.dept_sla_log, i.dept_statuses, i.jira_sla_breached, i.sla_waivers, i.sla_snapshot,
         i."assigneeId", au.email AS assignee_email, s.name AS status_name, s.category AS status_category,
         ${isEntSmbTeam ? 'i.summary, i.description' : 'NULL AS summary, NULL AS description'}`;
     const teamScopeRes = await pool.query(`
@@ -17724,11 +18101,38 @@ async function _handleJiraPgApi(
         for (const r of rows.rows) {
           const obj = r[col];
           if (!obj || typeof obj !== 'object') continue;
-          const realKey = Object.keys(obj).find((k) => k.toLowerCase() === oldName.toLowerCase());
-          if (!realKey || realKey === newName) continue;
+          // ALL keys matching the old name case-insensitively, not just the
+          // first -- a plain object can hold "Pre-sales" and "Pre-Sales" as
+          // two genuinely distinct keys (JS object keys are case-sensitive,
+          // same root cause as the user_worked_on_tickets duplicate-casing
+          // conflict above). .find() here would silently rename only
+          // whichever one happened to come first, leaving the other
+          // orphaned under its original casing instead of failing loudly --
+          // worse than the DB-constraint case since nothing would ever
+          // surface this incompleteness.
+          const matchingKeys = Object.keys(obj).filter((k) => k.toLowerCase() === oldName.toLowerCase() && k !== newName);
+          if (!matchingKeys.length) continue;
           const next = { ...obj };
-          next[newName] = next[realKey];
-          delete next[realKey];
+          // Merge every matching old-casing key, plus any value ALREADY
+          // under newName (e.g. from an earlier rename of this same
+          // queue), into one surviving newName entry. For dept_sla_log,
+          // elapsed_ms is additive (every entry is real time spent under
+          // what's now the same department identity); for the point-in-
+          // time status/assignee snapshots, the last one merged wins
+          // (arbitrary among equally "current" snapshots, but never loses
+          // the key entirely).
+          if (col === 'dept_sla_log') {
+            let totalElapsed = Number(next[newName]?.elapsed_ms) || 0;
+            let merged = next[newName] || {};
+            for (const k of matchingKeys) {
+              totalElapsed += Number(next[k]?.elapsed_ms) || 0;
+              merged = { ...merged, ...next[k] };
+            }
+            next[newName] = { ...merged, elapsed_ms: totalElapsed };
+          } else {
+            for (const k of matchingKeys) next[newName] = next[k];
+          }
+          for (const k of matchingKeys) delete next[k];
           await client.query(`UPDATE issues SET ${col} = $1 WHERE id = $2`, [JSON.stringify(next), r.id]);
         }
       }
@@ -17767,6 +18171,58 @@ async function _handleJiraPgApi(
         [newName, oldName, spaceId]
       );
       result.worklogs = worklogRes.rowCount || 0;
+
+      // user_worked_on_tickets has UNIQUE(user_id, issue_id, dept) -- a
+      // blind rename UPDATE throws a duplicate-key violation whenever a
+      // (user, issue) pair ends up with more than one row that would now
+      // share the target name. That happens two different ways, both
+      // confirmed for real on this exact queue: (1) an EARLIER rename
+      // attempt left some tickets with a "newName" row (logged after it)
+      // and others with an "oldName" row (from before it) -- renaming
+      // back collides on those; (2) completely independent of any rename,
+      // the SAME logical department was already stored under more than
+      // one casing (e.g. "Pre-sales" and "Pre-Sales" as genuinely separate
+      // rows -- the DB's unique constraint is case-SENSITIVE, so both
+      // coexist happily right up until a rename tries to collapse them
+      // onto the identical target string). A fix that only handled case
+      // (1) -- checking old-name rows against a pre-existing new-name row
+      // -- still failed with the same error from case (2) alone (24
+      // tickets, zero of which had anything to do with "Pre-Sales-Old" at
+      // all).
+      //
+      // General fix: fetch EVERY row matching old-OR-new name (any casing)
+      // for this space, group by (user_id, issue_id) in JS, and for any
+      // group with more than one row, keep only the most significant
+      // record of real work (closed > worked > returned > passed; latest
+      // worked_at breaks a tie), deleting the rest -- before the final
+      // rename UPDATE ever runs, so it can never collide with itself.
+      const REASON_RANK: Record<string, number> = { closed: 3, worked: 2, returned: 1, passed: 0 };
+      const candidateRows = await client.query(
+        `SELECT id, user_id, issue_id, reason, worked_at FROM user_worked_on_tickets
+         WHERE (LOWER(dept) = LOWER($1) OR LOWER(dept) = LOWER($2))
+           AND issue_id IN (SELECT id FROM issues WHERE "spaceId" = $3)`,
+        [oldName, newName, spaceId]
+      );
+      const groupedByPair = new Map<string, typeof candidateRows.rows>();
+      for (const r of candidateRows.rows) {
+        const key = `${r.user_id}:${r.issue_id}`;
+        if (!groupedByPair.has(key)) groupedByPair.set(key, []);
+        groupedByPair.get(key)!.push(r);
+      }
+      for (const group of groupedByPair.values()) {
+        if (group.length <= 1) continue;
+        group.sort((a, b) => {
+          const rankDiff = (REASON_RANK[b.reason] ?? -1) - (REASON_RANK[a.reason] ?? -1);
+          if (rankDiff !== 0) return rankDiff;
+          return new Date(b.worked_at).getTime() - new Date(a.worked_at).getTime();
+        });
+        const [survivor, ...losers] = group;
+        await client.query(`UPDATE user_worked_on_tickets SET reason = $1, worked_at = $2 WHERE id = $3`, [survivor.reason, survivor.worked_at, survivor.id]);
+        for (const loser of losers) {
+          await client.query(`DELETE FROM user_worked_on_tickets WHERE id = $1`, [loser.id]);
+        }
+      }
+
       const workedOnRes = await client.query(
         `UPDATE user_worked_on_tickets SET dept = $1
          WHERE LOWER(dept) = LOWER($2) AND issue_id IN (SELECT id FROM issues WHERE "spaceId" = $3)`,
@@ -17777,8 +18233,14 @@ async function _handleJiraPgApi(
       await client.query('COMMIT');
     } catch (e: any) {
       await client.query('ROLLBACK');
+      // Included directly in the response (not just server logs) -- this
+      // endpoint is already admin-only, and server logs have proven
+      // unreliable to retrieve in practice (every deploy restarts the
+      // container, wiping docker logs' history, and the email-poller's own
+      // constant background noise buries anything logged more than a
+      // minute or two ago).
       console.error('[Queue Rename] Failed, rolled back:', e?.message || e);
-      return json({ error: 'Rename failed and was rolled back. No changes were made.' }, 500);
+      return json({ error: 'Rename failed and was rolled back. No changes were made.', detail: e?.message || String(e) }, 500);
     } finally {
       client.release();
     }
@@ -18015,8 +18477,9 @@ async function _handleJiraPgApi(
       )
     `);
     if (method === 'GET') {
+      await pool.query(`ALTER TABLE email_configs ADD COLUMN IF NOT EXISTS auth_mode TEXT DEFAULT 'password'`).catch(() => {});
       const rows = await pool.query(
-        `SELECT id, address, imap_host, smtp_host, auto_reply, department, created_at FROM email_configs WHERE space_key = $1 ORDER BY created_at`,
+        `SELECT id, address, imap_host, smtp_host, auto_reply, department, created_at, auth_mode FROM email_configs WHERE space_key = $1 ORDER BY created_at`,
         [sk]
       );
       return json(rows.rows.map((r: any) => ({
@@ -18025,6 +18488,7 @@ async function _handleJiraPgApi(
         autoReply: r.auto_reply, department: r.department,
         requestType: 'Emailed request',
         createdAt: r.created_at,
+        authMode: r.auth_mode,
       })));
     }
 

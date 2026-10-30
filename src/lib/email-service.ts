@@ -38,6 +38,12 @@ const AUTOMATED_NOTIFICATION_SUBJECT_PATTERNS: RegExp[] = [
   /^Declined:\s/i,
   /^Tentative:\s/i,
   /^Canceled:\s/i,
+  // Microsoft Viva Engage's own recurring newsletter, forwarded into a
+  // monitored mailbox -- same "unambiguously automated, not a real request"
+  // reasoning as the Teams patterns above. Confirmed for real: CF-34522,
+  // "Voohalu Weekly Digest", a roundup of Viva Engage community posts with
+  // no actual request in it at all.
+  /^Voohalu Weekly Digest$/i,
 ];
 function isAutomatedNotificationEmail(subject: string, from: string): boolean {
   const s = (subject || '').trim();
@@ -45,6 +51,9 @@ function isAutomatedNotificationEmail(subject: string, from: string): boolean {
   if (AUTOMATED_NOTIFICATION_SUBJECT_PATTERNS.some((re) => re.test(s))) return true;
   const f = (from || '').toLowerCase();
   if (f.includes('noreply@email.teams.microsoft.com') || f.includes('teams-noreply@microsoft.com')) return true;
+  // Same Viva Engage digest sender as the subject pattern above -- covers it
+  // even if a future digest ever ships with a slightly different subject.
+  if (f.includes('@engage.mail.microsoft')) return true;
   return false;
 }
 
@@ -60,6 +69,11 @@ export interface EmailConfig {
     oauthAccessToken?:  string;
     oauthRefreshToken?: string;
     oauthProvider?:     'microsoft' | 'google';
+    // Tenant-wide Graph "application" access (client-credentials grant) —
+    // no per-mailbox sign-in or password at all. Requires admin-consented
+    // Application permissions (Mail.Read/Mail.Send) on the Azure app
+    // registration; see getGraphAppOnlyToken() in oauth-service.ts.
+    appOnly?: boolean;
   };
   smtp: {
     host: string;
@@ -68,6 +82,7 @@ export interface EmailConfig {
     user: string;
     password: string;
     oauthAccessToken?: string;
+    appOnly?: boolean;
   };
   spaceKey: string;
   address: string;
@@ -104,6 +119,38 @@ export function getEmailConfigFromEnv(): EmailConfig | null {
   };
 }
 
+function buildAutoReplyHtml(opts: { fromName: string; appUrl: string; autoReplyText: string; issueKey: string; issueUrl: string; subject: string }): string {
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.1)">
+      <div style="background:#0052CC;padding:16px 24px">
+        <span style="color:white;font-size:18px;font-weight:bold">${opts.fromName}</span>
+      </div>
+      <div style="background:#10B981;padding:8px 24px">
+        <span style="color:white;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Ticket Created Successfully</span>
+      </div>
+      <div style="padding:24px;background:#f9f9f9">
+        <p style="color:#333;font-size:14px;margin:0 0 16px">${opts.autoReplyText}</p>
+        <div style="margin:0 0 20px;padding:16px;background:#fff;border:1px solid #e0e0e0;border-radius:6px;border-left:4px solid #0052CC">
+          <p style="margin:0;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Your Support Ticket</p>
+          <p style="margin:8px 0 0;font-size:22px;font-weight:bold;color:#0052CC">${opts.issueKey}</p>
+          <p style="margin:6px 0 0;color:#555;font-size:13px">📌 ${opts.subject}</p>
+          <p style="margin:12px 0 0">
+            <a href="${opts.issueUrl}" style="display:inline-block;background:#0052CC;color:white;padding:8px 16px;border-radius:4px;text-decoration:none;font-size:13px;font-weight:600">View Ticket →</a>
+          </p>
+        </div>
+        <p style="color:#666;font-size:13px;margin:0 0 8px">Our team will review your request and get back to you as soon as possible.</p>
+        <p style="color:#888;font-size:12px;margin:0">
+          💬 <strong>Reply to this email</strong> to add a comment to your ticket.<br/>
+          🔖 Ticket reference: <strong>${opts.issueKey}</strong>
+        </p>
+      </div>
+      <div style="padding:12px 24px;background:#f0f0f0;border-top:1px solid #e0e0e0">
+        <p style="margin:0;font-size:11px;color:#999">${opts.fromName} · <a href="${opts.appUrl}" style="color:#0052CC;text-decoration:none">${opts.appUrl}</a></p>
+      </div>
+    </div>
+  `;
+}
+
 // ─── SMTP: Send auto-reply with full threading headers ────────────────────────
 export async function sendAutoReply(opts: {
   smtp: EmailConfig['smtp'];
@@ -128,6 +175,51 @@ export async function sendAutoReply(opts: {
     return;
   }
 
+  // App-only mailboxes have no password and no per-mailbox OAuth token to
+  // hand nodemailer's SMTP transport — send through Graph's /sendMail
+  // instead, using the same tenant-wide client-credentials token the poller
+  // uses to read this mailbox (requires Mail.Send as an Application
+  // permission, not just the Mail.Read needed to poll).
+  if (opts.smtp.appOnly) {
+    try {
+      const { getGraphAppOnlyToken } = await import('@/lib/oauth-service');
+      const token = await getGraphAppOnlyToken();
+      if (!token) {
+        console.error(`[EmailPoller] App-only auto-reply skipped for ${opts.to} — no app-only token available`);
+        return;
+      }
+      const subjectLine = opts.subject.includes(`[${opts.issueKey}]`)
+        ? opts.subject
+        : `${opts.subject.replace(/^Re:\s*/i, 'Re: ')} [${opts.issueKey}]`;
+      const fromNameApp = process.env.EMAIL_FROM_NAME || 'CloudFuze Support';
+      const appUrlApp = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
+      const htmlApp = buildAutoReplyHtml({ fromName: fromNameApp, appUrl: appUrlApp, autoReplyText: opts.autoReplyText, issueKey: opts.issueKey, issueUrl: opts.issueUrl, subject: opts.subject });
+      const internetMessageHeaders: Array<{ name: string; value: string }> = [];
+      if (opts.inReplyTo)  internetMessageHeaders.push({ name: 'x-mailer-in-reply-to', value: opts.inReplyTo });
+      if (opts.references) internetMessageHeaders.push({ name: 'x-mailer-references', value: opts.references });
+      const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(opts.from)}/sendMail`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: {
+            subject: subjectLine,
+            body: { contentType: 'HTML', content: htmlApp },
+            toRecipients: [{ emailAddress: { address: opts.to } }],
+            internetMessageHeaders: internetMessageHeaders.length ? internetMessageHeaders : undefined,
+          },
+          saveToSentItems: true,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.text().catch(() => '');
+        console.error(`[EmailPoller] App-only auto-reply send FAILED (${res.status}) for ${opts.to}: ${err}`);
+      }
+    } catch (e: any) {
+      console.error('[EmailPoller] App-only auto-reply error:', e?.message || e);
+    }
+    return;
+  }
+
   const smtpAuth: any = opts.smtp.oauthAccessToken
     ? { type: 'OAuth2', user: opts.smtp.user, accessToken: opts.smtp.oauthAccessToken }
     : { user: opts.smtp.user, pass: opts.smtp.password };
@@ -148,35 +240,7 @@ export async function sendAutoReply(opts: {
   const fromName = process.env.EMAIL_FROM_NAME || 'CloudFuze Support';
   const appUrl   = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:8080';
 
-  const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.1)">
-      <div style="background:#0052CC;padding:16px 24px">
-        <span style="color:white;font-size:18px;font-weight:bold">${fromName}</span>
-      </div>
-      <div style="background:#10B981;padding:8px 24px">
-        <span style="color:white;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Ticket Created Successfully</span>
-      </div>
-      <div style="padding:24px;background:#f9f9f9">
-        <p style="color:#333;font-size:14px;margin:0 0 16px">${opts.autoReplyText}</p>
-        <div style="margin:0 0 20px;padding:16px;background:#fff;border:1px solid #e0e0e0;border-radius:6px;border-left:4px solid #0052CC">
-          <p style="margin:0;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Your Support Ticket</p>
-          <p style="margin:8px 0 0;font-size:22px;font-weight:bold;color:#0052CC">${opts.issueKey}</p>
-          <p style="margin:6px 0 0;color:#555;font-size:13px">📌 ${opts.subject}</p>
-          <p style="margin:12px 0 0">
-            <a href="${opts.issueUrl}" style="display:inline-block;background:#0052CC;color:white;padding:8px 16px;border-radius:4px;text-decoration:none;font-size:13px;font-weight:600">View Ticket →</a>
-          </p>
-        </div>
-        <p style="color:#666;font-size:13px;margin:0 0 8px">Our team will review your request and get back to you as soon as possible.</p>
-        <p style="color:#888;font-size:12px;margin:0">
-          💬 <strong>Reply to this email</strong> to add a comment to your ticket.<br/>
-          🔖 Ticket reference: <strong>${opts.issueKey}</strong>
-        </p>
-      </div>
-      <div style="padding:12px 24px;background:#f0f0f0;border-top:1px solid #e0e0e0">
-        <p style="margin:0;font-size:11px;color:#999">${fromName} · <a href="${appUrl}" style="color:#0052CC;text-decoration:none">${appUrl}</a></p>
-      </div>
-    </div>
-  `;
+  const html = buildAutoReplyHtml({ fromName, appUrl, autoReplyText: opts.autoReplyText, issueKey: opts.issueKey, issueUrl: opts.issueUrl, subject: opts.subject });
 
   // Build headers — this is what makes email threading work in mail clients
   const extraHeaders: Record<string, string> = {};
@@ -973,14 +1037,19 @@ export function startImapPoller(
   }
 
   // ── Graph API polling — fallback for accounts with Graph-scoped tokens ────
-  async function pollViaGraphApi(token: string) {
+  // appOnly=true means `token` is a tenant-wide client-credentials token (not
+  // this mailbox's own delegated token) — Graph then requires addressing the
+  // mailbox explicitly via /users/{address}/... instead of the /me/ shorthand,
+  // which only resolves for the signed-in user a delegated token represents.
+  async function pollViaGraphApi(token: string, appOnly = false) {
+    const base = appOnly ? `/users/${encodeURIComponent(config.imap.user)}` : '/me';
     try {
       const since = new Date(); since.setDate(since.getDate() - 3);
       const sinceStr = since.toISOString();
-      const url = `https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages` +
+      const url = `https://graph.microsoft.com/v1.0${base}/mailFolders/Inbox/messages` +
         `?$top=25&$orderby=receivedDateTime desc` +
         `&$filter=receivedDateTime ge ${sinceStr}` +
-        `&$select=id,subject,from,toRecipients,ccRecipients,body,internetMessageId,receivedDateTime,hasAttachments`;
+        `&$select=id,subject,from,toRecipients,ccRecipients,body,internetMessageId,receivedDateTime,hasAttachments,internetMessageHeaders`;
 
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
@@ -1024,7 +1093,7 @@ export function startImapPoller(
         if (gm.id && (gm.hasAttachments || hasCidRef)) {
           try {
             const attRes = await fetch(
-              `https://graph.microsoft.com/v1.0/me/messages/${gm.id}/attachments`,
+              `https://graph.microsoft.com/v1.0${base}/messages/${gm.id}/attachments`,
               { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
             );
             if (attRes.ok) {
@@ -1049,9 +1118,24 @@ export function startImapPoller(
           }
         }
 
-        console.log(`[EmailPoller] Graph email: "${subject}" from ${from} to ${to}`);
+        // Graph never puts In-Reply-To/References on the message object
+        // itself -- they're only available by explicitly requesting
+        // internetMessageHeaders ($select above) and finding them by name
+        // in that array, same as how the IMAP path below parses them out
+        // of the raw header block. Without this, every reply via a
+        // Graph-connected mailbox came through with these hardcoded empty,
+        // so the webhook's own thread-detection (In-Reply-To -> References
+        // -> subject, see receive/route.ts) could never recognize it as a
+        // reply and always created a brand-new duplicate ticket instead of
+        // adding a comment to the existing one.
+        const graphHeaders: Array<{ name: string; value: string }> = gm.internetMessageHeaders || [];
+        const findHeader = (name: string) => graphHeaders.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+        const inReplyTo = findHeader('In-Reply-To');
+        const references = findHeader('References');
+
+        console.log(`[EmailPoller] Graph email: "${subject}" from ${from} to ${to}${inReplyTo ? ` (reply to ${inReplyTo})` : ' (new)'}`);
         try {
-          await onEmail({ from, to, cc, subject, body, messageId: msgId, inReplyTo: '', references: '', attachments: [] });
+          await onEmail({ from, to, cc, subject, body, messageId: msgId, inReplyTo, references, attachments: [] });
           // permanent:true (e.g. "no space found for this address") means retrying
           // will never succeed — mark it processed instead of re-fetching this same
           // message (and its attachments) every single poll cycle forever.
@@ -1072,6 +1156,26 @@ export function startImapPoller(
 
   async function pollOnceInner() {
     console.log(`[EmailPoller] Poll starting for ${config.imap.user}`);
+
+    // ── App-only (no per-mailbox sign-in at all) — tenant-wide client-
+    // credentials token, re-fetched/cached centrally in oauth-service.ts.
+    // There's no password or per-mailbox refresh token to fall back to for
+    // these configs, so this is the only path tried.
+    if (config.imap.appOnly) {
+      try {
+        const { getGraphAppOnlyToken } = await import('@/lib/oauth-service');
+        const token = await getGraphAppOnlyToken();
+        if (token) {
+          await pollViaGraphApi(token, true);
+        } else {
+          console.error(`[EmailPoller] App-only token unavailable for ${config.imap.user} — skipping this poll`);
+        }
+      } catch (e) {
+        console.error(`[EmailPoller] App-only poll error for ${config.imap.user}:`, e);
+      }
+      return;
+    }
+
     // Refresh OAuth token if needed
     let accessToken = config.imap.oauthAccessToken;
     if (config.imap.oauthProvider && config.imap.oauthRefreshToken) {
