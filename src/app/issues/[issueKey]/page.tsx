@@ -3352,7 +3352,9 @@ export default function IssueDetailPage() {
                             })()}
                             {/* SLA lifecycle event (started/resumed/paused/resolved/breached) */}
                             {a.field === 'sla' && a.newValue && (
-                              <div className={`inline-flex items-center gap-1 text-[11.5px] font-medium px-2 py-0.5 rounded-full ${
+                              <div
+                                title={/^SLA breached — [^(]*$/.test(a.newValue) ? 'No one was assigned at the time of breach' : undefined}
+                                className={`inline-flex items-center gap-1 text-[11.5px] font-medium px-2 py-0.5 rounded-full ${
                                 a.newValue.startsWith('SLA breached') ? 'bg-red-50 text-red-600'
                                 : a.newValue.startsWith('SLA resolved') ? 'bg-emerald-50 text-emerald-600'
                                 : a.newValue.startsWith('SLA paused') ? 'bg-amber-50 text-amber-600'
@@ -5241,7 +5243,9 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                               resolved the ticket. */}
                           {historicallyBreached && (
                             <p className="text-[10.5px] text-red-500 mt-2">
-                              Breached by <span className="font-semibold">{breachedByName || 'Unassigned'}</span>
+                              {breachedByName
+                                ? <>Breached by <span className="font-semibold">{breachedByName}</span></>
+                                : 'No one was assigned at the time of breach'}
                             </p>
                           )}
 

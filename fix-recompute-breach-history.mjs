@@ -21,9 +21,9 @@
 //   2. Walk the visits until the total reaches the department's target for
 //      the ticket's priority: that minute is the breach. No breach if it
 //      never does.
-//   3. Name: same rules as breachHolderName in src/lib/jira-pg-api.ts --
-//      whoever held it then; if nobody, the first person assigned in that
-//      department afterwards; keep the two in step.
+//   3. Name: same rule as breachHolderName in src/lib/jira-pg-api.ts --
+//      whoever held it then; no name if nobody did ("SLA breached — QA");
+//      keep the two in step.
 //   4. Insert / correct / delete the department's breach entries to match.
 //
 // Targets: the newest active dept-scoped policy in the ticket's space, with
@@ -43,7 +43,6 @@ const APPLY = process.argv.includes('--apply');
 const keyArgIdx = process.argv.indexOf('--key');
 const ONLY_KEY = keyArgIdx > -1 ? process.argv[keyArgIdx + 1] : null;
 const TOLERANCE_MS = 2 * 60 * 1000;
-const EDGE_MS = 5000;
 const PREFIX = 'SLA breached — ';
 
 const HISTORICAL_SLA_OVERRIDES = {
@@ -98,16 +97,12 @@ function visitsFor(slaRows, dept) {
   return { visits, stillOpen: open !== null };
 }
 
-function holderName(assigns, visits, at) {
+// Who held the ticket at `at`; null = nobody assigned then, and the entry is
+// left unnamed rather than given to whoever picked it up later.
+function holderName(assigns, at) {
   if (!assigns.length) return null;
   const before = assigns.filter((a) => ms(a.createdAt) <= at);
-  const holder = before.length ? clean(before[before.length - 1].newValue) : clean(assigns[0].oldValue);
-  if (holder) return holder;
-  const next = assigns.find((a) => {
-    const t = ms(a.createdAt);
-    return t >= at && clean(a.newValue) && visits.some(([s, e]) => t >= s - EDGE_MS && t < e - EDGE_MS);
-  });
-  return next ? clean(next.newValue) : null;
+  return before.length ? clean(before[before.length - 1].newValue) : clean(assigns[0].oldValue);
 }
 
 async function main() {
@@ -190,7 +185,7 @@ async function main() {
           continue;
         }
 
-        const name = holderName(assigns, visits, breachedAt);
+        const name = holderName(assigns, breachedAt);
         const label = `${PREFIX}${dept}${name ? ` (${name})` : ''}`;
         const at = new Date(Math.floor(breachedAt));
         if (!existing.length) {

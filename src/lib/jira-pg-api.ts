@@ -1230,37 +1230,15 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
         const breachedAt = startedAt && dueMs >= new Date(startedAt).getTime() && dueMs <= Date.now()
           ? new Date(dueMs)
           : new Date();
-        // The entry names who it breached under (by request, CF-34582); see
-        // breachHolderName. Nobody assigned yet = no name for now, filled in
-        // below once the department assigns someone.
+        // The entry names who it breached under (by request, CF-34582), or
+        // no one if nobody held it then -- see breachHolderName.
         const currentAssignee = (row.assignee_first || row.assignee_last)
           ? `${row.assignee_first || ''} ${row.assignee_last || ''}`.trim()
           : null;
-        const assigneeName = await breachHolderName(row.id, row.current_department || '', breachedAt, currentAssignee).catch(() => currentAssignee);
+        const assigneeName = await breachHolderName(row.id, breachedAt, currentAssignee).catch(() => currentAssignee);
         await logSlaHistory(null, row.id, `${base}${assigneeName ? ` (${assigneeName})` : ''}`, breachedAt);
       }
     }
-
-    // Breach entries written while nobody held the ticket get the name of
-    // whoever the department assigns next (by request: CF-33996 breached in
-    // QA at 07:35 while unassigned, Bhuvana Mosra picked it up at 15:17).
-    try {
-      const activeIds = rows.map((r: any) => r.id);
-      const unnamed = activeIds.length
-        ? await pool.query(
-            `SELECT id, "issueId", "newValue", "createdAt" FROM issue_history
-             WHERE "issueId" = ANY($1::text[]) AND field = 'sla'
-               AND "newValue" LIKE 'SLA breached — %' AND "newValue" NOT LIKE '%)'`,
-            [activeIds],
-          )
-        : { rows: [] as any[] };
-      for (const e of unnamed.rows) {
-        const dept = String(e.newValue).slice('SLA breached — '.length).trim();
-        if (!dept) continue;
-        const name = await breachHolderName(e.issueId, dept, new Date(e.createdAt), null);
-        if (name) await pool.query(`UPDATE issue_history SET "newValue" = $2 WHERE id = $1`, [e.id, `SLA breached — ${dept} (${name})`]);
-      }
-    } catch { /* non-fatal */ }
 
     if (candidates.length) {
       const keys = Array.from(new Set(candidates.map((c) => c.row.cf_key || c.row.key)));
@@ -2074,52 +2052,27 @@ async function getDeptBreachNames(issueIds: string[], dept: string): Promise<Map
 }
 
 /**
- * Who a department's SLA breach at `breachedAt` is attributed to:
- *  1. whoever held the ticket at that moment (the last assignee change at or
- *     before it, else the "from" side of the first change after it);
- *  2. if nobody held it, the first person assigned while the ticket was in
- *     `dept` after the breach -- the person who finally picked it up;
- *  3. if the ticket has no assignee history at all, `currentAssignee`.
- * Returns null when nobody has been assigned in that department yet.
- * Fix-recompute-breach-history.mjs applies the same rules to old tickets;
+ * Who held the ticket when a department's SLA ran out at `breachedAt`: the
+ * last assignee change at or before it, else the "from" side of the first
+ * change after it; `currentAssignee` if the ticket has no assignee history
+ * at all. Null = nobody was assigned at that moment, and the entry then
+ * reads just "SLA breached — <Dept>" -- by request, it is not attributed to
+ * whoever picked the ticket up later (CF-33996: QA ran out at 07:36 with
+ * nobody assigned; Bhuvana Mosra only took it at 15:17).
+ * Fix-recompute-breach-history.mjs applies the same rule to old tickets;
  * keep the two in step.
  */
-async function breachHolderName(issueId: string, dept: string, breachedAt: Date, currentAssignee: string | null): Promise<string | null> {
-  const rows = (await pool.query(
-    `SELECT field, "oldValue", "newValue", "createdAt" FROM issue_history
-     WHERE "issueId" = $1 AND field IN ('assignee', 'sla') ORDER BY "createdAt" ASC, id ASC`,
+async function breachHolderName(issueId: string, breachedAt: Date, currentAssignee: string | null): Promise<string | null> {
+  const assigns = (await pool.query(
+    `SELECT "oldValue", "newValue", "createdAt" FROM issue_history
+     WHERE "issueId" = $1 AND field = 'assignee' ORDER BY "createdAt" ASC, id ASC`,
     [issueId],
   )).rows;
-  const at = breachedAt.getTime();
-  const t = (r: any) => new Date(r.createdAt).getTime();
-  const clean = (v: any): string | null => (v && v !== 'None' ? String(v) : null);
-  const assigns = rows.filter((r: any) => r.field === 'assignee');
   if (!assigns.length) return currentAssignee;
-  let holder: string | null = null;
-  const before = assigns.filter((a: any) => t(a) <= at);
-  if (before.length) holder = clean(before[before.length - 1].newValue);
-  else holder = clean(assigns[0].oldValue);
-  if (holder) return holder;
-
-  // The department's visits, from its SLA started/resumed -> paused/resolved
-  // entries. A handoff writes the assignee change and the SLA entries in one
-  // request, a few ms apart, so an assignment within 5s of a visit's edges
-  // belongs to the side the ticket was moving to.
-  const EDGE = 5000;
-  const deptKey = dept.trim().toLowerCase();
-  const visits: Array<[number, number]> = [];
-  let open: number | null = null;
-  for (const r of rows) {
-    if (r.field !== 'sla') continue;
-    const m = String(r.newValue || '').match(/^SLA (started|resumed|paused|resolved) — (.+)$/);
-    if (!m || m[2].trim().toLowerCase() !== deptKey) continue;
-    if (m[1] === 'started' || m[1] === 'resumed') { if (open === null) open = t(r); }
-    else if (open !== null) { visits.push([open, t(r)]); open = null; }
-  }
-  if (open !== null) visits.push([open, Infinity]);
-  const next = assigns.find((a: any) =>
-    t(a) >= at && clean(a.newValue) && visits.some(([s, e]) => t(a) >= s - EDGE && t(a) < e - EDGE));
-  return next ? clean(next.newValue) : null;
+  const at = breachedAt.getTime();
+  const clean = (v: any): string | null => (v && v !== 'None' ? String(v) : null);
+  const before = assigns.filter((a: any) => new Date(a.createdAt).getTime() <= at);
+  return before.length ? clean(before[before.length - 1].newValue) : clean(assigns[0].oldValue);
 }
 
 // The exact (lower-cased) breach entries History writes for these users in
