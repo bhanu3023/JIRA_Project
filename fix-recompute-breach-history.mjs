@@ -54,7 +54,14 @@ const HISTORICAL_SLA_OVERRIDES = {
 const rid = () => 'rb_' + crypto.randomBytes(12).toString('hex');
 const ms = (d) => new Date(d).getTime();
 const clean = (v) => (v && v !== 'None' ? String(v) : null);
-const ist = (m) => new Date(m).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+// Offset by hand: the server's Node build ignores toLocaleString's timeZone
+// (it printed UTC), and IST has no daylight saving.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const ist = (m) => {
+  const d = new Date(new Date(m).getTime() + 330 * 60_000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getUTCDate())} ${MONTHS[d.getUTCMonth()]} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} IST`;
+};
 
 // Same priority -> target rules as computeSLAInstancesPure: a 0 means this
 // priority has no SLA; no row for the priority falls back to 8h.
