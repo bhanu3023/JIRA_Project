@@ -1173,7 +1173,7 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
     // discrete stored event -- so History never showed the moment a ticket actually
     // crossed its due time, only the pre-breach warning notification. Collect that
     // moment here too, logged once per issue per department visit (guarded below).
-    const justBreached: Array<{ row: any; policyName: string }> = [];
+    const justBreached: Array<{ row: any; policyName: string; dueTime: string; startedAt: string | null }> = [];
     for (const row of rows) {
       const policies = policiesBySpace[row.spaceId] || [];
       if (!policies.length) continue;
@@ -1193,32 +1193,70 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
         if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
           candidates.push({ row, policyName: inst.policyName, minsLeft: Math.ceil(timeToBreachMs / 60_000) });
         } else if (timeToBreachMs <= 0) {
-          justBreached.push({ row, policyName: inst.policyName });
+          justBreached.push({ row, policyName: inst.policyName, dueTime: inst.dueTime, startedAt: inst.startedAt || null });
         }
       }
     }
 
     if (justBreached.length) {
-      const byIssue = new Map<string, { row: any; policyName: string }>();
-      for (const c of justBreached) { if (!byIssue.has(c.row.id)) byIssue.set(c.row.id, c); }
-      for (const { row } of byIssue.values()) {
-        // By explicit request: the breach entry itself should name who it
-        // breached under, not just the department -- the ticket's current
-        // assignee at the moment the SLA crossed its due time, same person
-        // sla_breached_by already surfaces on the Filters list for a live
-        // (non-dept-scoped) view. Confirmed for real on CF-34582: History
-        // only ever showed a breach attribution at resolve time, via the
-        // separate status-change badge -- this is the first record of it
-        // at the actual moment of breach.
-        const assigneeName = (row.assignee_first || row.assignee_last)
+      // Several policies can be over at once; the one that ran out first is
+      // the breach.
+      const byIssue = new Map<string, (typeof justBreached)[number]>();
+      for (const c of justBreached) {
+        const prev = byIssue.get(c.row.id);
+        if (!prev || new Date(c.dueTime).getTime() < new Date(prev.dueTime).getTime()) byIssue.set(c.row.id, c);
+      }
+      for (const { row, dueTime, startedAt } of Array.from(byIssue.values())) {
+        // One breach entry per department per ticket. This scan keeps seeing
+        // the department as breached for as long as its clock runs (and again
+        // after it comes back from another department), and the old exact-
+        // label check logged a fresh entry for every new assignee: on CF-34162
+        // Dev breached under Ravi Srivastava at 12:16 PM, then History also
+        // blamed Akhila Aenkoju, who only picked it up two hours later. Each
+        // other department still gets its own entry when it breaches.
+        const base = `SLA breached — ${row.current_department || ''}`.trim();
+        try {
+          const loggedForDept = await (db as any).issueHistory.findFirst({
+            where: { issueId: row.id, field: 'sla', OR: [{ newValue: base }, { newValue: { startsWith: `${base} (` } }] },
+            select: { id: true },
+          });
+          if (loggedForDept) continue;
+        } catch { continue; }
+        // Stamp it at the moment the clock actually ran out, not whenever this
+        // scan noticed (a restart can delay that). A due time before this
+        // department's current stint began means it ran out during an earlier
+        // stint whose exact moment this instance can't place -- use now then.
+        const dueMs = new Date(dueTime).getTime();
+        const breachedAt = startedAt && dueMs >= new Date(startedAt).getTime() && dueMs <= Date.now()
+          ? new Date(dueMs)
+          : new Date();
+        // The entry names who it breached under (by request, CF-34582) --
+        // whoever held the ticket at that moment, from the assignee history:
+        // the last change at or before it, else the "from" side of the first
+        // change after it, else the current assignee.
+        let assigneeName: string | null = (row.assignee_first || row.assignee_last)
           ? `${row.assignee_first || ''} ${row.assignee_last || ''}`.trim()
           : null;
-        const label = `SLA breached — ${row.current_department || ''}${assigneeName ? ` (${assigneeName})` : ''}`.trim();
         try {
-          const already = await (db as any).issueHistory.findFirst({ where: { issueId: row.id, field: 'sla', newValue: label } });
-          if (already) continue;
-          await logSlaHistory(null, row.id, label);
-        } catch { /* non-fatal */ }
+          const before = await pool.query(
+            `SELECT "newValue" FROM issue_history WHERE "issueId" = $1 AND field = 'assignee' AND "createdAt" <= $2 ORDER BY "createdAt" DESC LIMIT 1`,
+            [row.id, breachedAt],
+          );
+          if (before.rows.length) {
+            const v = before.rows[0].newValue;
+            assigneeName = v && v !== 'None' ? v : null;
+          } else {
+            const after = await pool.query(
+              `SELECT "oldValue" FROM issue_history WHERE "issueId" = $1 AND field = 'assignee' AND "createdAt" > $2 ORDER BY "createdAt" ASC LIMIT 1`,
+              [row.id, breachedAt],
+            );
+            if (after.rows.length) {
+              const v = after.rows[0].oldValue;
+              assigneeName = v && v !== 'None' ? v : null;
+            }
+          }
+        } catch { /* keep the current assignee */ }
+        await logSlaHistory(null, row.id, `${base}${assigneeName ? ` (${assigneeName})` : ''}`, breachedAt);
       }
     }
 
@@ -2011,14 +2049,14 @@ function formatSpace(sp: any) {
 // nothing calling out that the SLA clock itself had started, paused, or
 // breached. Centralized here so every pauseDeptSLA/startDeptSLA call site
 // (transfer, recall, handoff, close) gets a History entry for free.
-async function logSlaHistory(issueKey: string | null, issueId: string | null, message: string): Promise<void> {
+async function logSlaHistory(issueKey: string | null, issueId: string | null, message: string, at?: Date): Promise<void> {
   try {
     const targetId = issueId || (issueKey
       ? (await pool.query(`SELECT id FROM issues WHERE key=$1`, [issueKey])).rows[0]?.id
       : null);
     if (!targetId) return;
     await (db as any).issueHistory.create({
-      data: { id: rid(), issueId: targetId, field: 'sla', oldValue: null, newValue: message, authorName: 'System', createdAt: new Date() },
+      data: { id: rid(), issueId: targetId, field: 'sla', oldValue: null, newValue: message, authorName: 'System', createdAt: at ?? new Date() },
     });
   } catch { /* non-fatal */ }
 }

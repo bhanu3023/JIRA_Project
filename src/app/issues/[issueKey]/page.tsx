@@ -4981,6 +4981,31 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                 }
                 return name;
               };
+              // Each department's breach as History recorded it: the one
+              // "SLA breached — <Dept> (<Name>)" entry written at the moment
+              // its clock ran out, naming whoever held the ticket then (see
+              // runMonitorAgentScan in jira-pg-api.ts). That's the source of
+              // truth for the card too, so the two can't disagree. Working it
+              // out here instead went wrong for a department that got the
+              // ticket back: CF-34162 left Dev for QA and came back, so its
+              // computed due time landed at 9:00 AM (counted back from the
+              // second visit) and the card blamed Akhila Aenkoju, who took it
+              // after the breach -- History correctly had Ravi Srivastava at
+              // 12:16 PM.
+              const breachEntryByDept = new Map<string, { at: Date; name: string | null }>();
+              if (Array.isArray(issue.activity)) {
+                for (const a of issue.activity) {
+                  if (a.field !== 'sla' || typeof a.newValue !== 'string') continue;
+                  const m = a.newValue.match(/^SLA breached — (.*?)(?: \((.*)\))?$/);
+                  if (!m) continue;
+                  const deptKey = m[1].trim().toLowerCase();
+                  const at = new Date(a.createdAt);
+                  const prev = breachEntryByDept.get(deptKey);
+                  // The earliest one is the breach; any later ones predate
+                  // the one-per-department rule.
+                  if (!prev || at.getTime() < prev.at.getTime()) breachEntryByDept.set(deptKey, { at, name: m[2] || null });
+                }
+              }
               const entries = finalEntries.map((s: any) => {
                 const startedAt = s.startedAt ? new Date(s.startedAt) : null;
                 const dueAt = new Date(s.dueTime);
@@ -5054,8 +5079,13 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                 // but both historical cards read "Breached by Sadia Shaik"
                 // (the ticket's assignee from an earlier, unrelated moment).
                 const dueAtWithinTenure = !!startedAt && dueAt.getTime() >= startedAt.getTime();
-                const breachedByName = dueAtWithinTenure ? (assigneeNameAsOf(dueAt.getTime()) || deptAssigneeName) : deptAssigneeName;
-                return { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, baseName, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName, breachedByName };
+                const breachEntry = showAsBreach ? breachEntryByDept.get((slaDept || '').trim().toLowerCase()) : undefined;
+                const breachedByName = breachEntry
+                  ? breachEntry.name
+                  : dueAtWithinTenure ? (assigneeNameAsOf(dueAt.getTime()) || deptAssigneeName) : deptAssigneeName;
+                // A breached card's Due is when its clock actually ran out.
+                const shownDueAt = breachEntry ? breachEntry.at : dueAt;
+                return { s, startedAt, dueAt, shownDueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, baseName, slaDept, isNotified, isBreachingSoon, showAsBreach, deptAssigneeName, breachedByName };
               });
 
               const groups = new Map<string, typeof entries>();
@@ -5084,7 +5114,7 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                     </div>
 
                     {group.map((e, i) => {
-                      const { s, startedAt, dueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, slaDept, isNotified, isBreachingSoon, showAsBreach, breachedByName } = e;
+                      const { s, startedAt, shownDueAt, resolvedAt, remainingMs, isPaused, isCompleted, resolvedLate, isBreached, historicallyBreached, goalMs, elapsedMs, pct, slaDept, isNotified, isBreachingSoon, showAsBreach, breachedByName } = e;
                       return (
                         <div key={s.id} className={i > 0 ? 'pt-3 mt-3 border-t border-gray-200' : ''}>
                           {/* Dept badge + goal + status badges */}
@@ -5143,7 +5173,7 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                               </div>
                               <div className={`rounded-lg px-2.5 py-1.5 ${showAsBreach ? 'bg-red-100' : 'bg-gray-50'}`}>
                                 <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">Due</p>
-                                <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(dueAt)}</p>
+                                <p className={`text-[11px] font-semibold ${showAsBreach ? 'text-red-600' : 'text-gray-700'}`}>{fmtTime(shownDueAt)}</p>
                               </div>
                             </div>
                           )}
