@@ -2049,6 +2049,40 @@ function formatSpace(sp: any) {
 // nothing calling out that the SLA clock itself had started, paused, or
 // breached. Centralized here so every pauseDeptSLA/startDeptSLA call site
 // (transfer, recall, handoff, close) gets a History entry for free.
+// Who each ticket breached `dept`'s SLA under, from its one "SLA breached —
+// <Dept> (<Name>)" History entry (see runMonitorAgentScan). Tickets with no
+// such entry (breached before these were recorded) are absent from the map;
+// an entry with no name maps to null.
+async function getDeptBreachNames(issueIds: string[], dept: string): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  if (!issueIds.length || !dept) return out;
+  const base = `SLA breached — ${dept}`;
+  const rows = await pool.query(
+    `SELECT DISTINCT ON ("issueId") "issueId", "newValue" FROM issue_history
+     WHERE "issueId" = ANY($1::text[]) AND field = 'sla'
+       AND (lower("newValue") = lower($2) OR lower("newValue") LIKE lower($3) ESCAPE '\\')
+     ORDER BY "issueId", "createdAt" ASC, id ASC`,
+    [issueIds, base, `${base.replace(/[\\%_]/g, (c) => `\\${c}`)} (%`],
+  );
+  for (const r of rows.rows) {
+    const m = String(r.newValue).match(/^SLA breached — .*? \((.*)\)$/);
+    out.set(r.issueId, m ? m[1].trim() : null);
+  }
+  return out;
+}
+
+// The exact (lower-cased) breach entries History writes for these users in
+// `dept` -- for matching tickets breached under them in SQL.
+async function deptBreachLabelsFor(userIds: string[], dept: string): Promise<string[]> {
+  if (!userIds.length || !dept) return [];
+  const users = await db.user.findMany({ where: { id: { in: userIds } }, select: { firstName: true, lastName: true, email: true } });
+  return users.map((u) => `SLA breached — ${dept} (${`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email})`.toLowerCase());
+}
+
+function personNameKey(name: string | null | undefined): string {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 async function logSlaHistory(issueKey: string | null, issueId: string | null, message: string, at?: Date): Promise<void> {
   try {
     const targetId = issueId || (issueKey
@@ -8694,9 +8728,21 @@ async function _handleJiraPgApi(
         const resolvedIds = await resolveUserIds(ids);
         if (resolvedIds.length) {
           const deptOwnerSql = queueDeptOwnerSql();
-          deptExtraClauses.push(`${deptOwnerSql} = ANY($${deptParamIdx}::text[])`);
+          const ownerClause = `${deptOwnerSql} = ANY($${deptParamIdx}::text[])`;
           deptExtraParams.push(resolvedIds);
           deptParamIdx++;
+          // With "SLA Breached: Yes", a ticket this queue breached under the
+          // selected person is theirs even if someone else is the queue's
+          // owner of record now (CF-34162: breached under Ravi Srivastava,
+          // owner of record Akhila Aenkoju). The prefilter below then drops
+          // the ones that breached under someone else.
+          if (slaBreachedParamEarly === 'yes') {
+            deptExtraClauses.push(`(${ownerClause} OR EXISTS (SELECT 1 FROM issue_history bh WHERE bh."issueId" = i.id AND bh.field = 'sla' AND lower(bh."newValue") = ANY($${deptParamIdx}::text[])))`);
+            deptExtraParams.push(await deptBreachLabelsFor(resolvedIds, deptParam));
+            deptParamIdx++;
+          } else {
+            deptExtraClauses.push(ownerClause);
+          }
         } else {
           assigneeFilterForcedEmpty = true;
         }
@@ -8722,8 +8768,18 @@ async function _handleJiraPgApi(
       } else if (assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         const resolvedIds = await resolveUserIds(ids);
-        deptExtraClauses.push(resolvedIds.length ? `i."assigneeId" = ANY($${deptParamIdx}::text[])` : '1=0');
-        if (resolvedIds.length) { deptExtraParams.push(resolvedIds); deptParamIdx++; }
+        if (!resolvedIds.length) {
+          deptExtraClauses.push('1=0');
+        } else if (slaBreachedParamEarly === 'yes') {
+          // Same "breached under them" widening as the queue-owner branch above.
+          deptExtraClauses.push(`(i."assigneeId" = ANY($${deptParamIdx}::text[]) OR EXISTS (SELECT 1 FROM issue_history bh WHERE bh."issueId" = i.id AND bh.field = 'sla' AND lower(bh."newValue") = ANY($${deptParamIdx + 1}::text[])))`);
+          deptExtraParams.push(resolvedIds, await deptBreachLabelsFor(resolvedIds, deptParam));
+          deptParamIdx += 2;
+        } else {
+          deptExtraClauses.push(`i."assigneeId" = ANY($${deptParamIdx}::text[])`);
+          deptExtraParams.push(resolvedIds);
+          deptParamIdx++;
+        }
       }
       if (reporters) {
         const ids = reporters.split(',').map((x) => x.trim()).filter(Boolean);
@@ -9294,7 +9350,7 @@ async function _handleJiraPgApi(
             for (const p of polRows.rows) (policiesBySpaceLight[p.spaceId] ??= []).push(p);
           }
           const nowMsLight = Date.now();
-          const matchingIds: string[] = [];
+          let matchingIds: string[] = [];
           for (const r of lightRows.rows) {
             const shaped = { ...r, status: r.status_name ? { name: r.status_name, category: r.status_category } : null };
             const { slaBreached, overdue } = computeSlaBreachedAndOverdue(shaped, deptParam, policiesBySpaceLight, nowMsLight);
@@ -9306,6 +9362,23 @@ async function _handleJiraPgApi(
             const matchesOverdue = !(overdueParamEarly === 'yes' || overdueParamEarly === 'no')
               || (overdueParamEarly === 'yes' ? overdue : !overdue);
             if (matchesSla && matchesOverdue) matchingIds.push(r.id);
+          }
+          // Assignee + "SLA Breached: Yes" means "breached under this
+          // person", not "this person touched a ticket this queue breached":
+          // CF-34162 breached in Dev under Ravi Srivastava, but Akhila
+          // Aenkoju -- who took it two hours after the breach -- is Dev's
+          // owner of record, so Queue: Dev + Assignee: Akhila + Breached: Yes
+          // listed it as hers. Where History recorded who it breached under,
+          // that person must be one of the selected assignees; tickets from
+          // before those entries existed keep the plain assignee match.
+          if (slaBreachedParamEarly === 'yes' && assignees && !unassignedOnly && matchingIds.length) {
+            const selectedIds = await resolveUserIds(assignees.split(',').map((x) => x.trim()).filter(Boolean));
+            const selectedUsers = selectedIds.length
+              ? await db.user.findMany({ where: { id: { in: selectedIds } }, select: { firstName: true, lastName: true, email: true } })
+              : [];
+            const selectedNames = new Set(selectedUsers.map((u) => personNameKey(`${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email)));
+            const breachNames = await getDeptBreachNames(matchingIds, deptParam);
+            matchingIds = matchingIds.filter((id) => !breachNames.has(id) || selectedNames.has(personNameKey(breachNames.get(id))));
           }
           // TRUE total across the full (up to SLA_PREFILTER_CAP) candidate
           // set, not just this page -- the shared post-processing block
@@ -9849,8 +9922,20 @@ async function _handleJiraPgApi(
       // -- the CF-33352 "always current" rule only applies to unscoped views
       // (My Tickets, a plain Assignee filter with no Queue selected), where
       // there's no department-scoped verdict to stay consistent with.
+      //
+      // Within a Queue scope, History's own breach entry for that department
+      // wins when there is one: it names whoever held the ticket the moment
+      // the clock ran out. dept_assignees is the handoff-time owner, which
+      // for CF-34162 was Akhila Aenkoju, not Ravi Srivastava who it actually
+      // breached under.
+      const deptBreachNames = deptParam
+        ? await getDeptBreachNames(enrichedIssues.filter((i: any) => i.sla_breached).map((i: any) => i.id), deptParam).catch(() => new Map<string, string | null>())
+        : new Map<string, string | null>();
       enrichedIssues = enrichedIssues.map((i: any) => {
         if (!i.sla_breached) return i;
+        if (deptParam && deptBreachNames.has(i.id)) {
+          return { ...i, sla_breached_by: deptBreachNames.get(i.id) ?? null, sla_breached_dept: deptParam };
+        }
         if (deptParam) {
           const deptAssignees: Record<string, any> = i.dept_assignees || {};
           const snapKey = Object.keys(deptAssignees).find((k) => k.toLowerCase() === deptParam.toLowerCase());
