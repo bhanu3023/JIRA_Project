@@ -84,15 +84,23 @@ async function main() {
   const { rows: allPolicies } = await pool.query(`SELECT * FROM sla_definitions WHERE status = 'active'`);
   for (const p of allPolicies) (policiesBySpace[p.spaceId] ??= []).push(p);
 
-  const url = `${APP_URL}/api/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true` +
-    `&createdRange=between:2026-10-01:2026-11-02` +
-    `&page=1&limit=500`;
-  const res = await fetch(url, { headers: authHeader, signal: AbortSignal.timeout(60000) });
-  const data = await res.json();
-  console.log(`Total tickets in this Created-range view (no breach filter): ${data.total}\n`);
+  const allIssues = [];
+  let total = null;
+  for (let page = 1; page <= 20; page++) {
+    const url = `${APP_URL}/api/issues?spaceKey=TESTIN&dept=Migration&queueMembersOnly=true` +
+      `&createdRange=between:2026-10-01:2026-11-02` +
+      `&page=${page}&limit=500`;
+    const res = await fetch(url, { headers: authHeader, signal: AbortSignal.timeout(60000) });
+    const data = await res.json();
+    if (total === null) total = data.total;
+    allIssues.push(...(data.issues || []));
+    if (!data.issues || data.issues.length < 500) break;
+  }
+  console.log(`Total tickets in this Created-range view (no breach filter): ${total}`);
+  console.log(`Fetched across pages: ${allIssues.length}\n`);
 
   let falsePositives = 0, falseNegatives = 0, matched = 0, noRealVerdict = 0, shownBreachedCount = 0;
-  for (const issue of data.issues || []) {
+  for (const issue of allIssues) {
     const shownBreached = !!issue.sla_breached;
     if (shownBreached) shownBreachedCount++;
     const { real, reason, realElapsedMs, minGoalMs } = await realBreachVerdict(issue.id, 'Migration', policiesBySpace);
