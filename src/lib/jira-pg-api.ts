@@ -2878,7 +2878,21 @@ async function enrichSlaWithResolver(
     // Migration" for that same resolution, straight from resolvedAt minus
     // the fixed display dueTime with no pause adjustment at all.
     const history = events.map((e) => {
-      const isOwnResolution = s.resolvedAt && new Date(e.resolvedAt).getTime() === new Date(s.resolvedAt).getTime();
+      // Exact millisecond equality here used to miss the ticket's own
+      // current resolution far more often than just the intended "older,
+      // different resolve-then-reopen cycle" case: s.resolvedAt (the issue
+      // row's own resolvedAt column) and e.resolvedAt (the status-change
+      // issue_history row's createdAt) are written in two separate inserts
+      // within the same resolve request, routinely landing a few
+      // milliseconds apart. Confirmed for real: CF-34197, 7ms apart
+      // (...882Z vs ...889Z) -- isOwnResolution read false, fell back to
+      // the naive resolvedAt-vs-fixed-dueTime comparison below, and flagged
+      // a genuinely on-time resolution ("41m -- within the SLA goal", the
+      // correct s.isBreached=false) as "SLA Breached by 21h 45m" in this
+      // exact badge. A few seconds of tolerance still correctly excludes a
+      // real, separate, earlier resolve-then-reopen cycle (which differs by
+      // minutes/hours/days, not milliseconds).
+      const isOwnResolution = s.resolvedAt && Math.abs(new Date(e.resolvedAt).getTime() - new Date(s.resolvedAt).getTime()) <= 5000;
       const wasBreached = s.waived ? false : isOwnResolution ? s.isBreached === true : new Date(e.resolvedAt).getTime() > dueMs;
       return { ...e, wasBreached };
     });
