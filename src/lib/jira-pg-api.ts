@@ -3095,22 +3095,29 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         // resolution-ending stint at 2026-10-27 6:53 PM -- affecting 1,648
         // of 2,299 resolved tickets checked (72%), all sharing the same
         // "revisited the same department more than once" pattern.
-        const deptSlaLogNow: Record<string, any> = (issue as any).dept_sla_log || {};
-        const currentDeptLogKey = Object.keys(deptSlaLogNow).find((k) => k.toLowerCase() === issueDept);
-        const currentDeptLogEntry = currentDeptLogKey ? deptSlaLogNow[currentDeptLogKey] : null;
         return existingSnapshot.map((inst: any) => {
           let next = inst;
-          if (
-            currentDeptLogEntry?.started_at &&
-            (inst.deptName || '').trim().toLowerCase() === issueDept &&
-            Math.abs(new Date(currentDeptLogEntry.started_at).getTime() - new Date(inst.startedAt).getTime()) > 60_000
-          ) {
-            const correctedStartMs = new Date(currentDeptLogEntry.started_at).getTime();
-            const finalStintEndMs = inst.resolvedAt ? new Date(inst.resolvedAt).getTime() : correctedStartMs;
-            const finalStintDurationMs = Math.max(0, finalStintEndMs - correctedStartMs);
-            const priorElapsedMs = (inst.actualElapsedMs || 0) - finalStintDurationMs;
-            const correctedDueMs = correctedStartMs + (inst.goalDurationMs - priorElapsedMs);
-            next = { ...inst, startedAt: new Date(correctedStartMs).toISOString(), dueTime: new Date(correctedDueMs).toISOString() };
+          // Re-anchoring this entry's startedAt to dept_sla_log[dept].started_at
+          // (the LAST stint's start) was tried here and reverted -- it
+          // reintroduced the exact "Due before Start" failure mode the
+          // createdAt-based convention below (see the isResolved branch
+          // further down in this function, "By explicit request...") was
+          // already written to prevent, because a ticket's cumulative
+          // elapsed time can already exceed the goal before that final
+          // stint even begins. Confirmed for real: CF-34499's Migration
+          // entry showed Due Oct 27 3:17 AM before Start Oct 28 12:23 AM
+          // after that attempt. The one true fixed point for a resolved
+          // ticket's Start/Due display is createdAt + goalDurationMs --
+          // same rule used when a snapshot is frozen for the first time --
+          // so apply that same correction here instead when this entry's
+          // startedAt doesn't already match it (an older snapshot frozen
+          // before that convention existed).
+          if ((inst.deptName || '').trim().toLowerCase() === issueDept) {
+            const createdAtMs = new Date(issue.createdAt).getTime();
+            if (Math.abs(createdAtMs - new Date(inst.startedAt).getTime()) > 60_000) {
+              const correctedDueMs = createdAtMs + (inst.goalDurationMs || 0);
+              next = { ...inst, startedAt: new Date(createdAtMs).toISOString(), dueTime: new Date(correctedDueMs).toISOString() };
+            }
           }
           const waiver = waivers[next.policyId] || null;
           if (!waiver) return next;
