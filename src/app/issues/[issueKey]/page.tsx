@@ -5211,11 +5211,27 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                             </p>
                           )}
 
-                          {/* Who actually resolved it */}
+                          {/* Who to credit/blame: a breached card names whoever
+                              actually held the ticket when THIS department's
+                              own SLA clock ran out (breachedByName, read
+                              straight from the "SLA breached — Dept (Name)"
+                              History entry) -- not whoever happened to click
+                              Resolve, which can be a completely different
+                              person who only picked it up afterward. Confirmed
+                              for real: CF-34499's Migration card showed
+                              "Resolved by Habeebunnisa Begum" even though she
+                              only resolved it -- the breach itself happened
+                              earlier, under a different assignee. Only a
+                              clean, on-time resolution still credits whoever
+                              resolved it, since there's no breach to attribute. */}
                           {isCompleted && Array.isArray(s.history) && s.history.length > 0 && (
                             s.history.length === 1 ? (
                               <p className="text-[10.5px] text-gray-400 mt-2">
-                                Resolved by <span className={`font-semibold ${s.history[0].wasBreached ? 'text-red-500' : 'text-gray-600'}`}>{s.history[0].resolvedByName}</span>
+                                {showAsBreach && breachedByName ? (
+                                  <>Breached by <span className="font-semibold text-red-500">{breachedByName}</span></>
+                                ) : (
+                                  <>Resolved by <span className={`font-semibold ${s.history[0].wasBreached ? 'text-red-500' : 'text-gray-600'}`}>{s.history[0].resolvedByName}</span></>
+                                )}
                               </p>
                             ) : (
                               <div className="mt-2 pt-2 border-t border-gray-100">
