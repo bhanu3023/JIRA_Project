@@ -3079,11 +3079,43 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
         // on top of the frozen numbers -- due time/elapsed/etc. stay
         // frozen, only the breach verdict and waiver metadata go live.
         const waivers: Record<string, any> = (issue as any).sla_waivers || {};
+        // The frozen entry for the ticket's CURRENT department can carry a
+        // stale startedAt/dueTime from whatever moment it was first frozen
+        // -- that freeze is permanent by design (CF-32756: never recompute
+        // after the fact), but dept_sla_log[issueDept].started_at keeps
+        // getting correctly updated on every later re-entry into this same
+        // department, so the two can drift apart for a ticket that visits
+        // the same department more than once before finally resolving
+        // there. actualElapsedMs/isBreached are untouched here -- those
+        // stay exactly as frozen, this only re-anchors the DISPLAY
+        // startedAt/dueTime (and therefore the "Actively worked" window
+        // computed from them) to the real final stint. Confirmed for real:
+        // CF-34499's Migration entry read startedAt 2026-10-26 10:02 AM (a
+        // 1-minute visit immediately paused) instead of its real, final,
+        // resolution-ending stint at 2026-10-27 6:53 PM -- affecting 1,648
+        // of 2,299 resolved tickets checked (72%), all sharing the same
+        // "revisited the same department more than once" pattern.
+        const deptSlaLogNow: Record<string, any> = (issue as any).dept_sla_log || {};
+        const currentDeptLogKey = Object.keys(deptSlaLogNow).find((k) => k.toLowerCase() === issueDept);
+        const currentDeptLogEntry = currentDeptLogKey ? deptSlaLogNow[currentDeptLogKey] : null;
         return existingSnapshot.map((inst: any) => {
-          const waiver = waivers[inst.policyId] || null;
-          if (!waiver) return inst;
+          let next = inst;
+          if (
+            currentDeptLogEntry?.started_at &&
+            (inst.deptName || '').trim().toLowerCase() === issueDept &&
+            Math.abs(new Date(currentDeptLogEntry.started_at).getTime() - new Date(inst.startedAt).getTime()) > 60_000
+          ) {
+            const correctedStartMs = new Date(currentDeptLogEntry.started_at).getTime();
+            const finalStintEndMs = inst.resolvedAt ? new Date(inst.resolvedAt).getTime() : correctedStartMs;
+            const finalStintDurationMs = Math.max(0, finalStintEndMs - correctedStartMs);
+            const priorElapsedMs = (inst.actualElapsedMs || 0) - finalStintDurationMs;
+            const correctedDueMs = correctedStartMs + (inst.goalDurationMs - priorElapsedMs);
+            next = { ...inst, startedAt: new Date(correctedStartMs).toISOString(), dueTime: new Date(correctedDueMs).toISOString() };
+          }
+          const waiver = waivers[next.policyId] || null;
+          if (!waiver) return next;
           return {
-            ...inst,
+            ...next,
             isBreached: false,
             waived: true,
             waivedByName: waiver.waivedByName || null,
