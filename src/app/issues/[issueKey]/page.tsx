@@ -112,6 +112,30 @@ function fmtSlaOverBy(ms: number): string {
   return '<1m';
 }
 
+// The History tab's "SLA Breached by Xh Ym — Dept" badge (attached to the
+// status-change-to-Resolved entry, since that's the action that actually
+// landed late) used to show only a duration and department, no name --
+// reading as if the breach itself happened at resolve time, under whoever
+// resolved it. The real breach moment and real assignee are already
+// recorded, separately, in the "SLA breached — <Dept> (<Name>)" History
+// entry this department's own clock wrote the instant it ran out (see
+// runMonitorAgentScan in jira-pg-api.ts) -- same source of truth the SLA
+// panel's own breachedByName already uses. Pull that name in here too so
+// the badge reads "who it was actually breached by", not nothing.
+function getBreachedByName(activity: any[] | undefined, dept: string | null): string | null {
+  if (!Array.isArray(activity) || !dept) return null;
+  const deptKey = dept.trim().toLowerCase();
+  let earliest: { at: number; name: string | null } | null = null;
+  for (const a of activity) {
+    if (a.field !== 'sla' || typeof a.newValue !== 'string') continue;
+    const m = a.newValue.match(/^SLA breached — (.*?)(?: \((.*)\))?$/);
+    if (!m || m[1].trim().toLowerCase() !== deptKey) continue;
+    const at = new Date(a.createdAt).getTime();
+    if (!earliest || at < earliest.at) earliest = { at, name: m[2] || null };
+  }
+  return earliest?.name || null;
+}
+
 // Worklog "Time spent" entry, matching real Jira's own log-work field: a
 // single free-text box like "2h 30m" / "1d 4h" / "45m" rather than a
 // decimal-hours-only number spinner, which had no way to enter minutes at
@@ -3315,9 +3339,10 @@ export default function IssueDetailPage() {
                               ).map(({ s, h }: any, i: number) => {
                                 const overMs = new Date(h.resolvedAt).getTime() - new Date(s.dueTime).getTime();
                                 const dept = s.deptName || (issue as any).current_department || null;
+                                const breachedByName = getBreachedByName(issue.activity, dept);
                                 return (
                                   <span key={`${s.policyId}_${i}`} className="inline-flex items-center gap-1 text-[9.5px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-full px-1.5 py-0.5">
-                                    <AlertTriangle size={9} /> SLA Breached by {fmtSlaOverBy(overMs)}{dept ? ` — ${dept}` : ''}
+                                    <AlertTriangle size={9} /> SLA Breached by {fmtSlaOverBy(overMs)}{dept ? ` — ${dept}` : ''}{breachedByName ? ` (${breachedByName})` : ''}
                                   </span>
                                 );
                               })}
