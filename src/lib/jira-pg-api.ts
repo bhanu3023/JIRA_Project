@@ -8767,51 +8767,29 @@ async function _handleJiraPgApi(
       } else if (workedRange && assignees) {
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         workedAssigneeIds = await resolveUserIds(ids);
-      } else if (queueMembersOnlyParam && assignees) {
-        // Filters page: Assignee = the ONE person this queue's Assignee
-        // column shows for the ticket (by explicit decision: "one owner per
-        // ticket"), so exporting the whole queue and filtering its Assignee
-        // column in Excel gives exactly the same per-person counts as this
-        // filter, and they add up to the ticket total. deptOwnerSql mirrors
-        // the row-display logic further down (assigneeOverride) for an
-        // unfiltered Queue view -- keep the two in step:
-        //   - ticket has left this queue, or has no live assignee, and this
-        //     queue's dept_assignees snapshot names someone -> that person
-        //   - left this queue with no snapshot at all -> its reporter
-        //   - otherwise -> the live assignee
-        // Replaces "owner or past worker", which counted a shared ticket for
-        // everyone who touched it (more than the one name a row can show).
-        const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
-        const resolvedIds = await resolveUserIds(ids);
-        if (resolvedIds.length) {
-          const deptOwnerSql = queueDeptOwnerSql();
-          const ownerClause = `${deptOwnerSql} = ANY($${deptParamIdx}::text[])`;
-          deptExtraParams.push(resolvedIds);
-          deptParamIdx++;
-          // With "SLA Breached: Yes", a ticket this queue breached under the
-          // selected person is theirs even if someone else is the queue's
-          // owner of record now (CF-34162: breached under Ravi Srivastava,
-          // owner of record Akhila Aenkoju). The prefilter below then drops
-          // the ones that breached under someone else.
-          if (slaBreachedParamEarly === 'yes') {
-            deptExtraClauses.push(`(${ownerClause} OR EXISTS (SELECT 1 FROM issue_history bh WHERE bh."issueId" = i.id AND bh.field = 'sla' AND lower(bh."newValue") = ANY($${deptParamIdx}::text[])))`);
-            deptExtraParams.push(await deptBreachLabelsFor(resolvedIds, deptParam));
-            deptParamIdx++;
-          } else {
-            deptExtraClauses.push(ownerClause);
-          }
-        } else {
-          assigneeFilterForcedEmpty = true;
-        }
-      } else if (includeHistoryParam && assignees) {
-        // Explicitly reversing the earlier "Queue + Assignee means current
-        // ownership only" decision for the Updated filter specifically, per
-        // direct request -- confirmed understanding that this reintroduces
-        // the exact confusion that decision existed to prevent (a ticket
-        // someone worked once, then handed off, shows under their name again
-        // with no way to tell current from historical). Same broadening
-        // includeHistoryParam already used: a real (non-'passed') worked-on
-        // record for this dept counts, not just current assigneeId.
+      } else if ((queueMembersOnlyParam || includeHistoryParam) && assignees) {
+        // By explicit decision (reversing an earlier "one owner per ticket"
+        // rule this same branch used to enforce): a ticket worked by more
+        // than one person in this queue -- different stints, different
+        // assignees -- now shows under EVERY one of them, not just whoever
+        // the Assignee column currently displays for the queue. The earlier
+        // rule used queueDeptOwnerSql's single dept_assignees[dept] snapshot,
+        // which only remembers the LAST stint's assignee -- silently
+        // dropping anyone from an EARLIER stint in the same department.
+        // Confirmed for real: CF-33620 visited Infra twice (Anish Pitta
+        // first, Syed Mubeen later); dept_assignees.Infra only ever
+        // remembered Mubeen, so "Queue: Infra + Assignee: Anish" could never
+        // find it even though Anish genuinely worked it there. A ticket
+        // worked by 2 people now counts toward both their totals, so
+        // per-person sums across the queue no longer add up to the queue
+        // total -- a deliberate, confirmed tradeoff for showing genuine
+        // co-ownership accurately. The match itself (current dept OR a real
+        // user_worked_on_tickets row for this dept) is folded into
+        // deptDeptMatchSql below via historyAssigneeIdx/assigneeScopeSql,
+        // same mechanism the Updated-filter's includeHistoryParam case
+        // already used -- its own reason-inclusion rule already special-
+        // cases queueMembersOnlyParam (a 'passed' row -- routed this ticket
+        // on from here -- counts as this person's work here too).
         const ids = assignees.split(',').map((x) => x.trim()).filter(Boolean);
         const resolvedIds = await resolveUserIds(ids);
         if (resolvedIds.length) {
