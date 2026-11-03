@@ -492,6 +492,14 @@ export async function handleKbApi(
 
   // GET kb/articles?kind=kb|release&q=&scope=all|mine|drafts|approvals
   if (path === 'kb/articles' && method === 'GET') {
+    // Temporary timing instrumentation -- diagnosing a reported "KB Articles
+    // takes too long to load / lags" complaint. Backend query/processing
+    // time logged here so it can be compared against the actual perceived
+    // page-load time: if this logs fast (tens of ms) while the page still
+    // feels slow, the real cause is elsewhere (frontend bundle, network,
+    // browser render), not this endpoint's own work. Remove once the real
+    // cause is found and fixed.
+    const __kbT0 = Date.now();
     const scope = url.searchParams.get('scope') || 'all';
     const q = (url.searchParams.get('q') || '').trim();
     const myTeams = await getUserTeamKeys(userId);
@@ -533,7 +541,9 @@ export async function handleKbApi(
       params,
     );
     const teams = await loadTeams();
-    return json(rows.rows.map((r) => formatArticle(r, teams, canManage(r), false, canApprove(r))));
+    const result = rows.rows.map((r) => formatArticle(r, teams, canManage(r), false, canApprove(r)));
+    console.log(`[KB_TIMING] GET kb/articles scope=${scope} kind=${url.searchParams.get('kind')} rows=${result.length} took ${Date.now() - __kbT0}ms`);
+    return json(result);
   }
 
   // POST kb/articles -- create a draft
@@ -589,6 +599,10 @@ export async function handleKbApi(
   // POST kb/articles/:id/approve -- the approver publishes it to the
   // audience the author chose, and that audience is notified.
   if (action === 'approve') {
+    // Temporary timing instrumentation -- see the matching note on GET
+    // kb/articles above. Remove once the real cause of the reported lag is
+    // found and fixed.
+    const __kbApproveT0 = Date.now();
     if (!canApprove(article)) return json({ error: 'Only the author’s manager or an admin can approve this' }, 403);
     const approverName = displayNameOf(currentUser);
     const row = await pool.query(
@@ -608,7 +622,9 @@ export async function handleKbApi(
       event: 'approved', articleId: id, title: published.title,
       kind: published.kind === 'release' ? 'release' : 'article', actorName: approverName,
     }).catch((e) => console.error('[KB] Approval email failed:', e?.message || e));
-    return json(formatArticle({ ...article, ...published }, await loadTeams(), manager, true, false));
+    const result = formatArticle({ ...article, ...published }, await loadTeams(), manager, true, false);
+    console.log(`[KB_TIMING] POST kb/articles/${id}/approve took ${Date.now() - __kbApproveT0}ms`);
+    return json(result);
   }
 
   // POST kb/articles/:id/reject {note} -- back to the author's drafts with a reason.
