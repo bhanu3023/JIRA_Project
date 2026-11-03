@@ -16,7 +16,7 @@ async function main() {
   const { rows: issues } = await pool.query(`
     SELECT i.id, COALESCE(i.cf_key, i.key) AS key, i.summary, i."spaceId", sp.key AS "spaceKey",
            i."createdAt", i."updatedAt", i."reporterId", i.jira_reporter_name, i."statusId", s.name AS "statusName",
-           i."assigneeId", i.priority, i.type, i.jira_issue_key, i.jira_project_key
+           i."assigneeId", i.priority, i.type
     FROM issues i
     LEFT JOIN spaces sp ON sp.id = i."spaceId"
     LEFT JOIN statuses s ON s.id = i."statusId"
@@ -40,7 +40,7 @@ async function main() {
 
   console.log('\nFirst 15 sample rows:');
   for (const r of issues.slice(0, 15)) {
-    console.log(` - ${r.key} [${r.spaceKey}] "${r.summary}" status=${r.statusName} created=${r.createdAt.toISOString()} jira_issue_key=${r.jira_issue_key} jira_project_key=${r.jira_project_key}`);
+    console.log(` - ${r.key} [${r.spaceKey}] "${r.summary}" status=${r.statusName} created=${r.createdAt.toISOString()} reporterId=${r.reporterId} jira_reporter_name=${r.jira_reporter_name}`);
   }
 
   // Duplicate-summary check: are these re-imports of tickets that already exist under a different reporter?
