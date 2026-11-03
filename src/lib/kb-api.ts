@@ -367,7 +367,19 @@ export async function rerouteKbApprovals(authorId: string) {
 function announcePublished(published: any) {
   (async () => {
     try {
-      const users = await db.user.findMany({ where: { isActive: true }, select: { id: true, email: true } });
+      // Excludes "guest_..." accounts -- auto-created (see
+      // src/app/api/email/receive/route.ts) the first time an unrecognized
+      // address emails one of this app's monitored support inboxes, never a
+      // real employee who should get a company-wide KB/release broadcast.
+      // Confirmed for real: leo@fuzebot.io is BOTH the monitored CUSTM
+      // support inbox AND the global fallback FROM address for system
+      // emails (notification-service.ts's FROM_EMAIL) -- so every KB
+      // publish mailed its own "New KB Article" notification to its own
+      // guest account's address, which is also a live inbox being polled
+      // for new tickets, creating a brand new "leo"-reported ticket out of
+      // every single publish. 109 such tickets accumulated in CUSTM before
+      // this was caught.
+      const users = await db.user.findMany({ where: { isActive: true, NOT: { id: { startsWith: 'guest_' } } }, select: { id: true, email: true } });
       let recipients = users;
       if (published.visibility !== 'org') {
         const teams = await loadTeams();
