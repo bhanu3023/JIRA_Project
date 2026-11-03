@@ -9,8 +9,8 @@ import pg from 'pg';
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 async function main() {
-  const { rows: configs } = await pool.query(`SELECT * FROM email_configs`);
-  console.log('All email_configs rows:', JSON.stringify(configs, null, 2));
+  const { rows: configs } = await pool.query(`SELECT space_key, address, auto_reply FROM email_configs WHERE address ILIKE '%fuzebot%'`);
+  console.log('email_configs rows matching fuzebot:', JSON.stringify(configs, null, 2));
 
   // Is leo@fuzebot.io's own guest account counted as an "active user" that
   // would receive a broadcast notification (announcePublished's recipient
