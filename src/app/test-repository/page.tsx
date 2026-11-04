@@ -166,6 +166,7 @@ function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
                       <button onClick={() => removeStep(i)} className="text-gray-300 hover:text-red-500"><Trash2 size={12} /></button>
                     )}
                   </div>
+                  <label className="mb-0.5 block text-[10.5px] font-semibold text-gray-400">Action</label>
                   <textarea
                     value={s.action || ''}
                     onChange={(e) => updateStep(i, { action: e.target.value })}
@@ -173,6 +174,23 @@ function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
                     rows={2}
                     className="mb-1.5 w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
                   />
+                  <label className="mb-0.5 block text-[10.5px] font-semibold text-gray-400">Data</label>
+                  <textarea
+                    value={s.data || ''}
+                    onChange={(e) => updateStep(i, { data: e.target.value })}
+                    placeholder="Data"
+                    rows={2}
+                    className="mb-1.5 w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  <label className="mb-0.5 block text-[10.5px] font-semibold text-gray-400">Test steps</label>
+                  <textarea
+                    value={s.testSteps || ''}
+                    onChange={(e) => updateStep(i, { testSteps: e.target.value })}
+                    placeholder="Test steps"
+                    rows={3}
+                    className="mb-1.5 w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  <label className="mb-0.5 block text-[10.5px] font-semibold text-gray-400">Expected result</label>
                   <textarea
                     value={s.expectedResult || s.result || ''}
                     onChange={(e) => updateStep(i, { expectedResult: e.target.value })}
