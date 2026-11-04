@@ -410,7 +410,12 @@ export default function TestRepositoryPage() {
 
   const reloadTests = () => {
     setLoadingTests(true);
-    api.listTestCases(spaceKey, { folderPath: debounced ? undefined : selectedPath, q: debounced || undefined, page, limit })
+    // Search respects whichever folder is selected (and its subfolders, same
+    // as the plain folder view) -- searching no longer ignores the selected
+    // folder and hit the whole repository regardless. Root ('/') already
+    // means "no folder filter" server-side, so searching from the top level
+    // still searches everything, which is the one case that should.
+    api.listTestCases(spaceKey, { folderPath: selectedPath, q: debounced || undefined, page, limit })
       .then((r) => { setTests(r.tests); setTotal(r.total); })
       .catch(() => { setTests([]); setTotal(0); })
       .finally(() => setLoadingTests(false));
