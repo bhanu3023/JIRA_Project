@@ -27,7 +27,13 @@ await pool.query(`
 // next ticket repeat the leak. Skipping this space here breaks that loop at
 // the source: a stray value can still land on an issue, but it will never
 // get promoted into a selectable queue again.
-const NO_DEPARTMENT_SPACE_KEYS = new Set(['IA']);
+// SAT_Board (SB) has the same leak (CF-34661, current_department='Infra'
+// with no real department concept otherwise) -- see the matching exclusion
+// now added in CreateIssueModal.tsx, which is the actual write-path fix;
+// this exclusion just stops this script from re-creating the queue that
+// write-path leak already produced, on every deploy, even after the row was
+// deleted directly in the database.
+const NO_DEPARTMENT_SPACE_KEYS = new Set(['IA', 'SB']);
 
 // Get all spaces
 const spaces = await pool.query(`SELECT id, key, name FROM spaces`);

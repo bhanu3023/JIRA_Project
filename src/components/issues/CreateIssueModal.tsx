@@ -86,7 +86,16 @@ const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB', 'ITS']);
 // custom_queues row that exists for this space (e.g. auto-recreated by
 // seed-queues.mjs off a stray current_department value) must never surface
 // as a selectable Queue here, or the same leak reproduces indefinitely.
-const NO_DEPARTMENT_SPACE_KEYS = new Set(['IA']);
+// SAT_Board (key "SB") has the exact same problem -- one stray ticket
+// (CF-34661) somehow got current_department='Infra', which left
+// custom_queues.SB holding exactly one queue ("Infra"). The "auto-select
+// the only queue option" convenience below (queueOptions.length === 1) then
+// silently forced Queue=Infra onto every NEW SAT_Board ticket too, so the
+// leak was actively spreading, not just a single leftover row -- confirmed
+// for real: that custom_queues row kept getting recreated by seed-queues.mjs
+// on every single deploy even after being deleted directly in the database,
+// because the underlying stray ticket data writing it back never stopped.
+const NO_DEPARTMENT_SPACE_KEYS = new Set(['IA', 'SB']);
 
 // Only shown/required for the Infra department -- distinguishes what kind of
 // Infra work a ticket actually needs (DB access vs. a server rebuild vs. a
