@@ -1736,6 +1736,112 @@ if (!globalThis.__notificationHealthCheckInterval) {
   }, NOTIFICATION_HEALTH_CHECK_WINDOW_MS);
 }
 
+// Who gets the dedicated Migration 15-minute SLA warning email below, by
+// explicit request -- a separate, additional notification from the general
+// 30-minute assignee/reporter/admin warning above (runMonitorAgentScan's own
+// 1./SLA-breach-warning block), not a replacement for it. Bharath Tummaganti
+// and Jyoshitha Dhannapaneni always get it for every Migration ticket;
+// ajay.singh/Abhishek Sakala are added on top depending on the ticket's own
+// Project Pool (ENT/SMB, see CreateIssueModal's Project Pool field).
+function migration15MinWarningRecipients(projectPool: string | null | undefined): string[] {
+  const recipients = ['bharath.tummaganti@cloudfuze.com', 'jyoshitha.dhannapaneni@cloudfuze.com'];
+  const pool = (projectPool || '').trim().toUpperCase();
+  if (pool === 'SMB') recipients.push('ajay.singh@cloudfuze.com');
+  if (pool === 'ENT') recipients.push('abhishek.sakala@cloudfuze.com');
+  return recipients;
+}
+
+// Dedicated, additional SLA warning for Migration tickets specifically, 15
+// minutes before breach instead of the general 30-minute one above -- by
+// explicit request, kept as its own fully independent scan (separate
+// candidate query, separate dedup marker via issue_history) rather than
+// folded into runMonitorAgentScan's own SLA-breach-warning block, so it can
+// never interfere with (or be accidentally changed by) that existing,
+// unrelated feature. Reuses the exact same due-time math
+// (computeSLAInstancesPure) and email sender (notifySLABreach) those already
+// use, just with Migration-only scope, a 15-minute window, and this
+// dedicated recipient list instead of assignee/reporter/admins.
+async function runMigration15MinWarningScan(): Promise<{ notified: number }> {
+  const results = { notified: 0 };
+  const warnMs = 15 * 60 * 1000;
+  try {
+    const activeIssues = await pool.query(
+      `SELECT i.*, s.category AS status_category, s.name AS status_name
+       FROM issues i
+       LEFT JOIN statuses s ON i."statusId" = s.id
+       WHERE i.dept_sla_started_at IS NOT NULL
+         AND LOWER(i.current_department) = 'migration'
+         AND (s.category IS NULL OR s.category != 'done')
+       LIMIT 2000`
+    );
+    const rows = activeIssues.rows;
+    if (!rows.length) return results;
+    const spaceIds = Array.from(new Set(rows.map((r: any) => r.spaceId).filter(Boolean)));
+    const policiesBySpace: Record<string, any[]> = {};
+    if (spaceIds.length) {
+      const polRows = await pool.query(
+        `SELECT * FROM sla_definitions WHERE "spaceId" = ANY($1::text[]) AND status = 'active'`,
+        [spaceIds]
+      );
+      for (const p of polRows.rows) (policiesBySpace[p.spaceId] ??= []).push(p);
+    }
+
+    const candidates: Array<{ row: any; policyName: string; minsLeft: number }> = [];
+    for (const row of rows) {
+      const policies = policiesBySpace[row.spaceId] || [];
+      if (!policies.length) continue;
+      const issueForCompute = { ...row, status: { category: row.status_category, name: row.status_name } };
+      const instances = await computeSLAInstancesPure(issueForCompute, policies, false);
+      for (const inst of instances) {
+        if (inst.isPaused || inst.isCompleted) continue;
+        if ((inst.deptName || '').trim().toLowerCase() !== 'migration') continue;
+        const timeToBreachMs = new Date(inst.dueTime).getTime() - Date.now();
+        if (timeToBreachMs > 0 && timeToBreachMs <= warnMs) {
+          candidates.push({ row, policyName: inst.policyName, minsLeft: Math.ceil(timeToBreachMs / 60_000) });
+        }
+      }
+    }
+    if (!candidates.length) return results;
+
+    const spaceRowCache: Record<string, { key: string; name: string } | null> = {};
+    for (const { row, policyName, minsLeft } of candidates) {
+      const key = row.cf_key || row.key;
+      // Dedup via issue_history (same mechanism/table the general SLA-breach
+      // log already uses) instead of the `notification` table -- this is an
+      // email-only feature to a fixed external list, not tied to any
+      // particular app user id, and this also leaves a visible audit trail
+      // on the ticket's own History tab.
+      const already = await (db as any).issueHistory.findFirst({
+        where: { issueId: row.id, field: 'sla', newValue: { startsWith: 'Migration 15-min SLA warning sent' } },
+        select: { id: true },
+      }).catch(() => null);
+      if (already) continue;
+
+      const recipients = migration15MinWarningRecipients(row.projectPool);
+      try {
+        if (!(row.spaceId in spaceRowCache)) {
+          spaceRowCache[row.spaceId] = await db.space.findUnique({ where: { id: row.spaceId }, select: { key: true, name: true } });
+        }
+        const spaceRow = spaceRowCache[row.spaceId];
+        if (spaceRow) {
+          await notifySLABreach({
+            issueKey: key,
+            issueSummary: row.summary || key,
+            spaceKey: spaceRow.key,
+            spaceName: spaceRow.name,
+            slaName: policyName || 'SLA',
+            minsLeft,
+            assigneeEmails: recipients,
+          }).catch(() => {});
+        }
+      } catch { /* non-critical */ }
+      await logSlaHistory(null, row.id, `Migration 15-min SLA warning sent (${recipients.join(', ')})`);
+      results.notified++;
+    }
+  } catch (e: any) { console.error('[MonitorAgent:Migration15Min]', e?.message); }
+  return results;
+}
+
 // Server-side singleton scheduler. This used to be triggered from every open browser tab
 // (Header.tsx polled it on mount, then every 5 minutes) — with N staff members having the
 // app open at once, N copies of this scan ran concurrently every 5 minutes, each looping
@@ -1752,8 +1858,10 @@ if (!globalThis.__notificationHealthCheckInterval) {
 // singleton fix exists to avoid.
 if (!globalThis.__monitorAgentInterval) {
   runMonitorAgentScan().catch((e) => console.error('[MonitorAgent] initial run failed:', e?.message));
+  runMigration15MinWarningScan().catch((e) => console.error('[MonitorAgent:Migration15Min] initial run failed:', e?.message));
   globalThis.__monitorAgentInterval = setInterval(() => {
     runMonitorAgentScan().catch((e) => console.error('[MonitorAgent] scheduled run failed:', e?.message));
+    runMigration15MinWarningScan().catch((e) => console.error('[MonitorAgent:Migration15Min] scheduled run failed:', e?.message));
   }, 30 * 1000);
 }
 
