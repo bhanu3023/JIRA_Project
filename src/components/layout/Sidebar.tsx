@@ -666,6 +666,7 @@ export default function Sidebar() {
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
           { href: '/kb', icon: <BookOpen size={16} />, match: pathname.startsWith('/kb') },
           ...(user?.role === 'admin' ? [{ href: '/worklog', icon: <Clock size={16} />, match: pathname.startsWith('/worklog') }] : []),
+          { href: '/test-repository', icon: <ClipboardList size={16} />, match: pathname.startsWith('/test-repository') },
           ...(canSeeMbr ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
         ].map((item, i) => (
           <Link
@@ -725,6 +726,7 @@ export default function Sidebar() {
             <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
             <GlobalNavItem href="/kb" icon={<BookOpen size={15} />} label="KB Articles" active={pathname.startsWith('/kb')} />
             <GlobalNavItem href="/worklog" icon={<Clock size={15} />} label="Worklog" active={pathname.startsWith('/worklog')} />
+            <GlobalNavItem href="/test-repository" icon={<ClipboardList size={15} />} label="Test Repository" active={pathname.startsWith('/test-repository')} />
             {canSeeMbr && (
               <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
             )}

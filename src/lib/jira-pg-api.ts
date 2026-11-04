@@ -15,6 +15,7 @@ import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 import { handleKbApi, kbSchemaReady, rerouteKbApprovals } from '@/lib/kb-api';
+import { handleTestRepoApi } from '@/lib/test-repo-api';
 import { handleSavedFiltersApi } from '@/lib/saved-filters-api';
 import sanitizeHtml from 'sanitize-html';
 
@@ -6485,6 +6486,12 @@ async function _handleJiraPgApi(
   if (userId && (path === 'kb' || path.startsWith('kb/'))) {
     const kbRes = await handleKbApi(req, path, method, url, { userId, currentUser, isAdmin });
     if (kbRes) return kbRes;
+  }
+
+  // Test Repository (test-repository/...) lives in its own module -- see test-repo-api.ts.
+  if (userId && (path === 'test-repository' || path.startsWith('test-repository/'))) {
+    const testRepoRes = await handleTestRepoApi(req, path, method, url, { userId, currentUser });
+    if (testRepoRes) return testRepoRes;
   }
 
   // Saved filters (filters/...) -- stored in Postgres, see saved-filters-api.ts.

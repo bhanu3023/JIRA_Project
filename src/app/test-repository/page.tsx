@@ -1,0 +1,450 @@
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import { ChevronRight, ChevronDown, Folder, FolderPlus, Plus, Search, X, Trash2, Pencil, FileText } from 'lucide-react';
+import { api, TestRepoFolder, TestCase, TestCaseSummary, TestStep } from '@/lib/api';
+
+type TreeNode = TestRepoFolder & { children: TreeNode[] };
+
+function buildTree(folders: TestRepoFolder[]): TreeNode {
+  const byPath = new Map<string, TreeNode>();
+  for (const f of folders) byPath.set(f.path, { ...f, children: [] });
+  const root = byPath.get('/')!;
+  for (const f of folders) {
+    if (f.path === '/') continue;
+    const node = byPath.get(f.path)!;
+    const parent = byPath.get(f.parentPath) || root;
+    parent.children.push(node);
+  }
+  const sortRec = (n: TreeNode) => { n.children.sort((a, b) => a.name.localeCompare(b.name)); n.children.forEach(sortRec); };
+  sortRec(root);
+  return root;
+}
+
+function FolderRow({ node, depth, selectedPath, onSelect, onDelete }: {
+  node: TreeNode; depth: number; selectedPath: string; onSelect: (p: string) => void; onDelete: (n: TreeNode) => void;
+}) {
+  const [open, setOpen] = useState(depth < 1);
+  const hasChildren = node.children.length > 0;
+  const active = node.path === selectedPath;
+  return (
+    <div>
+      <div
+        className={`group flex items-center gap-1 rounded-md px-1.5 py-1 text-[13px] cursor-pointer ${active ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700 hover:bg-gray-50'}`}
+        style={{ paddingLeft: `${depth * 14 + 4}px` }}
+        onClick={() => onSelect(node.path)}
+      >
+        <button
+          onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+          className={`flex h-4 w-4 flex-shrink-0 items-center justify-center text-gray-400 ${hasChildren ? '' : 'invisible'}`}
+        >
+          {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
+        <Folder size={14} className="flex-shrink-0 text-gray-400" />
+        <span className="flex-1 truncate">{node.name}</span>
+        <span className="text-[11px] text-gray-400">({node.testsCount})</span>
+        {node.path !== '/' && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(node); }}
+            className="hidden group-hover:flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-gray-400 hover:bg-red-50 hover:text-red-500"
+            title="Delete folder"
+          >
+            <Trash2 size={12} />
+          </button>
+        )}
+      </div>
+      {open && hasChildren && (
+        <div>
+          {node.children.map((c) => (
+            <FolderRow key={c.path} node={c} depth={depth + 1} selectedPath={selectedPath} onSelect={onSelect} onDelete={onDelete} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function statusBadgeColor(status: string) {
+  const s = status.toLowerCase();
+  if (s.includes('done') || s.includes('pass')) return 'bg-emerald-100 text-emerald-700';
+  if (s.includes('progress') || s.includes('fail')) return 'bg-amber-100 text-amber-700';
+  return 'bg-gray-100 text-gray-600';
+}
+
+function emptyStep(n: number): TestStep { return { stepNumber: n, action: '', expectedResult: '' }; }
+
+function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
+  spaceKey: string; folderPath: string; test: TestCase | null; onClose: () => void; onSaved: () => void;
+}) {
+  const [summary, setSummary] = useState(test?.summary || '');
+  const [description, setDescription] = useState(test?.description || '');
+  const [testType, setTestType] = useState<'Manual' | 'Automated'>(test?.testType || 'Manual');
+  const [status, setStatus] = useState(test?.status || 'To Do');
+  const [steps, setSteps] = useState<TestStep[]>(test?.steps?.length ? test.steps : [emptyStep(1)]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const updateStep = (i: number, patch: Partial<TestStep>) => {
+    setSteps((s) => s.map((st, idx) => (idx === i ? { ...st, ...patch } : st)));
+  };
+  const addStep = () => setSteps((s) => [...s, emptyStep(s.length + 1)]);
+  const removeStep = (i: number) => setSteps((s) => s.filter((_, idx) => idx !== i).map((st, idx) => ({ ...st, stepNumber: idx + 1 })));
+
+  const save = async () => {
+    if (!summary.trim()) { setError('Summary is required'); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      if (test) {
+        await api.updateTestCase(test.id, { summary, description, testType, status, steps });
+      } else {
+        await api.createTestCase({ spaceKey, summary, folderPath, testType, status, description, steps });
+      }
+      onSaved();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
+          <h2 className="text-[15px] font-semibold text-gray-800">{test ? 'Edit Test' : 'New Test'}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12.5px] text-red-700">{error}</div>}
+          <div>
+            <label className="mb-1 block text-[12px] font-semibold text-gray-500">Summary *</label>
+            <input
+              value={summary}
+              onChange={(e) => setSummary(e.target.value)}
+              placeholder="What is this test verifying?"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-[12px] font-semibold text-gray-500">Type</label>
+              <select value={testType} onChange={(e) => setTestType(e.target.value as any)} className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px]">
+                <option value="Manual">Manual</option>
+                <option value="Automated">Automated</option>
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-[12px] font-semibold text-gray-500">Status</label>
+              <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px]">
+                <option>To Do</option>
+                <option>Pass</option>
+                <option>Fail</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-semibold text-gray-500">Description</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={2}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <label className="text-[12px] font-semibold text-gray-500">Steps</label>
+              <button onClick={addStep} className="text-[12px] font-medium text-blue-600 hover:text-blue-700">+ Add step</button>
+            </div>
+            <div className="space-y-2">
+              {steps.map((s, i) => (
+                <div key={i} className="rounded-lg border border-gray-200 p-2.5">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-gray-400">STEP {i + 1}</span>
+                    {steps.length > 1 && (
+                      <button onClick={() => removeStep(i)} className="text-gray-300 hover:text-red-500"><Trash2 size={12} /></button>
+                    )}
+                  </div>
+                  <textarea
+                    value={s.action || ''}
+                    onChange={(e) => updateStep(i, { action: e.target.value })}
+                    placeholder="Action"
+                    rows={2}
+                    className="mb-1.5 w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  <textarea
+                    value={s.expectedResult || s.result || ''}
+                    onChange={(e) => updateStep(i, { expectedResult: e.target.value })}
+                    placeholder="Expected result"
+                    rows={2}
+                    className="w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-5 py-3">
+          <button onClick={onClose} className="rounded-lg px-3.5 py-1.5 text-[13px] font-medium text-gray-600 hover:bg-gray-100">Cancel</button>
+          <button
+            onClick={save}
+            disabled={saving}
+            className="rounded-lg bg-blue-600 px-3.5 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; onClose: () => void; onEdit: (t: TestCase) => void; onDeleted: () => void }) {
+  const [test, setTest] = useState<TestCase | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let stale = false;
+    api.getTestCase(testId).then((t) => { if (!stale) { setTest(t); setLoading(false); } }).catch(() => setLoading(false));
+    return () => { stale = true; };
+  }, [testId]);
+
+  const del = async () => {
+    if (!confirm('Delete this test case? This cannot be undone.')) return;
+    await api.deleteTestCase(testId);
+    onDeleted();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
+          <h2 className="text-[15px] font-semibold text-gray-800">Test Details</h2>
+          <div className="flex items-center gap-1">
+            {test && (
+              <>
+                <button onClick={() => onEdit(test)} className="flex h-7 w-7 items-center justify-center rounded text-gray-500 hover:bg-gray-100"><Pencil size={14} /></button>
+                <button onClick={del} className="flex h-7 w-7 items-center justify-center rounded text-gray-500 hover:bg-red-50 hover:text-red-500"><Trash2 size={14} /></button>
+              </>
+            )}
+            <button onClick={onClose} className="ml-1 text-gray-400 hover:text-gray-600"><X size={18} /></button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {loading ? (
+            <div className="py-10 text-center text-[13px] text-gray-400">Loading…</div>
+          ) : !test ? (
+            <div className="py-10 text-center text-[13px] text-gray-400">Not found</div>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">{test.testType}</span>
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${statusBadgeColor(test.status)}`}>{test.status}</span>
+                {test.jiraKey && <span className="text-[11px] text-gray-400">{test.jiraKey}</span>}
+              </div>
+              <h3 className="text-[15px] font-semibold text-gray-800">{test.summary}</h3>
+              {test.description && <p className="text-[13px] text-gray-600 whitespace-pre-wrap">{test.description}</p>}
+              {test.steps?.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[12px] font-semibold text-gray-500">Steps</p>
+                  {test.steps.map((s, i) => (
+                    <div key={i} className="rounded-lg border border-gray-200 p-2.5">
+                      <p className="mb-1 text-[11px] font-bold text-gray-400">STEP {s.stepNumber ?? i + 1}</p>
+                      {s.action && <p className="text-[12.5px] text-gray-700 whitespace-pre-wrap"><span className="font-medium">Action: </span>{s.action}</p>}
+                      {(s.expectedResult || s.result) && <p className="mt-1 text-[12.5px] text-gray-700 whitespace-pre-wrap"><span className="font-medium">Expected: </span>{s.expectedResult || s.result}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function TestRepositoryPage() {
+  const [spaces, setSpaces] = useState<{ id: string; key: string; name: string }[]>([]);
+  const [spaceKey, setSpaceKey] = useState('TESTIN');
+  const [folders, setFolders] = useState<TestRepoFolder[]>([]);
+  const [selectedPath, setSelectedPath] = useState('/');
+  const [tests, setTests] = useState<TestCaseSummary[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [query, setQuery] = useState('');
+  const [debounced, setDebounced] = useState('');
+  const [loadingTests, setLoadingTests] = useState(true);
+  const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingTest, setEditingTest] = useState<TestCase | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const limit = 50;
+
+  useEffect(() => { api.getSpaces().then(setSpaces).catch(() => setSpaces([])); }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(query.trim()), 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  const reloadFolders = () => { api.getTestRepoFolders(spaceKey).then(setFolders).catch(() => setFolders([])); };
+  useEffect(() => { reloadFolders(); }, [spaceKey]);
+
+  const reloadTests = () => {
+    setLoadingTests(true);
+    api.listTestCases(spaceKey, { folderPath: debounced ? undefined : selectedPath, q: debounced || undefined, page, limit })
+      .then((r) => { setTests(r.tests); setTotal(r.total); })
+      .catch(() => { setTests([]); setTotal(0); })
+      .finally(() => setLoadingTests(false));
+  };
+  useEffect(() => { reloadTests(); }, [spaceKey, selectedPath, debounced, page]);
+  useEffect(() => { setPage(1); }, [selectedPath, debounced]);
+
+  const tree = useMemo(() => buildTree(folders.length ? folders : [{ id: 'root', name: 'Test Repository', path: '/', parentPath: '', testsCount: 0 }]), [folders]);
+  const currentFolder = folders.find((f) => f.path === selectedPath);
+
+  const createFolder = async () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    await api.createTestRepoFolder({ spaceKey, name, parentPath: selectedPath });
+    setNewFolderName('');
+    setNewFolderOpen(false);
+    reloadFolders();
+  };
+
+  const deleteFolder = async (node: TreeNode) => {
+    if (!confirm(`Delete folder "${node.name}"? It must be empty.`)) return;
+    try {
+      await api.deleteTestRepoFolder(node.id);
+      if (selectedPath === node.path) setSelectedPath(node.parentPath || '/');
+      reloadFolders();
+    } catch (e: any) {
+      alert(e?.message || 'Failed to delete folder');
+    }
+  };
+
+  return (
+    <div className="flex h-full flex-col bg-white">
+      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-8 py-4">
+        <div>
+          <h1 className="text-[20px] font-semibold text-gray-800">Test Repository</h1>
+          <p className="text-[13px] text-gray-500">Manual and automated test cases, organized by folder.</p>
+        </div>
+        <select
+          value={spaceKey}
+          onChange={(e) => { setSpaceKey(e.target.value); setSelectedPath('/'); }}
+          className="rounded-lg border border-gray-300 px-3 py-1.5 text-[13px]"
+        >
+          {spaces.length ? spaces.map((s) => <option key={s.key} value={s.key}>{s.name}</option>) : <option value={spaceKey}>{spaceKey}</option>}
+        </select>
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+        {/* Folder tree */}
+        <div className="flex w-72 flex-shrink-0 flex-col border-r border-gray-200 bg-gray-50/50">
+          <div className="flex items-center justify-between px-3 py-2.5">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-gray-400">Folders</span>
+            <button onClick={() => setNewFolderOpen(true)} className="flex items-center gap-1 text-[11.5px] font-medium text-blue-600 hover:text-blue-700">
+              <FolderPlus size={13} /> New
+            </button>
+          </div>
+          {newFolderOpen && (
+            <div className="mx-2 mb-2 flex items-center gap-1 rounded-lg border border-blue-200 bg-white p-1.5">
+              <input
+                autoFocus
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') createFolder(); if (e.key === 'Escape') setNewFolderOpen(false); }}
+                placeholder="Folder name"
+                className="flex-1 border-none px-1 text-[12.5px] focus:outline-none"
+              />
+              <button onClick={createFolder} className="text-[11.5px] font-medium text-blue-600">Add</button>
+            </div>
+          )}
+          <div className="flex-1 overflow-y-auto px-2 pb-3">
+            <FolderRow node={tree} depth={0} selectedPath={selectedPath} onSelect={setSelectedPath} onDelete={deleteFolder} />
+          </div>
+        </div>
+
+        {/* Test list */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex flex-shrink-0 items-center gap-3 border-b border-gray-200 px-6 py-3">
+            <div className="relative flex-1 max-w-sm">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={`Search tests in ${currentFolder?.name || 'this folder'}...`}
+                className="w-full rounded-lg border border-gray-300 py-1.5 pl-8 pr-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <span className="text-[12.5px] text-gray-400">Total: {total}</span>
+            <button
+              onClick={() => { setEditingTest(null); setEditorOpen(true); }}
+              className="ml-auto flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700"
+            >
+              <Plus size={15} /> New Test
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            {loadingTests ? (
+              <div className="flex h-40 items-center justify-center"><div className="h-7 w-7 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" /></div>
+            ) : tests.length === 0 ? (
+              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 py-16 text-center">
+                <FileText size={28} className="mb-2 text-gray-300" />
+                <p className="text-[14px] font-medium text-gray-700">No tests here yet</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {tests.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => setDetailId(t.id)}
+                    className="w-full rounded-xl border border-gray-200 px-4 py-3 text-left transition-shadow hover:border-blue-300 hover:shadow-sm"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10.5px] font-semibold text-indigo-700">{t.testType}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${statusBadgeColor(t.status)}`}>{t.status}</span>
+                      {t.jiraKey && <span className="text-[11px] text-gray-400">{t.jiraKey}</span>}
+                    </div>
+                    <p className="mt-1.5 text-[13.5px] font-medium text-gray-800">{t.summary}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {total > limit && (
+            <div className="flex flex-shrink-0 items-center justify-center gap-3 border-t border-gray-200 px-6 py-2.5">
+              <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)} className="text-[12.5px] font-medium text-blue-600 disabled:text-gray-300">Previous</button>
+              <span className="text-[12px] text-gray-400">Page {page} of {Math.ceil(total / limit)}</span>
+              <button disabled={page * limit >= total} onClick={() => setPage((p) => p + 1)} className="text-[12.5px] font-medium text-blue-600 disabled:text-gray-300">Next</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {editorOpen && (
+        <TestEditor
+          spaceKey={spaceKey}
+          folderPath={selectedPath}
+          test={editingTest}
+          onClose={() => setEditorOpen(false)}
+          onSaved={() => { setEditorOpen(false); reloadTests(); reloadFolders(); }}
+        />
+      )}
+      {detailId && (
+        <TestDetail
+          testId={detailId}
+          onClose={() => setDetailId(null)}
+          onEdit={(t) => { setDetailId(null); setEditingTest(t); setEditorOpen(true); }}
+          onDeleted={() => { setDetailId(null); reloadTests(); reloadFolders(); }}
+        />
+      )}
+    </div>
+  );
+}

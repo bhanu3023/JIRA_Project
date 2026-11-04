@@ -492,6 +492,35 @@ class ApiClient {
   deleteKbArticle(id: string) {
     return this.request<{ ok: boolean }>(`/kb/articles/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
+  getTestRepoFolders(spaceKey: string) {
+    return this.request<TestRepoFolder[]>(`/test-repository/folders?spaceKey=${encodeURIComponent(spaceKey)}`);
+  }
+  createTestRepoFolder(data: { spaceKey: string; name: string; parentPath: string }) {
+    return this.request<TestRepoFolder>('/test-repository/folders', { method: 'POST', body: JSON.stringify(data) });
+  }
+  deleteTestRepoFolder(id: string) {
+    return this.request<{ ok: boolean }>(`/test-repository/folders/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+  listTestCases(spaceKey: string, opts: { folderPath?: string; q?: string; page?: number; limit?: number } = {}) {
+    const params = new URLSearchParams({ spaceKey });
+    if (opts.folderPath) params.set('folderPath', opts.folderPath);
+    if (opts.q) params.set('q', opts.q);
+    if (opts.page) params.set('page', String(opts.page));
+    if (opts.limit) params.set('limit', String(opts.limit));
+    return this.request<{ total: number; page: number; limit: number; tests: TestCaseSummary[] }>(`/test-repository/tests?${params}`);
+  }
+  getTestCase(id: string) {
+    return this.request<TestCase>(`/test-repository/tests/${encodeURIComponent(id)}`);
+  }
+  createTestCase(data: { spaceKey: string; summary: string; folderPath: string; testType: 'Manual' | 'Automated'; status?: string; description?: string; steps?: TestStep[] }) {
+    return this.request<TestCase>('/test-repository/tests', { method: 'POST', body: JSON.stringify(data) });
+  }
+  updateTestCase(id: string, data: Partial<{ summary: string; description: string; testType: 'Manual' | 'Automated'; status: string; folderPath: string; steps: TestStep[] }>) {
+    return this.request<TestCase>(`/test-repository/tests/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) });
+  }
+  deleteTestCase(id: string) {
+    return this.request<{ ok: boolean }>(`/test-repository/tests/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
   // XHR rather than fetch so the editor can show upload progress.
   uploadKbFile(id: string, file: File, onProgress?: (pct: number) => void): Promise<KbFile> {
     return new Promise((resolve, reject) => {
@@ -617,6 +646,22 @@ class ApiClient {
   starFilter(id: string) { return this.request<any>(`/filters/${id}/star`, { method: 'POST' }); }
   unstarFilter(id: string) { return this.request<any>(`/filters/${id}/star`, { method: 'DELETE' }); }
 }
+
+export type TestRepoFolder = { id: string; name: string; path: string; parentPath: string; testsCount: number; totalTestsCount?: number };
+export type TestStep = { stepNumber: number; action?: string; data?: string; testSteps?: string; result?: string; expectedResult?: string };
+export type TestCaseSummary = {
+  id: string;
+  jiraKey: string | null;
+  issueId: string | null;
+  summary: string;
+  testType: 'Manual' | 'Automated';
+  status: string;
+  folderPath: string;
+  source: 'imported' | 'local';
+  createdAt: string;
+  updatedAt: string;
+};
+export type TestCase = TestCaseSummary & { description: string | null; steps: TestStep[] };
 
 export type KbTeam = { key: string; name: string; memberCount: number };
 export type KbAccess = { visibility: 'org' | 'teams'; teams: string[] };
