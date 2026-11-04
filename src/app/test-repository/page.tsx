@@ -74,11 +74,11 @@ function statusBadgeColor(status: string) {
 function emptyStep(n: number): TestStep { return { stepNumber: n, action: '', expectedResult: '' }; }
 
 // Shared between the Edit modal's per-step card and the view-only Steps
-// table -- same upload/delete controls either place. Attachment rows wrap
-// their filename instead of truncating it to a fixed pixel width (the old
-// 96px column cut names off mid-word and overlapped the delete button once
-// a file was actually attached), so the block's own height simply grows
-// with however many files are on a step instead of squeezing them in.
+// table -- same upload/delete/paste controls either place. Always shows a
+// count (including "0 files") instead of a step with attachments looking
+// identical to one with none, and an image attachment renders as an actual
+// thumbnail instead of just a filename link -- a non-image (PDF/Excel/etc.)
+// still gets a filename link with a generic file icon in its place.
 function StepAttachments({
   attachments, stepNumber, uploading, canUpload, disabledReason, onUpload, onDelete,
 }: {
@@ -90,20 +90,61 @@ function StepAttachments({
   onUpload: (stepNumber: number, files: FileList | null) => void;
   onDelete: (attachmentId: string) => void;
 }) {
+  // Lets someone who just copied a screenshot (e.g. Win+Shift+S / a browser
+  // screenshot tool) click this box and Ctrl+V it straight in, instead of
+  // having to save it to disk first just to use "+ Add file".
+  const handlePasteImage = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items || !items.length) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const file = items[i].kind === 'file' ? items[i].getAsFile() : null;
+      if (file) files.push(file);
+    }
+    if (!files.length) return;
+    e.preventDefault();
+    const dt = new DataTransfer();
+    files.forEach((f) => dt.items.add(f));
+    onUpload(stepNumber, dt.files);
+  };
+
   return (
     <div className="flex flex-col gap-1.5">
-      {attachments.map((a) => (
-        <div key={a.id} className="flex items-start gap-1.5 rounded-md border border-gray-200 bg-gray-50 px-2 py-1">
-          <a href={a.url} target="_blank" rel="noreferrer" title={a.filename} className="min-w-0 flex-1 break-all text-[11.5px] leading-snug text-blue-600 hover:underline">
-            {a.filename}
-          </a>
-          <button onClick={() => onDelete(a.id)} className="mt-0.5 flex-shrink-0 text-gray-400 hover:text-red-500" title="Remove attachment">
-            <X size={11} />
-          </button>
+      <span className="text-[10.5px] font-semibold text-gray-400">
+        {attachments.length} {attachments.length === 1 ? 'file' : 'files'}
+      </span>
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {attachments.map((a) => {
+            const isImage = (a.mimeType || '').startsWith('image/');
+            return (
+              <div key={a.id} className="relative w-[76px] rounded-md border border-gray-200 bg-gray-50 p-1.5">
+                <button
+                  onClick={() => onDelete(a.id)}
+                  className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-gray-300 bg-white text-gray-400 hover:border-red-300 hover:text-red-500"
+                  title="Remove attachment"
+                >
+                  <X size={9} />
+                </button>
+                <a href={a.url} target="_blank" rel="noreferrer" className="block">
+                  {isImage ? (
+                    <img src={a.url} alt={a.filename} className="h-14 w-14 rounded border border-gray-200 bg-white object-cover" />
+                  ) : (
+                    <span className="flex h-14 w-14 items-center justify-center rounded border border-gray-200 bg-white text-gray-400">
+                      <FileText size={20} />
+                    </span>
+                  )}
+                </a>
+                <a href={a.url} target="_blank" rel="noreferrer" title={a.filename} className="mt-1 block truncate text-[10px] leading-tight text-blue-600 hover:underline">
+                  {a.filename}
+                </a>
+              </div>
+            );
+          })}
         </div>
-      ))}
+      )}
       {canUpload ? (
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label className="cursor-pointer whitespace-nowrap text-[11.5px] font-medium text-blue-600 hover:underline">
             {uploading ? 'Uploading…' : '+ Add file'}
             <input type="file" multiple className="hidden" disabled={uploading} onChange={(e) => onUpload(stepNumber, e.target.files)} />
@@ -119,6 +160,14 @@ function StepAttachments({
               {...({ webkitdirectory: '' } as any)}
             />
           </label>
+          <div
+            tabIndex={0}
+            onPaste={handlePasteImage}
+            title="Click here, then press Ctrl+V to paste a copied image"
+            className="cursor-text whitespace-nowrap rounded border border-dashed border-gray-300 px-2 py-0.5 text-[10.5px] text-gray-400 outline-none focus:border-blue-400 focus:text-blue-600"
+          >
+            Click + paste image
+          </div>
         </div>
       ) : (
         <p className="text-[11px] italic text-gray-400">{disabledReason || 'Save the test first to attach files.'}</p>
