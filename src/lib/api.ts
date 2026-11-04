@@ -521,6 +521,14 @@ class ApiClient {
   deleteTestCase(id: string) {
     return this.request<{ ok: boolean }>(`/test-repository/tests/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
+  uploadTestStepAttachment(testCaseId: string, stepNumber: number, file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    return this.request<TestCaseAttachment>(`/test-repository/tests/${encodeURIComponent(testCaseId)}/steps/${stepNumber}/attachments`, { method: 'POST', body: formData });
+  }
+  deleteTestCaseAttachment(attachmentId: string) {
+    return this.request<{ ok: boolean }>(`/test-repository/attachments/${encodeURIComponent(attachmentId)}`, { method: 'DELETE' });
+  }
   // XHR rather than fetch so the editor can show upload progress.
   uploadKbFile(id: string, file: File, onProgress?: (pct: number) => void): Promise<KbFile> {
     return new Promise((resolve, reject) => {
@@ -648,7 +656,8 @@ class ApiClient {
 }
 
 export type TestRepoFolder = { id: string; name: string; path: string; parentPath: string; testsCount: number; totalTestsCount?: number };
-export type TestStep = { stepNumber: number; action?: string; data?: string; testSteps?: string; result?: string; expectedResult?: string };
+export type TestStep = { stepNumber: number; action?: string; data?: string; testSteps?: string; result?: string; expectedResult?: string; comment?: string };
+export type TestCaseAttachment = { id: string; stepNumber: number; filename: string; url: string; mimeType: string | null; size: number | null; authorName: string | null; createdAt: string };
 export type TestCaseSummary = {
   id: string;
   jiraKey: string | null;
@@ -661,7 +670,7 @@ export type TestCaseSummary = {
   createdAt: string;
   updatedAt: string;
 };
-export type TestCase = TestCaseSummary & { description: string | null; steps: TestStep[] };
+export type TestCase = TestCaseSummary & { description: string | null; steps: TestStep[]; attachments: TestCaseAttachment[] };
 
 export type KbTeam = { key: string; name: string; memberCount: number };
 export type KbAccess = { visibility: 'org' | 'teams'; teams: string[] };

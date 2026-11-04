@@ -53,6 +53,20 @@ export const testRepoSchemaReady = pool.query(`
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS test_cases_space_folder_idx ON test_cases("spaceId", "folderPath")`))
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS test_cases_space_idx ON test_cases("spaceId")`))
   .then(() => pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS test_cases_jira_key_idx ON test_cases("jiraKey") WHERE "jiraKey" IS NOT NULL`))
+  .then(() => pool.query(`
+    CREATE TABLE IF NOT EXISTS test_case_attachments (
+      id TEXT PRIMARY KEY,
+      "testCaseId" TEXT NOT NULL,
+      "stepNumber" INTEGER NOT NULL,
+      filename TEXT NOT NULL,
+      url TEXT NOT NULL,
+      "mimeType" TEXT,
+      size INTEGER,
+      "authorName" TEXT,
+      "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `))
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS test_case_attachments_test_idx ON test_case_attachments("testCaseId")`))
   .catch(() => {});
 
 function json(data: unknown, status = 200) {
@@ -241,7 +255,11 @@ export async function handleTestRepoApi(
     if (method === 'GET') {
       const { rows } = await pool.query(`SELECT * FROM test_cases WHERE id = $1`, [id]);
       if (!rows.length) return json({ error: 'Test not found' }, 404);
-      return json(rows[0]);
+      const { rows: attachments } = await pool.query(
+        `SELECT id, "stepNumber", filename, url, "mimeType", size, "authorName", "createdAt" FROM test_case_attachments WHERE "testCaseId" = $1 ORDER BY "createdAt" ASC`,
+        [id],
+      );
+      return json({ ...rows[0], attachments });
     }
     if (method === 'PATCH') {
       const body: any = await req.json().catch(() => ({}));
@@ -267,6 +285,45 @@ export async function handleTestRepoApi(
       if (!result.rowCount) return json({ error: 'Test not found' }, 404);
       return json({ ok: true });
     }
+  }
+
+  // POST test-repository/tests/:id/steps/:stepNumber/attachments -- any file
+  // type, no restriction (image, PDF, Excel, etc.), same as ticket
+  // attachments. The frontend's "Attach folder" picker just calls this once
+  // per file it picked, same pattern issues/:key/attachments already uses.
+  const stepAttach = sub.match(/^tests\/([^/]+)\/steps\/(\d+)\/attachments$/);
+  if (stepAttach && method === 'POST') {
+    const testCaseId = stepAttach[1];
+    const stepNumber = parseInt(stepAttach[2], 10);
+    const existing = (await pool.query(`SELECT id FROM test_cases WHERE id = $1`, [testCaseId])).rows[0];
+    if (!existing) return json({ error: 'Test not found' }, 404);
+    const formData = await req.formData().catch(() => null);
+    const file = formData?.get('file') as File | null;
+    if (!file) return json({ error: 'No file provided' }, 400);
+    const { writeFile, mkdir } = await import('fs/promises');
+    const { join, extname } = await import('path');
+    const uploadDir = join(process.cwd(), 'public', 'uploads', 'test-repository');
+    await mkdir(uploadDir, { recursive: true });
+    const ext = extname(file.name) || '';
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+    await writeFile(join(uploadDir, uniqueName), Buffer.from(await file.arrayBuffer()));
+    const url = `/uploads/test-repository/${uniqueName}`;
+    const attId = rid();
+    const authorName = `${currentUser?.firstName || ''} ${currentUser?.lastName || ''}`.trim() || null;
+    const row = await pool.query(
+      `INSERT INTO test_case_attachments (id, "testCaseId", "stepNumber", filename, url, "mimeType", size, "authorName")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, "stepNumber", filename, url, "mimeType", size, "authorName", "createdAt"`,
+      [attId, testCaseId, stepNumber, file.name, url, file.type || null, file.size || null, authorName],
+    );
+    return json(row.rows[0], 201);
+  }
+
+  // DELETE test-repository/attachments/:attachmentId
+  const attachDel = sub.match(/^attachments\/([^/]+)$/);
+  if (attachDel && method === 'DELETE') {
+    const result = await pool.query(`DELETE FROM test_case_attachments WHERE id = $1`, [attachDel[1]]);
+    if (!result.rowCount) return json({ error: 'Attachment not found' }, 404);
+    return json({ ok: true });
   }
 
   return json({ error: 'Not found' }, 404);

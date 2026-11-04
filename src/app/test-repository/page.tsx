@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronRight, ChevronDown, Folder, FolderPlus, Plus, Search, X, Trash2, Pencil, FileText } from 'lucide-react';
-import { api, TestRepoFolder, TestCase, TestCaseSummary, TestStep } from '@/lib/api';
+import { api, TestRepoFolder, TestCase, TestCaseSummary, TestStep, TestCaseAttachment } from '@/lib/api';
 
 type TreeNode = TestRepoFolder & { children: TreeNode[] };
 
@@ -196,6 +196,14 @@ function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
                     onChange={(e) => updateStep(i, { expectedResult: e.target.value })}
                     placeholder="Expected result"
                     rows={2}
+                    className="mb-1.5 w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  <label className="mb-0.5 block text-[10.5px] font-semibold text-gray-400">Comment</label>
+                  <textarea
+                    value={s.comment || ''}
+                    onChange={(e) => updateStep(i, { comment: e.target.value })}
+                    placeholder="Comment (optional)"
+                    rows={1}
                     className="w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
                   />
                 </div>
@@ -234,10 +242,34 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
     return () => { stale = true; };
   }, [testId]);
 
+  const [uploadingStep, setUploadingStep] = useState<number | null>(null);
+
   const del = async () => {
     if (!confirm('Delete this test case? This cannot be undone.')) return;
     await api.deleteTestCase(testId);
     onDeleted();
+  };
+
+  const refresh = () => { api.getTestCase(testId).then(setTest).catch(() => {}); };
+
+  const uploadFiles = async (stepNumber: number, files: FileList | null) => {
+    if (!files || !files.length) return;
+    setUploadingStep(stepNumber);
+    try {
+      for (const file of Array.from(files)) {
+        await api.uploadTestStepAttachment(testId, stepNumber, file);
+      }
+      refresh();
+    } catch (e: any) {
+      alert(e?.message || 'Upload failed');
+    } finally {
+      setUploadingStep(null);
+    }
+  };
+
+  const deleteAttachment = async (attachmentId: string) => {
+    await api.deleteTestCaseAttachment(attachmentId);
+    refresh();
   };
 
   return (
@@ -296,17 +328,45 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {test.steps.map((s, i) => (
-                          <tr key={i} className="align-top">
-                            <td className="px-3 py-2.5 text-gray-400">{s.stepNumber ?? i + 1}</td>
-                            <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.action || '—'}</td>
-                            <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.data || '—'}</td>
-                            <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.testSteps || '—'}</td>
-                            <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.expectedResult || s.result || '—'}</td>
-                            <td className="px-3 py-2.5 text-gray-400">None</td>
-                            <td className="px-3 py-2.5 text-gray-400">(0)</td>
-                          </tr>
-                        ))}
+                        {test.steps.map((s, i) => {
+                          const stepNum = s.stepNumber ?? i + 1;
+                          const stepAttachments = (test.attachments || []).filter((a) => a.stepNumber === stepNum);
+                          return (
+                            <tr key={i} className="align-top">
+                              <td className="px-3 py-2.5 text-gray-400">{stepNum}</td>
+                              <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.action || '—'}</td>
+                              <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.data || '—'}</td>
+                              <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.testSteps || '—'}</td>
+                              <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.expectedResult || s.result || '—'}</td>
+                              <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.comment || <span className="text-gray-300">None</span>}</td>
+                              <td className="px-3 py-2.5">
+                                <div className="flex flex-col gap-1">
+                                  {stepAttachments.map((a) => (
+                                    <div key={a.id} className="flex items-center gap-1">
+                                      <a href={a.url} target="_blank" rel="noreferrer" title={a.filename} className="max-w-[110px] truncate text-blue-600 hover:underline">{a.filename}</a>
+                                      <button onClick={() => deleteAttachment(a.id)} className="flex-shrink-0 text-gray-300 hover:text-red-500"><X size={10} /></button>
+                                    </div>
+                                  ))}
+                                  <label className="cursor-pointer whitespace-nowrap text-blue-600 hover:underline">
+                                    {uploadingStep === stepNum ? 'Uploading…' : '+ Add file'}
+                                    <input type="file" multiple className="hidden" disabled={uploadingStep === stepNum} onChange={(e) => uploadFiles(stepNum, e.target.files)} />
+                                  </label>
+                                  <label className="cursor-pointer whitespace-nowrap text-blue-600 hover:underline">
+                                    + Add folder
+                                    <input
+                                      type="file"
+                                      multiple
+                                      className="hidden"
+                                      disabled={uploadingStep === stepNum}
+                                      onChange={(e) => uploadFiles(stepNum, e.target.files)}
+                                      {...({ webkitdirectory: '' } as any)}
+                                    />
+                                  </label>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
