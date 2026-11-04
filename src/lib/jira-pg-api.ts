@@ -196,6 +196,17 @@ async function userCanViewMbr(userId: string | null): Promise<boolean> {
   } catch { return false; }
 }
 
+// Same narrow, additive-grant pattern as can_view_mbr above, for the
+// Worklog page's cross-ticket "Worklog" tab (GET /worklogs), which is
+// otherwise admin-only.
+async function userCanViewWorklog(userId: string | null): Promise<boolean> {
+  if (!userId) return false;
+  try {
+    const row = await pool.query(`SELECT can_view_worklog FROM users WHERE id = $1`, [userId]);
+    return !!row.rows[0]?.can_view_worklog;
+  } catch { return false; }
+}
+
 // Whether userId may view a given space's tickets -- true for a member of
 // that space (any role: admin/manager/member/viewer/lead/shift_lead/agent),
 // false otherwise. Every real app user is an internal employee account (no
@@ -276,6 +287,9 @@ pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMP(3)
 // the MBR tab itself, nothing else -- deliberately separate from `role` so
 // it never disturbs whatever role a user already has.
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_mbr BOOLEAN DEFAULT FALSE`).catch(() => {});
+// Same narrow additive grant as can_view_mbr above, for the Worklog page's
+// cross-ticket "Worklog" tab (otherwise admin-only).
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_worklog BOOLEAN DEFAULT FALSE`).catch(() => {});
 
 // Deleted-ticket trash: DELETE /issues/:key used to be a genuine hard
 // delete with no way to get a ticket back -- a production ticket got
@@ -2091,6 +2105,7 @@ function formatUser(u: {
     // when the caller merged it in themselves (see auth/me below); absent
     // callers correctly default to false rather than throwing.
     canViewMbr: !!(u as any).can_view_mbr,
+    canViewWorklog: !!(u as any).can_view_worklog,
   };
 }
 
@@ -6507,7 +6522,7 @@ async function _handleJiraPgApi(
     // missing.
     try {
       const dbUser = await db.user.findUnique({ where: { id: userId } });
-      if (dbUser) return json(formatUser({ ...dbUser, can_view_mbr: await userCanViewMbr(userId) } as any));
+      if (dbUser) return json(formatUser({ ...dbUser, can_view_mbr: await userCanViewMbr(userId), can_view_worklog: await userCanViewWorklog(userId) } as any));
     } catch { /* DB unreachable -- fall through to dev fallback below */ }
     if (process.env.NODE_ENV === 'development') {
       try {
@@ -14019,13 +14034,16 @@ async function _handleJiraPgApi(
   }
 
   // GET /worklogs -- cross-ticket worklog report, Jira's own "Logged work"
-  // view. Admin-only -- a regular user never sees another person's logged
-  // hours across every space here, by explicit request. (Briefly opened to
-  // everyone, then explicitly reverted back to admin-only -- the "Ticket
-  // Worklog" tab/GET /activity-worklogs is the one meant for all users.)
+  // view. Admin-only by default -- a regular user never sees another
+  // person's logged hours across every space here, by explicit request.
+  // (Briefly opened to everyone, then explicitly reverted back to
+  // admin-only -- the "Ticket Worklog" tab/GET /activity-worklogs is the
+  // one meant for all users.) can_view_worklog is the same narrow,
+  // per-person additive grant as can_view_mbr -- unlocks just this tab for
+  // one named person without making them a full admin.
   if (path === 'worklogs' && method === 'GET') {
     if (!userId) return json({ error: 'Unauthorized' }, 401);
-    if (!isAdmin) return json({ error: 'Admin access required' }, 403);
+    if (!isAdmin && !(await userCanViewWorklog(userId))) return json({ error: 'Admin access required' }, 403);
     const qs = url.searchParams;
     const from = qs.get('from');
     const to = qs.get('to');

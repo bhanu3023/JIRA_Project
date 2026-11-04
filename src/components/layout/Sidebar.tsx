@@ -665,7 +665,7 @@ export default function Sidebar() {
           { href: '/my-dashboard', icon: <LayoutDashboard size={16} />, match: pathname === '/my-dashboard' },
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
           { href: '/kb', icon: <BookOpen size={16} />, match: pathname.startsWith('/kb') },
-          ...(user?.role === 'admin' ? [{ href: '/worklog', icon: <Clock size={16} />, match: pathname.startsWith('/worklog') }] : []),
+          ...((user?.role === 'admin' || (user as any)?.canViewWorklog) ? [{ href: '/worklog', icon: <Clock size={16} />, match: pathname.startsWith('/worklog') }] : []),
           { href: '/test-repository', icon: <ClipboardList size={16} />, match: pathname.startsWith('/test-repository') },
           ...(canSeeMbr ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
         ].map((item, i) => (
