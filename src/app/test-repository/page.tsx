@@ -73,6 +73,60 @@ function statusBadgeColor(status: string) {
 
 function emptyStep(n: number): TestStep { return { stepNumber: n, action: '', expectedResult: '' }; }
 
+// Shared between the Edit modal's per-step card and the view-only Steps
+// table -- same upload/delete controls either place. Attachment rows wrap
+// their filename instead of truncating it to a fixed pixel width (the old
+// 96px column cut names off mid-word and overlapped the delete button once
+// a file was actually attached), so the block's own height simply grows
+// with however many files are on a step instead of squeezing them in.
+function StepAttachments({
+  attachments, stepNumber, uploading, canUpload, disabledReason, onUpload, onDelete,
+}: {
+  attachments: TestCaseAttachment[];
+  stepNumber: number;
+  uploading: boolean;
+  canUpload: boolean;
+  disabledReason?: string;
+  onUpload: (stepNumber: number, files: FileList | null) => void;
+  onDelete: (attachmentId: string) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      {attachments.map((a) => (
+        <div key={a.id} className="flex items-start gap-1.5 rounded-md border border-gray-200 bg-gray-50 px-2 py-1">
+          <a href={a.url} target="_blank" rel="noreferrer" title={a.filename} className="min-w-0 flex-1 break-all text-[11.5px] leading-snug text-blue-600 hover:underline">
+            {a.filename}
+          </a>
+          <button onClick={() => onDelete(a.id)} className="mt-0.5 flex-shrink-0 text-gray-400 hover:text-red-500" title="Remove attachment">
+            <X size={11} />
+          </button>
+        </div>
+      ))}
+      {canUpload ? (
+        <div className="flex items-center gap-3">
+          <label className="cursor-pointer whitespace-nowrap text-[11.5px] font-medium text-blue-600 hover:underline">
+            {uploading ? 'Uploading…' : '+ Add file'}
+            <input type="file" multiple className="hidden" disabled={uploading} onChange={(e) => onUpload(stepNumber, e.target.files)} />
+          </label>
+          <label className="cursor-pointer whitespace-nowrap text-[11.5px] font-medium text-blue-600 hover:underline">
+            + Add folder
+            <input
+              type="file"
+              multiple
+              className="hidden"
+              disabled={uploading}
+              onChange={(e) => onUpload(stepNumber, e.target.files)}
+              {...({ webkitdirectory: '' } as any)}
+            />
+          </label>
+        </div>
+      ) : (
+        <p className="text-[11px] italic text-gray-400">{disabledReason || 'Save the test first to attach files.'}</p>
+      )}
+    </div>
+  );
+}
+
 function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
   spaceKey: string; folderPath: string; test: TestCase | null; onClose: () => void; onSaved: () => void;
 }) {
@@ -83,6 +137,34 @@ function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
   const [steps, setSteps] = useState<TestStep[]>(test?.steps?.length ? test.steps : [emptyStep(1)]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Attachments can only be uploaded against a step of a test that already
+  // exists (the upload endpoint needs a real testCaseId) -- so this stays
+  // empty, with upload disabled, for a brand-new unsaved test.
+  const [attachments, setAttachments] = useState<TestCaseAttachment[]>(test?.attachments || []);
+  const [uploadingStep, setUploadingStep] = useState<number | null>(null);
+  const refreshAttachments = () => {
+    if (!test) return;
+    api.getTestCase(test.id).then((t) => setAttachments(t.attachments || [])).catch(() => {});
+  };
+  const uploadFiles = async (stepNumber: number, files: FileList | null) => {
+    if (!test || !files || !files.length) return;
+    setUploadingStep(stepNumber);
+    try {
+      for (const file of Array.from(files)) {
+        await api.uploadTestStepAttachment(test.id, stepNumber, file);
+      }
+      refreshAttachments();
+    } catch (e: any) {
+      alert(e?.message || 'Upload failed');
+    } finally {
+      setUploadingStep(null);
+    }
+  };
+  const deleteAttachment = async (attachmentId: string) => {
+    await api.deleteTestCaseAttachment(attachmentId);
+    refreshAttachments();
+  };
 
   const updateStep = (i: number, patch: Partial<TestStep>) => {
     setSteps((s) => s.map((st, idx) => (idx === i ? { ...st, ...patch } : st)));
@@ -110,7 +192,7 @@ function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl bg-white shadow-xl">
+      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col rounded-xl bg-white shadow-xl">
         <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
           <h2 className="text-[15px] font-semibold text-gray-800">{test ? 'Edit Test' : 'New Test'}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
@@ -204,7 +286,16 @@ function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
                     onChange={(e) => updateStep(i, { comment: e.target.value })}
                     placeholder="Comment (optional)"
                     rows={1}
-                    className="w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+                    className="mb-1.5 w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  <label className="mb-0.5 block text-[10.5px] font-semibold text-gray-400">Attachments</label>
+                  <StepAttachments
+                    attachments={attachments.filter((a) => a.stepNumber === (s.stepNumber ?? i + 1))}
+                    stepNumber={s.stepNumber ?? i + 1}
+                    uploading={uploadingStep === (s.stepNumber ?? i + 1)}
+                    canUpload={!!test}
+                    onUpload={uploadFiles}
+                    onDelete={deleteAttachment}
                   />
                 </div>
               ))}
@@ -324,7 +415,7 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
                           <th className="px-3 py-2">Test steps</th>
                           <th className="px-3 py-2">Expected result</th>
                           <th className="px-3 py-2">Comments</th>
-                          <th className="px-3 py-2 w-24">Attachments</th>
+                          <th className="px-3 py-2 min-w-[200px]">Attachments</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -340,29 +431,14 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
                               <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.expectedResult || s.result || '—'}</td>
                               <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.comment || <span className="text-gray-300">None</span>}</td>
                               <td className="px-3 py-2.5">
-                                <div className="flex flex-col gap-1">
-                                  {stepAttachments.map((a) => (
-                                    <div key={a.id} className="flex items-center gap-1">
-                                      <a href={a.url} target="_blank" rel="noreferrer" title={a.filename} className="max-w-[110px] truncate text-blue-600 hover:underline">{a.filename}</a>
-                                      <button onClick={() => deleteAttachment(a.id)} className="flex-shrink-0 text-gray-300 hover:text-red-500"><X size={10} /></button>
-                                    </div>
-                                  ))}
-                                  <label className="cursor-pointer whitespace-nowrap text-blue-600 hover:underline">
-                                    {uploadingStep === stepNum ? 'Uploading…' : '+ Add file'}
-                                    <input type="file" multiple className="hidden" disabled={uploadingStep === stepNum} onChange={(e) => uploadFiles(stepNum, e.target.files)} />
-                                  </label>
-                                  <label className="cursor-pointer whitespace-nowrap text-blue-600 hover:underline">
-                                    + Add folder
-                                    <input
-                                      type="file"
-                                      multiple
-                                      className="hidden"
-                                      disabled={uploadingStep === stepNum}
-                                      onChange={(e) => uploadFiles(stepNum, e.target.files)}
-                                      {...({ webkitdirectory: '' } as any)}
-                                    />
-                                  </label>
-                                </div>
+                                <StepAttachments
+                                  attachments={stepAttachments}
+                                  stepNumber={stepNum}
+                                  uploading={uploadingStep === stepNum}
+                                  canUpload
+                                  onUpload={uploadFiles}
+                                  onDelete={deleteAttachment}
+                                />
                               </td>
                             </tr>
                           );
