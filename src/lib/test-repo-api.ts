@@ -103,11 +103,12 @@ export async function handleTestRepoApi(
   const sub = path.slice('test-repository'.length).replace(/^\//, '');
 
   // GET test-repository/folders?spaceKey= -- every folder in this space,
-  // flat (path/parentPath), each with its own DIRECT test count (tests
-  // filed straight into that folder, not its subfolders -- matches the
-  // source tool's own per-folder count, confirmed against its data dump:
-  // a folder with subfolders holding all the real content shows 0 for
-  // itself, not a rolled-up total).
+  // flat (path/parentPath), each with a CUMULATIVE test count -- every test
+  // directly in that folder PLUS every test in any of its subfolders,
+  // matching the source tool's own sidebar counts (confirmed for real:
+  // qaagent.cftools.live shows "CloudFuze Manage (1965)" in the tree and,
+  // on opening that folder, "Total Tests: 1965 (includes subfolders)" --
+  // the exact same rolled-up number, not a direct-only count).
   if (sub === 'folders' && method === 'GET') {
     const spaceKey = url.searchParams.get('spaceKey');
     if (!spaceKey) return json({ error: 'spaceKey is required' }, 400);
@@ -122,12 +123,19 @@ export async function handleTestRepoApi(
       `SELECT "folderPath", COUNT(*)::int AS count FROM test_cases WHERE "spaceId" = $1 GROUP BY "folderPath"`,
       [spaceId],
     );
-    const countByPath = new Map<string, number>(counts.map((c: any) => [c.folderPath, c.count]));
-    const rootCount = (await pool.query(`SELECT COUNT(*)::int AS count FROM test_cases WHERE "spaceId" = $1`, [spaceId])).rows[0].count;
+    const directCountByPath = new Map<string, number>(counts.map((c: any) => [c.folderPath, c.count]));
+    const allPaths = ['/', ...folders.map((f: any) => f.path)];
+    const cumulativeCount = (path: string) => {
+      let total = 0;
+      for (const p of allPaths) {
+        if (p === path || p.startsWith(path === '/' ? '/' : `${path}/`)) total += directCountByPath.get(p) || 0;
+      }
+      return total;
+    };
 
     return json([
-      { id: 'root', name: 'Test Repository', path: '/', parentPath: '', testsCount: countByPath.get('/') || 0, totalTestsCount: rootCount },
-      ...folders.map((f: any) => ({ ...f, testsCount: countByPath.get(f.path) || 0 })),
+      { id: 'root', name: 'Test Repository', path: '/', parentPath: '', testsCount: cumulativeCount('/') },
+      ...folders.map((f: any) => ({ ...f, testsCount: cumulativeCount(f.path) })),
     ]);
   }
 
@@ -183,7 +191,16 @@ export async function handleTestRepoApi(
     const where: string[] = [`"spaceId" = $1`];
     const params: any[] = [spaceId];
     let n = 2;
-    if (folderPath) { where.push(`"folderPath" = $${n}`); params.push(normalizePath(folderPath)); n++; }
+    // A selected folder shows its own tests PLUS every subfolder's, same as
+    // the folder tree's own cumulative counts above (and the source tool's
+    // "Total Tests: X (includes subfolders)" list view) -- root ('/') needs
+    // no filter at all, since every folderPath already starts with '/'.
+    const normalizedFolder = folderPath ? normalizePath(folderPath) : null;
+    if (normalizedFolder && normalizedFolder !== '/') {
+      where.push(`("folderPath" = $${n} OR "folderPath" LIKE $${n + 1})`);
+      params.push(normalizedFolder, `${normalizedFolder}/%`);
+      n += 2;
+    }
     if (q) { where.push(`(summary ILIKE $${n} OR "jiraKey" ILIKE $${n})`); params.push(`%${q}%`); n++; }
 
     const totalRes = await pool.query(`SELECT COUNT(*)::int AS count FROM test_cases WHERE ${where.join(' AND ')}`, params);

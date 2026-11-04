@@ -200,6 +200,12 @@ function TestEditor({ spaceKey, folderPath, test, onClose, onSaved }: {
   );
 }
 
+// "/BACS data dump/Workdocs to NFS" -> ["Test Repository", "BACS data dump", "Workdocs to NFS"]
+function breadcrumbFor(folderPath: string): string[] {
+  const parts = (folderPath || '/').split('/').filter(Boolean);
+  return ['Test Repository', ...parts];
+}
+
 function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; onClose: () => void; onEdit: (t: TestCase) => void; onDeleted: () => void }) {
   const [test, setTest] = useState<TestCase | null>(null);
   const [loading, setLoading] = useState(true);
@@ -218,10 +224,18 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl bg-white shadow-xl">
-        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
-          <h2 className="text-[15px] font-semibold text-gray-800">Test Details</h2>
-          <div className="flex items-center gap-1">
+      <div className="flex max-h-[88vh] w-full max-w-5xl flex-col rounded-xl bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3.5">
+          <div className="min-w-0">
+            <h2 className="truncate text-[16px] font-semibold text-gray-800">{test?.summary || 'Test Details'}</h2>
+            {test && (
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10.5px] font-semibold text-indigo-700">{test.testType}</span>
+                <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${statusBadgeColor(test.status)}`}>{test.status}</span>
+              </div>
+            )}
+          </div>
+          <div className="flex flex-shrink-0 items-center gap-1">
             {test && (
               <>
                 <button onClick={() => onEdit(test)} className="flex h-7 w-7 items-center justify-center rounded text-gray-500 hover:bg-gray-100"><Pencil size={14} /></button>
@@ -231,30 +245,53 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
             <button onClick={onClose} className="ml-1 text-gray-400 hover:text-gray-600"><X size={18} /></button>
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-4">
+        <div className="flex-1 overflow-auto px-5 py-4">
           {loading ? (
             <div className="py-10 text-center text-[13px] text-gray-400">Loading…</div>
           ) : !test ? (
             <div className="py-10 text-center text-[13px] text-gray-400">Not found</div>
           ) : (
             <div className="space-y-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">{test.testType}</span>
-                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${statusBadgeColor(test.status)}`}>{test.status}</span>
-                {test.jiraKey && <span className="text-[11px] text-gray-400">{test.jiraKey}</span>}
+              <div className="flex flex-wrap items-center gap-1 text-[12px] text-gray-400">
+                {breadcrumbFor(test.folderPath).map((crumb, i, arr) => (
+                  <span key={i} className="flex items-center gap-1">
+                    <span className={i === arr.length - 1 ? 'font-medium text-gray-600' : ''}>{crumb}</span>
+                    {i < arr.length - 1 && <ChevronRight size={11} />}
+                  </span>
+                ))}
               </div>
-              <h3 className="text-[15px] font-semibold text-gray-800">{test.summary}</h3>
               {test.description && <p className="text-[13px] text-gray-600 whitespace-pre-wrap">{test.description}</p>}
               {test.steps?.length > 0 && (
-                <div className="space-y-2">
-                  <p className="text-[12px] font-semibold text-gray-500">Steps</p>
-                  {test.steps.map((s, i) => (
-                    <div key={i} className="rounded-lg border border-gray-200 p-2.5">
-                      <p className="mb-1 text-[11px] font-bold text-gray-400">STEP {s.stepNumber ?? i + 1}</p>
-                      {s.action && <p className="text-[12.5px] text-gray-700 whitespace-pre-wrap"><span className="font-medium">Action: </span>{s.action}</p>}
-                      {(s.expectedResult || s.result) && <p className="mt-1 text-[12.5px] text-gray-700 whitespace-pre-wrap"><span className="font-medium">Expected: </span>{s.expectedResult || s.result}</p>}
-                    </div>
-                  ))}
+                <div>
+                  <p className="mb-2 text-[12px] font-bold uppercase tracking-wide text-gray-500">Test Details — Steps</p>
+                  <div className="overflow-x-auto rounded-lg border border-gray-200">
+                    <table className="w-full text-left text-[12.5px]">
+                      <thead className="bg-gray-50 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                        <tr>
+                          <th className="px-3 py-2 w-10">#</th>
+                          <th className="px-3 py-2">Action</th>
+                          <th className="px-3 py-2">Data</th>
+                          <th className="px-3 py-2">Test steps</th>
+                          <th className="px-3 py-2">Expected result</th>
+                          <th className="px-3 py-2">Comments</th>
+                          <th className="px-3 py-2 w-24">Attachments</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {test.steps.map((s, i) => (
+                          <tr key={i} className="align-top">
+                            <td className="px-3 py-2.5 text-gray-400">{s.stepNumber ?? i + 1}</td>
+                            <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.action || '—'}</td>
+                            <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.data || '—'}</td>
+                            <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.testSteps || '—'}</td>
+                            <td className="px-3 py-2.5 whitespace-pre-wrap text-gray-700">{s.expectedResult || s.result || '—'}</td>
+                            <td className="px-3 py-2.5 text-gray-400">None</td>
+                            <td className="px-3 py-2.5 text-gray-400">(0)</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>
@@ -381,7 +418,9 @@ export default function TestRepositoryPage() {
                 className="w-full rounded-lg border border-gray-300 py-1.5 pl-8 pr-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            <span className="text-[12.5px] text-gray-400">Total: {total}</span>
+            <span className="text-[12.5px] text-gray-400">
+              Total Tests: {total}{selectedPath !== '/' && !debounced && ' (includes subfolders)'}
+            </span>
             <button
               onClick={() => { setEditingTest(null); setEditorOpen(true); }}
               className="ml-auto flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700"
