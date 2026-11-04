@@ -399,6 +399,20 @@ export default function IssueDetailPage() {
   const [copiedLink, setCopiedLink]     = useState(false);
   const [customFields, setCustomFields] = useState<any[]>([]);
   const [mandatoryModal, setMandatoryModal] = useState<{ missingFields: string[]; pendingStatusId?: string; context: 'resolve' | 'department' } | null>(null);
+  // Blocks an In Progress -> "Routed to X"/"Waiting for X" handoff until at
+  // least one worklog entry exists for the department handing it off -- by
+  // explicit request, applies to every department/queue alike (Migration,
+  // Dev, Infra, QA, ...), not just the Dev/Migration-only resolve-time
+  // worklog check getMissingCoreFields already does. The backend enforces
+  // this authoritatively too (see its own comment on the PATCH handler); this
+  // modal exists so the user gets a clear "log work to continue" prompt
+  // instead of a generic alert() after a rejected request.
+  const [worklogRequiredModal, setWorklogRequiredModal] = useState<{ pendingStatusId: string; targetDept: string } | null>(null);
+  const [worklogGateHours, setWorklogGateHours] = useState('');
+  const [worklogGateDesc, setWorklogGateDesc] = useState('');
+  const [worklogGateDate, setWorklogGateDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [worklogGateSubmitting, setWorklogGateSubmitting] = useState(false);
+  const [worklogGateError, setWorklogGateError] = useState('');
   const [deptBlockModal, setDeptBlockModal] = useState(false);
   const [pendingDeptChange, setPendingDeptChange] = useState<{ dept: { name: string; boardKey: string }; execute: () => void } | null>(null);
   const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
@@ -590,6 +604,36 @@ export default function IssueDetailPage() {
       setWorklogError(e?.message || 'Failed to log work. Please try again.');
     } finally {
       setWorklogSubmitting(false);
+    }
+  };
+
+  // Logs the work AND then re-runs the handoff that triggered the gate --
+  // the retried handleStatusChange call re-checks everything from scratch,
+  // but this time a worklog for the current department exists, so it falls
+  // through and actually changes the status.
+  const handleWorklogGateSubmit = async () => {
+    if (!worklogRequiredModal) return;
+    setWorklogGateError('');
+    const minutes = parseTimeSpent(worklogGateHours);
+    if (!minutes) { setWorklogGateError('Enter a valid time spent, e.g. 2h 30m.'); return; }
+    setWorklogGateSubmitting(true);
+    try {
+      await api.addWorklog(issueKey, {
+        department: (issue as any)?.current_department || '',
+        timeSpentMinutes: minutes,
+        description: worklogGateDesc.trim() || undefined,
+        workDate: worklogGateDate,
+      });
+      const pendingStatusId = worklogRequiredModal.pendingStatusId;
+      setWorklogGateHours(''); setWorklogGateDesc(''); setWorklogGateDate(new Date().toISOString().slice(0, 10));
+      setWorklogRequiredModal(null);
+      const freshWorklogs = await api.getWorklogs(issueKey).catch(() => []);
+      setWorklogs(Array.isArray(freshWorklogs) ? freshWorklogs : []);
+      await handleStatusChange(pendingStatusId);
+    } catch (e: any) {
+      setWorklogGateError(e?.message || 'Failed to log work. Please try again.');
+    } finally {
+      setWorklogGateSubmitting(false);
     }
   };
 
@@ -1536,6 +1580,25 @@ export default function IssueDetailPage() {
 
       if (missing.length > 0) {
         setMandatoryModal({ missingFields: missing, pendingStatusId: statusId, context: 'resolve' });
+        return;
+      }
+    }
+    // Mandatory worklog before an In Progress -> "Routed to X"/"Waiting for X"
+    // handoff, in every department/queue alike -- by explicit request. Only a
+    // genuine in_progress -> routed-away transition is gated: resolving
+    // (handled above), reopening a done ticket into "Routed to X", or picking
+    // the department it's already in are all left alone, same scope as the
+    // backend's own enforcement of this (see its comment on the PATCH handler).
+    const handoffMatchForWorklogGate = targetStatus?.name?.match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
+    const currentDeptForWorklogGate = ((issue as any)?.current_department || '').trim();
+    if (
+      handoffMatchForWorklogGate &&
+      getEffectiveIssueStatus(issue as any).category === 'in_progress' &&
+      handoffMatchForWorklogGate[1].trim().toLowerCase() !== currentDeptForWorklogGate.toLowerCase()
+    ) {
+      const hasWorklogForDept = worklogs.some((w: any) => (w.department || '').trim().toLowerCase() === currentDeptForWorklogGate.toLowerCase());
+      if (!hasWorklogForDept) {
+        setWorklogRequiredModal({ pendingStatusId: statusId, targetDept: handoffMatchForWorklogGate[1].trim() });
         return;
       }
     }
@@ -4679,6 +4742,73 @@ export default function IssueDetailPage() {
               <button onClick={() => setMandatoryModal(null)}
                 className="px-4 py-2 text-[13px] font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-white transition-colors">
                 Go back &amp; fill fields
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mandatory worklog before an In Progress -> Routed to X handoff */}
+      {worklogRequiredModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4" style={{ background: 'rgba(9,30,66,0.54)' }}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="flex items-center gap-3 px-6 pt-6 pb-4 border-b border-gray-100">
+              <div className="w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle size={18} className="text-orange-600" />
+              </div>
+              <div>
+                <h3 className="text-[15px] font-bold text-gray-900">Log work before routing</h3>
+                <p className="text-[12.5px] text-gray-500 mt-0.5">
+                  Log time against this ticket before routing it to {worklogRequiredModal.targetDept}.
+                </p>
+              </div>
+            </div>
+            <div className="px-6 py-4 space-y-3">
+              {worklogGateError && (
+                <p className="text-[12.5px] text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{worklogGateError}</p>
+              )}
+              <div>
+                <label className="block text-[11.5px] font-semibold text-gray-500 mb-1">Time spent *</label>
+                <input
+                  autoFocus
+                  value={worklogGateHours}
+                  onChange={(e) => setWorklogGateHours(e.target.value)}
+                  placeholder="e.g. 2h 30m"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[11.5px] font-semibold text-gray-500 mb-1">Date</label>
+                <input
+                  type="date"
+                  value={worklogGateDate}
+                  onChange={(e) => setWorklogGateDate(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[11.5px] font-semibold text-gray-500 mb-1">Description (optional)</label>
+                <textarea
+                  value={worklogGateDesc}
+                  onChange={(e) => setWorklogGateDesc(e.target.value)}
+                  rows={2}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 px-6 py-4 bg-gray-50 border-t border-gray-100">
+              <button
+                onClick={() => { setWorklogRequiredModal(null); setWorklogGateError(''); }}
+                className="px-4 py-2 text-[13px] font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleWorklogGateSubmit}
+                disabled={worklogGateSubmitting}
+                className="px-4 py-2 text-[13px] font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+              >
+                {worklogGateSubmitting ? 'Logging…' : 'Log work & continue'}
               </button>
             </div>
           </div>
