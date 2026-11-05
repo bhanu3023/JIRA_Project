@@ -34,8 +34,8 @@ function buildTree(folders: TestRepoFolder[]): TreeNode {
   return root;
 }
 
-function FolderRow({ node, depth, selectedPath, onSelect, onDelete }: {
-  node: TreeNode; depth: number; selectedPath: string; onSelect: (p: string) => void; onDelete: (n: TreeNode) => void;
+function FolderRow({ node, depth, index, selectedPath, onSelect, onDelete }: {
+  node: TreeNode; depth: number; index: number; selectedPath: string; onSelect: (p: string) => void; onDelete: (n: TreeNode) => void;
 }) {
   const [open, setOpen] = useState(depth < 1);
   const hasChildren = node.children.length > 0;
@@ -55,6 +55,7 @@ function FolderRow({ node, depth, selectedPath, onSelect, onDelete }: {
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         </button>
         <Folder size={14} className="flex-shrink-0 text-gray-400" />
+        {node.path !== '/' && <span className="flex-shrink-0 text-[11px] text-gray-400">{index}.</span>}
         <span className="flex-1 truncate">{node.name}</span>
         <span className="text-[11px] text-gray-400">({node.testsCount})</span>
         {node.path !== '/' && canDelete && (
@@ -69,8 +70,8 @@ function FolderRow({ node, depth, selectedPath, onSelect, onDelete }: {
       </div>
       {open && hasChildren && (
         <div>
-          {node.children.map((c) => (
-            <FolderRow key={c.path} node={c} depth={depth + 1} selectedPath={selectedPath} onSelect={onSelect} onDelete={onDelete} />
+          {node.children.map((c, i) => (
+            <FolderRow key={c.path} node={c} depth={depth + 1} index={i + 1} selectedPath={selectedPath} onSelect={onSelect} onDelete={onDelete} />
           ))}
         </div>
       )}
@@ -657,7 +658,7 @@ export default function TestRepositoryPage() {
             </div>
           )}
           <div className="flex-1 overflow-y-auto px-2 pb-3">
-            <FolderRow node={tree} depth={0} selectedPath={selectedPath} onSelect={setSelectedPath} onDelete={deleteFolder} />
+            <FolderRow node={tree} depth={0} index={1} selectedPath={selectedPath} onSelect={setSelectedPath} onDelete={deleteFolder} />
           </div>
         </div>
 
