@@ -15,7 +15,7 @@ import { pgPool as pool } from '@/lib/pg-pool';
 import { isManager, isPrivileged } from '@/lib/permissions';
 import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 import { handleKbApi, kbSchemaReady, rerouteKbApprovals } from '@/lib/kb-api';
-import { handleTestRepoApi } from '@/lib/test-repo-api';
+import { handleTestRepoApi, isQaQueueMember } from '@/lib/test-repo-api';
 import { handleSavedFiltersApi } from '@/lib/saved-filters-api';
 import sanitizeHtml from 'sanitize-html';
 
@@ -2106,6 +2106,12 @@ function formatUser(u: {
     // callers correctly default to false rather than throwing.
     canViewMbr: !!(u as any).can_view_mbr,
     canViewWorklog: !!(u as any).can_view_worklog,
+    // Only ever set on the auth/me response below (computed per-request from
+    // live QA-queue membership, not a stored column) -- every other
+    // formatUser call formats someone ELSE for display and correctly gets
+    // false here, which the frontend never reads for anyone but the
+    // logged-in user anyway.
+    canAccessTestRepo: !!(u as any).can_access_test_repo,
   };
 }
 
@@ -6522,7 +6528,12 @@ async function _handleJiraPgApi(
     // missing.
     try {
       const dbUser = await db.user.findUnique({ where: { id: userId } });
-      if (dbUser) return json(formatUser({ ...dbUser, can_view_mbr: await userCanViewMbr(userId), can_view_worklog: await userCanViewWorklog(userId) } as any));
+      if (dbUser) return json(formatUser({
+        ...dbUser,
+        can_view_mbr: await userCanViewMbr(userId),
+        can_view_worklog: await userCanViewWorklog(userId),
+        can_access_test_repo: dbUser.role === 'admin' || await isQaQueueMember(userId),
+      } as any));
     } catch { /* DB unreachable -- fall through to dev fallback below */ }
     if (process.env.NODE_ENV === 'development') {
       try {

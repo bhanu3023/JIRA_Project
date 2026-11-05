@@ -73,6 +73,47 @@ function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status });
 }
 
+// Test Repository is restricted to the QA queue's own members + admins --
+// by explicit request, not open to every logged-in user (the sidebar link
+// and every route here previously had no restriction at all). "The QA
+// queue" means whichever custom_queues entry is literally named "QA",
+// wherever it's configured (confirmed: TESTIN's own "QA" queue, 11
+// members) -- matched by name rather than a hardcoded space/id so this
+// keeps working if that queue is ever recreated with a new id. Small
+// in-memory cache since this is checked on every single Test Repository
+// request, not just once per page load.
+const QA_QUEUE_MEMBER_CACHE_MS = 60_000;
+let qaQueueMemberCache: { ids: Set<string>; exp: number } | null = null;
+export async function isQaQueueMember(userId: string | null | undefined): Promise<boolean> {
+  if (!userId) return false;
+  const now = Date.now();
+  if (!qaQueueMemberCache || qaQueueMemberCache.exp < now) {
+    const ids = new Set<string>();
+    try {
+      const { rows } = await pool.query(`SELECT queues FROM custom_queues`);
+      for (const row of rows) {
+        const queues = row.queues || [];
+        for (const q of queues) {
+          if (String(q.name || '').trim().toLowerCase() === 'qa' && Array.isArray(q.memberIds)) {
+            for (const id of q.memberIds) ids.add(id);
+          }
+        }
+      }
+    } catch { /* fail closed below -- an empty set means nobody matches */ }
+    qaQueueMemberCache = { ids, exp: now + QA_QUEUE_MEMBER_CACHE_MS };
+  }
+  return qaQueueMemberCache.ids.has(userId);
+}
+
+// Deleting a test case/folder/attachment is further restricted to admins +
+// Bhuvana Mosra specifically (bhuvana.mosra@cloudfuze.com, a QA queue
+// member) -- by explicit request, every other QA queue member can use Test
+// Repository but not delete from it.
+const TEST_REPO_DELETE_ALLOWED_USER_ID = 'pg_0p2l8gvjod';
+function canDeleteTestRepoContent(userId: string, isAdminUser: boolean): boolean {
+  return isAdminUser || userId === TEST_REPO_DELETE_ALLOWED_USER_ID;
+}
+
 function rid() {
   return `tc_${Math.random().toString(36).slice(2, 12)}`;
 }
@@ -113,6 +154,11 @@ export async function handleTestRepoApi(
   const { userId, currentUser } = ctx;
   if (!userId) return json({ error: 'Unauthorized' }, 401);
   await testRepoSchemaReady;
+
+  const isAdminForTestRepo = currentUser?.role === 'admin';
+  if (!isAdminForTestRepo && !(await isQaQueueMember(userId))) {
+    return json({ error: 'Test Repository is only available to the QA queue and admins.' }, 403);
+  }
 
   const sub = path.slice('test-repository'.length).replace(/^\//, '');
 
@@ -179,6 +225,7 @@ export async function handleTestRepoApi(
   // no subfolders), same safety rule the source tool enforces.
   const folderDel = sub.match(/^folders\/([^/]+)$/);
   if (folderDel && method === 'DELETE') {
+    if (!canDeleteTestRepoContent(userId, isAdminForTestRepo)) return json({ error: 'Only admins and Bhuvana can delete here.' }, 403);
     const { rows } = await pool.query(`SELECT * FROM test_repo_folders WHERE id = $1`, [folderDel[1]]);
     const folder = rows[0];
     if (!folder) return json({ error: 'Folder not found' }, 404);
@@ -281,6 +328,7 @@ export async function handleTestRepoApi(
       return json(row.rows[0]);
     }
     if (method === 'DELETE') {
+      if (!canDeleteTestRepoContent(userId, isAdminForTestRepo)) return json({ error: 'Only admins and Bhuvana can delete here.' }, 403);
       const result = await pool.query(`DELETE FROM test_cases WHERE id = $1`, [id]);
       if (!result.rowCount) return json({ error: 'Test not found' }, 404);
       return json({ ok: true });
@@ -321,6 +369,7 @@ export async function handleTestRepoApi(
   // DELETE test-repository/attachments/:attachmentId
   const attachDel = sub.match(/^attachments\/([^/]+)$/);
   if (attachDel && method === 'DELETE') {
+    if (!canDeleteTestRepoContent(userId, isAdminForTestRepo)) return json({ error: 'Only admins and Bhuvana can delete here.' }, 403);
     const result = await pool.query(`DELETE FROM test_case_attachments WHERE id = $1`, [attachDel[1]]);
     if (!result.rowCount) return json({ error: 'Attachment not found' }, 404);
     return json({ ok: true });

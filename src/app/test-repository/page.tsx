@@ -1,8 +1,21 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, ChevronDown, Folder, FolderPlus, Plus, Search, X, Trash2, Pencil, FileText } from 'lucide-react';
+import { ChevronRight, ChevronDown, Folder, FolderPlus, Plus, Search, X, Trash2, Pencil, FileText, Lock } from 'lucide-react';
 import { api, TestRepoFolder, TestCase, TestCaseSummary, TestStep, TestCaseAttachment } from '@/lib/api';
+import { useStore } from '@/store';
+
+// Deleting a test/folder/attachment is restricted to admins + Bhuvana Mosra
+// specifically -- by explicit request, every other QA queue member can use
+// Test Repository (the page itself is already gated to that queue + admins
+// via the sidebar link and the backend's own 403) but not delete from it.
+// The backend re-enforces this on every DELETE route regardless of what
+// this hides -- see test-repo-api.ts's own canDeleteTestRepoContent.
+const TEST_REPO_DELETE_ALLOWED_USER_ID = 'pg_0p2l8gvjod';
+function useCanDeleteTestRepo(): boolean {
+  const user = useStore((s) => s.user);
+  return user?.role === 'admin' || user?.id === TEST_REPO_DELETE_ALLOWED_USER_ID;
+}
 
 type TreeNode = TestRepoFolder & { children: TreeNode[] };
 
@@ -27,6 +40,7 @@ function FolderRow({ node, depth, selectedPath, onSelect, onDelete }: {
   const [open, setOpen] = useState(depth < 1);
   const hasChildren = node.children.length > 0;
   const active = node.path === selectedPath;
+  const canDelete = useCanDeleteTestRepo();
   return (
     <div>
       <div
@@ -43,7 +57,7 @@ function FolderRow({ node, depth, selectedPath, onSelect, onDelete }: {
         <Folder size={14} className="flex-shrink-0 text-gray-400" />
         <span className="flex-1 truncate">{node.name}</span>
         <span className="text-[11px] text-gray-400">({node.testsCount})</span>
-        {node.path !== '/' && (
+        {node.path !== '/' && canDelete && (
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(node); }}
             className="hidden group-hover:flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-gray-400 hover:bg-red-50 hover:text-red-500"
@@ -90,6 +104,11 @@ function StepAttachments({
   onUpload: (stepNumber: number, files: FileList | null) => void;
   onDelete: (attachmentId: string) => void;
 }) {
+  // Anyone with Test Repository access can still ADD an attachment --
+  // deleting one is the part restricted to admins + Bhuvana, same as
+  // deleting a whole test or folder (see this file's own comment on
+  // useCanDeleteTestRepo).
+  const canDelete = useCanDeleteTestRepo();
   // Lets someone who just copied a screenshot (e.g. Win+Shift+S / a browser
   // screenshot tool) click this box and Ctrl+V it straight in, instead of
   // having to save it to disk first just to use "+ Add file".
@@ -119,13 +138,15 @@ function StepAttachments({
             const isImage = (a.mimeType || '').startsWith('image/');
             return (
               <div key={a.id} className="relative w-[76px] rounded-md border border-gray-200 bg-gray-50 p-1.5">
-                <button
-                  onClick={() => onDelete(a.id)}
-                  className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-gray-300 bg-white text-gray-400 hover:border-red-300 hover:text-red-500"
-                  title="Remove attachment"
-                >
-                  <X size={9} />
-                </button>
+                {canDelete && (
+                  <button
+                    onClick={() => onDelete(a.id)}
+                    className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-gray-300 bg-white text-gray-400 hover:border-red-300 hover:text-red-500"
+                    title="Remove attachment"
+                  >
+                    <X size={9} />
+                  </button>
+                )}
                 <a href={a.url} target="_blank" rel="noreferrer" className="block">
                   {isImage ? (
                     <img src={a.url} alt={a.filename} className="h-14 w-14 rounded border border-gray-200 bg-white object-cover" />
@@ -375,6 +396,7 @@ function breadcrumbFor(folderPath: string): string[] {
 function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; onClose: () => void; onEdit: (t: TestCase) => void; onDeleted: () => void }) {
   const [test, setTest] = useState<TestCase | null>(null);
   const [loading, setLoading] = useState(true);
+  const canDelete = useCanDeleteTestRepo();
 
   useEffect(() => {
     let stale = false;
@@ -429,7 +451,9 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
             {test && (
               <>
                 <button onClick={() => onEdit(test)} className="flex h-7 w-7 items-center justify-center rounded text-gray-500 hover:bg-gray-100"><Pencil size={14} /></button>
-                <button onClick={del} className="flex h-7 w-7 items-center justify-center rounded text-gray-500 hover:bg-red-50 hover:text-red-500"><Trash2 size={14} /></button>
+                {canDelete && (
+                  <button onClick={del} className="flex h-7 w-7 items-center justify-center rounded text-gray-500 hover:bg-red-50 hover:text-red-500"><Trash2 size={14} /></button>
+                )}
               </>
             )}
             <button onClick={onClose} className="ml-1 text-gray-400 hover:text-gray-600"><X size={18} /></button>
@@ -506,6 +530,12 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
 }
 
 export default function TestRepositoryPage() {
+  const user = useStore((s) => s.user);
+  // Backend-enforced (every test-repository/* route 403s a non-member) --
+  // this is just so a non-QA/non-admin user who navigates here directly
+  // sees a clear message instead of an empty/broken page full of silently
+  // failed requests.
+  const canAccessTestRepo = user?.role === 'admin' || !!(user as any)?.canAccessTestRepo;
   const [spaces, setSpaces] = useState<{ id: string; key: string; name: string }[]>([]);
   const [spaceKey, setSpaceKey] = useState('TESTIN');
   const [folders, setFolders] = useState<TestRepoFolder[]>([]);
@@ -570,6 +600,16 @@ export default function TestRepositoryPage() {
       alert(e?.message || 'Failed to delete folder');
     }
   };
+
+  if (!canAccessTestRepo) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 bg-white px-8 text-center">
+        <Lock size={28} className="text-gray-300" />
+        <p className="text-[14px] font-medium text-gray-700">Test Repository is only available to the QA queue and admins.</p>
+        <p className="text-[12.5px] text-gray-400">Ask an admin if you believe you should have access.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col bg-white">

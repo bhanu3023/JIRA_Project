@@ -568,6 +568,13 @@ export default function Sidebar() {
   // above so that grant only ever unlocks the MBR link itself, never
   // "Create space" or any other admin-only affordance in this sidebar.
   const canSeeMbr = isPrivileged || !!(user as any)?.canViewMbr;
+  // Test Repository is restricted to the QA queue's own members + admins --
+  // by explicit request, not open to every logged-in user the way the nav
+  // link previously showed unconditionally. canAccessTestRepo comes straight
+  // off auth/me (computed live from QA-queue membership there, see its own
+  // comment) -- the backend enforces this too, on every Test Repository
+  // route, so hiding the link here is a UX nicety, not the real boundary.
+  const canAccessTestRepo = user?.role === 'admin' || !!(user as any)?.canAccessTestRepo;
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -666,7 +673,7 @@ export default function Sidebar() {
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
           { href: '/kb', icon: <BookOpen size={16} />, match: pathname.startsWith('/kb') },
           ...((user?.role === 'admin' || (user as any)?.canViewWorklog) ? [{ href: '/worklog', icon: <Clock size={16} />, match: pathname.startsWith('/worklog') }] : []),
-          { href: '/test-repository', icon: <ClipboardList size={16} />, match: pathname.startsWith('/test-repository') },
+          ...(canAccessTestRepo ? [{ href: '/test-repository', icon: <ClipboardList size={16} />, match: pathname.startsWith('/test-repository') }] : []),
           ...(canSeeMbr ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
         ].map((item, i) => (
           <Link
@@ -726,7 +733,9 @@ export default function Sidebar() {
             <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
             <GlobalNavItem href="/kb" icon={<BookOpen size={15} />} label="KB Articles" active={pathname.startsWith('/kb')} />
             <GlobalNavItem href="/worklog" icon={<Clock size={15} />} label="Worklog" active={pathname.startsWith('/worklog')} />
-            <GlobalNavItem href="/test-repository" icon={<ClipboardList size={15} />} label="Test Repository" active={pathname.startsWith('/test-repository')} />
+            {canAccessTestRepo && (
+              <GlobalNavItem href="/test-repository" icon={<ClipboardList size={15} />} label="Test Repository" active={pathname.startsWith('/test-repository')} />
+            )}
             {canSeeMbr && (
               <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
             )}
