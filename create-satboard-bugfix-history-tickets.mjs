@@ -153,8 +153,8 @@ async function main() {
          id, key, cf_key, summary, description, type, priority,
          "spaceId", "statusId", "assigneeId", "reporterId",
          labels, "createdAt", "updatedAt", "resolvedAt"
-       ) VALUES ($1,$2,$3,$4,$5,'bug',$6,$7,$8,$9,$10, ARRAY[]::text[], $11,$12,$12)`,
-      [issueId, key, key, p.summary, p.description, p.priority, space.id, resolvedStatus.id, user.id, user.id, p.createdAt, p.resolvedAt],
+       ) VALUES ($1,$2,$3,$4,$5,'bug',$6,$7,$8,$9,$10, ARRAY[]::text[], $11,$12,$13)`,
+      [issueId, key, key, p.summary, p.description, p.priority, space.id, resolvedStatus.id, user.id, user.id, p.createdAt, p.resolvedAt, p.resolvedAt],
     );
 
     const histRows = [
