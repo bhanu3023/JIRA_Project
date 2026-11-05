@@ -94,12 +94,18 @@ function emptyStep(n: number): TestStep { return { stepNumber: n, action: '', ex
 // thumbnail instead of just a filename link -- a non-image (PDF/Excel/etc.)
 // still gets a filename link with a generic file icon in its place.
 function StepAttachments({
-  attachments, stepNumber, uploading, canUpload, disabledReason, onUpload, onDelete,
+  attachments, stepNumber, uploading, canUpload, showUploadControls = true, disabledReason, onUpload, onDelete,
 }: {
   attachments: TestCaseAttachment[];
   stepNumber: number;
   uploading: boolean;
   canUpload: boolean;
+  // The view-only Test Details screen shows attachments but never lets you
+  // add one there -- uploading only happens from the Edit modal, by
+  // explicit request. false hides the whole Add file/Add folder/paste
+  // section (not just disables it); the attachments themselves and the
+  // count still render either way.
+  showUploadControls?: boolean;
   disabledReason?: string;
   onUpload: (stepNumber: number, files: FileList | null) => void;
   onDelete: (attachmentId: string) => void;
@@ -164,7 +170,7 @@ function StepAttachments({
           })}
         </div>
       )}
-      {canUpload ? (
+      {showUploadControls && (canUpload ? (
         <div className="flex flex-wrap items-center gap-3">
           <label className="cursor-pointer whitespace-nowrap text-[11.5px] font-medium text-blue-600 hover:underline">
             {uploading ? 'Uploading…' : '+ Add file'}
@@ -192,7 +198,7 @@ function StepAttachments({
         </div>
       ) : (
         <p className="text-[11px] italic text-gray-400">{disabledReason || 'Save the test first to attach files.'}</p>
-      )}
+      ))}
     </div>
   );
 }
@@ -509,6 +515,7 @@ function TestDetail({ testId, onClose, onEdit, onDeleted }: { testId: string; on
                                   stepNumber={stepNum}
                                   uploading={uploadingStep === stepNum}
                                   canUpload
+                                  showUploadControls={false}
                                   onUpload={uploadFiles}
                                   onDelete={deleteAttachment}
                                 />
