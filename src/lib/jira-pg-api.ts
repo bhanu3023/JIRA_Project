@@ -6452,19 +6452,14 @@ async function _handleJiraPgApi(
   const url = new URL(req.url);
   const path = segments.join('/');
 
-  // Office/VPN-only enforcement (see isOfficeIp above). Deliberately scoped
-  // to AUTHENTICATED requests only -- a remote-allowed user still has to be
-  // able to reach auth/login (userId is null there, before this runs) from
-  // off-network in order to log in and have this check ever apply to them.
-  // Everything past login already requires a valid userId anyway, so an
-  // anonymous off-network visitor gets the normal 401 further down, same as
-  // always, rather than a 403 here that would leak "this endpoint exists."
-  if (userId && !isOfficeIp(clientIp)) {
-    const bypassRow = await pool.query(`SELECT can_access_anywhere FROM users WHERE id=$1`, [userId]).catch(() => ({ rows: [] as any[] }));
-    if (!bypassRow.rows[0]?.can_access_anywhere) {
-      return json({ error: 'This tool can only be accessed from the office network or VPN. Contact an admin if you need remote access.' }, 403);
-    }
-  }
+  // Office/VPN-only enforcement was tried here (isOfficeIp below, gated by
+  // can_access_anywhere) and then explicitly reverted: office-restricted-
+  // by-default blocked regular users who had no way to grant themselves the
+  // bypass, and the explicit decision was to open access to every active
+  // user from any network instead, same as before this was ever added.
+  // isOfficeIp/can_access_anywhere/the User Management toggle are left in
+  // place, just unused, in case a future narrower restriction is wanted
+  // again -- nothing currently calls this check.
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Auth Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
