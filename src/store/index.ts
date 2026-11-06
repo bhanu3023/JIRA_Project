@@ -151,17 +151,26 @@ export const useStore = create<AppState>((set, get) => ({
   loadUser: async () => {
     const epochAtStart = authEpoch;
     try {
-      // Used to bail out immediately (no network call at all) when
-      // localStorage had no token -- correct for the old flow, where no
-      // token there really did mean "not logged in", but wrong now that a
-      // session can live entirely in an httpOnly cookie the page can't read.
-      // Always attempt GET /auth/me instead; it authenticates via whichever
-      // of the header (legacy localStorage token, if this session predates
-      // the cookie change) or the cookie is actually valid, and a genuinely
-      // logged-out visitor just gets a quick 401 here instead.
+      // Always attempt GET /auth/me; the httpOnly cookie alone is enough to
+      // authenticate it, and a genuinely logged-out visitor just gets a
+      // quick 401 here instead. A real JWT previously sat in
+      // localStorage['jira_token'] for any session that logged in before
+      // the httpOnly-cookie migration (see login() above) -- readable by
+      // any script on the page (including DevTools' own console) and by a
+      // future XSS payload, unlike the cookie. One more read here, to
+      // finish authenticating that one last pre-migration session via the
+      // header exactly as before, then wipe it immediately so it can never
+      // show up in Local Storage again after this one page load. Confirmed
+      // via a security audit that this was the only remaining path still
+      // relying on it.
       const token = localStorage.getItem('jira_token');
       if (token) set({ token });
       const user = await api.getMe();
+      // Wipe only on a successful authenticated call -- getMe() needed the
+      // token to still be in localStorage for api.ts's getToken() to attach
+      // it as the Authorization header in the first place, so it can't be
+      // removed any earlier than this.
+      if (token) localStorage.removeItem('jira_token');
       if (epochAtStart !== authEpoch) return;
       set({ user, isAuthenticated: true, initializing: false });
     } catch (err: any) {
