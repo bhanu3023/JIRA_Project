@@ -12109,10 +12109,21 @@ async function _handleJiraPgApi(
       try {
       // Fetch full state BEFORE modifying anything
       const recallRow = await pool.query(
-        `SELECT i.current_department, i.original_dept, i.dept_assignees, i."reporterId", i.summary, i."assigneeId"
+        `SELECT i.current_department, i.original_dept, i.dept_assignees, i."reporterId", i.summary, i."assigneeId", i."spaceId"
          FROM issues i WHERE i.key=$1 LIMIT 1`, [key]
       );
       if (!recallRow.rows[0]) return json({ error: 'Ticket not found' }, 404);
+      // This branch has its own early DB lookup and returns before the
+      // canAccessIssue check further below ever runs, so it needs the same
+      // guard independently -- otherwise any logged-in user with no
+      // membership in this ticket's space could still move it between
+      // departments via {recall:true}. Confirmed via a security audit.
+      if (!(await canAccessIssue(
+        { spaceId: recallRow.rows[0].spaceId, reporterId: recallRow.rows[0].reporterId, assigneeId: recallRow.rows[0].assigneeId },
+        userId, isAdmin
+      ))) {
+        return json({ error: 'Not found' }, 404);
+      }
       const recallDept: string = recallRow.rows[0]?.current_department || '';
       const homeDept: string = recallRow.rows[0]?.original_dept || 'Migration';
       const savedDeptAssignees: Record<string, any> = recallRow.rows[0]?.dept_assignees || {};
@@ -12195,6 +12206,18 @@ async function _handleJiraPgApi(
       pool.query<{ cf_key: string | null }>(`SELECT cf_key FROM issues WHERE key = $1 LIMIT 1`, [key]),
     ]);
     if (!issue) return json({ error: 'Not found' }, 404);
+    // Same gap as the one already fixed on GET /issues/:key: a logged-in
+    // user with zero membership in this ticket's space (and who isn't its
+    // reporter/assignee) had no check at all stopping them from editing
+    // non-status fields (priority, assignee, summary, description, labels,
+    // custom fields, ...) on it by guessing/typing its key -- the only
+    // checks below this point gate status/queue-status/resolve changes
+    // specifically, not ordinary field edits. Confirmed via a security
+    // audit. Admins, the reporter, the assignee, and any member of the
+    // ticket's own space are unaffected.
+    if (!(await canAccessIssue(issue, userId, isAdmin))) {
+      return json({ error: 'Not found' }, 404);
+    }
     // cf_key is a raw ALTER TABLE column Prisma doesn't select on any
     // db.issue.findUnique/update call in this handler ("issue", "updated",
     // and "refreshed" below are all Prisma results) -- every notifyStatusChanged/

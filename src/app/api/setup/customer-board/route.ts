@@ -7,12 +7,22 @@
  * - Ensures required columns exist
  * Safe to call multiple times.
  */
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { pgPool as pool } from '@/lib/pg-pool';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  // One-time setup/repair endpoint that does destructive writes (deletes a
+  // duplicate space, overwrites a live mailbox's email_configs row) -- it
+  // was reachable with zero authentication, so anyone who loaded this URL
+  // (including a crawler or link-prefetcher) could trigger those writes.
+  // Confirmed via a security audit; gated the same way the other one-off
+  // admin repair endpoints under /api/admin/* already are.
+  const auth = await requireAdmin(req);
+  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
   const log: string[] = [];
 
   try {
