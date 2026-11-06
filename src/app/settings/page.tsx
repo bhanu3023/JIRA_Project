@@ -365,6 +365,18 @@ function SettingsContent() {
     }
   };
 
+  const handleToggleRemoteAccess = async (userId: string, canAccessAnywhere: boolean) => {
+    const target = users.find(u => u.id === userId);
+    const name = target ? `${target.firstName} ${target.lastName}`.trim() : 'User';
+    try {
+      await api.updateUser(userId, { canAccessAnywhere: !canAccessAnywhere });
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, canAccessAnywhere: !canAccessAnywhere } as any : u));
+      pushUserToast(canAccessAnywhere ? `${name} restricted to the office network/VPN again` : `${name} can now access this tool from anywhere`);
+    } catch (err: any) {
+      pushUserToast(err?.message || 'Failed to update remote access', 'error');
+    }
+  };
+
   const handleRoleChange = async (userId: string, role: string) => {
     const target = users.find(u => u.id === userId);
     const name = target ? `${target.firstName} ${target.lastName}`.trim() : 'User';
@@ -2279,6 +2291,11 @@ function SettingsContent() {
                             }
                           </div>
                           <span className="text-sm font-medium text-gray-900 hover:text-blue-600 transition-colors truncate">{u.firstName} {u.lastName}</span>
+                          {(u as any).canAccessAnywhere === true && (
+                            <span title="Can access from anywhere (not restricted to office network/VPN)" className="flex-shrink-0 inline-flex">
+                              <Globe size={12} className="text-blue-500" />
+                            </span>
+                          )}
                         </button>
                       </td>
                       <td className="px-4 py-2.5 text-sm text-gray-500 max-w-0"><span data-hj-suppress className="block truncate">{u.email}</span></td>
@@ -2457,6 +2474,12 @@ function SettingsContent() {
                                   className="w-full flex items-center gap-2 px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-50">
                                   <RefreshCw size={13} className={resendingUserId === u.id ? 'animate-spin' : ''} />
                                   {resendingUserId === u.id ? 'Sending…' : 'Resend invite'}
+                                </button>
+                                <div className="my-1 h-px bg-gray-100" />
+                                <button onClick={() => { handleToggleRemoteAccess(u.id, (u as any).canAccessAnywhere === true); setOpenUserMenu(null); setRoleMenuPos(null); }}
+                                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-50 transition-colors text-gray-700">
+                                  <Globe size={13} className={(u as any).canAccessAnywhere === true ? 'text-blue-600' : ''} />
+                                  {(u as any).canAccessAnywhere === true ? 'Restrict to office network' : 'Allow access from anywhere'}
                                 </button>
                                 <div className="my-1 h-px bg-gray-100" />
                                 <button onClick={() => { handleToggleActive(u.id, u.isActive !== false); setOpenUserMenu(null); setRoleMenuPos(null); }}
@@ -2661,6 +2684,21 @@ function SettingsContent() {
                       <span className="text-sm text-gray-700">{new Date(u.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
                     </div>
                   )}
+
+                  {/* Remote access — this tool is normally restricted to the office network/VPN; this lets a specific user through from anywhere */}
+                  <div className="py-3 border-b border-gray-50 flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1">Access from anywhere</span>
+                      <span className="text-sm text-gray-500">Off by default — only the office network/VPN can reach this tool</span>
+                    </div>
+                    <button
+                      onClick={() => { const next = (u as any).canAccessAnywhere !== true; handleToggleRemoteAccess(u.id, (u as any).canAccessAnywhere === true); setSelectedUser({ ...u, canAccessAnywhere: next } as any); }}
+                      className="flex-shrink-0">
+                      {(u as any).canAccessAnywhere === true
+                        ? <ToggleRight size={28} className="text-blue-600" />
+                        : <ToggleLeft size={28} className="text-gray-300" />}
+                    </button>
+                  </div>
                 </div>
 
                 {/* Footer actions */}

@@ -290,6 +290,11 @@ pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_mbr BOOLEAN DEFA
 // Same narrow additive grant as can_view_mbr above, for the Worklog page's
 // cross-ticket "Worklog" tab (otherwise admin-only).
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_worklog BOOLEAN DEFAULT FALSE`).catch(() => {});
+// Same narrow additive grant as can_view_mbr above -- per explicit request,
+// an admin can mark specific active users as allowed to use this tool from
+// outside the office/VPN network (see isOfficeIp/OFFICE_ALLOWED_IPS below).
+// Everyone else stays restricted to the office network by default.
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_access_anywhere BOOLEAN DEFAULT FALSE`).catch(() => {});
 
 // Deleted-ticket trash: DELETE /issues/:key used to be a genuine hard
 // delete with no way to get a ticket back -- a production ticket got
@@ -2106,6 +2111,11 @@ function formatUser(u: {
     // callers correctly default to false rather than throwing.
     canViewMbr: !!(u as any).can_view_mbr,
     canViewWorklog: !!(u as any).can_view_worklog,
+    // Same "only present when the caller merged it in" rule as canViewMbr
+    // above -- GET /users (the User Management list) merges this in for
+    // every row itself, unlike canViewMbr/canViewWorklog which only ever
+    // get merged in on the logged-in user's own auth/me response.
+    canAccessAnywhere: !!(u as any).can_access_anywhere,
     // Only ever set on the auth/me response below (computed per-request from
     // live QA-queue membership, not a stored column) -- every other
     // formatUser call formats someone ELSE for display and correctly gets
@@ -6364,6 +6374,50 @@ export async function handleJiraPgApi(
   }
 }
 
+// This tool used to be blocked at the network level for anyone outside the
+// office/VPN (nginx's own `allow <ips>; deny all;` in
+// /etc/nginx/snippets/vpn-only.conf) -- but that happens before any request
+// reaches this app at all, so a specific user could never be exempted from
+// it there. Per explicit request, some active users (remote/traveling
+// staff) need to use this tool from anywhere: nginx's blanket block was
+// relaxed and the same IP allowlist is re-enforced here instead, now with a
+// per-user bypass (can_access_anywhere, set in Settings > User Management)
+// checked after login. Keep OFFICE_ALLOWED_IPS in sync with vpn-only.conf's
+// `allow` list if that ever changes; comma-separated, plain IPs or
+// IPv4 CIDR ranges (e.g. "10.0.0.0/24").
+const DEFAULT_OFFICE_IPS = '208.70.248.69,208.70.248.70,14.97.145.225,43.252.204.88,127.0.0.1,::1';
+function parseOfficeIps(raw: string): { exact: Set<string>; cidrs: Array<{ base: number; mask: number }> } {
+  const exact = new Set<string>();
+  const cidrs: Array<{ base: number; mask: number }> = [];
+  const ipToInt = (ip: string) => ip.split('.').reduce((acc, oct) => (acc * 256) + (Number(oct) || 0), 0) >>> 0;
+  for (const entry of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    if (entry.includes('/') && entry.includes('.')) {
+      const [base, bitsStr] = entry.split('/');
+      const bits = Number(bitsStr);
+      if (!Number.isNaN(bits) && bits >= 0 && bits <= 32) {
+        const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+        cidrs.push({ base: ipToInt(base) & mask, mask });
+      }
+    } else {
+      exact.add(entry);
+    }
+  }
+  return { exact, cidrs };
+}
+const _officeIps = parseOfficeIps(process.env.OFFICE_ALLOWED_IPS || DEFAULT_OFFICE_IPS);
+function isOfficeIp(ip: string): boolean {
+  const clean = (ip || '').trim().replace(/^::ffff:/, '');
+  if (!clean) return false;
+  if (_officeIps.exact.has(clean)) return true;
+  if (clean.includes('.') && !clean.includes(':')) {
+    const n = clean.split('.').reduce((acc, oct) => (acc * 256) + (Number(oct) || 0), 0) >>> 0;
+    for (const { base, mask } of _officeIps.cidrs) {
+      if ((n & mask) === base) return true;
+    }
+  }
+  return false;
+}
+
 async function _handleJiraPgApi(
   req: NextRequest,
   segments: string[],
@@ -6397,6 +6451,20 @@ async function _handleJiraPgApi(
   touchLastSeen(userId);
   const url = new URL(req.url);
   const path = segments.join('/');
+
+  // Office/VPN-only enforcement (see isOfficeIp above). Deliberately scoped
+  // to AUTHENTICATED requests only -- a remote-allowed user still has to be
+  // able to reach auth/login (userId is null there, before this runs) from
+  // off-network in order to log in and have this check ever apply to them.
+  // Everything past login already requires a valid userId anyway, so an
+  // anonymous off-network visitor gets the normal 401 further down, same as
+  // always, rather than a 403 here that would leak "this endpoint exists."
+  if (userId && !isOfficeIp(clientIp)) {
+    const bypassRow = await pool.query(`SELECT can_access_anywhere FROM users WHERE id=$1`, [userId]).catch(() => ({ rows: [] as any[] }));
+    if (!bypassRow.rows[0]?.can_access_anywhere) {
+      return json({ error: 'This tool can only be accessed from the office network or VPN. Contact an admin if you need remote access.' }, 403);
+    }
+  }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Auth Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
@@ -6675,18 +6743,20 @@ async function _handleJiraPgApi(
     // All authenticated users can list users (needed for queue member search)
     const [users, statusRows] = await Promise.all([
       db.user.findMany({ orderBy: { firstName: 'asc' } }),
-      kbSchemaReady.then(() => pool.query(`SELECT id, status, manager_ids FROM users`))
+      kbSchemaReady.then(() => pool.query(`SELECT id, status, manager_ids, can_access_anywhere FROM users`))
         .catch(() => pool.query(`SELECT id, status FROM users`))
         .catch(() => ({ rows: [] as any[] })),
     ]);
     const statusMap: Record<string, string> = {};
     const managerMap: Record<string, string[]> = {};
-    for (const r of statusRows.rows) { statusMap[r.id] = r.status; managerMap[r.id] = r.manager_ids || []; }
+    const accessMap: Record<string, boolean> = {};
+    for (const r of statusRows.rows) { statusMap[r.id] = r.status; managerMap[r.id] = r.manager_ids || []; accessMap[r.id] = !!r.can_access_anywhere; }
     return json(users.map(u => ({
       ...formatUser(u),
       status: statusMap[u.id] || (u.isActive ? 'active' : 'inactive'),
       // Who approves this user's KB articles (raw column, added in kb-api.ts).
       managerIds: managerMap[u.id] || [],
+      canAccessAnywhere: accessMap[u.id] || false,
     })));
   }
 
@@ -6742,18 +6812,30 @@ async function _handleJiraPgApi(
       const found = await db.user.count({ where: { id: { in: managerIds } } });
       if (found !== managerIds.length) return json({ error: 'Manager not found' }, 400);
     }
+    // Per-user exception to the office/VPN-only restriction (see isOfficeIp
+    // above). Admin-only; raw column, same narrow-grant pattern as
+    // can_view_mbr/can_view_worklog.
+    let canAccessAnywhere: boolean | undefined;
+    if (body.canAccessAnywhere !== undefined) {
+      if (!isAdmin) return json({ error: 'Only admins can change remote access' }, 403);
+      canAccessAnywhere = Boolean(body.canAccessAnywhere);
+    }
     try {
       const user = Object.keys(data).length
         ? await db.user.update({ where: { id }, data })
         : await db.user.findUniqueOrThrow({ where: { id } });
+      if (canAccessAnywhere !== undefined) {
+        await pool.query(`UPDATE users SET can_access_anywhere=$1 WHERE id=$2`, [canAccessAnywhere, id]);
+      }
+      const extra = canAccessAnywhere !== undefined ? { canAccessAnywhere } : {};
       if (managerIds !== undefined) {
         await kbSchemaReady;
         await pool.query(`UPDATE users SET manager_ids = $1 WHERE id = $2`, [managerIds, id]);
         // Anything they already submitted moves to the new managers.
         rerouteKbApprovals(id).catch((e) => console.error('[KB] Re-routing approvals failed:', e?.message || e));
-        return json({ ...formatUser(user), managerIds });
+        return json({ ...formatUser(user), managerIds, ...extra });
       }
-      return json(formatUser(user));
+      return json({ ...formatUser(user), ...extra });
     } catch {
       return json({ error: 'Not found' }, 404);
     }
