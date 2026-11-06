@@ -12714,8 +12714,30 @@ async function _handleJiraPgApi(
             let queueHandoffTargetDept = '';
             let queueHandoffDone = false;
             const waitMatchQueue = String(body.queueStatusName || '').match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
-            if (waitMatchQueue) {
-              queueHandoffTargetDept = waitMatchQueue[1].trim();
+            // "Deferred", picked from the Dev queue specifically, means the
+            // same thing as "Routed to <wherever this ticket came from>" --
+            // per explicit request, Dev deferring a ticket hands it back to
+            // whichever department originally raised it (Migration/QA/Infra),
+            // not just a generic "deferred" label sitting in Dev forever.
+            // Origin is resolved the same way the resolve-authorization
+            // check above already finds a ticket's true origin: original_dept
+            // (set once at creation, never overwritten) falling back to the
+            // current department if somehow unset. If a ticket genuinely
+            // originated in Dev itself (no other department to send it back
+            // to), this is a no-op and "Deferred" just sits in Dev like any
+            // other plain status, via the else branch below.
+            let deferredOriginDept: string | null = null;
+            const isDevDeferred = dept.trim().toLowerCase() === 'dev'
+              && String(body.queueStatusName || '').trim().toLowerCase() === 'deferred';
+            if (isDevDeferred) {
+              const originRowForDeferred = await pool.query(
+                `SELECT COALESCE(original_dept, current_department) AS origin FROM issues WHERE key=$1`, [key]
+              );
+              deferredOriginDept = (originRowForDeferred.rows[0]?.origin || '').trim() || null;
+            }
+            const deferredHasRealOrigin = isDevDeferred && !!deferredOriginDept && deferredOriginDept.toLowerCase() !== 'dev';
+            if (waitMatchQueue || deferredHasRealOrigin) {
+              queueHandoffTargetDept = waitMatchQueue ? waitMatchQueue[1].trim() : (deferredOriginDept as string);
               // Confirmed for real (CF-29693): the "Change Department" dropdown
               // moves the ticket to Infra (its own correct restore-or-round-robin
               // runs), and moments later a "Waiting for Infra" queue status --
