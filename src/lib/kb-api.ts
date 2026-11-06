@@ -99,6 +99,12 @@ export const kbSchemaReady = pool.query(`CREATE TABLE IF NOT EXISTS kb_articles 
   .then(() => pool.query(`UPDATE users SET manager_ids = ARRAY[manager_id], manager_id = NULL WHERE manager_id IS NOT NULL`))
   .then(() => pool.query(`ALTER TABLE kb_articles ADD COLUMN IF NOT EXISTS approver_ids TEXT[] NOT NULL DEFAULT '{}'`))
   .then(() => pool.query(`UPDATE kb_articles SET approver_ids = ARRAY[approver_id], approver_id = NULL WHERE approver_id IS NOT NULL`))
+  // Per-user override granting the same blanket "Awaiting my approval" access
+  // as an admin/migration_manager, without changing that user's actual role
+  // (which would also affect Filters' assignee picker, my-dashboard, and the
+  // Home dashboard's Migration Manager section -- none of which were asked
+  // for here). See isMigrationManager/hasKbApproveOverride below.
+  .then(() => pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_approve_kb BOOLEAN DEFAULT FALSE`))
   .catch((e) => { console.error('[kb] schema setup failed:', e?.message || e); });
 
 // Same row the bell in Header.tsx polls for. KB_* notifications carry the
@@ -466,13 +472,19 @@ export async function handleKbApi(
   // article they didn't personally submit is never their own article
   // (row.author_id !== userId already guards that for every path here).
   const isMigrationManager = currentUser?.role === 'migration_manager';
+  // Per-user override (can_approve_kb) -- same blanket approval access as a
+  // migration_manager, granted individually without changing the user's role.
+  const kbOverrideRow = await pool.query(`SELECT can_approve_kb FROM users WHERE id = $1`, [userId]).catch(() => ({ rows: [] as any[] }));
+  const hasKbApproveOverride = !!kbOverrideRow.rows[0]?.can_approve_kb;
+  const hasBlanketKbApproval = isMigrationManager || hasKbApproveOverride;
   const canManage = (row: any) => isAdmin || row.author_id === userId;
   // A pending article waits on any of its author's managers (approver_ids),
-  // any admin when the author has no manager, or any migration_manager role
-  // user (same blanket access as an admin -- see isMigrationManager above).
+  // any admin, any migration_manager role user, or anyone individually
+  // granted can_approve_kb (same blanket access as an admin -- see
+  // hasBlanketKbApproval above).
   const canApprove = (row: any) =>
     row.status === 'pending' && row.author_id !== userId &&
-    (isAdmin || isMigrationManager || (row.approver_ids || []).includes(userId));
+    (isAdmin || hasBlanketKbApproval || (row.approver_ids || []).includes(userId));
   const canRead = (row: any, myTeams: string[]) =>
     canManage(row) ||
     canApprove(row) ||
@@ -488,7 +500,7 @@ export async function handleKbApi(
     return json({
       publishesDirectly: isAdmin,
       approvers: approvers.map((a) => ({ id: a.id, name: a.name })),
-      reviews: isAdmin || isMigrationManager || reportCount > 0,
+      reviews: isAdmin || hasBlanketKbApproval || reportCount > 0,
     });
   }
 
@@ -530,7 +542,7 @@ export async function handleKbApi(
       // same as an ordinary manager, leaving it empty for everyone except
       // whoever happened to be set as that particular author's manager.
       where.push(`status = 'pending' AND author_id <> ${p(userId)}`);
-      if (!isAdmin && !isMigrationManager) where.push(`${p(userId)} = ANY(approver_ids)`);
+      if (!isAdmin && !hasBlanketKbApproval) where.push(`${p(userId)} = ANY(approver_ids)`);
     } else if (scope === 'drafts') {
       // Drafts include the ones submitted and waiting for approval.
       where.push(`status IN ('draft', 'pending')`);
