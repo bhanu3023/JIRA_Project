@@ -1559,22 +1559,27 @@ export default function IssueDetailPage() {
     // Mandatory worklog before EVERY status change on a department-queue
     // ticket (Migration/Dev/Infra/QA) -- by explicit request: not just once
     // per department, but every single time the status is changed, however
-    // many times that happens, including the very first Open -> In
-    // Progress move. Deliberately always fires (no "already logged one for
-    // this department, skip it next time" check) -- a fresh worklog entry
-    // is required for every transition, not just the first one. Scoped
-    // naturally to real dept-queue tickets only: current_department is
-    // never set on IA/SB/other non-queue boards, so they're unaffected.
-    // Takes priority over the 'done'-category missing-fields check below --
-    // worklog is always addressed first; handleWorklogGateSubmit retries
-    // this same function afterward (with skipWorklogGate, since it just
-    // logged one itself), so a resolve still correctly prompts for Root
-    // Cause/Fix Description/etc. next if any of those are also still
-    // missing.
+    // many times that happens. Deliberately always fires (no "already
+    // logged one for this department, skip it next time" check) -- a fresh
+    // worklog entry is required for every transition. Exception: the
+    // "starting work" transition itself (todo -> in_progress, e.g. Open ->
+    // In Progress) is skipped -- by explicit follow-up request, nothing has
+    // actually been worked on yet at that point, so there's nothing real to
+    // log; every OTHER transition, including leaving in_progress again
+    // right after, still asks. Scoped naturally to real dept-queue tickets
+    // only: current_department is never set on IA/SB/other non-queue
+    // boards, so they're unaffected. Takes priority over the 'done'-
+    // category missing-fields check below -- worklog is always addressed
+    // first; handleWorklogGateSubmit retries this same function afterward
+    // (with skipWorklogGate, since it just logged one itself), so a resolve
+    // still correctly prompts for Root Cause/Fix Description/etc. next if
+    // any of those are also still missing.
     const currentDeptForWorklogGate = ((issue as any)?.current_department || '').trim();
     const DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE = ['migration', 'dev', 'infra', 'qa'];
+    const isStartingWork = getEffectiveIssueStatus(issue as any).category === 'todo' && targetStatus?.category === 'in_progress';
     if (
       !skipWorklogGate &&
+      !isStartingWork &&
       currentDeptForWorklogGate &&
       DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(currentDeptForWorklogGate.toLowerCase()) &&
       statusId !== getEffectiveIssueStatus(issue as any).id

@@ -12454,7 +12454,22 @@ async function _handleJiraPgApi(
         const DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE = ['migration', 'dev', 'infra', 'qa'];
         const isNoOpQueueStatus = !!body.queueStatusId && fromDept
           && deptMapGet(deptStatusesForGate, fromDept)?.id === body.queueStatusId;
-        if (fromDept && DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(fromDept.trim().toLowerCase()) && !isNoOpQueueStatus) {
+        // Exempt specifically the "starting work" transition (todo ->
+        // in_progress, e.g. Open -> In Progress) -- by explicit follow-up
+        // request, nothing has actually been worked on yet at that point,
+        // so there's nothing real to log. Every OTHER transition, including
+        // leaving in_progress again right after, still requires one.
+        const fromCategoryForWorklogGate = fromDept ? (deptMapGet(deptStatusesForGate, fromDept)?.category
+          ?? (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId)?.category ?? null) : null;
+        let toCategoryForWorklogGate: string | null = null;
+        if (body.queueStatusId) {
+          toCategoryForWorklogGate = body.queueStatusCategory ? String(body.queueStatusCategory) : null;
+        } else if (body.statusId) {
+          const targetStForWorklogGate = await db.status.findUnique({ where: { id: String(body.statusId) } });
+          toCategoryForWorklogGate = targetStForWorklogGate?.category ?? null;
+        }
+        const isStartingWork = fromCategoryForWorklogGate === 'todo' && toCategoryForWorklogGate === 'in_progress';
+        if (fromDept && DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(fromDept.trim().toLowerCase()) && !isNoOpQueueStatus && !isStartingWork) {
           const wlCheckForGate = await pool.query(
             `SELECT 1 FROM issue_worklogs WHERE "issueId" = $1 AND LOWER(department) = LOWER($2) AND "createdAt" > $3 LIMIT 1`,
             [issue.id, fromDept, issue.updatedAt],
