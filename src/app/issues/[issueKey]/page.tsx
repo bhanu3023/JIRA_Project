@@ -1556,28 +1556,21 @@ export default function IssueDetailPage() {
     // Check if moving to a "done" category status — validate required fields
     const targetStatus = spaceStatuses.find(s => s.id === statusId);
 
-    // Mandatory worklog before ANY status change on a department-queue
-    // ticket (Migration/Dev/Infra/QA) -- by explicit request: every single
-    // transition, not just a handoff or a resolve, needs at least one
-    // worklog entry logged against whichever department currently holds
-    // it, including the very first Open -> In Progress move. Scoped
+    // Mandatory worklog before EVERY status change on a department-queue
+    // ticket (Migration/Dev/Infra/QA) -- by explicit request: not just once
+    // per department, but every single time the status is changed, however
+    // many times that happens, including the very first Open -> In
+    // Progress move. Deliberately always fires (no "already logged one for
+    // this department, skip it next time" check) -- a fresh worklog entry
+    // is required for every transition, not just the first one. Scoped
     // naturally to real dept-queue tickets only: current_department is
     // never set on IA/SB/other non-queue boards, so they're unaffected.
     // Takes priority over the 'done'-category missing-fields check below --
     // worklog is always addressed first; handleWorklogGateSubmit retries
-    // this same function afterward, so a resolve still correctly prompts
-    // for Root Cause/Fix Description/etc. next if any of those are also
-    // still missing.
-    //
-    // skipWorklogGate: handleWorklogGateSubmit sets this on its retry call,
-    // right after it just logged the worklog this same check would
-    // otherwise look for. Without it, this check would read the `worklogs`
-    // state variable as it was captured in THIS closure at render time --
-    // setWorklogs() updating it moments earlier doesn't make the new value
-    // visible until the next render, so the retry kept seeing the old
-    // (empty) list and re-showing this same modal forever, even though the
-    // worklog genuinely had just been saved (confirmed for real: it showed
-    // up in the Worklog panel while the modal kept reopening).
+    // this same function afterward (with skipWorklogGate, since it just
+    // logged one itself), so a resolve still correctly prompts for Root
+    // Cause/Fix Description/etc. next if any of those are also still
+    // missing.
     const currentDeptForWorklogGate = ((issue as any)?.current_department || '').trim();
     const DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE = ['migration', 'dev', 'infra', 'qa'];
     if (
@@ -1586,11 +1579,8 @@ export default function IssueDetailPage() {
       DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(currentDeptForWorklogGate.toLowerCase()) &&
       statusId !== getEffectiveIssueStatus(issue as any).id
     ) {
-      const hasWorklogForDept = worklogs.some((w: any) => (w.department || '').trim().toLowerCase() === currentDeptForWorklogGate.toLowerCase());
-      if (!hasWorklogForDept) {
-        setWorklogRequiredModal({ pendingStatusId: statusId });
-        return;
-      }
+      setWorklogRequiredModal({ pendingStatusId: statusId });
+      return;
     }
 
     if (targetStatus?.category === 'done') {

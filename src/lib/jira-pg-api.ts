@@ -12418,15 +12418,13 @@ async function _handleJiraPgApi(
       } catch { /* fail open on lookup errors, same as the queue-authorization check above */ }
     }
 
-    // Mandatory worklog before ANY status change on a department-queue
-    // ticket (Migration, Dev, Infra, QA) -- by explicit request, broadened
-    // from the original narrower rule (only an in_progress -> routed-away
-    // handoff required it): every single transition, including the very
-    // first Open -> In Progress move and resolving, now needs at least one
-    // worklog entry logged against whichever department currently holds
-    // the ticket. Checked once here, ahead of either transition
-    // implementation further below (the queueStatusId branch's own
-    // dept_statuses handling, or the plain statusId branch's db.status
+    // Mandatory worklog before EVERY status change on a department-queue
+    // ticket (Migration, Dev, Infra, QA) -- by explicit request: not just
+    // once per department, but every single time the status changes,
+    // however many times that happens, including the very first Open -> In
+    // Progress move and resolving. Checked once here, ahead of either
+    // transition implementation further below (the queueStatusId branch's
+    // own dept_statuses handling, or the plain statusId branch's db.status
     // lookup), so a rejected request never touches dept_statuses/
     // current_department/issue_worklogs at all -- the ticket is left
     // exactly as it was. Admins and internal/automated jobs (round-robin
@@ -12435,6 +12433,19 @@ async function _handleJiraPgApi(
     // queue status again (a genuine no-op) is left alone; the plain-status
     // case already only reaches this block when statusId actually differs
     // (see the outer condition).
+    //
+    // Requires a worklog logged AFTER issue.updatedAt (this ticket's state
+    // as fetched at the top of this handler, i.e. its timestamp from the
+    // PREVIOUS update/status-change) rather than just "any worklog ever
+    // exists" -- otherwise, once a single worklog existed for a department,
+    // every later status change would silently pass this check with
+    // nothing fresh logged against it, which is exactly the gap that let a
+    // ticket get moved through several statuses in a row after only ever
+    // being asked once. This is also the ONLY enforcement point for status
+    // changes made from the queue/board list view's quick status dropdown
+    // (a separate code path on the frontend with no worklog-prompt UI of
+    // its own, unlike the ticket detail page's modal) -- fixing it here
+    // closes the gap there too, not just on the detail page.
     if (!isAdmin && !isInternalJob && (body.queueStatusId || (body.statusId !== undefined && body.statusId !== null && body.statusId !== issue.statusId))) {
       try {
         const deptRowForWorklogGate = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE id=$1 LIMIT 1`, [issue.id]);
@@ -12445,8 +12456,8 @@ async function _handleJiraPgApi(
           && deptMapGet(deptStatusesForGate, fromDept)?.id === body.queueStatusId;
         if (fromDept && DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(fromDept.trim().toLowerCase()) && !isNoOpQueueStatus) {
           const wlCheckForGate = await pool.query(
-            `SELECT 1 FROM issue_worklogs WHERE "issueId" = $1 AND LOWER(department) = LOWER($2) LIMIT 1`,
-            [issue.id, fromDept],
+            `SELECT 1 FROM issue_worklogs WHERE "issueId" = $1 AND LOWER(department) = LOWER($2) AND "createdAt" > $3 LIMIT 1`,
+            [issue.id, fromDept, issue.updatedAt],
           );
           if (!wlCheckForGate.rows.length) {
             return json({ error: `Log work against this ticket in ${fromDept} before changing its status.` }, 400);
