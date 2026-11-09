@@ -12450,42 +12450,54 @@ async function _handleJiraPgApi(
       try {
         const deptRowForWorklogGate = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE id=$1 LIMIT 1`, [issue.id]);
         const fromDept: string | null = deptRowForWorklogGate.rows[0]?.current_department || null;
-        const deptStatusesForGate = deptRowForWorklogGate.rows[0]?.dept_statuses || {};
         const DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE = ['migration', 'dev', 'infra', 'qa'];
-        const isNoOpQueueStatus = !!body.queueStatusId && fromDept
-          && deptMapGet(deptStatusesForGate, fromDept)?.id === body.queueStatusId;
-        // Exempt specifically the "starting work" transition (todo ->
-        // in_progress, e.g. Open -> In Progress) -- by explicit follow-up
-        // request, nothing has actually been worked on yet at that point,
-        // so there's nothing real to log. Every OTHER transition, including
-        // leaving in_progress again right after, still requires one.
-        const fromCategoryForWorklogGate = fromDept ? (deptMapGet(deptStatusesForGate, fromDept)?.category
-          ?? (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId)?.category ?? null) : null;
-        let toCategoryForWorklogGate: string | null = null;
-        if (body.queueStatusId) {
-          toCategoryForWorklogGate = body.queueStatusCategory ? String(body.queueStatusCategory) : null;
-        } else if (body.statusId) {
-          const targetStForWorklogGate = await db.status.findUnique({ where: { id: String(body.statusId) } });
-          toCategoryForWorklogGate = targetStForWorklogGate?.category ?? null;
-        }
-        // Category values aren't consistently spelled across this data set --
-        // confirmed for real that 32 of 43 "in progress"-shaped status rows
-        // in TESTIN store "in-progress" (hyphen) while the rest use
-        // "in_progress" (underscore); same for a handful of dept_statuses
-        // entries. Normalize both sides before comparing, or this exemption
-        // silently never matched for any status using the hyphenated
-        // spelling -- confirmed for real on CF-35078's QA status row
-        // (status_qa_inprogress, category "in-progress").
-        const normalizeCategoryForGate = (c: unknown) => String(c || '').replace(/-/g, '_');
-        const isStartingWork = normalizeCategoryForGate(fromCategoryForWorklogGate) === 'todo'
-          && normalizeCategoryForGate(toCategoryForWorklogGate) === 'in_progress';
-        if (fromDept && DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(fromDept.trim().toLowerCase()) && !isNoOpQueueStatus && !isStartingWork) {
-          const wlCheckForGate = await pool.query(
-            `SELECT 1 FROM issue_worklogs WHERE "issueId" = $1 AND LOWER(department) = LOWER($2) AND "createdAt" > $3 LIMIT 1`,
-            [issue.id, fromDept, issue.updatedAt],
-          );
-          if (!wlCheckForGate.rows.length) {
-            return json({ error: `Log work against this ticket in ${fromDept} before changing its status.` }, 400);
+        // Skip everything else immediately (no further queries at all) for
+        // the common case of a ticket that will never be gated -- IA/SB/
+        // ITS, or anything not currently in Migration/Dev/Infra/QA. This
+        // used to run a second query (db.status.findUnique, just to read a
+        // category this handler already has loaded) and a third
+        // (issue_worklogs) unconditionally once this far, adding real
+        // latency to every single status change regardless of whether the
+        // gate could even apply -- confirmed for real as the cause of a
+        // reported slowdown after this gate was added.
+        if (fromDept && DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(fromDept.trim().toLowerCase())) {
+          const deptStatusesForGate = deptRowForWorklogGate.rows[0]?.dept_statuses || {};
+          const isNoOpQueueStatus = !!body.queueStatusId
+            && deptMapGet(deptStatusesForGate, fromDept)?.id === body.queueStatusId;
+          // Exempt specifically the "starting work" transition (todo ->
+          // in_progress, e.g. Open -> In Progress) -- by explicit
+          // follow-up request, nothing has actually been worked on yet at
+          // that point, so there's nothing real to log. Every OTHER
+          // transition, including leaving in_progress again right after,
+          // still requires one.
+          const fromCategoryForWorklogGate = deptMapGet(deptStatusesForGate, fromDept)?.category
+            ?? (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId)?.category ?? null;
+          // issue.space.statuses already holds every real status for this
+          // space (fetched once at the top of this handler) -- reading the
+          // target's category from there instead of a fresh
+          // db.status.findUnique call saves a whole round trip.
+          const toCategoryForWorklogGate = body.queueStatusId
+            ? (body.queueStatusCategory ? String(body.queueStatusCategory) : null)
+            : (body.statusId ? (issue.space?.statuses ?? []).find((s: any) => s.id === String(body.statusId))?.category ?? null : null);
+          // Category values aren't consistently spelled across this data set --
+          // confirmed for real that 32 of 43 "in progress"-shaped status rows
+          // in TESTIN store "in-progress" (hyphen) while the rest use
+          // "in_progress" (underscore); same for a handful of dept_statuses
+          // entries. Normalize both sides before comparing, or this exemption
+          // silently never matched for any status using the hyphenated
+          // spelling -- confirmed for real on CF-35078's QA status row
+          // (status_qa_inprogress, category "in-progress").
+          const normalizeCategoryForGate = (c: unknown) => String(c || '').replace(/-/g, '_');
+          const isStartingWork = normalizeCategoryForGate(fromCategoryForWorklogGate) === 'todo'
+            && normalizeCategoryForGate(toCategoryForWorklogGate) === 'in_progress';
+          if (!isNoOpQueueStatus && !isStartingWork) {
+            const wlCheckForGate = await pool.query(
+              `SELECT 1 FROM issue_worklogs WHERE "issueId" = $1 AND LOWER(department) = LOWER($2) AND "createdAt" > $3 LIMIT 1`,
+              [issue.id, fromDept, issue.updatedAt],
+            );
+            if (!wlCheckForGate.rows.length) {
+              return json({ error: `Log work against this ticket in ${fromDept} before changing its status.` }, 400);
+            }
           }
         }
       } catch { /* fail open on lookup errors, same as the checks above */ }
