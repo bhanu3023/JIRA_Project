@@ -14243,6 +14243,19 @@ async function _handleJiraPgApi(
     const authorUser = await getCachedUser(userId);
     const id = rid();
     const workDate = body.workDate ? new Date(String(body.workDate)) : new Date();
+    // Bump the ticket's updatedAt (so it re-sorts as recently active) BEFORE
+    // inserting the worklog, not after -- the mandatory-worklog gate on the
+    // PATCH handler requires a worklog logged AFTER issue.updatedAt to prove
+    // it's fresh since the last change. With the UPDATE running after the
+    // INSERT (the original order), that bump landed strictly later than the
+    // worklog's own createdAt on every single call, which made the worklog
+    // that was JUST logged to satisfy that gate permanently look stale
+    // relative to it -- confirmed for real: the gate kept re-asking forever
+    // no matter how many entries were logged, even though they were
+    // genuinely saved (visible in the Worklog panel the whole time).
+    // Awaited (not fire-and-forget like before) so the ordering is actually
+    // guaranteed, not just usually-true.
+    await pool.query(`UPDATE issues SET "updatedAt"=NOW() WHERE id=$1`, [issue.id]).catch(() => {});
     const result = await pool.query(
       `INSERT INTO issue_worklogs (id, "issueId", department, "timeSpentMinutes", description, "workDate", "authorId", "authorName", "authorEmail", "createdAt")
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) RETURNING *`,
@@ -14255,7 +14268,6 @@ async function _handleJiraPgApi(
         authorUser?.email ?? null,
       ]
     );
-    pool.query(`UPDATE issues SET "updatedAt"=NOW() WHERE id=$1`, [issue.id]).catch(() => {});
     return json(result.rows[0]);
   }
 
