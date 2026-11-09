@@ -386,10 +386,24 @@ export async function exchangeMicrosoftCode(code: string, redirectUri: string, m
   // ── 1. Try id_token claims first (no extra network call) ───────────────────
   let email = '';
   let name  = '';
+  let tenantId = '';
   if (data.id_token && typeof data.id_token === 'string') {
     const claims = decodeJwtPayload(data.id_token);
+    tenantId = String(claims.tid || '');
     email = String(claims.email || claims.preferred_username || claims.upn || '').toLowerCase();
     name  = String(claims.name || '');
+  }
+
+  // Login is only accepted from our own Microsoft tenant(s). The authorize/token
+  // endpoints use /common, so without this any organisation's account -- whose
+  // email claim that organisation controls -- would reach the email-based lookup.
+  if (mode === 'login') {
+    const allowed = (process.env.MICROSOFT_ALLOWED_TENANTS || process.env.MICROSOFT_TENANT_ID || '')
+      .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (!tenantId || !allowed.includes(tenantId.toLowerCase())) {
+      console.warn(`[OAuthService] login rejected: tenant ${tenantId || '(none)'} not in allowed list`);
+      return null;
+    }
   }
 
   // ── 2. Fallback: call MS Graph /me ─────────────────────────────────────────

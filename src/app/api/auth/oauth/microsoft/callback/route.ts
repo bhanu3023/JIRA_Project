@@ -120,11 +120,11 @@ export async function GET(req: NextRequest) {
 
     try {
       let user = await db.user.findUnique({ where: { email: rawEmail } });
-      if (!user) {
-        const localPart = rawEmail.split('@')[0];
-        const candidates = await db.user.findMany({ where: { email: { startsWith: localPart + '@' } }, take: 1 });
-        user = candidates[0] ?? null;
-      }
+      // Was previously a fuzzy fallback here (match any user whose email
+      // local-part matched, across any domain) when no exact match was
+      // found -- removed for exact-match-only login: that fallback could
+      // log a Microsoft account into a DIFFERENT, unrelated user's account
+      // purely because the part before "@" happened to coincide.
       // Same gap as /auth/login's password path, same fix: status (raw
       // column) distinguishes a fresh invite that's never logged in yet
       // ('invited') from an account an admin explicitly disabled later
