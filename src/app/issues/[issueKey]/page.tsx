@@ -607,10 +607,10 @@ export default function IssueDetailPage() {
     }
   };
 
-  // Logs the work AND then re-runs the handoff that triggered the gate --
-  // the retried handleStatusChange call re-checks everything from scratch,
-  // but this time a worklog for the current department exists, so it falls
-  // through and actually changes the status.
+  // Logs the work AND then re-runs the change that triggered the gate --
+  // passing skipWorklogGate=true since the worklog state array won't
+  // actually reflect what was just logged until the next render (see the
+  // comment on handleStatusChange's skipWorklogGate param).
   const handleWorklogGateSubmit = async () => {
     if (!worklogRequiredModal) return;
     setWorklogGateError('');
@@ -629,7 +629,7 @@ export default function IssueDetailPage() {
       setWorklogRequiredModal(null);
       const freshWorklogs = await api.getWorklogs(issueKey).catch(() => []);
       setWorklogs(Array.isArray(freshWorklogs) ? freshWorklogs : []);
-      await handleStatusChange(pendingStatusId);
+      await handleStatusChange(pendingStatusId, true);
     } catch (e: any) {
       setWorklogGateError(e?.message || 'Failed to log work. Please try again.');
     } finally {
@@ -1551,7 +1551,7 @@ export default function IssueDetailPage() {
     return missing;
   };
 
-  const handleStatusChange = async (statusId: string) => {
+  const handleStatusChange = async (statusId: string, skipWorklogGate = false) => {
     setShowStatusDropdown(false);
     // Check if moving to a "done" category status — validate required fields
     const targetStatus = spaceStatuses.find(s => s.id === statusId);
@@ -1568,9 +1568,20 @@ export default function IssueDetailPage() {
     // this same function afterward, so a resolve still correctly prompts
     // for Root Cause/Fix Description/etc. next if any of those are also
     // still missing.
+    //
+    // skipWorklogGate: handleWorklogGateSubmit sets this on its retry call,
+    // right after it just logged the worklog this same check would
+    // otherwise look for. Without it, this check would read the `worklogs`
+    // state variable as it was captured in THIS closure at render time --
+    // setWorklogs() updating it moments earlier doesn't make the new value
+    // visible until the next render, so the retry kept seeing the old
+    // (empty) list and re-showing this same modal forever, even though the
+    // worklog genuinely had just been saved (confirmed for real: it showed
+    // up in the Worklog panel while the modal kept reopening).
     const currentDeptForWorklogGate = ((issue as any)?.current_department || '').trim();
     const DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE = ['migration', 'dev', 'infra', 'qa'];
     if (
+      !skipWorklogGate &&
       currentDeptForWorklogGate &&
       DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(currentDeptForWorklogGate.toLowerCase()) &&
       statusId !== getEffectiveIssueStatus(issue as any).id
