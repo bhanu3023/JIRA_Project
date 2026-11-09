@@ -2005,7 +2005,7 @@ function generateApiToken(): string {
 }
 
 /** Resolve userId Ã¢â‚¬â€ verifies JWT signature + DB session, rejects forged tokens */
-async function resolveUserId(auth: string | null, reqIp?: string): Promise<string | null> {
+async function resolveUserId(auth: string | null, reqIp?: string, fromRealHeader?: boolean): Promise<string | null> {
   if (!auth?.startsWith('Bearer ')) return null;
   const t = auth.slice(7).trim();
 
@@ -2017,8 +2017,24 @@ async function resolveUserId(auth: string | null, reqIp?: string): Promise<strin
   // target's id trivially available from GET /users. Removed entirely --
   // every real caller already uses a signed JWT (starts with "eyJ") below.
 
-  // Signed JWT tokens (new format -- starts with eyJ)
+  // Signed JWT tokens (new format -- starts with eyJ). The call site below
+  // funnels the httpOnly cookie's value through this same `auth` string
+  // (wrapped as "Bearer <cookie>") for convenience -- fromRealHeader is how
+  // this function tells that apart from a literal Authorization header. A
+  // session JWT is a bearer credential with no binding to the browser that
+  // issued it: anyone who ever captures its raw value (a proxy/debugging
+  // tool, a misconfigured log, a compromised dependency reading
+  // document.cookie's neighbors, etc.) could previously replay it directly
+  // as `Authorization: Bearer <stolen jwt>` from curl/Postman/anywhere,
+  // fully equivalent to stealing the session but without any of the
+  // httpOnly/SameSite protections a real cookie gets. Confirmed via a
+  // security audit. Now rejected outright when it arrives as a real header
+  // -- a session JWT only ever authenticates via the cookie it was issued
+  // in. Personal API tokens (nta_, below) are unaffected: headers are the
+  // only place those are ever sent, by design, and they're a separate,
+  // independently-revocable secret, not the session token.
   if (t.startsWith('eyJ')) {
+    if (fromRealHeader) return null;
     try {
       const jwt = require('jsonwebtoken');
       const payload = jwt.verify(t, JWT_SECRET, { algorithms: ['HS256'] }) as {
@@ -6444,7 +6460,7 @@ async function _handleJiraPgApi(
     || req.headers.get('x-real-ip')
     || '0.0.0.0';
   const clientUA = req.headers.get('user-agent') || '';
-  const userId = await resolveUserId(auth, clientIp);
+  const userId = await resolveUserId(auth, clientIp, hasRealHeaderToken);
   if (userId && isRateLimited(userId)) {
     return json({ error: 'Too many requests. Please slow down and try again shortly.' }, 429);
   }

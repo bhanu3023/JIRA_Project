@@ -29,18 +29,19 @@ function readSessionCookie(req: Request): string | null {
 }
 
 export async function requireAdmin(req: Request): Promise<{ ok: true; userId: string } | { ok: false; status: number; error: string }> {
-  // Prefer the Authorization header (explicit callers) but fall back to the
-  // httpOnly session cookie, same as jira-pg-api.ts's resolveUserId -- a
-  // cookie-based session (no token in localStorage at all) would otherwise
-  // send an empty/missing Authorization header here and get rejected.
-  const headerAuth = req.headers.get('authorization');
-  // A literal "Bearer " with nothing after it (sent by a cookie-based
-  // session whose frontend call still unconditionally attaches
-  // `Bearer ${localStorage.getItem('jira_token') || ''}`) must NOT win over
-  // a real cookie -- .slice(7).trim() on it is an empty string, which is
-  // falsy, so the `||` below already falls through to the cookie correctly.
-  const headerToken = headerAuth?.startsWith('Bearer ') ? headerAuth.slice(7).trim() : '';
-  const token = headerToken || readSessionCookie(req);
+  // Only the httpOnly session cookie authenticates here now -- this used to
+  // also accept the same session JWT via a literal Authorization header,
+  // preferred over the cookie. This file doesn't support personal API
+  // tokens at all (only ever verifies the "eyJ" session-JWT format), so
+  // that header path existed purely to replay the exact token the cookie
+  // already carries. Anyone who ever captured that raw JWT value (a proxy/
+  // debugging tool, a misconfigured log, etc.) could send it straight back
+  // as `Authorization: Bearer <stolen jwt>` from curl/Postman/anywhere,
+  // fully equivalent to stealing the session but with none of the
+  // httpOnly/SameSite protections a real cookie gets. Confirmed via a
+  // security audit. The cookie is sent automatically by the browser on
+  // every same-origin request, so legitimate callers are unaffected.
+  const token = readSessionCookie(req);
   if (!token) return { ok: false, status: 401, error: 'Unauthorized' };
   if (!token.startsWith('eyJ')) return { ok: false, status: 401, error: 'Unauthorized' };
 
