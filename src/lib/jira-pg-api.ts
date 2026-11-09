@@ -12468,7 +12468,17 @@ async function _handleJiraPgApi(
           const targetStForWorklogGate = await db.status.findUnique({ where: { id: String(body.statusId) } });
           toCategoryForWorklogGate = targetStForWorklogGate?.category ?? null;
         }
-        const isStartingWork = fromCategoryForWorklogGate === 'todo' && toCategoryForWorklogGate === 'in_progress';
+        // Category values aren't consistently spelled across this data set --
+        // confirmed for real that 32 of 43 "in progress"-shaped status rows
+        // in TESTIN store "in-progress" (hyphen) while the rest use
+        // "in_progress" (underscore); same for a handful of dept_statuses
+        // entries. Normalize both sides before comparing, or this exemption
+        // silently never matched for any status using the hyphenated
+        // spelling -- confirmed for real on CF-35078's QA status row
+        // (status_qa_inprogress, category "in-progress").
+        const normalizeCategoryForGate = (c: unknown) => String(c || '').replace(/-/g, '_');
+        const isStartingWork = normalizeCategoryForGate(fromCategoryForWorklogGate) === 'todo'
+          && normalizeCategoryForGate(toCategoryForWorklogGate) === 'in_progress';
         if (fromDept && DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(fromDept.trim().toLowerCase()) && !isNoOpQueueStatus && !isStartingWork) {
           const wlCheckForGate = await pool.query(
             `SELECT 1 FROM issue_worklogs WHERE "issueId" = $1 AND LOWER(department) = LOWER($2) AND "createdAt" > $3 LIMIT 1`,

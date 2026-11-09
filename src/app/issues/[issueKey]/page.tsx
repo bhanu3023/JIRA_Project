@@ -1555,6 +1555,20 @@ export default function IssueDetailPage() {
     setShowStatusDropdown(false);
     // Check if moving to a "done" category status — validate required fields
     const targetStatus = spaceStatuses.find(s => s.id === statusId);
+    // Defense in depth: the server is the authoritative source for the
+    // mandatory-worklog gate below and can reject a change this function's
+    // own pre-check let through (e.g. a stale local `issue` snapshot after
+    // an earlier optimistic update's background loadIssue() hadn't landed
+    // yet when this was clicked -- confirmed for real on CF-35078). Without
+    // this, that rejection just showed a dead-end native alert() with no
+    // way to act on it; recovering into the same worklog modal here means
+    // logging work and retrying always works regardless of what caused the
+    // client-side check to be wrong.
+    const isWorklogGateError = (msg: unknown) => /^Log work against this ticket in .+ before changing its status\.$/.test(String(msg || ''));
+    const handleStatusChangeError = (err: any) => {
+      if (isWorklogGateError(err?.message)) { setWorklogRequiredModal({ pendingStatusId: statusId }); return; }
+      alert(err?.message || 'Failed to change status.');
+    };
 
     // Mandatory worklog before EVERY status change on a department-queue
     // ticket (Migration/Dev/Infra/QA) -- by explicit request: not just once
@@ -1576,7 +1590,15 @@ export default function IssueDetailPage() {
     // any of those are also still missing.
     const currentDeptForWorklogGate = ((issue as any)?.current_department || '').trim();
     const DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE = ['migration', 'dev', 'infra', 'qa'];
-    const isStartingWork = getEffectiveIssueStatus(issue as any).category === 'todo' && targetStatus?.category === 'in_progress';
+    // Category values aren't consistently spelled across this data set --
+    // confirmed for real that 32 of 43 "in progress"-shaped status rows in
+    // TESTIN store "in-progress" (hyphen) while the rest use "in_progress"
+    // (underscore); same for a handful of dept_statuses entries. Normalize
+    // both sides before comparing, or this exemption silently never matched
+    // for any status using the hyphenated spelling.
+    const normalizeCategory = (c: unknown) => String(c || '').replace(/-/g, '_');
+    const isStartingWork = normalizeCategory(getEffectiveIssueStatus(issue as any).category) === 'todo'
+      && normalizeCategory(targetStatus?.category) === 'in_progress';
     if (
       !skipWorklogGate &&
       !isStartingWork &&
@@ -1675,7 +1697,7 @@ export default function IssueDetailPage() {
           useStore.setState(s => ({
             currentIssue: s.currentIssue ? { ...s.currentIssue, dept_statuses: prevDeptStatuses, current_department: prevDepartment } as any : s.currentIssue,
           }));
-          alert(err?.message || 'Failed to change status.');
+          handleStatusChangeError(err);
         } finally {
           pendingUpdateRef.current = false;
         }
@@ -1697,7 +1719,7 @@ export default function IssueDetailPage() {
           ...(routedMatch ? { current_department: routedMatch[1].trim() } : {}),
         }
       : undefined,
-      (err: any) => { alert(err?.message || 'Failed to change status.'); }
+      handleStatusChangeError
     );
   };
 
