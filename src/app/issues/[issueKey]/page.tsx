@@ -407,7 +407,7 @@ export default function IssueDetailPage() {
   // this authoritatively too (see its own comment on the PATCH handler); this
   // modal exists so the user gets a clear "log work to continue" prompt
   // instead of a generic alert() after a rejected request.
-  const [worklogRequiredModal, setWorklogRequiredModal] = useState<{ pendingStatusId: string; targetDept: string } | null>(null);
+  const [worklogRequiredModal, setWorklogRequiredModal] = useState<{ pendingStatusId: string } | null>(null);
   const [worklogGateHours, setWorklogGateHours] = useState('');
   const [worklogGateDesc, setWorklogGateDesc] = useState('');
   const [worklogGateDate, setWorklogGateDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -1544,13 +1544,10 @@ export default function IssueDetailPage() {
       const val = (cfEntry ? customFieldValues[cfEntry.id] : null) || (issue as any)?.[f.key];
       if (!val || val.toString().trim() === '') missing.push(f.name);
     }
-    // Worklog -- same scope as Root Cause/Fix Description (Dev/Migration
-    // only, by explicit request): at least one time-logged entry must
-    // exist before resolving, so a ticket can't close with zero recorded
-    // work against it.
-    if ((deptLower === 'dev' || deptLower === 'migration') && worklogs.length === 0) {
-      missing.push('Worklog');
-    }
+    // Worklog is no longer checked here -- handleStatusChange's own
+    // worklogRequiredModal gate now covers it for every status change
+    // (including resolving) across all four dept-queue departments
+    // (Migration/Dev/Infra/QA), not just Dev/Migration at resolve time.
     return missing;
   };
 
@@ -1558,6 +1555,33 @@ export default function IssueDetailPage() {
     setShowStatusDropdown(false);
     // Check if moving to a "done" category status — validate required fields
     const targetStatus = spaceStatuses.find(s => s.id === statusId);
+
+    // Mandatory worklog before ANY status change on a department-queue
+    // ticket (Migration/Dev/Infra/QA) -- by explicit request: every single
+    // transition, not just a handoff or a resolve, needs at least one
+    // worklog entry logged against whichever department currently holds
+    // it, including the very first Open -> In Progress move. Scoped
+    // naturally to real dept-queue tickets only: current_department is
+    // never set on IA/SB/other non-queue boards, so they're unaffected.
+    // Takes priority over the 'done'-category missing-fields check below --
+    // worklog is always addressed first; handleWorklogGateSubmit retries
+    // this same function afterward, so a resolve still correctly prompts
+    // for Root Cause/Fix Description/etc. next if any of those are also
+    // still missing.
+    const currentDeptForWorklogGate = ((issue as any)?.current_department || '').trim();
+    const DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE = ['migration', 'dev', 'infra', 'qa'];
+    if (
+      currentDeptForWorklogGate &&
+      DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(currentDeptForWorklogGate.toLowerCase()) &&
+      statusId !== getEffectiveIssueStatus(issue as any).id
+    ) {
+      const hasWorklogForDept = worklogs.some((w: any) => (w.department || '').trim().toLowerCase() === currentDeptForWorklogGate.toLowerCase());
+      if (!hasWorklogForDept) {
+        setWorklogRequiredModal({ pendingStatusId: statusId });
+        return;
+      }
+    }
+
     if (targetStatus?.category === 'done') {
       const missing: string[] = getMissingCoreFields();
 
@@ -1580,25 +1604,6 @@ export default function IssueDetailPage() {
 
       if (missing.length > 0) {
         setMandatoryModal({ missingFields: missing, pendingStatusId: statusId, context: 'resolve' });
-        return;
-      }
-    }
-    // Mandatory worklog before an In Progress -> "Routed to X"/"Waiting for X"
-    // handoff, in every department/queue alike -- by explicit request. Only a
-    // genuine in_progress -> routed-away transition is gated: resolving
-    // (handled above), reopening a done ticket into "Routed to X", or picking
-    // the department it's already in are all left alone, same scope as the
-    // backend's own enforcement of this (see its comment on the PATCH handler).
-    const handoffMatchForWorklogGate = targetStatus?.name?.match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
-    const currentDeptForWorklogGate = ((issue as any)?.current_department || '').trim();
-    if (
-      handoffMatchForWorklogGate &&
-      getEffectiveIssueStatus(issue as any).category === 'in_progress' &&
-      handoffMatchForWorklogGate[1].trim().toLowerCase() !== currentDeptForWorklogGate.toLowerCase()
-    ) {
-      const hasWorklogForDept = worklogs.some((w: any) => (w.department || '').trim().toLowerCase() === currentDeptForWorklogGate.toLowerCase());
-      if (!hasWorklogForDept) {
-        setWorklogRequiredModal({ pendingStatusId: statusId, targetDept: handoffMatchForWorklogGate[1].trim() });
         return;
       }
     }
@@ -4748,7 +4753,7 @@ export default function IssueDetailPage() {
         </div>
       )}
 
-      {/* Mandatory worklog before an In Progress -> Routed to X handoff */}
+      {/* Mandatory worklog before ANY status change on a dept-queue ticket */}
       {worklogRequiredModal && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4" style={{ background: 'rgba(9,30,66,0.54)' }}>
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
@@ -4757,9 +4762,9 @@ export default function IssueDetailPage() {
                 <AlertTriangle size={18} className="text-orange-600" />
               </div>
               <div>
-                <h3 className="text-[15px] font-bold text-gray-900">Log work before routing</h3>
+                <h3 className="text-[15px] font-bold text-gray-900">Log work before continuing</h3>
                 <p className="text-[12.5px] text-gray-500 mt-0.5">
-                  Log time against this ticket before routing it to {worklogRequiredModal.targetDept}.
+                  Log time against this ticket before changing its status.
                 </p>
               </div>
             </div>

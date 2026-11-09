@@ -12418,42 +12418,38 @@ async function _handleJiraPgApi(
       } catch { /* fail open on lookup errors, same as the queue-authorization check above */ }
     }
 
-    // Mandatory worklog before an In Progress -> "Routed to X"/"Waiting for X"
-    // handoff, in every queue alike (Migration, Dev, Infra, QA, ...) -- by
-    // explicit request: a department can no longer hand a ticket onward with
-    // zero time logged against it while they had it. Checked once here, ahead
-    // of either handoff implementation further below (the queueStatusId
-    // branch's own dept_statuses handling, or the plain statusId branch's
-    // db.status lookup), so a rejected request never touches dept_statuses/
-    // current_department/issue_worklogs at all -- the ticket is left exactly
-    // as it was. Admins and internal/automated jobs (round-robin reassignment,
-    // migrations, etc.) bypass this, same as every other queue-level
-    // enforcement in this handler. Only a genuine in_progress -> routed-away
-    // transition is gated: picking the same status again, moving between two
-    // non-"routed to" statuses, or reopening a done ticket into "Routed to X"
-    // (a separate, already-paused case) are all left alone.
+    // Mandatory worklog before ANY status change on a department-queue
+    // ticket (Migration, Dev, Infra, QA) -- by explicit request, broadened
+    // from the original narrower rule (only an in_progress -> routed-away
+    // handoff required it): every single transition, including the very
+    // first Open -> In Progress move and resolving, now needs at least one
+    // worklog entry logged against whichever department currently holds
+    // the ticket. Checked once here, ahead of either transition
+    // implementation further below (the queueStatusId branch's own
+    // dept_statuses handling, or the plain statusId branch's db.status
+    // lookup), so a rejected request never touches dept_statuses/
+    // current_department/issue_worklogs at all -- the ticket is left
+    // exactly as it was. Admins and internal/automated jobs (round-robin
+    // reassignment, migrations, etc.) bypass this, same as every other
+    // queue-level enforcement in this handler. Picking the same custom
+    // queue status again (a genuine no-op) is left alone; the plain-status
+    // case already only reaches this block when statusId actually differs
+    // (see the outer condition).
     if (!isAdmin && !isInternalJob && (body.queueStatusId || (body.statusId !== undefined && body.statusId !== null && body.statusId !== issue.statusId))) {
       try {
         const deptRowForWorklogGate = await pool.query(`SELECT current_department, dept_statuses FROM issues WHERE id=$1 LIMIT 1`, [issue.id]);
         const fromDept: string | null = deptRowForWorklogGate.rows[0]?.current_department || null;
-        let fromCategory: string | null = null;
-        let targetName = '';
-        if (body.queueStatusId) {
-          fromCategory = fromDept ? (deptMapGet(deptRowForWorklogGate.rows[0]?.dept_statuses || {}, fromDept)?.category || null) : null;
-          targetName = String(body.queueStatusName || '');
-        } else {
-          fromCategory = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId)?.category || null;
-          const targetStForGate = await db.status.findUnique({ where: { id: String(body.statusId) } });
-          targetName = targetStForGate?.name || '';
-        }
-        const handoffMatchForGate = targetName.match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
-        if (fromCategory === 'in_progress' && fromDept && handoffMatchForGate && handoffMatchForGate[1].trim().toLowerCase() !== fromDept.trim().toLowerCase()) {
+        const deptStatusesForGate = deptRowForWorklogGate.rows[0]?.dept_statuses || {};
+        const DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE = ['migration', 'dev', 'infra', 'qa'];
+        const isNoOpQueueStatus = !!body.queueStatusId && fromDept
+          && deptMapGet(deptStatusesForGate, fromDept)?.id === body.queueStatusId;
+        if (fromDept && DEPTS_REQUIRING_WORKLOG_EVERY_CHANGE.includes(fromDept.trim().toLowerCase()) && !isNoOpQueueStatus) {
           const wlCheckForGate = await pool.query(
             `SELECT 1 FROM issue_worklogs WHERE "issueId" = $1 AND LOWER(department) = LOWER($2) LIMIT 1`,
             [issue.id, fromDept],
           );
           if (!wlCheckForGate.rows.length) {
-            return json({ error: `Log work against this ticket in ${fromDept} before routing it to ${handoffMatchForGate[1].trim()}.` }, 400);
+            return json({ error: `Log work against this ticket in ${fromDept} before changing its status.` }, 400);
           }
         }
       } catch { /* fail open on lookup errors, same as the checks above */ }
