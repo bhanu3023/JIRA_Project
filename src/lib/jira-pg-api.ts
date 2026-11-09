@@ -6471,6 +6471,20 @@ async function _handleJiraPgApi(
     if (!user || !user.password || !(await verifyPassword(password, user.password, user.id))) {
       return json({ error: 'Invalid email or password' }, 401);
     }
+    // status is a raw column (not in the Prisma schema) distinguishing a
+    // fresh invite that's never logged in yet ('invited') from an account an
+    // admin explicitly disabled later ('inactive') -- both share isActive=
+    // false, but only the first should auto-activate on a correct password.
+    // Before this fix, typing the right password reactivated EITHER one the
+    // same way: an admin deactivating someone (an offboarded employee, a
+    // compromised account, anyone whose access was deliberately revoked) did
+    // nothing permanent -- they could still log straight back in and flip
+    // themselves back to active. Confirmed via a security audit.
+    const statusRow = await pool.query(`SELECT status FROM users WHERE id=$1`, [user.id]).catch(() => ({ rows: [] as any[] }));
+    const rawStatus: string | null = statusRow.rows[0]?.status ?? null;
+    if (!user.isActive && rawStatus === 'inactive') {
+      return json({ error: 'This account has been deactivated. Please contact your admin for access.' }, 403);
+    }
     // First login: activate invited user
     if (!user.isActive) {
       await db.user.update({ where: { id: user.id }, data: { isActive: true } });

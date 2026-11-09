@@ -125,8 +125,22 @@ export async function GET(req: NextRequest) {
         const candidates = await db.user.findMany({ where: { email: { startsWith: localPart + '@' } }, take: 1 });
         user = candidates[0] ?? null;
       }
-      // Activate invited user on first Microsoft login + update avatar (both non-blocking)
+      // Same gap as /auth/login's password path, same fix: status (raw
+      // column) distinguishes a fresh invite that's never logged in yet
+      // ('invited') from an account an admin explicitly disabled later
+      // ('inactive'). Before this, a deactivated user's Microsoft account
+      // alone was enough to log straight back in and silently reactivate
+      // themselves here -- no password needed at all. Confirmed via a
+      // security audit.
       if (user && !user.isActive) {
+        const statusRow = await db.$queryRawUnsafe<{ status: string | null }[]>(
+          `SELECT status FROM users WHERE id=$1`, user.id
+        ).catch(() => [] as { status: string | null }[]);
+        if (statusRow[0]?.status === 'inactive') {
+          const msg = encodeURIComponent('This account has been deactivated. Please contact your admin for access.');
+          return NextResponse.redirect(`${appUrl}/auth/login?oauth_error=${msg}`);
+        }
+        // Activate invited user on first Microsoft login + update avatar (both non-blocking)
         db.$executeRawUnsafe(
           `UPDATE users SET "isActive"=true, status='active' WHERE id=$1`,
           user.id
