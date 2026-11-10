@@ -305,6 +305,10 @@ function TicketWorklogTab({ userId, allUsers }: {
   useEffect(load, [dateFrom, dateTo, userFilter]);
 
   const visibleEntries = activityFilter ? entries.filter((e) => e.activityType === activityFilter) : entries;
+  // Same summary as the Worklog tab, over the entries currently shown.
+  const visibleMinutes = visibleEntries.reduce((sum, e) => sum + (e.timeSpentMinutes || 0), 0);
+  const reporter = userFilter ? allUsers.find((u) => u.id === userFilter) : undefined;
+  const reporterLabel = reporter ? `${reporter.firstName || ''} ${reporter.lastName || ''}`.trim() || reporter.email || '' : '';
 
   const handleDelete = async (id: string) => {
     setEntries((prev) => prev.filter((e) => e.id !== id));
@@ -364,6 +368,27 @@ function TicketWorklogTab({ userId, allUsers }: {
           </button>
         )}
       </div>
+
+      {!loading && (
+        <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex items-center gap-6">
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">
+              {reporterLabel ? `${reporterLabel}'s total` : 'Total logged'}{activityFilter ? ` · ${activityFilter}` : ''}
+            </p>
+            <p className="text-[22px] font-bold text-gray-800">{visibleMinutes > 0 ? formatMinutes(visibleMinutes) : '0m'}</p>
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Entries</p>
+            <p className="text-[22px] font-bold text-gray-800">{visibleEntries.length}</p>
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Avg per entry</p>
+            <p className="text-[22px] font-bold text-gray-800">
+              {visibleEntries.length > 0 ? formatMinutes(Math.round(visibleMinutes / visibleEntries.length)) : '0m'}
+            </p>
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-8 text-center text-[13px] text-gray-400">Loading…</div>
