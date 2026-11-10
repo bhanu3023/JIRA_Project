@@ -277,7 +277,11 @@ class ApiClient {
   // Issues
   getIssues(params: Record<string, string> = {}) {
     const qs = new URLSearchParams(params).toString();
-    return this.request<{ issues: any[]; total: number; page: number; totalPages: number }>(`/issues?${qs}`);
+    return this.request<{
+      issues: any[]; total: number; page: number; totalPages: number;
+      // Only when params.productTypeCounts = '1'.
+      productTypeCounts?: { content: number; message: number; email: number; multiple: number; other: number; none: number };
+    }>(`/issues?${qs}`);
   }
   getIssue(key: string) { return this.request<any>(`/issues/${key}`); }
   createIssue(data: any) { return this.request<any>('/issues', { method: 'POST', body: JSON.stringify(data) }); }

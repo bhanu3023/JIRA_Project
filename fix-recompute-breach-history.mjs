@@ -38,6 +38,14 @@
 import pg from 'pg';
 import crypto from 'crypto';
 
+// issue_history."createdAt" is a timestamp WITHOUT time zone holding UTC (the
+// app container runs in UTC). pg reads and writes those in the process's own
+// time zone, and the server host is on IST -- so without this every time was
+// read 5h30m early (and printed as "IST" while really being UTC). Writes went
+// back the same way, so stored values were never shifted, but the override
+// cut-off below compares against real UTC instants.
+process.env.TZ = 'UTC';
+
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const APPLY = process.argv.includes('--apply');
 const keyArgIdx = process.argv.indexOf('--key');

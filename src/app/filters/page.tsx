@@ -1138,6 +1138,8 @@ export default function FiltersPage() {
   /* issues */
   const [issues, setIssues]   = useState<any[]>([]);
   const [total, setTotal]     = useState(0);
+  // Product Type split of all `total` matches (not just this page).
+  const [productCounts, setProductCounts] = useState<Record<string, number> | null>(null);
   // 1000, not 100 -- by request, a normal filtered view (hundreds of
   // matches) should show entirely on one screen with no clicking through
   // pages at all. This page used to fetch page=1/limit=100 unconditionally
@@ -1574,12 +1576,13 @@ export default function FiltersPage() {
           // issue objects with nested status/assignee/reporter), which is what made this
           // page take multiple seconds to load. 100 keeps a generous browsing window
           // while cutting the payload by ~90%.
-          const params = { ...buildFilterParams(), page: String(page), limit: String(PAGE_SIZE) };
-          const { issues: list, total: tot } = await api.getIssues(params);
+          const params = { ...buildFilterParams(), page: String(page), limit: String(PAGE_SIZE), productTypeCounts: '1' };
+          const { issues: list, total: tot, productTypeCounts } = await api.getIssues(params);
           if (cancelled) return;
           setIssues(list as any[]);
           setTotal(tot);
-        } catch { if (!cancelled) { setIssues([]); setTotal(0); } }
+          setProductCounts(productTypeCounts ?? null);
+        } catch { if (!cancelled) { setIssues([]); setTotal(0); setProductCounts(null); } }
         if (!cancelled) setLoadingIssues(false);
       })();
     }, 150);
@@ -2500,9 +2503,29 @@ export default function FiltersPage() {
       {!showSavedPanel && <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
         {/* table header */}
         <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-5 py-2.5">
-          <p className="text-[12.5px] font-semibold text-gray-600">
-            {loadingIssues ? 'Loading…' : `${total.toLocaleString()} issue${total !== 1 ? 's' : ''}`}
-          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <p className="text-[12.5px] font-semibold text-gray-600">
+              {loadingIssues ? 'Loading…' : `${total.toLocaleString()} issue${total !== 1 ? 's' : ''}`}
+            </p>
+            {/* Content / Message / Email / Multiple always show; Other and
+                No product type only when there are any, so the numbers
+                always add up to the total. */}
+            {!loadingIssues && productCounts && total > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {([
+                  ['content', 'Content'], ['message', 'Message'], ['email', 'Email'],
+                  ['multiple', 'Multiple'], ['other', 'Other'], ['none', 'No product type'],
+                ] as const)
+                  .filter(([k]) => ['content', 'message', 'email', 'multiple'].includes(k) || (productCounts[k] || 0) > 0)
+                  .map(([k, label]) => (
+                    <span key={k} className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[11.5px] text-gray-600">
+                      {label}
+                      <span className="font-semibold text-gray-800">{(productCounts[k] || 0).toLocaleString()}</span>
+                    </span>
+                  ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {loadingIssues && issues.length === 0 ? (

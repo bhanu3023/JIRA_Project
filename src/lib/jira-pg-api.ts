@@ -6363,6 +6363,28 @@ export async function runJiraIssueSync(maxPerRun: number = 5000): Promise<{ impo
   }
 }
 
+// Filters page: how the matching tickets split by Product Type, next to the
+// total. A ticket spanning several products stores them comma-joined
+// ("Message Migration, Email Migration") and counts once, as "multiple", so
+// the buckets add up to the total. No product type, or one that isn't
+// Content/Message/Email, goes under "none" / "other".
+type ProductTypeCounts = { content: number; message: number; email: number; multiple: number; other: number; none: number };
+function bucketProductTypes(rows: Array<[string | null | undefined, number]>): ProductTypeCounts {
+  const counts: ProductTypeCounts = { content: 0, message: 0, email: 0, multiple: 0, other: 0, none: 0 };
+  for (const [raw, n] of rows) {
+    const parts = String(raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    const key: keyof ProductTypeCounts =
+      parts.length === 0 ? 'none'
+      : parts.length > 1 ? 'multiple'
+      : /content/i.test(parts[0]) ? 'content'
+      : /message/i.test(parts[0]) ? 'message'
+      : /email/i.test(parts[0]) ? 'email'
+      : 'other';
+    counts[key] += n;
+  }
+  return counts;
+}
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ Main handler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 export async function handleJiraPgApi(
@@ -7784,6 +7806,11 @@ async function _handleJiraPgApi(
     const overdueParamEarly = url.searchParams.get('overdue');
     const needsSlaPrefilter = slaBreachedParamEarly === 'yes' || slaBreachedParamEarly === 'no'
       || overdueParamEarly === 'yes' || overdueParamEarly === 'no';
+    // Filters page asks for the Product Type split of the whole result (not
+    // just this page); each branch below fills it from the same rows it
+    // counts for `total`. Opt-in, so other list views don't pay for it.
+    const wantProductCounts = url.searchParams.get('productTypeCounts') === '1';
+    let productTypeCounts: ProductTypeCounts | null = null;
     // Safety ceiling only -- the actual candidate-set size fetched below is
     // whichever is SMALLER of this and the real matching-row count (see the
     // `Math.min(..., SLA_PREFILTER_CAP)` call sites). A fixed 5000 silently
@@ -8243,6 +8270,10 @@ async function _handleJiraPgApi(
         });
         total = issues.length; // placeholder -- corrected after breach filtering below
       } else {
+        const productGroups = wantProductCounts
+          ? db.issue.groupBy({ by: ['productType'], where: where as any, _count: { _all: true } })
+              .catch((e: any) => { console.error('[product type counts failed]', e?.message || e); return null; })
+          : null;
         [total, issues] = await Promise.all([
           db.issue.count({ where: where as any }),
           db.issue.findMany({
@@ -8273,6 +8304,8 @@ async function _handleJiraPgApi(
             take: limit,
           }),
         ]);
+        const groups = productGroups ? await productGroups : null;
+        if (groups) productTypeCounts = bucketProductTypes(groups.map((g: any) => [g.productType, g._count._all]));
       }
 
       try {
@@ -9578,6 +9611,22 @@ async function _handleJiraPgApi(
           countParams
         );
         deptCandidateCount = countRow.rows[0]?.cnt ?? 0;
+        // Same rows as the count; with the SLA prefilter the split is taken
+        // from its final matches instead (below).
+        if (wantProductCounts && !needsSlaPrefilter) {
+          const groups = await pool.query<{ pt: string | null; cnt: number }>(
+            `SELECT i."productType" AS pt, COUNT(*)::int AS cnt
+             FROM issues i
+             LEFT JOIN statuses s ON i."statusId" = s.id
+             WHERE i."spaceId" = ANY($1::text[])
+               AND ${deptDeptMatchSql}
+             ${deptSearchClause}
+             ${deptExtraSql}
+             GROUP BY i."productType"`,
+            countParams
+          ).catch((e) => { console.error('[product type counts failed]', e?.message || e); return null; });
+          if (groups) productTypeCounts = bucketProductTypes(groups.rows.map((r) => [r.pt, r.cnt]));
+        }
       } catch (err) { console.error('[dept count query failed]', err); deptCandidateCount = 0; }
       // placeholder when SLA-prefiltering -- corrected after breach filtering below
       deptTotal = needsSlaPrefilter ? 0 : deptCandidateCount;
@@ -9669,6 +9718,13 @@ async function _handleJiraPgApi(
           // enrichedIssues.length, which from this point on only ever holds
           // the current page (see prefilteredTotal's own declaration).
           prefilteredTotal = matchingIds.length;
+          if (wantProductCounts) {
+            const groups = matchingIds.length
+              ? await pool.query(`SELECT "productType" AS pt, COUNT(*)::int AS cnt FROM issues WHERE id = ANY($1::text[]) GROUP BY "productType"`, [matchingIds])
+                  .then((r) => r.rows, (e) => { console.error('[product type counts failed]', e?.message || e); return null; })
+              : [];
+            if (groups) productTypeCounts = bucketProductTypes(groups.map((r: any) => [r.pt, r.cnt]));
+          }
           const sliceStart = (page - 1) * limit;
           const pageIds = matchingIds.slice(sliceStart, sliceStart + limit);
 
@@ -10155,6 +10211,7 @@ async function _handleJiraPgApi(
           deptTotal = prefilteredTotal;
         } else {
           deptTotal = enrichedIssues.length;
+          if (wantProductCounts) productTypeCounts = bucketProductTypes(enrichedIssues.map((i: any) => [i.productType, 1]));
           const sliceStart = (page - 1) * limit;
           enrichedIssues = enrichedIssues.slice(sliceStart, sliceStart + limit);
         }
@@ -10253,6 +10310,7 @@ async function _handleJiraPgApi(
       total: deptTotal,
       page,
       totalPages: Math.max(1, Math.ceil(deptTotal / limit)),
+      ...(productTypeCounts ? { productTypeCounts } : {}),
     });
   }
 
