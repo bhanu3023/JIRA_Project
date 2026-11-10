@@ -318,11 +318,13 @@ class ApiClient {
   createActivityWorklog(data: { workDate: string; entries: Array<{ activityType: string; customReason?: string; timeSpentMinutes: number; description?: string }> }) {
     return this.request<{ ok: true; entries: any[] }>(`/activity-worklogs`, { method: 'POST', body: JSON.stringify(data) });
   }
-  getActivityWorklogs(params: { from?: string; to?: string; userId?: string } = {}) {
+  getActivityWorklogs(params: { from?: string; to?: string; userId?: string; spaceKey?: string; dept?: string } = {}) {
     const qs = new URLSearchParams();
     if (params.from) qs.set('from', params.from);
     if (params.to) qs.set('to', params.to);
     if (params.userId) qs.set('userId', params.userId);
+    if (params.spaceKey) qs.set('spaceKey', params.spaceKey);
+    if (params.dept) qs.set('dept', params.dept);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return this.request<any[]>(`/activity-worklogs${suffix}`);
   }

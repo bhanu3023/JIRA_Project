@@ -14495,6 +14495,25 @@ async function _handleJiraPgApi(
     if (targetUserId) { conditions.push(`"userId" = $${n}`); params.push(targetUserId); n++; }
     if (from) { conditions.push(`"workDate" >= $${n}`); params.push(new Date(from)); n++; }
     if (to) { conditions.push(`"workDate" <= $${n}`); params.push(new Date(to)); n++; }
+    // Space / Queue, same meaning as GET /worklogs' Queue filter: these
+    // entries aren't on a ticket, so they're placed by who logged them --
+    // a member of that queue's roster (custom_queues memberIds), or of any
+    // queue in that space. A queue name in several spaces counts in each.
+    const spaceKeyFilter = qs.get('spaceKey');
+    const deptFilter = qs.get('dept');
+    if (spaceKeyFilter || deptFilter) {
+      const cq = spaceKeyFilter
+        ? await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKeyFilter.toUpperCase()])
+        : await pool.query(`SELECT queues FROM custom_queues`);
+      const members = new Set<string>();
+      for (const r of cq.rows) {
+        for (const q of (r.queues || []) as any[]) {
+          if (deptFilter && String(q?.name || '').toLowerCase() !== deptFilter.toLowerCase()) continue;
+          if (Array.isArray(q?.memberIds)) q.memberIds.forEach((id: string) => members.add(id));
+        }
+      }
+      conditions.push(`"userId" = ANY($${n}::text[])`); params.push(Array.from(members)); n++;
+    }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = await pool.query(
       `SELECT * FROM activity_worklogs ${where} ORDER BY "workDate" DESC, "createdAt" DESC LIMIT 500`,

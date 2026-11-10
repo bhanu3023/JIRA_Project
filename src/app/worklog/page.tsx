@@ -278,9 +278,10 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
   );
 }
 
-function TicketWorklogTab({ userId, allUsers }: {
+function TicketWorklogTab({ userId, allUsers, spaces }: {
   userId: string | undefined;
   allUsers: { id: string; firstName?: string; lastName?: string; email?: string }[];
+  spaces: { key: string; name?: string }[];
 }) {
   const [entries, setEntries] = useState<ActivityWorklogRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -293,6 +294,28 @@ function TicketWorklogTab({ userId, allUsers }: {
   const [dateTo, setDateTo] = useState(() => isoDate(new Date()));
   const [userFilter, setUserFilter] = useState(''); // open to everyone -- any user can filter to anyone else here
   const [activityFilter, setActivityFilter] = useState('');
+  // Space / Queue, same as the Worklog tab's: these entries aren't on a
+  // ticket, so the server places them by who logged them -- a member of
+  // that queue (or of any queue in that space).
+  const [spaceKeyFilter, setSpaceKeyFilter] = useState('');
+  const [deptFilter, setDeptFilter] = useState('');
+
+  // Queue names configured in the chosen space, or in every space.
+  const [deptOptions, setDeptOptions] = useState<string[]>([]);
+  useEffect(() => {
+    const keys = spaceKeyFilter ? [spaceKeyFilter] : spaces.map((s) => s.key);
+    if (!keys.length) return;
+    let cancelled = false;
+    Promise.all(keys.map((sk) => api.request<any[]>(`custom-queues/${sk}`).catch(() => [] as any[])))
+      .then((lists) => {
+        if (cancelled) return;
+        const names = Array.from(new Set(lists.flat().map((q: any) => q?.name).filter(Boolean))).sort() as string[];
+        setDeptOptions(names);
+        // The chosen queue doesn't exist in the newly chosen space.
+        setDeptFilter((d) => (d && !names.includes(d) ? '' : d));
+      });
+    return () => { cancelled = true; };
+  }, [spaceKeyFilter, spaces]);
 
   const load = () => {
     setLoading(true);
@@ -300,9 +323,11 @@ function TicketWorklogTab({ userId, allUsers }: {
       from: dateFrom ? `${dateFrom}T00:00:00` : undefined,
       to: dateTo ? `${dateTo}T23:59:59` : undefined,
       userId: userFilter || undefined,
+      spaceKey: spaceKeyFilter || undefined,
+      dept: deptFilter || undefined,
     }).then(setEntries).catch(() => {}).finally(() => setLoading(false));
   };
-  useEffect(load, [dateFrom, dateTo, userFilter]);
+  useEffect(load, [dateFrom, dateTo, userFilter, spaceKeyFilter, deptFilter]);
 
   const visibleEntries = activityFilter ? entries.filter((e) => e.activityType === activityFilter) : entries;
   // Same summary as the Worklog tab, over the entries currently shown.
@@ -342,6 +367,22 @@ function TicketWorklogTab({ userId, allUsers }: {
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
         </div>
         <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">Space</label>
+          <select value={spaceKeyFilter} onChange={(e) => setSpaceKeyFilter(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">All spaces</option>
+            {spaces.map((sp) => <option key={sp.key} value={sp.key}>{sp.name || sp.key}</option>)}
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[12px] text-gray-400 font-medium">Queue</label>
+          <select value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">All queues</option>
+            {deptOptions.map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
           <label className="text-[12px] text-gray-400 font-medium">Reporter</label>
           <UserSearchSelect
             value={userFilter}
@@ -361,8 +402,8 @@ function TicketWorklogTab({ userId, allUsers }: {
             {ACTIVITY_TYPES.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
         </div>
-        {(userFilter || activityFilter || dateFrom || dateTo) && (
-          <button onClick={() => { setUserFilter(''); setActivityFilter(''); setDateFrom(isoDate(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000))); setDateTo(isoDate(new Date())); }}
+        {(userFilter || activityFilter || spaceKeyFilter || deptFilter || dateFrom || dateTo) && (
+          <button onClick={() => { setUserFilter(''); setActivityFilter(''); setSpaceKeyFilter(''); setDeptFilter(''); setDateFrom(isoDate(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000))); setDateTo(isoDate(new Date())); }}
             className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
             <X size={11} /> Clear
           </button>
@@ -373,7 +414,7 @@ function TicketWorklogTab({ userId, allUsers }: {
         <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-5 flex items-center gap-6">
           <div>
             <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">
-              {reporterLabel ? `${reporterLabel}'s total` : 'Total logged'}{activityFilter ? ` · ${activityFilter}` : ''}
+              {reporterLabel ? `${reporterLabel}'s total` : 'Total logged'}{deptFilter ? ` · ${deptFilter}` : ''}{activityFilter ? ` · ${activityFilter}` : ''}
             </p>
             <p className="text-[22px] font-bold text-gray-800">{visibleMinutes > 0 ? formatMinutes(visibleMinutes) : '0m'}</p>
           </div>
@@ -624,7 +665,7 @@ export default function WorklogPage() {
         </div>
       </div>
 
-      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} allUsers={users} />}
+      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} allUsers={users} spaces={spaces || []} />}
 
       {mainTab === 'worklog' && canSeeWorklogTab && (
       <div className="flex-1 overflow-auto px-8 py-6">
