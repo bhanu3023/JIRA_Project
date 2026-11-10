@@ -278,6 +278,54 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
   );
 }
 
+// Space / Queue filters on both tabs: the queue names to offer (from the
+// chosen space, or every space) and who belongs to the selection -- members
+// of that queue, or of any queue in the chosen space. `memberIds` is null
+// when neither is chosen (everyone). Same rule the server applies to the
+// entries themselves, so the Logged by / Reporter list only offers people
+// who can actually have entries under the current Space / Queue.
+function useQueueRoster(spaces: { key: string }[], spaceKey: string, dept: string) {
+  const [queuesBySpace, setQueuesBySpace] = useState<Record<string, any[]>>({});
+  const keysStr = spaceKey || spaces.map((s) => s.key).join(',');
+  useEffect(() => {
+    const missing = keysStr.split(',').filter((k) => k && !(k in queuesBySpace));
+    if (!missing.length) return;
+    let cancelled = false;
+    Promise.all(missing.map((sk) => api.request<any[]>(`custom-queues/${sk}`).then((q) => [sk, q || []] as const, () => [sk, []] as const)))
+      .then((entries) => { if (!cancelled) setQueuesBySpace((prev) => ({ ...prev, ...Object.fromEntries(entries) })); });
+    return () => { cancelled = true; };
+  }, [keysStr, queuesBySpace]);
+
+  return useMemo(() => {
+    const keys = keysStr.split(',').filter(Boolean);
+    // Every needed space's queues have arrived -- until then an empty
+    // option list / roster means "not loaded", not "nobody".
+    const ready = keys.every((k) => k in queuesBySpace);
+    const queues = keys.flatMap((k) => queuesBySpace[k] || []);
+    const deptOptions = Array.from(new Set(queues.map((q: any) => q?.name).filter(Boolean))).sort() as string[];
+    if (!spaceKey && !dept) return { ready, deptOptions, memberIds: null as Set<string> | null };
+    const memberIds = new Set<string>();
+    for (const q of queues) {
+      if (dept && String(q?.name || '').toLowerCase() !== dept.toLowerCase()) continue;
+      if (Array.isArray(q?.memberIds)) q.memberIds.forEach((id: string) => memberIds.add(id));
+    }
+    return { ready, deptOptions, memberIds };
+  }, [keysStr, queuesBySpace, spaceKey, dept]);
+}
+
+// Drops a Queue / person choice the new Space / Queue no longer contains.
+function useResetStaleFilters(
+  roster: ReturnType<typeof useQueueRoster>,
+  deptFilter: string, setDeptFilter: (v: string) => void,
+  userFilter: string, setUserFilter: (v: string) => void,
+) {
+  useEffect(() => {
+    if (!roster.ready) return;
+    if (deptFilter && !roster.deptOptions.includes(deptFilter)) setDeptFilter('');
+    else if (userFilter && roster.memberIds && !roster.memberIds.has(userFilter)) setUserFilter('');
+  }, [roster, deptFilter, userFilter, setDeptFilter, setUserFilter]);
+}
+
 function TicketWorklogTab({ userId, allUsers, spaces }: {
   userId: string | undefined;
   allUsers: { id: string; firstName?: string; lastName?: string; email?: string }[];
@@ -300,22 +348,10 @@ function TicketWorklogTab({ userId, allUsers, spaces }: {
   const [spaceKeyFilter, setSpaceKeyFilter] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
 
-  // Queue names configured in the chosen space, or in every space.
-  const [deptOptions, setDeptOptions] = useState<string[]>([]);
-  useEffect(() => {
-    const keys = spaceKeyFilter ? [spaceKeyFilter] : spaces.map((s) => s.key);
-    if (!keys.length) return;
-    let cancelled = false;
-    Promise.all(keys.map((sk) => api.request<any[]>(`custom-queues/${sk}`).catch(() => [] as any[])))
-      .then((lists) => {
-        if (cancelled) return;
-        const names = Array.from(new Set(lists.flat().map((q: any) => q?.name).filter(Boolean))).sort() as string[];
-        setDeptOptions(names);
-        // The chosen queue doesn't exist in the newly chosen space.
-        setDeptFilter((d) => (d && !names.includes(d) ? '' : d));
-      });
-    return () => { cancelled = true; };
-  }, [spaceKeyFilter, spaces]);
+  const roster = useQueueRoster(spaces, spaceKeyFilter, deptFilter);
+  const deptOptions = roster.deptOptions;
+  useResetStaleFilters(roster, deptFilter, setDeptFilter, userFilter, setUserFilter);
+  const reporterUsers = roster.memberIds ? allUsers.filter((u) => roster.memberIds!.has(u.id)) : allUsers;
 
   const load = () => {
     setLoading(true);
@@ -390,7 +426,7 @@ function TicketWorklogTab({ userId, allUsers, spaces }: {
             placeholder="Everyone"
             options={[
               { value: '', label: 'Everyone' },
-              ...allUsers.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
+              ...reporterUsers.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
             ]}
           />
         </div>
@@ -542,36 +578,14 @@ export default function WorklogPage() {
   // underlying roster data itself checking out correct every time via a
   // script, so it can be verified directly against real data instead of
   // depending on this component's own state/effect timing. This only
-  // fetches the dropdown's own option list now: every CONFIGURED queue for
-  // the spaces actually present in the current (unfiltered-by-dept) rows,
-  // not just whichever department tags happen to appear in this date
-  // range, so a queue stays selectable even when none of its own entries
-  // happened to be tagged that way.
-  const [deptOptionsBySpace, setDeptOptionsBySpace] = useState<Record<string, string[]>>({});
-  useEffect(() => {
-    const spaceKeys = Array.from(new Set(rows.map((r) => r.spaceKey).filter(Boolean)));
-    const missing = spaceKeys.filter((sk) => !(sk in deptOptionsBySpace));
-    if (!missing.length) return;
-    let cancelled = false;
-    (async () => {
-      const entries = await Promise.all(missing.map(async (sk) => {
-        try {
-          const queues = await api.request<any[]>(`custom-queues/${sk}`);
-          return [sk, (queues || []).map((q: any) => q.name).filter(Boolean)] as const;
-        } catch {
-          return [sk, []] as const;
-        }
-      }));
-      if (cancelled) return;
-      setDeptOptionsBySpace((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
-    })();
-    return () => { cancelled = true; };
-  }, [rows, deptOptionsBySpace]);
-
-  const deptOptions = useMemo(
-    () => Array.from(new Set(Object.values(deptOptionsBySpace).flat())).sort(),
-    [deptOptionsBySpace],
-  );
+  // supplies the dropdowns: every CONFIGURED queue in the chosen space (or
+  // every space), so a queue stays selectable even when none of its own
+  // entries happened to be tagged that way, and -- once a Space / Queue is
+  // chosen -- only that queue's people under "Logged by".
+  const roster = useQueueRoster(spaces || [], spaceKeyFilter, deptFilter);
+  const deptOptions = roster.deptOptions;
+  useResetStaleFilters(roster, deptFilter, setDeptFilter, userFilter, setUserFilter);
+  const loggedByUsers = roster.memberIds ? users.filter((u) => roster.memberIds!.has(u.id)) : users;
 
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -712,8 +726,8 @@ export default function WorklogPage() {
               placeholder="Everyone"
               options={[
                 { value: '', label: 'Everyone' },
-                { value: user?.id || '', label: 'Just me' },
-                ...users.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
+                ...(!roster.memberIds || (user?.id && roster.memberIds.has(user.id)) ? [{ value: user?.id || '', label: 'Just me' }] : []),
+                ...loggedByUsers.map((u) => ({ value: u.id, label: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email || u.id })),
               ]}
             />
           </div>
