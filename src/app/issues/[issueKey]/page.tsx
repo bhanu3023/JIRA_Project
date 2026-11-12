@@ -13,7 +13,7 @@ import RichTextEditor from '@/components/ui/RichTextEditor';
 import CommentReactions from '@/components/ui/CommentReactions';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
 import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
-import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
+import { INFRA_ISSUE_TYPES, TICKET_CATEGORIES } from '@/components/issues/CreateIssueModal';
 import * as XLSX from 'xlsx';
 
 // RichTextEditor's own paste/insertImage upload placeholders use
@@ -4239,6 +4239,9 @@ export default function IssueDetailPage() {
                 <Link href={`/issues/${issue.parent.cfKey ?? issue.parent.key}`} className="text-[13px] text-blue-600 hover:underline px-1.5 py-1">{issue.parent.cfKey ?? issue.parent.key}</Link>
               </PropRow>
             )}
+
+            {/* Ticket Category -- every board */}
+            {renderCustomField('ticketCategory', 'Ticket Category', 'select', TICKET_CATEGORIES, 'all')}
 
             {/* ── L2B Custom Fields ─────────────────────────────────────── */}
             {issue.spaceKey === 'L2BOARD' && (() => {

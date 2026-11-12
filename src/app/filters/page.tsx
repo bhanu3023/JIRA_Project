@@ -17,7 +17,7 @@ import {
   List, LayoutGrid, Download,
 } from 'lucide-react';
 import { can } from '@/lib/permissions';
-import { INFRA_ISSUE_TYPES } from '@/components/issues/CreateIssueModal';
+import { INFRA_ISSUE_TYPES, TICKET_CATEGORIES } from '@/components/issues/CreateIssueModal';
 
 /* ─── types ─── */
 // Everything a saved filter can hold. Every filter on the page has a key
@@ -45,6 +45,7 @@ interface FilterCriteria {
   projectManager?: string[];
   projectPool?: string;
   infraIssueType?: string[];
+  ticketCategory?: string[];
   slaBreached?: 'yes' | 'no';
   overdue?: 'yes' | 'no';
   extras?: string[];
@@ -793,6 +794,7 @@ const EXTRA_FILTER_OPTIONS = [
   { id: 'clientName',     label: 'Client Name',     group: 'Issue' },
   { id: 'projectPool',    label: 'Project Pool',    group: 'Issue' },
   { id: 'infraIssueType', label: 'Infra Issue Type', group: 'Issue' },
+  { id: 'ticketCategory', label: 'Ticket Category', group: 'Issue' },
   { id: 'created',        label: 'Created date',    group: 'Date' },
   { id: 'updated',        label: 'Updated date',    group: 'Date' },
   { id: 'worked',         label: 'Worked',          group: 'Date' },
@@ -1132,6 +1134,7 @@ export default function FiltersPage() {
   const [selProjectManager, setSelProjectManager] = useState<string[]>([]);
   const [selProjectPool, setSelProjectPool] = useState('');
   const [selInfraIssueType, setSelInfraIssueType] = useState<string[]>([]);
+  const [selTicketCategory, setSelTicketCategory] = useState<string[]>([]);
   const [selBreached, setSelBreached] = useState<'yes' | 'no' | ''>('');
   const [selOverdue, setSelOverdue] = useState<'yes' | 'no' | ''>('');
 
@@ -1213,6 +1216,7 @@ export default function FiltersPage() {
     if (key === 'projectManager') setSelProjectManager([]);
     if (key === 'projectPool')    setSelProjectPool('');
     if (key === 'infraIssueType') setSelInfraIssueType([]);
+    if (key === 'ticketCategory') setSelTicketCategory([]);
   };
   const toggleExtra = (key: string) => {
     setActiveExtras((prev) => {
@@ -1307,6 +1311,7 @@ export default function FiltersPage() {
     const rProjectManager  = urlParams?.get('rProjectManager');
     const rProjectPool     = urlParams?.get('rProjectPool');
     const rInfraIssueType  = urlParams?.get('rInfraIssueType');
+    const rTicketCategory  = urlParams?.get('rTicketCategory');
     const rBreached        = urlParams?.get('rBreached');
     const rOverdue         = urlParams?.get('rOverdue');
     const rQ               = urlParams?.get('rQ');
@@ -1334,6 +1339,7 @@ export default function FiltersPage() {
     if (rProjectManager) setSelProjectManager(rProjectManager.split('|||'));
     if (rProjectPool) setSelProjectPool(rProjectPool);
     if (rInfraIssueType) setSelInfraIssueType(splitMultiParam(rInfraIssueType, pipeSep));
+    if (rTicketCategory) setSelTicketCategory(splitMultiParam(rTicketCategory, pipeSep));
     if (rBreached === 'yes' || rBreached === 'no') setSelBreached(rBreached);
     if (rOverdue === 'yes' || rOverdue === 'no') setSelOverdue(rOverdue);
     if (rQ) setText(rQ);
@@ -1349,7 +1355,7 @@ export default function FiltersPage() {
     const impliedExtras = [
       rProductType && 'productType', rProductionTicket && 'productionTicket', rCombination && 'combination', rCustomerName && 'customerName',
       rClientName && 'clientName', rProjectManager && 'projectManager', rProjectPool && 'projectPool',
-      rInfraIssueType && 'infraIssueType',
+      rInfraIssueType && 'infraIssueType', rTicketCategory && 'ticketCategory',
       rWorked && 'worked', rDueDate && 'dueDate', rResolved && 'resolved',
     ].filter(Boolean) as string[];
     if (rExtras || impliedExtras.length) {
@@ -1390,13 +1396,14 @@ export default function FiltersPage() {
     if (selProjectManager.length) p.rProjectManager = selProjectManager.join('|||');
     if (selProjectPool) p.rProjectPool = selProjectPool;
     if (selInfraIssueType.length) p.rInfraIssueType = selInfraIssueType.join(MULTI_SEP);
-    if (p.rProductType || p.rProductionTicket || p.rCustomerName || p.rClientName || p.rInfraIssueType) p.rSep = 'pipe';
+    if (selTicketCategory.length) p.rTicketCategory = selTicketCategory.join(MULTI_SEP);
+    if (p.rProductType || p.rProductionTicket || p.rCustomerName || p.rClientName || p.rInfraIssueType || p.rTicketCategory) p.rSep = 'pipe';
     if (selBreached) p.rBreached = selBreached;
     if (selOverdue) p.rOverdue = selOverdue;
     if (text.trim()) p.rQ = text.trim();
     if (activeExtras.length) p.rExtras = activeExtras.join(',');
     return p;
-  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selResolved, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text, activeExtras]);
+  }, [selSpaces, selQueue, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selResolved, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selTicketCategory, selBreached, selOverdue, text, activeExtras]);
 
   useEffect(() => {
     if (!skippedFirstUrlSyncRef.current) { skippedFirstUrlSyncRef.current = true; return; }
@@ -1444,7 +1451,7 @@ export default function FiltersPage() {
     text.trim() || selSpaces.length || selQueue || selAssignees.length || selReporters.length ||
     selTypes.length || selStatuses.length || selPriorities.length ||
     selCreated || selUpdated || selWorked || selDueDate || selResolved || selDepartment ||
-    selProductType.length || selProductionTicket.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selInfraIssueType.length || selBreached || selOverdue,
+    selProductType.length || selProductionTicket.length || selCombination || selCustomerName.length || selClientName.length || selProjectManager.length || selProjectPool || selInfraIssueType.length || selTicketCategory.length || selBreached || selOverdue,
   );
 
   // Builds the filter params both the live table and the CSV export send —
@@ -1543,6 +1550,7 @@ export default function FiltersPage() {
         if (selProjectManager.length) params.projectManager = selProjectManager.join('|||');
         if (selProjectPool)    params.projectPool    = selProjectPool;
         if (selInfraIssueType.length) params.infraIssueType = selInfraIssueType.join(MULTI_SEP);
+        if (selTicketCategory.length) params.ticketCategory = selTicketCategory.join(MULTI_SEP);
         if (selBreached) params.slaBreached = selBreached;
         if (selOverdue) params.overdue = selOverdue;
 
@@ -1550,7 +1558,7 @@ export default function FiltersPage() {
         if (text.trim()) params.q = text.trim();
 
         return params;
-  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selResolved, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selBreached, selOverdue, text]);
+  }, [spaces, selSpaces, selQueue, allMembers, selAssignees, selReporters, selTypes, selStatuses, selPriorities, selCreated, selUpdated, selWorked, selDueDate, selResolved, selDepartment, selProductType, selProductionTicket, selCombination, selCustomerName, selClientName, selProjectManager, selProjectPool, selInfraIssueType, selTicketCategory, selBreached, selOverdue, text]);
 
   /* fetch issues — all filtering done server-side for accuracy.
      Short (150ms) debounce -- NOT the old flat 400ms, which made every
@@ -1662,6 +1670,7 @@ export default function FiltersPage() {
     clientName:     { label: 'Client Name',     getValue: (i) => i.clientName ?? '' },
     projectPool:    { label: 'Project Pool',    getValue: (i) => i.projectPool ?? '' },
     infraIssueType: { label: 'Infra Issue Type', getValue: (i) => i.infraIssueType ?? '' },
+    ticketCategory: { label: 'Ticket Category', getValue: (i) => i.ticketCategory ?? '' },
     dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
     resolved:       { label: 'Resolved date',   getValue: (i) => i.resolvedAt ?? '' },
   };
@@ -1724,6 +1733,7 @@ export default function FiltersPage() {
         projectManager: selProjectManager.length > 0,
         projectPool: !!selProjectPool,
         infraIssueType: selInfraIssueType.length > 0,
+        ticketCategory: selTicketCategory.length > 0,
         dueDate: !!selDueDate,
         resolved: !!selResolved,
       };
@@ -1856,6 +1866,7 @@ export default function FiltersPage() {
     clientName: selClientName.length > 0,
     projectPool: !!selProjectPool,
     infraIssueType: selInfraIssueType.length > 0,
+    ticketCategory: selTicketCategory.length > 0,
     dueDate: !!selDueDate,
     resolved: !!selResolved,
   };
@@ -1933,6 +1944,7 @@ export default function FiltersPage() {
     setSelProjectManager(c.projectManager || []);
     setSelProjectPool(c.projectPool || '');
     setSelInfraIssueType(c.infraIssueType || []);
+    setSelTicketCategory(c.ticketCategory || []);
     setSelBreached(c.slaBreached || '');
     setSelOverdue(c.overdue || '');
     // Show the bar button of every field that has a value, plus whatever
@@ -1944,7 +1956,7 @@ export default function FiltersPage() {
       [!!c.productType?.length, 'productType'], [!!c.productionTicket?.length, 'productionTicket'],
       [!!c.combination, 'combination'], [!!c.customerName?.length, 'customerName'],
       [!!c.clientName?.length, 'clientName'], [!!c.projectManager?.length, 'projectManager'],
-      [!!c.projectPool, 'projectPool'], [!!c.infraIssueType?.length, 'infraIssueType'],
+      [!!c.projectPool, 'projectPool'], [!!c.infraIssueType?.length, 'infraIssueType'], [!!c.ticketCategory?.length, 'ticketCategory'],
     ];
     setActiveExtras(Array.from(new Set([...(c.extras || []), ...implied.filter(([on]) => on).map(([, k]) => k)])));
   };
@@ -1997,6 +2009,7 @@ export default function FiltersPage() {
     ...(selProjectManager.length ? { projectManager: selProjectManager } : {}),
     ...(selProjectPool ? { projectPool: selProjectPool } : {}),
     ...(selInfraIssueType.length ? { infraIssueType: selInfraIssueType } : {}),
+    ...(selTicketCategory.length ? { ticketCategory: selTicketCategory } : {}),
     ...(selBreached ? { slaBreached: selBreached } : {}),
     ...(selOverdue ? { overdue: selOverdue } : {}),
     ...(activeExtras.length ? { extras: activeExtras } : {}),
@@ -2413,6 +2426,17 @@ export default function FiltersPage() {
                   onChange={setSelInfraIssueType}
                 />
                 <button onClick={() => toggleExtra('infraIssueType')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
+              </div>
+            )}
+            {activeExtras.includes('ticketCategory') && (
+              <div className="flex items-center gap-1">
+                <DropBtn
+                  label="Ticket Category"
+                  options={TICKET_CATEGORIES.map(v => ({ value: v, label: v }))}
+                  selected={selTicketCategory}
+                  onChange={setSelTicketCategory}
+                />
+                <button onClick={() => toggleExtra('ticketCategory')} className="rounded border border-gray-300 bg-white p-1 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors"><X size={11} /></button>
               </div>
             )}
             {activeExtras.includes('projectManager') && (

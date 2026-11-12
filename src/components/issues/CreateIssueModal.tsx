@@ -97,6 +97,26 @@ const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB', 'ITS']);
 // because the underlying stray ticket data writing it back never stopped.
 const NO_DEPARTMENT_SPACE_KEYS = new Set(['IA', 'SB']);
 
+// Ticket Category -- what kind of problem the ticket is about. Every board,
+// optional; set on Create Issue and editable on the ticket page.
+export const TICKET_CATEGORIES = [
+  'Conflict & Retry Handling',
+  'Stuck / In-Progress Status',
+  'Data / Content Not Migrating',
+  'Server, Cloud & Job Management',
+  'Permissions & User Mapping',
+  'API Errors & Timeouts',
+  'Delta, Comparison & Validation',
+  'Reports & CSV Export',
+  'Groups & Duplication Testing',
+  'Links & Hyperlinks',
+  'Data Updates & Access Requests',
+  'User Missing or Not Sync',
+  'UI & Reporting',
+  'Customization & Enhancements',
+  'Other',
+];
+
 // Only shown/required for the Infra department -- distinguishes what kind of
 // Infra work a ticket actually needs (DB access vs. a server rebuild vs. a
 // Grafana/Metabase change, etc.), which nothing else on the form captures.
@@ -306,7 +326,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     assigneeId: '', storyPoints: '', dueDate: '', statusId: '', combination: [] as string[],
     department: NO_DEPARTMENT_SPACE_KEYS.has(spaceKey.toUpperCase()) ? '' : (initialDept || ''),
     productType: [] as string[], projectManager: [] as string[], productionTicket: '',
-    projectPool: '', infraIssueType: '',
+    projectPool: '', infraIssueType: '', ticketCategory: '',
   });
   // One independent rich-text value per Migration section (see
   // MIGRATION_SECTION_LABELS above for why these are separate editors
@@ -340,6 +360,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   const [summaryError, setSummaryError] = useState(false);
   const [queueError, setQueueError]                 = useState(false);
+  const [ticketCategoryError, setTicketCategoryError] = useState(false);
   const [combinationError, setCombinationError]     = useState(false);
   const [productTypeError, setProductTypeError]     = useState(false);
   const [projectManagerError, setProjectManagerError] = useState(false);
@@ -517,6 +538,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingSummary        = !form.summary.trim();
     // Only require a queue when this space actually has queues to pick from
     const missingQueue          = queueOptions.length > 0 && !form.department;
+    const missingTicketCategory = !form.ticketCategory;
     const missingCombination    = showMigrationFields && !skipsInfraOptionalFields && form.combination.length === 0;
     const missingProductType    = showMigrationFields && !skipsInfraOptionalFields && form.productType.length === 0;
     const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !skipsProjectManager;
@@ -526,6 +548,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
     setSummaryError(missingSummary);
     setQueueError(missingQueue);
+    setTicketCategoryError(missingTicketCategory);
     setCombinationError(missingCombination);
     setProductTypeError(missingProductType);
     setProjectManagerError(missingProjectManager);
@@ -533,10 +556,11 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     setInfraIssueTypeError(missingInfraIssueType);
     setCustomFieldErrors(Object.fromEntries(missingCustomFields.map((cf: any) => [cf.id, true])));
 
-    if (missingSummary || missingQueue || missingCombination || missingProductType || missingProjectManager || missingProjectPool || missingInfraIssueType || missingCustomFields.length > 0) {
+    if (missingSummary || missingQueue || missingTicketCategory || missingCombination || missingProductType || missingProjectManager || missingProjectPool || missingInfraIssueType || missingCustomFields.length > 0) {
       const missingLabels = [
         missingSummary && 'Summary',
         missingQueue && 'Queue',
+        missingTicketCategory && 'Ticket Category',
         missingCombination && 'Combination',
         missingProductType && 'Product Type',
         missingProjectManager && 'Project Manager',
@@ -580,6 +604,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
         productionTicket: form.productionTicket || undefined,
         projectPool: form.projectPool || undefined,
         infraIssueType: form.infraIssueType || undefined,
+        ticketCategory: form.ticketCategory || undefined,
         ...(form.department
           ? { department: form.department }
           : initialDept && !NO_DEPARTMENT_SPACE_KEYS.has(selectedSpaceKey.toUpperCase())
@@ -606,6 +631,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     setForm(f => ({ ...f, [field]: value }));
     if (field === 'summary' && value.trim()) setSummaryError(false);
     if (field === 'department' && value) setQueueError(false);
+    if (field === 'ticketCategory' && value) setTicketCategoryError(false);
     if (field === 'combination' && Array.isArray(value) && value.length > 0) setCombinationError(false);
     if (field === 'productType' && Array.isArray(value) && value.length > 0) setProductTypeError(false);
     if (field === 'projectManager' && Array.isArray(value) && value.length > 0) setProjectManagerError(false);
@@ -1121,6 +1147,30 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                 )}
               </div>
             )}
+
+            {/* Ticket Category -- every board, required */}
+            <div className="mb-4">
+              <label className="block text-[12px] font-semibold text-gray-500 mb-1">
+                Ticket Category <span className="text-red-500">*</span>
+              </label>
+              <div className="relative">
+                <select
+                  value={form.ticketCategory}
+                  onChange={e => update('ticketCategory', e.target.value)}
+                  className={`w-full px-3 pr-7 py-1.5 bg-white border rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 ${ticketCategoryError ? 'border-red-400' : 'border-gray-200'}`}
+                >
+                  <option value="">Select category</option>
+                  {TICKET_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+              </div>
+              {ticketCategoryError && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
+                  <p className="text-[12px] text-red-600 font-medium">Ticket Category is required</p>
+                </div>
+              )}
+            </div>
 
             {/* Priority */}
             <div className="mb-4">
