@@ -18,10 +18,6 @@
 //    tickets are unaffected until someone picks one of these for the first
 //    time (getEffectiveIssueStatus falls back to the real statusId-based
 //    status whenever dept_statuses['Pre-Sales-Team'] isn't set yet).
-// 4. Any issue CURRENTLY sitting at one of the renamed Dev/Infra/QA
-//    statuses (dept_statuses[dept].id matches) gets its own snapshot's
-//    name field fixed too, so it doesn't keep showing the stale
-//    "Routed to Pre-Sales-Old" text until its next status change.
 //
 // Dry-run by default -- pass --apply to write.
 import pg from 'pg';
@@ -87,17 +83,12 @@ async function main() {
     psQ.queueStatuses = PRESALES_TEAM_STATUSES;
   }
 
-  // Fix any issue currently sitting at a renamed status's stale snapshot name.
-  const { rows: staleIssues } = await pool.query(
-    `SELECT id, key, current_department, dept_statuses FROM issues
-     WHERE "spaceId" = $1 AND dept_statuses IS NOT NULL
-       AND (dept_statuses->'Dev'->>'id' = 'qst_dev_waitingpresales'
-         OR dept_statuses->'Infra'->>'id' = 'qst_infra_waitingpresales'
-         OR dept_statuses->'QA'->>'id' = 'qst_qa_waitingpresales')`,
-    [spaceId],
-  );
-  console.log(`\n--- Issues currently sitting at a renamed status (stale snapshot name): ${staleIssues.length} ---`);
-  for (const iss of staleIssues) console.log(`  ${iss.key} (dept=${iss.current_department})`);
+  // Issues whose dept_statuses snapshot already shows the old "Routed to
+  // Pre-Sales-Old" text for Dev/Infra/QA are genuine history -- they really
+  // were routed to the separate, still-existing Pre-Sales-Old queue at the
+  // time (confirmed for real: every one currently has
+  // current_department='Pre-Sales-Old', never Pre-Sales-Team). Deliberately
+  // NOT rewritten here, same as every other historical record in this app.
 
   if (!APPLY) {
     console.log('\nDry run only -- rerun with --apply to write.');
@@ -107,17 +98,6 @@ async function main() {
 
   await pool.query(`UPDATE custom_queues SET queues = $1::jsonb WHERE space_key = $2`, [JSON.stringify(queues), SPACE_KEY]);
   console.log('\ncustom_queues updated.');
-
-  for (const iss of staleIssues) {
-    const ds = iss.dept_statuses || {};
-    for (const dept of ['Dev', 'Infra', 'QA']) {
-      if (ds[dept]?.id === 'qst_dev_waitingpresales' || ds[dept]?.id === 'qst_infra_waitingpresales' || ds[dept]?.id === 'qst_qa_waitingpresales') {
-        ds[dept] = { ...ds[dept], name: NEW_NAME };
-      }
-    }
-    await pool.query(`UPDATE issues SET dept_statuses = $1::jsonb WHERE id = $2`, [JSON.stringify(ds), iss.id]);
-  }
-  console.log(`Fixed stale snapshot name on ${staleIssues.length} issue(s).`);
 
   await pool.end();
 }
