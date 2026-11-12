@@ -19,6 +19,12 @@ type SLAPolicy = {
 };
 type CustomQueue = {
   id: string; name: string; memberIds: string[]; suspendedIds?: string[];
+  // Per-queue admins -- a subset of memberIds who can delete tickets
+  // currently sitting in this queue and manage this queue's own settings
+  // (People & Access, SLAs, Round Robin, Email, Notifications, Workflow),
+  // without needing the site-wide admin role. Everyone else in memberIds
+  // is a plain member. By explicit request.
+  adminIds?: string[];
   sla?: { timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' };
   slaPolicies?: SLAPolicy[];
   workflowSpaceKey?: string;
@@ -1394,7 +1400,13 @@ export default function QueueSettingsPage() {
     setTimeout(() => setSavedMsg(''), 2000);
   };
 
-  const removeMember  = (id: string) => { if (!queue) return; persistQueue({ ...queue, memberIds: queue.memberIds.filter(x => x !== id), suspendedIds: (queue.suspendedIds||[]).filter(x => x !== id) }); };
+  const removeMember  = (id: string) => { if (!queue) return; persistQueue({ ...queue, memberIds: queue.memberIds.filter(x => x !== id), suspendedIds: (queue.suspendedIds||[]).filter(x => x !== id), adminIds: (queue.adminIds||[]).filter(x => x !== id) }); };
+  const toggleQueueAdmin = (id: string) => {
+    if (!queue) return;
+    const current = queue.adminIds || [];
+    const next = current.includes(id) ? current.filter(x => x !== id) : [...current, id];
+    persistQueue({ ...queue, adminIds: next });
+  };
   const suspendMember = (id: string) => { if (!queue) return; persistQueue({ ...queue, suspendedIds: [...(queue.suspendedIds||[]), id] }); };
   const reactivate    = (id: string) => { if (!queue) return; persistQueue({ ...queue, suspendedIds: (queue.suspendedIds||[]).filter(x => x !== id) }); };
   const addNotifyEmail = () => {
@@ -1634,7 +1646,15 @@ export default function QueueSettingsPage() {
                               : <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-2.5 py-1"><span className="w-1.5 h-1.5 rounded-full bg-green-500" />Active</span>}
                           </td>
                           <td className="px-6 py-4">
-                            <span className="text-[12.5px] text-gray-500 bg-gray-100 rounded-md px-2.5 py-1">Member</span>
+                            <select
+                              value={(queue?.adminIds || []).includes(mb.id) ? 'admin' : 'member'}
+                              onChange={() => toggleQueueAdmin(mb.id)}
+                              disabled={isSuspended}
+                              className="text-[12.5px] text-gray-700 bg-gray-100 border-0 rounded-md px-2.5 py-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-blue-400"
+                            >
+                              <option value="member">Member</option>
+                              <option value="admin">Admin</option>
+                            </select>
                           </td>
                           <td className="px-6 py-4">
                             <div className="flex items-center justify-end gap-2">

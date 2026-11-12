@@ -879,7 +879,7 @@ export default function Sidebar() {
   );
 }
 
-type CustomQueue = { id: string; name: string; memberIds: string[]; suspendedIds?: string[]; sla?: { timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' } };
+type CustomQueue = { id: string; name: string; memberIds: string[]; suspendedIds?: string[]; adminIds?: string[]; sla?: { timeValue: string; timeUnit: 'minutes' | 'hours' | 'days' } };
 
 function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pathname: string; spaceType?: string }) {
   // treat as dept_queue if explicitly typed OR if it has custom queues (backward compat for pre-existing spaces)
@@ -1172,9 +1172,11 @@ function SMSpaceSubNav({ spaceKey, pathname, spaceType }: { spaceKey: string; pa
                           <ClipboardList size={12} className={cn('flex-shrink-0', isActive ? 'text-blue-500' : 'text-gray-400')} />
                           <span className="flex-1 truncate">{q.name}</span>
                         </Link>
-                        {/* Three-dot menu — admin/manager only */}
+                        {/* Three-dot menu — admin/manager, or a per-queue
+                            admin (q.adminIds, set in this queue's own
+                            People & Access tab) for just this one queue. */}
                         <div className="relative flex-shrink-0">
-                          {canManageSpace && <button
+                          {(canManageSpace || (q.adminIds || []).includes(user?.id || '')) && <button
                             onClick={e => { e.stopPropagation(); setQueueMenuOpen(isMenuOpen ? null : q.id); setQueuePanelOpen(null); }}
                             className="hidden group-hover:flex w-6 h-6 items-center justify-center rounded text-gray-400 hover:text-gray-700 hover:bg-gray-200">
                             <MoreHorizontal size={13} />

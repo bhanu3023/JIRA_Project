@@ -293,7 +293,7 @@ function SpaceDetailContent() {
     return () => { cancelled = true; };
   }, [queueFilter, deptParam, spaceKey, summaryRange, isAdmin]);
   const [deptFilter, setDeptFilter] = useState<string>(''); // '' = all departments
-  const [allCustomQueues, setAllCustomQueues] = useState<{ id: string; name: string; memberIds: string[] }[]>([]);
+  const [allCustomQueues, setAllCustomQueues] = useState<{ id: string; name: string; memberIds: string[]; adminIds?: string[] }[]>([]);
   // Track which spaceKey the queues were loaded for — avoids stale-spaceKey race condition
   const [customQueuesLoadedFor, setCustomQueuesLoadedFor] = useState<string>('');
   // True while waiting for custom-queue metadata (prevents "No issues found" flash before queues load)
@@ -356,11 +356,15 @@ function SpaceDetailContent() {
   const _matchId   = _rawMatch?.id   ?? null;
   const _matchName = _rawMatch?.name ?? null;
   const _matchMembers = JSON.stringify(_rawMatch?.memberIds ?? null);
+  // A per-queue admin (adminIds, set in this queue's own People & Access
+  // tab) can bulk-delete tickets while viewing just this one queue -- by
+  // explicit request. Same stable-primitive pattern as _matchMembers above.
+  const _matchAdmins = JSON.stringify((_rawMatch as any)?.adminIds ?? null);
   const activeCustomQueue = useMemo(() => {
     if (!_matchId) return null;
-    return { id: _matchId, name: _matchName ?? '', memberIds: JSON.parse(_matchMembers) ?? [] };
+    return { id: _matchId, name: _matchName ?? '', memberIds: JSON.parse(_matchMembers) ?? [], adminIds: JSON.parse(_matchAdmins) ?? [] };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [_matchId, _matchName, _matchMembers]);
+  }, [_matchId, _matchName, _matchMembers, _matchAdmins]);
   const [rrDepartments, setRrDepartments] = useState<string[]>([]); // from RR config
 
   // Load departments from both RR config + Department Routing custom fields, and
@@ -540,6 +544,15 @@ function SpaceDetailContent() {
   // key includes the department so switching queues re-fetches instead of reusing
   // another department's (or the space-wide) option list.
   const effectiveDept = queueFilter.startsWith('cq_') ? (activeCustomQueue?.name || '') : deptParam;
+  // A per-queue admin (adminIds, set in that queue's own People & Access
+  // tab) can bulk-delete while viewing just that one queue -- by explicit
+  // request. Covers both ways of landing on a single queue's tickets: a
+  // direct cq_<id> queueFilter (activeCustomQueue) or dept_all+dept=<name>
+  // (effectiveDept, looked up by name since that path has no queue id).
+  const isEffectiveDeptQueueAdmin = !!effectiveDept && !!user?.id && (
+    (activeCustomQueue?.adminIds || []).includes(user.id)
+    || (allCustomQueues.find(q => q.name.toLowerCase() === effectiveDept.toLowerCase())?.adminIds || []).includes(user.id)
+  );
   useEffect(() => {
     if (!spaceKey) return;
     const textFields = new Set(['workType','productType','combination','testEnvironment','rootCause',
@@ -3125,8 +3138,9 @@ function SpaceDetailContent() {
       )}
 
       {queueFilter !== 'summary' && queueFilter !== 'queues' && queueFilter !== 'dept_closed' && <>
-      {/* ── Bulk action bar (admin only) ── */}
-      {isAdmin && selectedRows.size > 0 && (() => { const activeCount = issues.filter(i => selectedRows.has(i.id)).length; return activeCount > 0 ? (
+      {/* ── Bulk action bar (admin, or a per-queue admin while viewing
+          just that one queue's tickets) ── */}
+      {(isAdmin || isEffectiveDeptQueueAdmin) && selectedRows.size > 0 && (() => { const activeCount = issues.filter(i => selectedRows.has(i.id)).length; return activeCount > 0 ? (
         <div className="flex items-center gap-3 px-4 py-2 bg-blue-50 border-b border-blue-200">
           <span className="text-sm font-medium text-blue-700">{activeCount} selected</span>
           <button

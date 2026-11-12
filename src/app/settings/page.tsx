@@ -12,7 +12,7 @@ import {
   Settings, Zap, Layers, LayoutList, ArrowLeft, Check, X, Plus, Trash2,
   ChevronDown, MoreHorizontal, RefreshCw, UserPlus, UserCheck, UserX, Filter,
   ImageDown, AlertCircle, Link2, Webhook, Slack, Activity, ToggleLeft, ToggleRight,
-  Copy, FlaskConical, RotateCcw, Clock,
+  Copy, FlaskConical, RotateCcw, Clock, Pencil,
 } from 'lucide-react';
 
 // ── Sync MS Photos button ─────────────────────────────────────────────────────
@@ -213,6 +213,11 @@ function SettingsContent() {
   const [roleMenuPos, setRoleMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [managerSearch, setManagerSearch] = useState('');
   const [selectedUser, setSelectedUser] = useState<any | null>(null);
+  const [editingUserName, setEditingUserName] = useState(false);
+  const [userNameDraft, setUserNameDraft] = useState('');
+  // Opening a different user (or closing the drawer) should never carry
+  // over an in-progress name edit from whoever was open before.
+  useEffect(() => { setEditingUserName(false); }, [selectedUser?.id]);
   const [resendingUserId, setResendingUserId] = useState<string | null>(null);
   const [resendToast, setResendToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [deleteConfirmUser, setDeleteConfirmUser] = useState<any | null>(null);
@@ -351,6 +356,22 @@ function SettingsContent() {
       setMessage('User created successfully');
       setTimeout(() => setMessage(''), 3000);
     } catch (err: any) { setMessage(err.message); }
+  };
+
+  const handleRenameUser = async (userId: string, fullName: string) => {
+    const raw = fullName.trim();
+    if (!raw) return;
+    const spaceIdx = raw.indexOf(' ');
+    const firstName = spaceIdx === -1 ? raw : raw.slice(0, spaceIdx);
+    const lastName = spaceIdx === -1 ? '' : raw.slice(spaceIdx + 1).trimStart();
+    try {
+      await api.updateUser(userId, { firstName, lastName });
+      setUsers(prev => prev.map(u => u.id === userId ? { ...u, firstName, lastName } : u));
+      setSelectedUser((prev: any) => (prev && prev.id === userId ? { ...prev, firstName, lastName } : prev));
+      pushUserToast(`Renamed to ${raw}`);
+    } catch (err: any) {
+      pushUserToast(err?.message || 'Failed to rename user', 'error');
+    }
   };
 
   const handleToggleActive = async (userId: string, isActive: boolean) => {
@@ -2618,7 +2639,39 @@ function SettingsContent() {
                     }
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-base font-bold text-gray-900 truncate">{u.firstName} {u.lastName}</p>
+                    {editingUserName ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          autoFocus
+                          value={userNameDraft}
+                          onChange={(e) => setUserNameDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { handleRenameUser(u.id, userNameDraft); setEditingUserName(false); }
+                            if (e.key === 'Escape') setEditingUserName(false);
+                          }}
+                          className="min-w-0 flex-1 text-base font-bold text-gray-900 border border-blue-300 rounded-md px-2 py-0.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                        <button onClick={() => { handleRenameUser(u.id, userNameDraft); setEditingUserName(false); }}
+                          className="w-6 h-6 flex-shrink-0 flex items-center justify-center rounded-md text-emerald-600 hover:bg-emerald-50">
+                          <Check size={14} />
+                        </button>
+                        <button onClick={() => setEditingUserName(false)}
+                          className="w-6 h-6 flex-shrink-0 flex items-center justify-center rounded-md text-gray-400 hover:bg-gray-100">
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="group flex items-center gap-1.5">
+                        <p className="text-base font-bold text-gray-900 truncate">{u.firstName} {u.lastName}</p>
+                        <button
+                          onClick={() => { setUserNameDraft(`${u.firstName} ${u.lastName}`.trim()); setEditingUserName(true); }}
+                          className="w-6 h-6 flex-shrink-0 flex items-center justify-center rounded-md text-gray-300 opacity-0 group-hover:opacity-100 hover:text-blue-600 hover:bg-blue-50 transition-all"
+                          title="Edit name"
+                        >
+                          <Pencil size={13} />
+                        </button>
+                      </div>
+                    )}
                     <p data-hj-suppress className="text-sm text-gray-500 truncate">{u.email}</p>
                     <span className={`inline-flex items-center gap-1 mt-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold ${ROLE_COLORS[u.role] || 'bg-gray-100 text-gray-600'}`}>
                       {ROLE_LABELS[u.role] || u.role}

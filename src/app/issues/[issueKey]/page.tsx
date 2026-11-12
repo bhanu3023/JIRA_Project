@@ -296,6 +296,11 @@ export default function IssueDetailPage() {
   // handoff, and saw "Showing Dev's own assignee" instead of being treated
   // as the QA-queue member she actually is. null = not yet resolved.
   const [isCurrentDeptQueueMember, setIsCurrentDeptQueueMember] = useState<boolean | null>(null);
+  // A per-queue admin (q.adminIds, set in that queue's own People & Access
+  // tab) for whichever department currently holds this ticket -- can
+  // delete it without needing the site-wide admin role. By explicit
+  // request. Resolved alongside isCurrentDeptQueueMember above, same data.
+  const [isCurrentDeptQueueAdmin, setIsCurrentDeptQueueAdmin] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
   // Single combined work log against the whole ticket, matching real Jira --
   // department is still recorded on each entry (backend requires it) but is
@@ -725,6 +730,7 @@ export default function IssueDetailPage() {
 
       if (dept) {
         setIsCurrentDeptQueueMember(null); // reset for the new ticket/department until re-resolved below
+        setIsCurrentDeptQueueAdmin(false);
         // Resolve which space's custom queue matches this department in ONE
         // targeted request (department-queue) instead of fetching
         // all-space-keys and then firing one custom-queues/:spaceKey request
@@ -752,6 +758,7 @@ export default function IssueDetailPage() {
               const matchedQueue = queues.find(q => (q.name || '').toLowerCase() === dept.toLowerCase());
               if (matchedQueue) {
                 setIsCurrentDeptQueueMember(!!user?.id && Array.isArray(matchedQueue.memberIds) && matchedQueue.memberIds.includes(user.id));
+                setIsCurrentDeptQueueAdmin(!!user?.id && Array.isArray(matchedQueue.adminIds) && matchedQueue.adminIds.includes(user.id));
                 const qSt = matchedQueue.queueStatuses;
                 const qTr = matchedQueue.queueTransitions;
                 if (qSt?.length) {
@@ -783,6 +790,7 @@ export default function IssueDetailPage() {
             const spKey = result?.spaceKey;
             if (matchedQueue && spKey) {
               setIsCurrentDeptQueueMember(!!user?.id && Array.isArray(matchedQueue.memberIds) && matchedQueue.memberIds.includes(user.id));
+              setIsCurrentDeptQueueAdmin(!!user?.id && Array.isArray(matchedQueue.adminIds) && matchedQueue.adminIds.includes(user.id));
               try {
                 const existing: any[] = JSON.parse(localStorage.getItem(`custom_queues_${spKey}`) || '[]');
                 const others = existing.filter((q: any) => q.id !== matchedQueue.id);
@@ -812,6 +820,7 @@ export default function IssueDetailPage() {
         })();
       } else {
         setIsCurrentDeptQueueMember(null);
+        setIsCurrentDeptQueueAdmin(false);
         loadStatusesForSpace(currentIssue.spaceKey);
       }
     }
@@ -2272,19 +2281,25 @@ export default function IssueDetailPage() {
 
         {/* Right: icon actions only */}
         <div className="flex items-center gap-0.5">
-          {user?.role === 'admin' && <div className="relative">
+          {/* A per-queue admin (isCurrentDeptQueueAdmin) can delete this
+              ticket too, scoped to just the department currently holding
+              it -- by explicit request. Resync from Jira stays site-wide-
+              admin only; it's unrelated to queue-level ticket deletion. */}
+          {(user?.role === 'admin' || isCurrentDeptQueueAdmin) && <div className="relative">
             <button onClick={() => setShowMoreMenu(!showMoreMenu)}
               className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-all">
               <MoreHorizontal size={15} />
             </button>
             {showMoreMenu && (
               <Dropdown onClose={() => setShowMoreMenu(false)} width="w-52" align="right-0">
-                <button onClick={() => { setShowMoreMenu(false); handleResyncFromJira(); }}
-                  disabled={resyncingJira}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50">
-                  <RefreshCw size={14} className={resyncingJira ? 'animate-spin' : ''} />
-                  {resyncingJira ? 'Resyncing…' : 'Resync from Jira'}
-                </button>
+                {user?.role === 'admin' && (
+                  <button onClick={() => { setShowMoreMenu(false); handleResyncFromJira(); }}
+                    disabled={resyncingJira}
+                    className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50">
+                    <RefreshCw size={14} className={resyncingJira ? 'animate-spin' : ''} />
+                    {resyncingJira ? 'Resyncing…' : 'Resync from Jira'}
+                  </button>
+                )}
                 <button onClick={() => { setShowMoreMenu(false); setShowDeleteModal(true); }}
                   className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm text-red-600 hover:bg-red-50 transition-colors">
                   <Trash2 size={14} /> Delete issue
