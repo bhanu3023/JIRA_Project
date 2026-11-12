@@ -315,7 +315,7 @@ class ApiClient {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return this.request<any>(`/worklogs${suffix}`);
   }
-  createActivityWorklog(data: { workDate: string; entries: Array<{ activityType: string; customReason?: string; timeSpentMinutes: number; description?: string }> }) {
+  createActivityWorklog(data: { workDate: string; spaceKey?: string; queue?: string; entries: Array<{ activityType: string; customReason?: string; timeSpentMinutes: number; description?: string }> }) {
     return this.request<{ ok: true; entries: any[] }>(`/activity-worklogs`, { method: 'POST', body: JSON.stringify(data) });
   }
   getActivityWorklogs(params: { from?: string; to?: string; userId?: string; spaceKey?: string; dept?: string } = {}) {

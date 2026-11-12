@@ -709,6 +709,10 @@ pool.query(`
   )
 `).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS activity_worklogs_user_idx ON activity_worklogs ("userId")`).catch(() => {});
+// The space + queue the person logged the entry under (picked in the Create
+// form). Entries from before these columns existed stay NULL and are placed
+// by the author's queue membership instead (see GET /activity-worklogs).
+pool.query(`ALTER TABLE activity_worklogs ADD COLUMN IF NOT EXISTS "spaceKey" TEXT, ADD COLUMN IF NOT EXISTS queue TEXT`).catch(() => {});
 // Records every real (non-dev-mode) notification send attempt and its
 // outcome -- written by notification-service.ts's sendNotification, the
 // single choke point every notification email (status change, comment,
@@ -14464,6 +14468,22 @@ async function _handleJiraPgApi(
     const workDate = body.workDate ? new Date(body.workDate) : new Date();
     const authorUser = await getCachedUser(userId);
     const authorName = authorUser ? `${authorUser.firstName} ${authorUser.lastName}`.trim() : null;
+    // Queue this work was done for. Must be a real queue in that space that
+    // the author belongs to, so entries can't be filed under another team.
+    const entrySpaceKey = body.spaceKey ? String(body.spaceKey).trim().toUpperCase() : null;
+    const entryQueueIn = body.queue ? String(body.queue).trim() : null;
+    let entryQueue: string | null = null;
+    if (entrySpaceKey && entryQueueIn) {
+      const cqRow = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [entrySpaceKey]);
+      const match = ((cqRow.rows[0]?.queues || []) as any[]).find(
+        (q: any) => String(q?.name || '').toLowerCase() === entryQueueIn.toLowerCase()
+      );
+      if (!match) return json({ error: `Queue "${entryQueueIn}" not found in ${entrySpaceKey}.` }, 400);
+      if (!Array.isArray(match.memberIds) || !match.memberIds.includes(userId)) {
+        return json({ error: `You are not a member of the ${match.name} queue.` }, 403);
+      }
+      entryQueue = String(match.name);
+    }
     const inserted: any[] = [];
     for (const e of entries) {
       const activityType = String(e.activityType || '').trim();
@@ -14471,8 +14491,8 @@ async function _handleJiraPgApi(
       if (!activityType || timeSpentMinutes <= 0) continue;
       const id = rid();
       const result = await pool.query(
-        `INSERT INTO activity_worklogs (id, "userId", "authorName", "authorEmail", "activityType", "customReason", "timeSpentMinutes", description, "workDate", "createdAt")
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) RETURNING *`,
+        `INSERT INTO activity_worklogs (id, "userId", "authorName", "authorEmail", "activityType", "customReason", "timeSpentMinutes", description, "workDate", "createdAt", "spaceKey", queue)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),$10,$11) RETURNING *`,
         [
           id, userId, authorName, authorUser?.email ?? null,
           activityType,
@@ -14480,6 +14500,8 @@ async function _handleJiraPgApi(
           timeSpentMinutes,
           e.description ? String(e.description).trim() : null,
           workDate,
+          entryQueue ? entrySpaceKey : null,
+          entryQueue,
         ]
       );
       inserted.push(result.rows[0]);
@@ -14509,10 +14531,11 @@ async function _handleJiraPgApi(
     if (targetUserId) { conditions.push(`"userId" = $${n}`); params.push(targetUserId); n++; }
     if (from) { conditions.push(`"workDate" >= $${n}`); params.push(new Date(from)); n++; }
     if (to) { conditions.push(`"workDate" <= $${n}`); params.push(new Date(to)); n++; }
-    // Space / Queue, same meaning as GET /worklogs' Queue filter: these
-    // entries aren't on a ticket, so they're placed by who logged them --
-    // a member of that queue's roster (custom_queues memberIds), or of any
-    // queue in that space. A queue name in several spaces counts in each.
+    // Space / Queue. An entry logged with a queue (picked in the Create
+    // form) is filed under exactly that space + queue -- someone in both
+    // Migration and Dev only shows under the queue they actually logged
+    // for. Older entries without one (queue IS NULL) fall back to the
+    // author's queue membership (custom_queues memberIds), as before.
     const spaceKeyFilter = qs.get('spaceKey');
     const deptFilter = qs.get('dept');
     if (spaceKeyFilter || deptFilter) {
@@ -14526,7 +14549,12 @@ async function _handleJiraPgApi(
           if (Array.isArray(q?.memberIds)) q.memberIds.forEach((id: string) => members.add(id));
         }
       }
-      conditions.push(`"userId" = ANY($${n}::text[])`); params.push(Array.from(members)); n++;
+      const tagged: string[] = [];
+      if (spaceKeyFilter) { tagged.push(`"spaceKey" = $${n}`); params.push(spaceKeyFilter.toUpperCase()); n++; }
+      if (deptFilter) { tagged.push(`LOWER(queue) = LOWER($${n})`); params.push(deptFilter); n++; }
+      if (!deptFilter) tagged.push(`queue IS NOT NULL`);
+      conditions.push(`((${tagged.join(' AND ')}) OR (queue IS NULL AND "userId" = ANY($${n}::text[])))`);
+      params.push(Array.from(members)); n++;
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = await pool.query(

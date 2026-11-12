@@ -28,9 +28,35 @@ const ACTIVITY_TYPES = [
   'Others',
 ] as const;
 
+// What the Dev queue logs instead -- shown in the Create form when the
+// entry is being logged for the Dev queue.
+const DEV_ACTIVITY_TYPES = [
+  'Worked on automation',
+  'Attend the daily meeting on updates',
+  'Helping Team Members on tickets (Add Ticket Number Which Ticket You helped)',
+  'QA Discussion And Migration Team discussion',
+  'RCA Doc preparation',
+  'Working with infra on deployment',
+  'Wrote KB articles',
+  'Investigate issues',
+  'Join client calls',
+  'Join internal calls',
+  'Others',
+] as const;
+
+const HELPING_ON_TICKETS = 'Helping Team Members on tickets (Add Ticket Number Which Ticket You helped)';
+
+const activityTypesForQueue = (queue: string): readonly string[] =>
+  queue.trim().toLowerCase() === 'dev' ? DEV_ACTIVITY_TYPES : ACTIVITY_TYPES;
+
+// Every activity from both lists, for the Activity filter.
+const ALL_ACTIVITY_TYPES = Array.from(new Set<string>([...ACTIVITY_TYPES, ...DEV_ACTIVITY_TYPES]));
+
 type ActivityWorklogRow = {
   id: string;
   userId: string;
+  spaceKey?: string | null;
+  queue?: string | null;
   authorName: string | null;
   authorEmail: string | null;
   activityType: string;
@@ -152,11 +178,53 @@ function emptyDraft(activityType: string): DraftEntry {
   return { activityType, hours: '', minutes: '', customReason: '', description: '' };
 }
 
-function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+function CreateActivityWorklogModal({ onClose, onSaved, userId, spaces }: {
+  onClose: () => void;
+  onSaved: () => void;
+  userId: string | undefined;
+  spaces: { key: string; name?: string }[];
+}) {
   const [workDate, setWorkDate] = useState(() => isoDate(new Date()));
   const [selected, setSelected] = useState<Record<string, DraftEntry>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  // The queues this person belongs to, across every space -- the entry is
+  // filed under the one picked here (auto-picked when there's only one).
+  const [myQueues, setMyQueues] = useState<{ spaceKey: string; spaceName: string; name: string }[] | null>(null);
+  const [queueChoice, setQueueChoice] = useState(''); // "SPACEKEY|Queue name"
+  const spaceKeysStr = spaces.map((s) => s.key).join(',');
+  useEffect(() => {
+    if (!userId) { setMyQueues([]); return; }
+    let cancelled = false;
+    Promise.all(spaces.map((sp) =>
+      api.request<any[]>(`custom-queues/${sp.key}`).then(
+        (qs) => (qs || [])
+          .filter((q: any) => q?.name && Array.isArray(q.memberIds) && q.memberIds.includes(userId))
+          .map((q: any) => ({ spaceKey: sp.key, spaceName: sp.name || sp.key, name: String(q.name) })),
+        () => [] as { spaceKey: string; spaceName: string; name: string }[],
+      ),
+    )).then((lists) => {
+      if (cancelled) return;
+      const all = lists.flat();
+      setMyQueues(all);
+      if (all.length === 1) setQueueChoice(`${all[0].spaceKey}|${all[0].name}`);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, spaceKeysStr]);
+  const [choiceSpaceKey, ...choiceNameParts] = queueChoice.split('|');
+  const choiceQueue = choiceNameParts.join('|');
+  const activityTypes = activityTypesForQueue(choiceQueue);
+  const needsQueue = !!myQueues && myQueues.length > 0;
+
+  // Switching queue can swap the activity list -- drop picks that aren't on it.
+  useEffect(() => {
+    setSelected((prev) => {
+      const kept = Object.fromEntries(Object.entries(prev).filter(([k]) => activityTypes.includes(k)));
+      return Object.keys(kept).length === Object.keys(prev).length ? prev : kept;
+    });
+  }, [activityTypes]);
 
   const toggle = (activityType: string) => {
     setSelected((prev) => {
@@ -172,6 +240,7 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
   };
 
   const handleSave = async () => {
+    if (needsQueue && !choiceQueue) { setError('Select the queue you are logging this work for.'); return; }
     const drafts = Object.values(selected);
     if (!drafts.length) { setError('Select at least one activity.'); return; }
     const entries: Array<{ activityType: string; customReason?: string; timeSpentMinutes: number; description?: string }> = [];
@@ -181,6 +250,7 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
       const total = h * 60 + m;
       if (total <= 0) { setError(`Enter time spent for "${d.activityType}".`); return; }
       if (d.activityType === 'Others' && !d.customReason.trim()) { setError('Enter a reason for "Others".'); return; }
+      if (d.activityType === HELPING_ON_TICKETS && !d.description.trim()) { setError('Enter the ticket number(s) you helped on in Notes.'); return; }
       entries.push({
         activityType: d.activityType,
         customReason: d.activityType === 'Others' ? d.customReason.trim() : undefined,
@@ -191,7 +261,11 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
     setSaving(true);
     setError('');
     try {
-      await api.createActivityWorklog({ workDate: `${workDate}T12:00:00`, entries });
+      await api.createActivityWorklog({
+        workDate: `${workDate}T12:00:00`,
+        ...(choiceQueue ? { spaceKey: choiceSpaceKey, queue: choiceQueue } : {}),
+        entries,
+      });
       onSaved();
       onClose();
     } catch (e: any) {
@@ -216,9 +290,24 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
               className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
 
+          {needsQueue && (
+            <div className="mb-4">
+              <label className="text-[12px] text-gray-500 font-medium block mb-1">Queue <span className="text-red-500">*</span></label>
+              <select value={queueChoice} onChange={(e) => setQueueChoice(e.target.value)}
+                className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">Select queue</option>
+                {myQueues!.map((q) => (
+                  <option key={`${q.spaceKey}|${q.name}`} value={`${q.spaceKey}|${q.name}`}>
+                    {q.name} — {q.spaceName}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <p className="text-[12px] text-gray-500 font-medium mb-2">Select what you worked on — check each one that applies, then log time for it.</p>
           <div className="space-y-2">
-            {ACTIVITY_TYPES.map((activityType) => {
+            {activityTypes.map((activityType) => {
               const checked = !!selected[activityType];
               const draft = selected[activityType];
               return (
@@ -251,7 +340,9 @@ function CreateActivityWorklogModal({ onClose, onSaved }: { onClose: () => void;
                       )}
                       <div className="flex items-center gap-2">
                         <label className="text-[11px] text-gray-500 font-medium w-20 flex-shrink-0">Notes</label>
-                        <input type="text" placeholder="Optional" value={draft.description}
+                        <input type="text"
+                          placeholder={activityType === HELPING_ON_TICKETS ? 'Ticket number(s) you helped on — required' : 'Optional'}
+                          value={draft.description}
                           onChange={(e) => updateDraft(activityType, { description: e.target.value })}
                           className="flex-1 border border-gray-300 rounded px-2 py-1 text-[12.5px] focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
@@ -435,7 +526,7 @@ function TicketWorklogTab({ userId, allUsers, spaces }: {
           <select value={activityFilter} onChange={(e) => setActivityFilter(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-[12.5px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white max-w-[260px]">
             <option value="">All activities</option>
-            {ACTIVITY_TYPES.map((a) => <option key={a} value={a}>{a}</option>)}
+            {ALL_ACTIVITY_TYPES.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
         </div>
         {(userFilter || activityFilter || spaceKeyFilter || deptFilter || dateFrom || dateTo) && (
@@ -481,6 +572,7 @@ function TicketWorklogTab({ userId, allUsers, spaces }: {
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</th>
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Reporter</th>
+                  <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Queue</th>
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Activity</th>
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Time</th>
                   <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Notes</th>
@@ -494,6 +586,7 @@ function TicketWorklogTab({ userId, allUsers, spaces }: {
                       {new Date(e.workDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
                     </td>
                     <td className="px-4 py-2.5 text-[12.5px] text-gray-600 whitespace-nowrap">{e.authorName || 'Unknown'}</td>
+                    <td className="px-4 py-2.5 text-[12.5px] text-gray-500 whitespace-nowrap">{e.queue || '—'}</td>
                     <td className="px-4 py-2.5 text-[13px] text-gray-800">
                       {e.activityType === 'Others' && e.customReason ? e.customReason : e.activityType}
                     </td>
@@ -515,7 +608,7 @@ function TicketWorklogTab({ userId, allUsers, spaces }: {
         </div>
       )}
 
-      {showCreate && <CreateActivityWorklogModal onClose={() => setShowCreate(false)} onSaved={load} />}
+      {showCreate && <CreateActivityWorklogModal onClose={() => setShowCreate(false)} onSaved={load} userId={userId} spaces={spaces} />}
     </div>
   );
 }
