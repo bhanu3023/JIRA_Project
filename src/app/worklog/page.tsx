@@ -46,8 +46,16 @@ const DEV_ACTIVITY_TYPES = [
 
 const HELPING_ON_TICKETS = 'Helping Team Members on tickets (Add Ticket Number Which Ticket You helped)';
 
-const activityTypesForQueue = (queue: string): readonly string[] =>
-  queue.trim().toLowerCase() === 'dev' ? DEV_ACTIVITY_TYPES : ACTIVITY_TYPES;
+// People whose role is on the Migration team. They always get the Migration
+// activity list and never count under the Dev queue, even if they're also
+// listed as a Dev queue member. ("developer" can't be used the other way
+// round -- it's the default role every team member gets.)
+const MIGRATION_ROLES = new Set(['migration_engineer', 'migration_manager']);
+const isMigrationRole = (role?: string | null) => MIGRATION_ROLES.has(String(role || '').toLowerCase());
+const isDevQueue = (queue?: string | null) => String(queue || '').trim().toLowerCase() === 'dev';
+
+const activityTypesFor = (queue: string, role?: string | null): readonly string[] =>
+  !isMigrationRole(role) && isDevQueue(queue) ? DEV_ACTIVITY_TYPES : ACTIVITY_TYPES;
 
 // Every activity from both lists, for the Activity filter.
 const ALL_ACTIVITY_TYPES = Array.from(new Set<string>([...ACTIVITY_TYPES, ...DEV_ACTIVITY_TYPES]));
@@ -178,10 +186,11 @@ function emptyDraft(activityType: string): DraftEntry {
   return { activityType, hours: '', minutes: '', customReason: '', description: '' };
 }
 
-function CreateActivityWorklogModal({ onClose, onSaved, userId, spaces }: {
+function CreateActivityWorklogModal({ onClose, onSaved, userId, userRole, spaces }: {
   onClose: () => void;
   onSaved: () => void;
   userId: string | undefined;
+  userRole: string | undefined;
   spaces: { key: string; name?: string }[];
 }) {
   const [workDate, setWorkDate] = useState(() => isoDate(new Date()));
@@ -201,6 +210,7 @@ function CreateActivityWorklogModal({ onClose, onSaved, userId, spaces }: {
       api.request<any[]>(`custom-queues/${sp.key}`).then(
         (qs) => (qs || [])
           .filter((q: any) => q?.name && Array.isArray(q.memberIds) && q.memberIds.includes(userId))
+          .filter((q: any) => !(isMigrationRole(userRole) && isDevQueue(q.name)))
           .map((q: any) => ({ spaceKey: sp.key, spaceName: sp.name || sp.key, name: String(q.name) })),
         () => [] as { spaceKey: string; spaceName: string; name: string }[],
       ),
@@ -212,10 +222,10 @@ function CreateActivityWorklogModal({ onClose, onSaved, userId, spaces }: {
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, spaceKeysStr]);
+  }, [userId, userRole, spaceKeysStr]);
   const [choiceSpaceKey, ...choiceNameParts] = queueChoice.split('|');
   const choiceQueue = choiceNameParts.join('|');
-  const activityTypes = activityTypesForQueue(choiceQueue);
+  const activityTypes = activityTypesFor(choiceQueue, userRole);
   const needsQueue = !!myQueues && myQueues.length > 0;
 
   // Switching queue can swap the activity list -- drop picks that aren't on it.
@@ -417,9 +427,10 @@ function useResetStaleFilters(
   }, [roster, deptFilter, userFilter, setDeptFilter, setUserFilter]);
 }
 
-function TicketWorklogTab({ userId, allUsers, spaces }: {
+function TicketWorklogTab({ userId, userRole, allUsers, spaces }: {
   userId: string | undefined;
-  allUsers: { id: string; firstName?: string; lastName?: string; email?: string }[];
+  userRole: string | undefined;
+  allUsers: { id: string; firstName?: string; lastName?: string; email?: string; role?: string }[];
   spaces: { key: string; name?: string }[];
 }) {
   const [entries, setEntries] = useState<ActivityWorklogRow[]>([]);
@@ -442,7 +453,8 @@ function TicketWorklogTab({ userId, allUsers, spaces }: {
   const roster = useQueueRoster(spaces, spaceKeyFilter, deptFilter);
   const deptOptions = roster.deptOptions;
   useResetStaleFilters(roster, deptFilter, setDeptFilter, userFilter, setUserFilter);
-  const reporterUsers = roster.memberIds ? allUsers.filter((u) => roster.memberIds!.has(u.id)) : allUsers;
+  const reporterUsers = (roster.memberIds ? allUsers.filter((u) => roster.memberIds!.has(u.id)) : allUsers)
+    .filter((u) => !(isDevQueue(deptFilter) && isMigrationRole(u.role)));
 
   const load = () => {
     setLoading(true);
@@ -608,7 +620,7 @@ function TicketWorklogTab({ userId, allUsers, spaces }: {
         </div>
       )}
 
-      {showCreate && <CreateActivityWorklogModal onClose={() => setShowCreate(false)} onSaved={load} userId={userId} spaces={spaces} />}
+      {showCreate && <CreateActivityWorklogModal onClose={() => setShowCreate(false)} onSaved={load} userId={userId} userRole={userRole} spaces={spaces} />}
     </div>
   );
 }
@@ -634,7 +646,7 @@ export default function WorklogPage() {
   const [deptFilter, setDeptFilter] = useState('');
   const [search, setSearch] = useState('');
 
-  const [users, setUsers] = useState<{ id: string; firstName?: string; lastName?: string; email?: string }[]>([]);
+  const [users, setUsers] = useState<{ id: string; firstName?: string; lastName?: string; email?: string; role?: string }[]>([]);
   useEffect(() => { api.getUsers().then(setUsers).catch(() => {}); }, []);
 
   const [rows, setRows] = useState<WorklogRow[]>([]);
@@ -772,7 +784,7 @@ export default function WorklogPage() {
         </div>
       </div>
 
-      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} allUsers={users} spaces={spaces || []} />}
+      {mainTab === 'ticket' && <TicketWorklogTab userId={user?.id} userRole={user?.role} allUsers={users} spaces={spaces || []} />}
 
       {mainTab === 'worklog' && canSeeWorklogTab && (
       <div className="flex-1 overflow-auto px-8 py-6">

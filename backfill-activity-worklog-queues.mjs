@@ -11,7 +11,7 @@
 //
 // Dry run by default -- pass --apply to write.
 //   node backfill-activity-worklog-queues.mjs
-//   node backfill-activity-worklog-queues.mjs --assign ravi.hemanth@cloudfuze.com=Migration --apply
+//   node backfill-activity-worklog-queues.mjs --assign someone@cloudfuze.com=Migration --apply
 import pg from 'pg';
 
 const APPLY = process.argv.includes('--apply');
@@ -35,10 +35,11 @@ async function main() {
   }
 
   const pending = await pool.query(`
-    SELECT a."userId", COALESCE(u.email, a."authorEmail") AS email, MAX(a."authorName") AS name, COUNT(*)::int AS n
+    SELECT a."userId", COALESCE(u.email, a."authorEmail") AS email, MAX(a."authorName") AS name, COUNT(*)::int AS n,
+           LOWER(COALESCE(u.role, '')) AS role
     FROM activity_worklogs a LEFT JOIN users u ON u.id = a."userId"
     WHERE a.queue IS NULL
-    GROUP BY a."userId", COALESCE(u.email, a."authorEmail")
+    GROUP BY a."userId", COALESCE(u.email, a."authorEmail"), u.role
     ORDER BY name`);
 
   const plan = []; const unresolved = [];
@@ -52,7 +53,14 @@ async function main() {
       if (matches.length !== 1) { unresolved.push(`${p.name} <${email}>: --assign "${spec}" matched ${matches.length} queues`); continue; }
       target = matches[0];
     } else {
-      const mine = allQueues.filter((q) => q.memberIds.includes(p.userId));
+      let mine = allQueues.filter((q) => q.memberIds.includes(p.userId));
+      // Migration-team roles never go under Dev; if one of their queues is
+      // named Migration, that's theirs.
+      if (['migration_engineer', 'migration_manager'].includes(p.role)) {
+        mine = mine.filter((q) => q.name.toLowerCase() !== 'dev');
+        const migration = mine.filter((q) => q.name.toLowerCase() === 'migration');
+        if (migration.length === 1) mine = migration;
+      }
       if (mine.length === 1) target = mine[0];
       else {
         unresolved.push(`${p.name} <${email}> (${p.n} entries): ` +

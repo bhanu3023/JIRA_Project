@@ -14507,6 +14507,11 @@ async function _handleJiraPgApi(
       if (!Array.isArray(match.memberIds) || !match.memberIds.includes(userId)) {
         return json({ error: `You are not a member of the ${match.name} queue.` }, 403);
       }
+      // Migration-team roles log under Migration, never Dev (see GET below).
+      if (String(match.name).trim().toLowerCase() === 'dev'
+        && ['migration_engineer', 'migration_manager'].includes(String(authorUser?.role || '').toLowerCase())) {
+        return json({ error: 'Migration team members log their work under the Migration queue, not Dev.' }, 403);
+      }
       entryQueue = String(match.name);
     }
     const inserted: any[] = [];
@@ -14573,6 +14578,15 @@ async function _handleJiraPgApi(
           if (deptFilter && String(q?.name || '').toLowerCase() !== deptFilter.toLowerCase()) continue;
           if (Array.isArray(q?.memberIds)) q.memberIds.forEach((id: string) => members.add(id));
         }
+      }
+      // Migration-team roles never count under Dev, even when they're also
+      // on the Dev queue's member list (e.g. added there for ticket access).
+      if (deptFilter && deptFilter.trim().toLowerCase() === 'dev' && members.size) {
+        const mig = await pool.query(
+          `SELECT id FROM users WHERE id = ANY($1::text[]) AND LOWER(role) IN ('migration_engineer','migration_manager')`,
+          [Array.from(members)]
+        ).catch(() => ({ rows: [] as any[] }));
+        for (const r of mig.rows) members.delete(r.id);
       }
       const tagged: string[] = [];
       if (spaceKeyFilter) { tagged.push(`"spaceKey" = $${n}`); params.push(spaceKeyFilter.toUpperCase()); n++; }
