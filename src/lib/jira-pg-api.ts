@@ -5509,12 +5509,15 @@ async function importIssueFromJira(localKey: string, opts?: { defaultDepartment?
 // missing 165 tickets, QA 161, SOPS 5, every one of them created after the
 // original one-time migration. defaultDepartment matches each board's own
 // single, 100%-consistent existing department (confirmed for real: every
-// already-migrated PSM ticket is 'Pre-Sales', every SOPS ticket 'SalesOps',
-// every QA ticket 'QA' -- NOT 'Dev', which is only right for L2B/L3B).
+// already-migrated PSM ticket was 'Pre-Sales', every SOPS ticket 'SalesOps',
+// every QA ticket 'QA' -- NOT 'Dev', which is only right for L2B/L3B). PSM
+// updated to 'Pre-Sales-Team' after the standalone "Pre-Sales" queue was
+// merged into it and deleted -- left as 'Pre-Sales' here would have
+// resurrected that queue on the very next sync.
 const SYNC_PROJECTS: { prefix: string; jiraProject: string; defaultDepartment: string }[] = [
   { prefix: 'L2B',  jiraProject: 'L2B',  defaultDepartment: 'Dev' },
   { prefix: 'L3B',  jiraProject: 'L3B',  defaultDepartment: 'Dev' },
-  { prefix: 'PSM',  jiraProject: 'PSM',  defaultDepartment: 'Pre-Sales' },
+  { prefix: 'PSM',  jiraProject: 'PSM',  defaultDepartment: 'Pre-Sales-Team' },
   { prefix: 'SOPS', jiraProject: 'SOPS', defaultDepartment: 'SalesOps' },
   { prefix: 'QA',   jiraProject: 'QA',   defaultDepartment: 'QA' },
 ];

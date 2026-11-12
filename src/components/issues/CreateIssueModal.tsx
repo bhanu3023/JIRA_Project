@@ -157,6 +157,19 @@ const WORK_TYPES = [
   { value: 'service_request', label: 'Service Request' },
 ];
 
+// Pre-Sales-Team's own work types, replacing the normal list above --
+// by explicit request, this one queue's tickets are sales activities
+// (a demo, a POC, a security assessment, ...), not engineering work, so
+// the generic Task/Bug/Sub-task/Service Request set doesn't fit. Every
+// other queue keeps the normal WORK_TYPES list unchanged.
+const PRESALES_TEAM_WORK_TYPES = [
+  { value: 'demo',                  label: 'Demo' },
+  { value: 'poc',                   label: 'POC' },
+  { value: 'technical_discussion',  label: 'Technical Discussion' },
+  { value: 'security_assessment',   label: 'Security assessment' },
+  { value: 'technical_assistance',  label: 'Technical assistance' },
+];
+
 const COMBINATION_OPTIONS = [
   'Box - OneDrive', 'Box - SharePoint', 'Box - MyDrive', 'Box - ShareDrive',
   'Box - Dropbox', 'Box - Box', 'Box - Cirtix', 'Box - Amazon S3',
@@ -443,7 +456,10 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
 
   // Pre-Sales and QA tickets don't have a project manager assigned at creation time.
   // Infra tickets don't have one either, by request -- same exemption, one more dept.
-  const skipsProjectManager = ['pre-sales', 'qa', 'infra'].includes(form.department.trim().toLowerCase());
+  // 'pre-sales-team' added after the standalone "Pre-Sales" queue was merged
+  // into it and deleted -- this exemption otherwise silently stopped
+  // applying to every ticket created there from that point on.
+  const skipsProjectManager = ['pre-sales', 'pre-sales-team', 'qa', 'infra'].includes(form.department.trim().toLowerCase());
   // Infra keeps Combination, Product Type, and Project Pool on the form
   // (still useful data to capture when known) but, unlike every other
   // migration-style department, never requires them to create a ticket --
@@ -633,7 +649,18 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   };
 
   const update = (field: string, value: any) => {
-    setForm(f => ({ ...f, [field]: value }));
+    setForm(f => {
+      const next = { ...f, [field]: value };
+      // Switching queue can change which work-type list applies (see
+      // PRESALES_TEAM_WORK_TYPES above) -- if the currently-picked type
+      // isn't one of the new list's options, fall back to its first entry
+      // instead of silently keeping an option that's no longer shown.
+      if (field === 'department') {
+        const nextTypes = String(value).trim().toLowerCase() === 'pre-sales-team' ? PRESALES_TEAM_WORK_TYPES : WORK_TYPES;
+        if (!nextTypes.some(t => t.value === next.type)) next.type = nextTypes[0].value;
+      }
+      return next;
+    });
     if (field === 'summary' && value.trim()) setSummaryError(false);
     if (field === 'department' && value) setQueueError(false);
     if (field === 'ticketCategory' && value) setTicketCategoryError(false);
@@ -645,7 +672,8 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   };
 
   const selectedAssignee = spaceMembers.find(m => m.id === form.assigneeId);
-  const workTypeLabel = WORK_TYPES.find(t => t.value === form.type)?.label || 'Task';
+  const activeWorkTypes = form.department.trim().toLowerCase() === 'pre-sales-team' ? PRESALES_TEAM_WORK_TYPES : WORK_TYPES;
+  const workTypeLabel = activeWorkTypes.find(t => t.value === form.type)?.label || activeWorkTypes[0].label;
   // Real department destinations only — the built-in entries (Unassigned/Assigned/My
   // Queue/All Requests) are list-filter views, not places a new ticket can be routed to.
   // Non-admins only see queues they're a member of (and not suspended from) — same
@@ -1107,7 +1135,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
                   onChange={e => update('type', e.target.value)}
                   className="w-full pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  {WORK_TYPES.map(t => (
+                  {activeWorkTypes.map(t => (
                     <option key={t.value} value={t.value}>{t.label}</option>
                   ))}
                 </select>

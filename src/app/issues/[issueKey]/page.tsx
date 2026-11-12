@@ -2175,6 +2175,12 @@ export default function IssueDetailPage() {
   };
   const priorityMeta = getPriorityMeta(issue.priority ?? 'medium');
 
+  // Pre-Sales-Team's own work types, replacing the normal list -- by
+  // explicit request, this queue's tickets are sales activities (a demo, a
+  // POC, a security assessment, ...), not engineering work. Same list as
+  // CreateIssueModal's PRESALES_TEAM_WORK_TYPES; kept separately here since
+  // this page has no shared import path with that modal's file for it.
+  const isPreSalesTeamDept = ((issue as any)?.current_department || '').trim().toLowerCase() === 'pre-sales-team';
   const issueTypes = issue.spaceKey === 'TESTBOARD'
     ? [
         { value: 'test',           label: 'Test' },
@@ -2187,6 +2193,14 @@ export default function IssueDetailPage() {
         { value: 'test_plan',      label: 'Test Plan' },
         { value: 'test_execution', label: 'Test Execution' },
         { value: 'precondition',   label: 'Precondition' },
+      ]
+    : isPreSalesTeamDept
+    ? [
+        { value: 'demo',                 label: 'Demo' },
+        { value: 'poc',                  label: 'POC' },
+        { value: 'technical_discussion', label: 'Technical Discussion' },
+        { value: 'security_assessment',  label: 'Security assessment' },
+        { value: 'technical_assistance', label: 'Technical assistance' },
       ]
     : [
         { value: 'epic',            label: 'Epic' },
