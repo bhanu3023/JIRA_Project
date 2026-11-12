@@ -8,14 +8,14 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 async function main() {
   const { rows: spaceRows } = await pool.query(
-    `SELECT id, key, name, custom_queues FROM spaces WHERE name ILIKE '%cloudfuze board%' OR key ILIKE '%CB%'`,
+    `SELECT id, key, name FROM spaces WHERE name ILIKE '%cloudfuze board%' OR key ILIKE '%CB%'`,
   );
   console.log(`Spaces matching "CloudFuze Board": ${spaceRows.length}`);
   for (const sp of spaceRows) {
     console.log(`\n--- Space: ${sp.name} (key=${sp.key}, id=${sp.id}) ---`);
-    let cq = sp.custom_queues;
-    if (typeof cq === 'string') { try { cq = JSON.parse(cq); } catch {} }
-    const queues = cq?.queues || cq || [];
+    const { rows: cqRows } = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [sp.key]);
+    let queues = cqRows[0]?.queues || [];
+    if (typeof queues === 'string') { try { queues = JSON.parse(queues); } catch {} }
     for (const q of queues) {
       if (/pre.?sales/i.test(q.name || '')) {
         console.log(`Queue: "${q.name}" (id=${q.id}) members=${JSON.stringify(q.memberIds)} statuses=${(q.queueStatuses||[]).length}`);
