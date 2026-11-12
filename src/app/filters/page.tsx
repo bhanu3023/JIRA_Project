@@ -1423,19 +1423,29 @@ export default function FiltersPage() {
   // to gate this list, which hid any other real status (it could never be
   // picked at all). Keyed case-insensitively so "Open"/"open" across spaces
   // show once; the server matches status names case-insensitively anyway.
-  const availableStatuses: { value: string; label: string }[] = Array.from(
-    new Map([
-      ...filteredSpacesForStatus
-        .flatMap((sp: any) => (sp.statuses || []))
-        .filter((s: any) => (s.name || '').trim())
-        .map((s: any) => [(s.name as string).toLowerCase(), { value: s.name, label: s.name, order: s.order ?? 0 }] as const),
-      // Merged in on top -- the selected queue's own "Routed to X" set, only
-      // ever meaningful once a specific queue is chosen (see queueStatusOptions above).
-      ...queueStatusOptions.map((s) => [s.value.toLowerCase(), { ...s, order: 99 }] as const),
-    ]).values()
-  )
-    .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
-    .map((s: any) => ({ value: s.value, label: s.label }));
+  //
+  // Once a single specific queue is chosen (queueStatusOptions populated --
+  // see the effect above), its own status set REPLACES this space-wide
+  // catalog entirely rather than merging with it -- a space like TESTIN
+  // carries every status from every board ever migrated into it (hundreds,
+  // e.g. "Pending", "Waiting for L1", "Pending with Migration", ...none of
+  // them real options for Dev's own queue), so merging buried the handful
+  // of statuses that actually apply (Open/In Progress/Routed to X/Resolved)
+  // under a wall of irrelevant ones. Falls back to the full catalog when no
+  // queue is selected, or the selected queue has no custom statuses of its
+  // own configured yet.
+  const availableStatuses: { value: string; label: string }[] = queueStatusOptions.length > 0
+    ? queueStatusOptions
+    : Array.from(
+        new Map(
+          filteredSpacesForStatus
+            .flatMap((sp: any) => (sp.statuses || []))
+            .filter((s: any) => (s.name || '').trim())
+            .map((s: any) => [(s.name as string).toLowerCase(), { value: s.name, label: s.name, order: s.order ?? 0 }] as const)
+        ).values()
+      )
+        .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
+        .map((s: any) => ({ value: s.value, label: s.label }));
 
   // Memoized: this feeds buildFilterParams' dependency array below. Without
   // useMemo, this array got a brand-new reference every render, which broke
