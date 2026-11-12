@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "neutara-db-ro": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "${CLAUDE_RO_DATABASE_URL}"]
+    }
+  }
+}

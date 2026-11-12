@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__neutara-db-ro"
+    ],
+    "deny": [
+      "Read(./.env.server)"
+    ]
+  },
+  "enableAllProjectMcpServers": false
+}
