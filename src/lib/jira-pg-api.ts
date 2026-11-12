@@ -1113,6 +1113,23 @@ async function isUserAuthorizedForDeptQueue(spaceKey: string, department: string
   } catch { return true; }
 }
 
+// A per-queue admin (q.adminIds, set in that queue's own People & Access
+// tab -- a subset of its memberIds) can delete tickets currently sitting
+// in THEIR queue without needing the site-wide admin role. By explicit
+// request. Scoped to exactly one department's queue, unlike the site-wide
+// isAdmin flag this is meant to narrowly stand in for here.
+async function isQueueAdminForDept(spaceKey: string, department: string | null | undefined, userId: string | null | undefined): Promise<boolean> {
+  if (!department || !userId) return false;
+  try {
+    const row = await pool.query(`SELECT queues FROM custom_queues WHERE space_key = $1`, [spaceKey.toUpperCase()]);
+    const queues: any[] = row.rows[0]?.queues || [];
+    const q = queues.find((qq: any) => String(qq.name || '').toLowerCase() === department.toLowerCase());
+    if (!q) return false;
+    const adminIds: string[] = Array.isArray(q.adminIds) ? q.adminIds : [];
+    return adminIds.includes(userId);
+  } catch { return false; }
+}
+
 // Find previously RESOLVED issues with a similar summary (to detect recurring issues)
 async function findPreviouslyResolvedSimilar(spaceId: string, excludeId: string, summary: string): Promise<Array<{ key: string; cf_key: string; summary: string }>> {
   try {
@@ -13894,8 +13911,16 @@ async function _handleJiraPgApi(
     // page's "..." menu, the bulk-delete toolbar), but nothing here ever
     // actually enforced that server-side -- any authenticated session of any
     // role could hit this endpoint directly and delete a ticket. Matches the
-    // same isAdmin gate the space/board DELETE endpoint already uses.
-    if (!isAdmin) return json({ error: 'Admin only' }, 403);
+    // same isAdmin gate the space/board DELETE endpoint already uses. A
+    // per-queue admin (isQueueAdminForDept, set in that queue's own People &
+    // Access tab) is also allowed, scoped to exactly this ticket's own
+    // current department -- by explicit request.
+    if (!isAdmin) {
+      const deptRow = await pool.query(`SELECT current_department FROM issues WHERE id=$1 LIMIT 1`, [issue.id]);
+      const currentDept: string | null = deptRow.rows[0]?.current_department || null;
+      const isQueueAdmin = await isQueueAdminForDept(issue.space?.key || '', currentDept, userId);
+      if (!isQueueAdmin) return json({ error: 'Admin only' }, 403);
+    }
 
     // Before deleting: save emailthreadid to processed_emails so this email is NEVER re-processed
     // even after the ticket is deleted (survives server restarts and re-polls)
