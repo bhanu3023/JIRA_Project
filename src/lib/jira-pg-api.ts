@@ -12957,28 +12957,28 @@ async function _handleJiraPgApi(
             let queueHandoffTargetDept = '';
             let queueHandoffDone = false;
             const waitMatchQueue = String(body.queueStatusName || '').match(/^(?:waiting\s+for|routed\s+to)\s+(.+)$/i);
-            // "Deferred", picked from the Dev queue specifically, means the
-            // same thing as "Routed to <wherever this ticket came from>" --
-            // per explicit request, Dev deferring a ticket hands it back to
-            // whichever department originally raised it (Migration/QA/Infra),
-            // not just a generic "deferred" label sitting in Dev forever.
-            // Origin is resolved the same way the resolve-authorization
-            // check above already finds a ticket's true origin: original_dept
-            // (set once at creation, never overwritten) falling back to the
-            // current department if somehow unset. If a ticket genuinely
-            // originated in Dev itself (no other department to send it back
-            // to), this is a no-op and "Deferred" just sits in Dev like any
-            // other plain status, via the else branch below.
+            // "Deferred", picked from ANY queue, means the same thing as
+            // "Routed to <wherever this ticket came from>" -- the queue a
+            // ticket was sent to hands it back to the department that
+            // originally raised it. (Originally Dev-only; extended to every
+            // queue by explicit request.) Origin is resolved the same way the
+            // resolve-authorization check above finds a ticket's true
+            // origin: original_dept (set once at creation, never
+            // overwritten) falling back to the current department if unset.
+            // If the ticket is already in its origin queue (nowhere to send
+            // it back to), this is a no-op and "Deferred" is just a plain
+            // status there, via the else branch below.
             let deferredOriginDept: string | null = null;
-            const isDevDeferred = dept.trim().toLowerCase() === 'dev'
+            const isDeferred = !!dept.trim()
               && String(body.queueStatusName || '').trim().toLowerCase() === 'deferred';
-            if (isDevDeferred) {
+            if (isDeferred) {
               const originRowForDeferred = await pool.query(
                 `SELECT COALESCE(original_dept, current_department) AS origin FROM issues WHERE key=$1`, [key]
               );
               deferredOriginDept = (originRowForDeferred.rows[0]?.origin || '').trim() || null;
             }
-            const deferredHasRealOrigin = isDevDeferred && !!deferredOriginDept && deferredOriginDept.toLowerCase() !== 'dev';
+            const deferredHasRealOrigin = isDeferred && !!deferredOriginDept
+              && deferredOriginDept.toLowerCase() !== dept.trim().toLowerCase();
             if (waitMatchQueue || deferredHasRealOrigin) {
               queueHandoffTargetDept = waitMatchQueue ? waitMatchQueue[1].trim() : (deferredOriginDept as string);
               // Confirmed for real (CF-29693): the "Change Department" dropdown

@@ -97,6 +97,10 @@ const NON_MIGRATION_SPACE_KEYS = new Set(['IA', 'SB', 'ITS']);
 // because the underlying stray ticket data writing it back never stopped.
 const NO_DEPARTMENT_SPACE_KEYS = new Set(['IA', 'SB']);
 
+// Ticket Category is required on every board except IT Administration (IA)
+// and SAT_Board (SB), where it stays optional.
+const OPTIONAL_TICKET_CATEGORY_SPACE_KEYS = new Set(['IA', 'SB']);
+
 // Ticket Category -- what kind of problem the ticket is about. Every board,
 // optional; set on Create Issue and editable on the ticket page.
 export const TICKET_CATEGORIES = [
@@ -448,6 +452,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
   // IT Administration's own board never requires Infra Issue Type -- by
   // request. Every other board keeps it required when department is Infra.
   const isITAdminBoard = selectedSpaceKey.toUpperCase() === 'IA';
+  const ticketCategoryRequired = !OPTIONAL_TICKET_CATEGORY_SPACE_KEYS.has(selectedSpaceKey.toUpperCase());
   const showMigrationFields = !NON_MIGRATION_SPACE_KEYS.has(selectedSpaceKey.toUpperCase());
 
   // Narrow the Status dropdown to the selected queue's own status list, same
@@ -538,7 +543,7 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
     const missingSummary        = !form.summary.trim();
     // Only require a queue when this space actually has queues to pick from
     const missingQueue          = queueOptions.length > 0 && !form.department;
-    const missingTicketCategory = !form.ticketCategory;
+    const missingTicketCategory = ticketCategoryRequired && !form.ticketCategory;
     const missingCombination    = showMigrationFields && !skipsInfraOptionalFields && form.combination.length === 0;
     const missingProductType    = showMigrationFields && !skipsInfraOptionalFields && form.productType.length === 0;
     const missingProjectManager = showMigrationFields && form.projectManager.length === 0 && !skipsProjectManager;
@@ -1148,23 +1153,23 @@ export default function CreateIssueModal({ spaceKey, statuses, members, initialD
               </div>
             )}
 
-            {/* Ticket Category -- every board, required */}
+            {/* Ticket Category -- every board; required except on IA / SB */}
             <div className="mb-4">
               <label className="block text-[12px] font-semibold text-gray-500 mb-1">
-                Ticket Category <span className="text-red-500">*</span>
+                Ticket Category {ticketCategoryRequired && <span className="text-red-500">*</span>}
               </label>
               <div className="relative">
                 <select
                   value={form.ticketCategory}
                   onChange={e => update('ticketCategory', e.target.value)}
-                  className={`w-full px-3 pr-7 py-1.5 bg-white border rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 ${ticketCategoryError ? 'border-red-400' : 'border-gray-200'}`}
+                  className={`w-full px-3 pr-7 py-1.5 bg-white border rounded-lg text-[12px] appearance-none cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 ${ticketCategoryRequired && ticketCategoryError ? 'border-red-400' : 'border-gray-200'}`}
                 >
                   <option value="">Select category</option>
                   {TICKET_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
                 <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
               </div>
-              {ticketCategoryError && (
+              {ticketCategoryRequired && ticketCategoryError && (
                 <div className="flex items-center gap-1.5 mt-1.5">
                   <AlertCircle size={13} className="text-red-500 flex-shrink-0" />
                   <p className="text-[12px] text-red-600 font-medium">Ticket Category is required</p>
