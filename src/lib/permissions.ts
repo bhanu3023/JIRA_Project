@@ -38,6 +38,8 @@ export type AppRole =
   | 'hr'
   | 'sales'
   | 'marketing'
+  | 'solution_architect'
+  | 'pre_sales'
   | 'developer'
   | 'viewer'
   | 'agent'; // internal/system role — not shown in UI
@@ -64,6 +66,8 @@ export const ROLE_LABELS: Record<string, string> = {
   hr:                  'HR',
   sales:               'Sales',
   marketing:           'Marketing',
+  solution_architect:  'Solution Architect',
+  pre_sales:           'Pre-Sales',
   developer:           'Developer',
   viewer:              'Viewer',
   agent:               'Agent',
@@ -85,6 +89,8 @@ export const ROLE_COLORS: Record<string, string> = {
   hr:                  'bg-pink-100 text-pink-700',
   sales:               'bg-rose-100 text-rose-700',
   marketing:           'bg-fuchsia-100 text-fuchsia-700',
+  solution_architect:  'bg-slate-100 text-slate-700',
+  pre_sales:           'bg-yellow-100 text-yellow-700',
   developer:           'bg-emerald-100 text-emerald-700',
   viewer:              'bg-gray-100 text-gray-600',
   agent:               'bg-gray-100 text-gray-500',
@@ -258,6 +264,26 @@ const PERMISSION_MAP: Record<Exclude<AppRole, 'agent'>, Permissions> & { agent: 
   },
 
   marketing: {
+    accessSettings: false, manageUsers: false,      manageSpaces: false,
+    manageWorkItems: false, viewBilling: false,       viewSystemLogs: false,
+    createIssues: true,     editAnyIssue: false,      editOwnIssue: true,
+    deleteIssues: false,    transitionIssues: true,   assignIssues: false,
+    setPriority: false,     addComments: true,        manageComments: false,
+    viewReports: false,     exportData: true,
+  },
+
+  // Same tier as sales/marketing/hr -- raises/tracks its own tickets but has
+  // no reason to edit other people's issues, assign work, or touch settings.
+  solution_architect: {
+    accessSettings: false, manageUsers: false,      manageSpaces: false,
+    manageWorkItems: false, viewBilling: false,       viewSystemLogs: false,
+    createIssues: true,     editAnyIssue: false,      editOwnIssue: true,
+    deleteIssues: false,    transitionIssues: true,   assignIssues: false,
+    setPriority: false,     addComments: true,        manageComments: false,
+    viewReports: false,     exportData: true,
+  },
+
+  pre_sales: {
     accessSettings: false, manageUsers: false,      manageSpaces: false,
     manageWorkItems: false, viewBilling: false,       viewSystemLogs: false,
     createIssues: true,     editAnyIssue: false,      editOwnIssue: true,

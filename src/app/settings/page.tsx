@@ -2542,17 +2542,23 @@ function SettingsContent() {
                   </button>
                 </div>
                 <form onSubmit={handleInvite} className="p-5 space-y-4">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">First name</label>
-                      <input type="text" value={inviteForm.firstName} onChange={e => setInviteForm(f => ({ ...f, firstName: e.target.value }))}
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" required />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Last name</label>
-                      <input type="text" value={inviteForm.lastName} onChange={e => setInviteForm(f => ({ ...f, lastName: e.target.value }))}
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" required />
-                    </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Name</label>
+                    <input type="text" value={`${inviteForm.firstName} ${inviteForm.lastName}`.trim()}
+                      onChange={e => {
+                        // The backend still stores firstName/lastName separately
+                        // (used throughout the app for avatars, display, etc.) --
+                        // a single visible field here just splits on the first
+                        // space: everything after it is the "last name", same as
+                        // how most people type a full name.
+                        const raw = e.target.value;
+                        const spaceIdx = raw.indexOf(' ');
+                        const firstName = spaceIdx === -1 ? raw : raw.slice(0, spaceIdx);
+                        const lastName = spaceIdx === -1 ? '' : raw.slice(spaceIdx + 1).trimStart();
+                        setInviteForm(f => ({ ...f, firstName, lastName }));
+                      }}
+                      placeholder="Full name"
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" required />
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">Email</label>
