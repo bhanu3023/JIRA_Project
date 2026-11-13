@@ -279,6 +279,7 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
     // instead of one-at-a-time is what actually lets a multi-recipient
     // notification (e.g. status change with 3 watchers) land in ~1 round-trip
     // instead of 3 serial ones.
+    const failedRecipients: string[] = [];
     await Promise.all(opts.to.map(async (recipient) => {
       const message: any = {
         subject: opts.subject,
@@ -326,10 +327,17 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body,
       });
-      for (let attempt = 0; res.status === 429 && attempt < 3; attempt++) {
+      // 429 is Microsoft's per-mailbox throttle (see comment above); 500/502/503/504
+      // are transient gateway/server errors on Microsoft's end -- confirmed for real
+      // during a burst send (14 notifications fired within the same ~minute): most
+      // recipients got one of these and were never retried, so the email was dropped
+      // for good even though sendViaGraph still reported overall success (see the
+      // unconditional `return true` this replaced). Both classes clear on a short
+      // retry the large majority of the time.
+      for (let attempt = 0; (res.status === 429 || res.status >= 500) && attempt < 3; attempt++) {
         const retryAfterHeader = parseInt(res.headers.get('retry-after') || '', 10);
         const waitMs = (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader * 1000 : 2000) * (attempt + 1);
-        console.warn(`[Notification] Graph throttled for ${recipient}, retrying in ${waitMs}ms (attempt ${attempt + 1}/3)`);
+        console.warn(`[Notification] Graph ${res.status === 429 ? 'throttled' : 'transient error'} for ${recipient}, retrying in ${waitMs}ms (attempt ${attempt + 1}/3)`);
         await new Promise(r => setTimeout(r, waitMs));
         res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
           method: 'POST',
@@ -342,8 +350,20 @@ async function sendViaGraph(opts: { from: string; to: string[]; subject: string;
       } else {
         const err = await res.text().catch(() => '');
         console.error(`[Notification] Graph send failed for ${recipient}: ${res.status} ${err.slice(0, 200)}`);
+        failedRecipients.push(recipient);
       }
     }));
+    // Previously returned `true` here unconditionally -- any recipient that still
+    // failed after retries was silently dropped, since the caller (sendNotification)
+    // treats a `true` return as "fully sent" and never falls through to the global
+    // SMTP account or another connected OAuth mailbox for anyone. Reporting failure
+    // for the whole batch here means those real failures now actually get a second
+    // delivery path tried, at the cost of a harmless duplicate email to whichever
+    // recipients in the same batch already succeeded.
+    if (failedRecipients.length) {
+      console.error(`[Notification] Graph send incomplete for "${opts.subject}" -- still failing for: ${failedRecipients.join(', ')}`);
+      return false;
+    }
     return true;
   } catch (e: any) {
     console.error('[Notification] Graph send error:', e?.message);
