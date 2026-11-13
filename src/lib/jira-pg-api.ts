@@ -1180,6 +1180,22 @@ async function findPreviouslyResolvedSimilar(spaceId: string, excludeId: string,
  * sla_definitions and notifications inside a per-row loop over up to ~4200 rows, i.e.
  * several thousand sequential DB round trips per run.
  */
+// SLA escalation chain, per explicit request -- on top of the usual
+// assignee/reporter/space-leads/admins recipients the 30-min-before-breach
+// warning below already notifies, these specific people also get escalated
+// for their own department's tickets:
+//   Migration: Migration Manager (Abhishek Sakala & Ajay Singh), Ops,
+//   Sujana Manapuram.
+//   Dev (Customer Engineering): Shift Lead (Mayank Jain), Ops,
+//   Sujana Manapuram.
+// All fire together at the same 30-min warning, not staggered. "Ops" here
+// is specifically Bharath Tummaganti and Jyoshitha Dhannapaneni -- not a
+// role or distribution list.
+const SLA_ESCALATION_CHAINS: Record<string, string[]> = {
+  migration: ['pg_5qkf2zt9u4', 'pg_fvt6f6gq80', 'pg_7da8vs32an', 'pg_3qs010ohxf', 'usr_sujana_manapuram_cloudfuze_com'],
+  dev:       ['pg_3lc6y8c9x7', 'pg_7da8vs32an', 'pg_3qs010ohxf', 'usr_sujana_manapuram_cloudfuze_com'],
+};
+
 async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNotified: number; duplicatesFound: number }> {
   const results = { slaNotified: 0, dueDateNotified: 0, duplicatesFound: 0 };
   const warnMs = 30 * 60 * 1000;
@@ -1296,14 +1312,15 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
         already.add(key); // don't double-notify if more than one policy triggers this run
         const leadIds = await getSpaceLeadUserIds(row.spaceId);
         const { ids: slaAdminIds, emails: slaAdminEmails } = await getAllAdminRecipients(row.spaceId);
-        await notifyUsers([row.assigneeId, row.reporterId, ...leadIds, ...slaAdminIds], null, {
+        const escalationIds = SLA_ESCALATION_CHAINS[String(row.current_department || '').trim().toLowerCase()] || [];
+        await notifyUsers([row.assigneeId, row.reporterId, ...leadIds, ...slaAdminIds, ...escalationIds], null, {
           type: 'SLA_BREACH',
           title: `SLA breaching in ${minsLeft} min: ${key}`,
           message: `${policyName || 'SLA'} will breach in ${minsLeft} minutes for: ${row.summary || key}`,
           issueKey: key,
         });
         try {
-          const emailRecipientIds = [row.assigneeId, row.reporterId].filter(Boolean);
+          const emailRecipientIds = [row.assigneeId, row.reporterId, ...escalationIds].filter(Boolean);
           const emailRecipients = emailRecipientIds.length
             ? await db.user.findMany({ where: { id: { in: emailRecipientIds } }, select: { email: true } })
             : [];
