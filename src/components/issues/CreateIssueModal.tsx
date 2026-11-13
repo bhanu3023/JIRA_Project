@@ -173,6 +173,7 @@ const PRESALES_TEAM_WORK_TYPES = [
 const COMBINATION_OPTIONS = [
   'Box - OneDrive', 'Box - SharePoint', 'Box - MyDrive', 'Box - ShareDrive',
   'Box - Dropbox', 'Box - Box', 'Box - Cirtix', 'Box - Amazon S3',
+  'Confluence - SharePoint',
   'Dropbox - OneDrive', 'Dropbox - SharePoint', 'Dropbox - MyDrive',
   'Dropbox - ShareDrive', 'Dropbox - Azure', 'Dropbox - Box', 'Dropbox - Egnyte',
   'MyDrive - OneDrive', 'MyDrive - SharePoint', 'MyDrive - Dropbox',
