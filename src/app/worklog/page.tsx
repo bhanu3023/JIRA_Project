@@ -4,7 +4,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useStore } from '@/store';
-import { Clock, Calendar, X, Search, ChevronDown, Plus, Trash2 } from 'lucide-react';
+import { Clock, Calendar, X, Search, ChevronDown, Plus, Trash2, Download } from 'lucide-react';
 
 // The fixed activity list for the "Ticket Worklog" tab's Create form --
 // non-ticket work that still deserves a logged, reportable time entry.
@@ -98,6 +98,60 @@ function formatMinutes(m: number) {
 
 function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
+}
+
+// yyyy-mm-dd in the viewer's local time -- the same day the table shows.
+function localDay(d: string) {
+  const t = new Date(d);
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+}
+
+const toHours = (m: number) => Math.round(((m || 0) / 60) * 100) / 100;
+
+// Writes the given sheets to an .xlsx and downloads it. xlsx is loaded only
+// when someone actually exports, so it stays out of the page bundle.
+async function downloadWorkbook(filename: string, sheets: { name: string; rows: Record<string, any>[] }[]) {
+  const XLSX = await import('xlsx');
+  const wb = XLSX.utils.book_new();
+  for (const s of sheets) {
+    const ws = XLSX.utils.json_to_sheet(s.rows);
+    const headers = Object.keys(s.rows[0] || {});
+    ws['!cols'] = headers.map((h) => ({
+      wch: Math.min(60, Math.max(h.length, ...s.rows.map((r) => String(r[h] ?? '').length)) + 2),
+    }));
+    XLSX.utils.book_append_sheet(wb, ws, s.name);
+  }
+  XLSX.writeFile(wb, filename);
+}
+
+// Per-person totals sheet shared by both exports.
+function perPersonRows(items: { authorName: string | null; authorEmail: string | null; timeSpentMinutes: number }[]) {
+  const map = new Map<string, { Name: string; Email: string; minutes: number; Entries: number }>();
+  for (const r of items) {
+    const key = r.authorEmail || r.authorName || 'unknown';
+    const g = map.get(key) || { Name: r.authorName || 'Unknown', Email: r.authorEmail || '', minutes: 0, Entries: 0 };
+    g.minutes += r.timeSpentMinutes || 0;
+    g.Entries += 1;
+    map.set(key, g);
+  }
+  return Array.from(map.values())
+    .sort((a, b) => b.minutes - a.minutes)
+    .map((g) => ({ Name: g.Name, Email: g.Email, 'Total (hours)': toHours(g.minutes), Total: formatMinutes(g.minutes), Entries: g.Entries }));
+}
+
+function ExportButton({ onClick, disabled }: { onClick: () => Promise<void>; disabled: boolean }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={disabled || busy}
+      title={disabled ? 'Nothing to download for these filters' : 'Download the entries shown as an Excel file'}
+      onClick={async () => { setBusy(true); try { await onClick(); } catch (e) { console.error(e); alert('Could not create the Excel file.'); } finally { setBusy(false); } }}
+      className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 bg-white text-gray-700 text-[12.5px] font-semibold rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+    >
+      <Download size={14} /> {busy ? 'Preparing…' : 'Download Excel'}
+    </button>
+  );
 }
 
 // Plain <select> for "Logged by" had no way to search a 300+ person list --
@@ -474,6 +528,25 @@ function TicketWorklogTab({ userId, userRole, allUsers, spaces }: {
   const reporter = userFilter ? allUsers.find((u) => u.id === userFilter) : undefined;
   const reporterLabel = reporter ? `${reporter.firstName || ''} ${reporter.lastName || ''}`.trim() || reporter.email || '' : '';
 
+  const exportExcel = () => {
+    const rows = visibleEntries.map((e) => ({
+      Date: localDay(e.workDate),
+      Reporter: e.authorName || 'Unknown',
+      Email: e.authorEmail || '',
+      Space: e.spaceKey || '',
+      Queue: e.queue || '',
+      Activity: e.activityType,
+      Reason: e.activityType === 'Others' ? e.customReason || '' : '',
+      'Time (hours)': toHours(e.timeSpentMinutes),
+      Time: formatMinutes(e.timeSpentMinutes),
+      Notes: e.description || '',
+    }));
+    return downloadWorkbook(`ticket-worklog_${dateFrom || 'start'}_to_${dateTo || 'today'}.xlsx`, [
+      { name: 'Ticket Worklog', rows },
+      { name: 'Per person', rows: perPersonRows(visibleEntries) },
+    ]);
+  };
+
   const handleDelete = async (id: string) => {
     setEntries((prev) => prev.filter((e) => e.id !== id));
     try { await api.deleteActivityWorklog(id); } catch { load(); }
@@ -483,10 +556,13 @@ function TicketWorklogTab({ userId, userRole, allUsers, spaces }: {
     <div className="flex-1 overflow-auto px-8 py-6">
       <div className="flex items-center justify-between mb-5">
         <p className="text-[13px] text-gray-500">Non-ticket work — training, meetings, reports, and other activities worth logging.</p>
-        <button onClick={() => setShowCreate(true)}
-          className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white text-[12.5px] font-semibold rounded-lg hover:bg-blue-700">
-          <Plus size={14} /> Create
-        </button>
+        <div className="flex items-center gap-2">
+          <ExportButton onClick={exportExcel} disabled={loading || visibleEntries.length === 0} />
+          <button onClick={() => setShowCreate(true)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white text-[12.5px] font-semibold rounded-lg hover:bg-blue-700">
+            <Plus size={14} /> Create
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -760,6 +836,35 @@ export default function WorklogPage() {
     return Array.from(map.values()).sort((a, b) => b.totalMinutes - a.totalMinutes);
   }, [filteredRows, userFilter]);
 
+  // Same rows as the table (filters + search applied), ticket by ticket.
+  const exportExcel = () => {
+    const rows = groupedByTicket.flatMap((g) => g.entries.map((r) => ({
+      Ticket: r.issueKey,
+      Summary: r.issueSummary || '',
+      Space: r.spaceName || r.spaceKey || '',
+      'Logged by': r.authorName || 'Unknown',
+      Email: r.authorEmail || '',
+      Department: r.department || '',
+      Date: localDay(r.workDate),
+      'Time (hours)': toHours(r.timeSpentMinutes),
+      Time: formatMinutes(r.timeSpentMinutes || 0),
+      Description: r.description || '',
+    })));
+    const byTicket = groupedByTicket.map((g) => ({
+      Ticket: g.issueKey,
+      Summary: g.issueSummary || '',
+      Space: g.spaceName || g.spaceKey || '',
+      'Total (hours)': toHours(g.totalMinutes),
+      Total: formatMinutes(g.totalMinutes),
+      Entries: g.entries.length,
+    }));
+    return downloadWorkbook(`worklog_${dateFrom || 'start'}_to_${dateTo || 'today'}.xlsx`, [
+      { name: 'Worklog', rows },
+      { name: 'Per ticket', rows: byTicket },
+      { name: 'Per person', rows: perPersonRows(filteredRows) },
+    ]);
+  };
+
   return (
     <div className="flex flex-col h-full min-h-0 overflow-auto bg-gray-50">
       {/* Header */}
@@ -852,6 +957,10 @@ export default function WorklogPage() {
               <X size={11} /> Clear
             </button>
           )}
+
+          <div className="ml-auto">
+            <ExportButton onClick={exportExcel} disabled={loading || !!error || filteredRows.length === 0} />
+          </div>
         </div>
 
         {/* Summary */}
