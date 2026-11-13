@@ -123,7 +123,7 @@ async function cmdApply(dept) {
   console.log(`Backdated ${backup.key}: dept_sla_started_at -> ${newStartedAt.toISOString()} (~${Math.round(WARN_LEFT_MS / 60000)} min left). Backup saved to ${BACKUP_FILE}.`);
 
   console.log('Triggering the scan (POST /api/monitor-agent)...');
-  const res = await fetch('http://localhost:3000/api/monitor-agent', { method: 'POST' });
+  const res = await fetch('http://localhost:8080/api/monitor-agent', { method: 'POST' });
   const result = await res.json().catch(() => ({}));
   console.log('Scan result:', result);
 
