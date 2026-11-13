@@ -122,10 +122,13 @@ async function cmdApply(dept) {
   );
   console.log(`Backdated ${backup.key}: dept_sla_started_at -> ${newStartedAt.toISOString()} (~${Math.round(WARN_LEFT_MS / 60000)} min left). Backup saved to ${BACKUP_FILE}.`);
 
-  console.log('Triggering the scan (POST /api/monitor-agent)...');
-  const res = await fetch('http://localhost:8080/api/monitor-agent', { method: 'POST' });
-  const result = await res.json().catch(() => ({}));
-  console.log('Scan result:', result);
+  // The POST /monitor-agent HTTP endpoint requires a logged-in session, which
+  // this script doesn't have -- but the exact same scan already runs
+  // in-process every 30s (see globalThis.__monitorAgentInterval in
+  // jira-pg-api.ts), with no auth needed since nothing crosses HTTP. Just
+  // wait for the next automatic cycle instead of trying to call the endpoint.
+  console.log('Waiting 35s for the next automatic scan cycle (runs every 30s in-process)...');
+  await new Promise((r) => setTimeout(r, 35_000));
 
   const { rows: notifs } = await pool.query(
     `SELECT n."userId", n.title, n.message, n."createdAt", u."firstName", u."lastName", u.email
