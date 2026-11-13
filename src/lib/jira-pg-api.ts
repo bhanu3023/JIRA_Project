@@ -3163,7 +3163,7 @@ async function computeIssueSLAsFromDb(issue: any): Promise<any[]> {
       ).catch(() => ({ rows: [] as any[] })), // notifications table may not have issueKey column
     ]);
     const isNotified = notifRes.rows.length > 0;
-    return await computeSLAInstancesPure(issue, res.rows, isNotified);
+    return await computeSLAInstancesPure(issue, res.rows, isNotified, { freeze: true });
   } catch { return []; }
 }
 
@@ -3282,7 +3282,17 @@ function isSlaSnapshotStale(snapshot: any[], issueResolvedAt: any): boolean {
   return false;
 }
 
-async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean): Promise<any[]> {
+// opts.freeze: only the two callers that compute a ticket's real, complete
+// result -- the ticket itself, in its real current department, against every
+// active policy in its space (computeIssueSLAsFromDb, and the admin backfill)
+// -- may write sla_snapshot. Report callers compute "as if" the ticket were
+// in some department (current_department overridden for a per-department
+// breakdown) or against a filtered policy set; freezing THAT result saved a
+// wrong-perspective snapshot permanently. Confirmed for real on CF-35038:
+// after its stale snapshot was cleared, a per-department report reached it
+// before anyone opened it and froze it from QA's point of view (QA as the
+// resolving department, Migration as a paused leftover).
+async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean, opts: { freeze?: boolean } = {}): Promise<any[]> {
   try {
     const issueDept = ((issue as any).current_department || '').trim().toLowerCase();
 
@@ -3785,7 +3795,7 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     // fix (see the long comment above) -- fire-and-forget, never blocks the
     // response, and every later call for this same ticket takes the
     // short-circuit above instead of ever reaching this point again.
-    if (isResolved && issue.id && result.length) {
+    if (opts.freeze && isResolved && issue.id && result.length) {
       // Stamped with the resolution it belongs to, so a later reopen +
       // re-resolve is recognised as a new cycle (see isSlaSnapshotStale).
       const frozenForResolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt).toISOString() : null;
@@ -18726,7 +18736,7 @@ async function _handleJiraPgApi(
       let frozen = 0;
       for (const row of rows.rows) {
         const issueShaped = { ...row, status: row.status_name ? { name: row.status_name, category: row.status_category } : null };
-        const instances = await computeSLAInstancesPure(issueShaped, policiesBySpace[row.spaceId] || [], false);
+        const instances = await computeSLAInstancesPure(issueShaped, policiesBySpace[row.spaceId] || [], false, { freeze: true });
         if (instances.length) frozen++;
       }
 

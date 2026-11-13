@@ -165,8 +165,43 @@ async function main() {
   if (APPLY && stale.length) {
     await pool.query(`UPDATE issues SET sla_snapshot = NULL WHERE id = ANY($1::text[])`, [stale.map((r) => r.id)]);
   }
-  console.log(`\n[2] Resolved tickets showing an SLA result from an earlier resolution: ${stale.length}${APPLY ? ' (cleared)' : ''}`);
-  if (APPLY && (stale.length || repairedIds.size)) {
+  console.log(`\n[2] Resolved tickets showing an SLA result from an earlier resolution: ${stale.length}${APPLY ? ' (cleared)' : ''}\n`);
+
+  // ── 3) Wrong-perspective snapshots ────────────────────────────────────
+  // Report queries compute SLAs "as if" a ticket sat in some department, and
+  // used to freeze that result as the ticket's own snapshot. Signature: the
+  // snapshot's completed (resolving-department) entry names a different
+  // department than the ticket's last "SLA resolved — <Dept>" History entry.
+  // A ticket legitimately moved after being resolved is unaffected: its last
+  // resolution still matches its snapshot.
+  const staleIds = new Set(stale.map((r) => r.id));
+  const remaining = snaps.rows.filter((r) => !repairedIds.has(r.id) && !staleIds.has(r.id));
+  const lastResolved = new Map();
+  if (remaining.length) {
+    const lr = await pool.query(
+      `SELECT DISTINCT ON ("issueId") "issueId", substring("newValue" from 16) AS dept
+         FROM issue_history
+        WHERE field = 'sla' AND "newValue" LIKE 'SLA resolved — %' AND "issueId" = ANY($1::text[])
+        ORDER BY "issueId", "createdAt" DESC`,
+      [remaining.map((r) => r.id)],
+    );
+    for (const row of lr.rows) lastResolved.set(row.issueId, lc(row.dept));
+  }
+  const wrongView = remaining.filter((r) => {
+    const resolvedIn = lastResolved.get(r.id);
+    const completed = r.sla_snapshot.find((x) => x?.isCompleted && x?.deptName);
+    return !!resolvedIn && !!completed && lc(completed.deptName) !== resolvedIn;
+  });
+  for (const r of wrongView.slice(0, 50)) {
+    const completed = r.sla_snapshot.find((x) => x?.isCompleted && x?.deptName);
+    console.log(`  ${r.cf_key || r.key}: snapshot treats ${completed.deptName} as the resolving department, but it was last resolved in ${lastResolved.get(r.id)}`);
+  }
+  if (wrongView.length > 50) console.log(`  ... and ${wrongView.length - 50} more`);
+  if (APPLY && wrongView.length) {
+    await pool.query(`UPDATE issues SET sla_snapshot = NULL WHERE id = ANY($1::text[])`, [wrongView.map((r) => r.id)]);
+  }
+  console.log(`\n[3] Resolved tickets whose SLA result was saved from another department's view: ${wrongView.length}${APPLY ? ' (cleared)' : ''}`);
+  if (APPLY && (stale.length || repairedIds.size || wrongView.length)) {
     console.log('\nCleared snapshots are rebuilt when each ticket is next opened, or all at once via POST /api/admin/backfill-sla-snapshots (admin; repeat until remaining is 0).');
   }
 }
