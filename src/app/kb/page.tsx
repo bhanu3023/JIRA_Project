@@ -9,7 +9,7 @@ import RichTextEditor from '@/components/ui/RichTextEditor';
 import { KbDocumentEditor, KbDocumentList, FileIcon, downloadFile } from '@/components/kb/KbDocuments';
 import { KbFileViewer, viewKindOf } from '@/components/kb/KbFileViewer';
 import { KbQuestions } from '@/components/kb/KbQuestions';
-import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion, Maximize2, Minimize2, Download, Megaphone, Clock, CheckCircle2, AlertCircle } from 'lucide-react';
+import { BookOpen, Plus, Search, Globe, Users, ArrowLeft, Pencil, Trash2, ShieldCheck, X, FileText, Paperclip, MessageCircleQuestion, Maximize2, Minimize2, Download, Megaphone, Clock, CheckCircle2, AlertCircle, Calendar } from 'lucide-react';
 
 // True when the editor HTML has something a reader would see (text or an image).
 function hasBodyContent(html: string) {
@@ -60,6 +60,20 @@ function scopesFor(kind: KbKind, reviews: boolean): { id: Scope; label: string }
 function formatDate(d: string | null | undefined) {
   if (!d) return '';
   return new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+// The date the list shows for an article: published, submitted (pending) or
+// last edited (draft). The date-range filter matches on the same date.
+function listDateOf(a: KbArticle): string | null {
+  if (a.status === 'pending') return a.submittedAt || a.updatedAt;
+  if (a.status === 'draft') return a.updatedAt;
+  return a.publishedAt || a.updatedAt;
+}
+
+// yyyy-mm-dd in the viewer's local time, to compare with <input type="date">.
+function localDay(d: string): string {
+  const t = new Date(d);
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
 }
 
 function VisibilityBadge({ article }: { article: KbArticle }) {
@@ -219,6 +233,30 @@ function ArticleList({ kind, onKindChange, onOpen, onNew }: {
   const [articles, setArticles] = useState<KbArticle[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [author, setAuthor] = useState('');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+
+  const authors = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const a of articles) if (a.authorId) byId.set(a.authorId, a.authorName || 'Unknown');
+    return Array.from(byId, ([id, name]) => ({ id, name })).sort((x, y) => x.name.localeCompare(y.name));
+  }, [articles]);
+
+  const filtered = useMemo(() => articles.filter((a) => {
+    if (author && a.authorId !== author) return false;
+    if (fromDate || toDate) {
+      const d = listDateOf(a);
+      if (!d) return false;
+      const day = localDay(d);
+      if (fromDate && day < fromDate) return false;
+      if (toDate && day > toDate) return false;
+    }
+    return true;
+  }), [articles, author, fromDate, toDate]);
+
+  const filtersActive = !!(author || fromDate || toDate);
+  const clearFilters = () => { setAuthor(''); setFromDate(''); setToDate(''); };
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(query.trim()), 300);
@@ -271,18 +309,49 @@ function ArticleList({ kind, onKindChange, onOpen, onNew }: {
           />
         </div>
       </div>
+      <div className="flex flex-shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-gray-200 bg-white px-8 py-2.5 text-[13px]">
+        <label className="flex items-center gap-2 text-gray-500">
+          <Users size={14} /> Author
+          <select value={author} onChange={(e) => setAuthor(e.target.value)}
+            className="rounded-lg border border-gray-300 bg-white px-2 py-1 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">All authors</option>
+            {authors.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            {author && !authors.some((a) => a.id === author) && <option value={author}>Selected author</option>}
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-gray-500">
+          <Calendar size={14} /> From
+          <input type="date" value={fromDate} max={toDate || undefined} onChange={(e) => setFromDate(e.target.value)}
+            className="rounded-lg border border-gray-300 px-2 py-1 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </label>
+        <label className="flex items-center gap-2 text-gray-500">
+          To
+          <input type="date" value={toDate} min={fromDate || undefined} onChange={(e) => setToDate(e.target.value)}
+            className="rounded-lg border border-gray-300 px-2 py-1 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </label>
+        {filtersActive && (
+          <>
+            <button onClick={clearFilters} className="flex items-center gap-1 rounded-md px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700">
+              <X size={13} /> Clear filters
+            </button>
+            {!loading && <span className="text-gray-400">{filtered.length} of {articles.length} {many}</span>}
+          </>
+        )}
+      </div>
 
       <div className="flex-1 overflow-auto px-8 py-6">
         {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-700">{error}</div>}
         {loading ? (
           <div className="flex h-40 items-center justify-center"><div className="h-7 w-7 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" /></div>
-        ) : articles.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center">
             <FileText size={28} className="mb-2 text-gray-300" />
             <p className="text-[14px] font-medium text-gray-700">
-              {debounced ? `No ${many} match your search` : scope === 'drafts' ? 'No drafts' : scope === 'approvals' ? 'Nothing is waiting for your approval' : `No ${many} yet`}
+              {articles.length > 0 && filtersActive ? `No ${many} match these filters` : debounced ? `No ${many} match your search` : scope === 'drafts' ? 'No drafts' : scope === 'approvals' ? 'Nothing is waiting for your approval' : `No ${many} yet`}
             </p>
-            {!debounced && scope !== 'approvals' && (
+            {articles.length > 0 && filtersActive ? (
+              <button onClick={clearFilters} className="mt-2 text-[13px] font-medium text-blue-600 hover:underline">Clear filters</button>
+            ) : !debounced && scope !== 'approvals' && (
               <p className="mt-1 text-[13px] text-gray-500">
                 {kind === 'release' ? 'Let everyone know what shipped: write the first release note.' : 'Share what you know: write the first article.'}
               </p>
@@ -290,7 +359,7 @@ function ArticleList({ kind, onKindChange, onOpen, onNew }: {
           </div>
         ) : (
           <div className="grid gap-3">
-            {articles.map((a) => (
+            {filtered.map((a) => (
               <button key={a.id} onClick={() => onOpen(a.id)}
                 className="rounded-xl border border-gray-200 bg-white px-5 py-4 text-left transition-shadow hover:border-blue-300 hover:shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
