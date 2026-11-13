@@ -2999,13 +2999,48 @@ async function enrichSlaWithInProgressTime(issueId: string, slaInstances: any[])
 // instead of one unattributed badge that only reflects whichever attempt
 // happened last. The two independent lookups (status history, done-status
 // names) run in parallel rather than one function awaiting the other.
+// How long `dept`'s SLA clock had actually run as of `atMs`, rebuilt from the
+// "SLA started/resumed/paused/resolved — <Dept>" History entries that
+// startDeptSLA/pauseDeptSLA write on every clock change. null when this
+// department has no such entries (tickets from before that logging existed),
+// so the caller can fall back to its older comparison.
+function deptSlaElapsedAt(slaRows: Array<{ newValue: string | null; createdAt: any }>, dept: string, atMs: number): number | null {
+  const d = (dept || '').trim().toLowerCase();
+  if (!d) return null;
+  let total = 0;
+  let runningSince: number | null = null;
+  let seen = false;
+  for (const r of slaRows) {
+    const t = new Date(r.createdAt).getTime();
+    // The resolve's own "SLA resolved" entry lands a few ms after the status
+    // change it belongs to -- include it.
+    if (t > atMs + 5000) break;
+    const m = /^SLA (started|resumed|paused|resolved) — (.+)$/.exec(r.newValue || '');
+    if (!m || m[2].trim().toLowerCase() !== d) continue;
+    seen = true;
+    if (m[1] === 'started' || m[1] === 'resumed') {
+      if (runningSince === null) runningSince = t;
+    } else if (runningSince !== null) {
+      total += Math.max(0, Math.min(t, atMs + 5000) - runningSince);
+      runningSince = null;
+    }
+  }
+  if (!seen) return null;
+  if (runningSince !== null) total += Math.max(0, atMs - runningSince);
+  return total;
+}
+
 async function enrichSlaWithResolver(
   issueId: string, slaInstances: any[], spaceId?: string | null, currentDept?: string | null
 ): Promise<any[]> {
   if (!slaInstances.some((s: any) => s.isCompleted)) return slaInstances;
-  const [statusHistory, doneNames] = await Promise.all([
+  const [statusHistory, doneNames, slaHistoryRows] = await Promise.all([
     getStatusHistoryRows(issueId),
     getDoneStatusNames(spaceId, currentDept),
+    pool.query(
+      `SELECT "newValue", "createdAt" FROM issue_history WHERE "issueId" = $1 AND field = 'sla' ORDER BY "createdAt" ASC`,
+      [issueId]
+    ).then((r) => r.rows as Array<{ newValue: string | null; createdAt: any }>).catch(() => [] as Array<{ newValue: string | null; createdAt: any }>),
   ]);
   const resolvedByName = statusHistory.length ? (statusHistory[statusHistory.length - 1].authorName || null) : null;
   const events = statusHistory
@@ -3089,7 +3124,23 @@ async function enrichSlaWithResolver(
       // real, separate, earlier resolve-then-reopen cycle (which differs by
       // minutes/hours/days, not milliseconds).
       const isOwnResolution = s.resolvedAt && Math.abs(new Date(e.resolvedAt).getTime() - new Date(s.resolvedAt).getTime()) <= 5000;
-      const wasBreached = s.waived ? false : isOwnResolution ? s.isBreached === true : new Date(e.resolvedAt).getTime() > dueMs;
+      // An EARLIER resolution (before a reopen) used to be judged as
+      // "resolvedAt > dueTime", where dueTime is the fixed createdAt + goal
+      // window -- wrong for any ticket that sat in another department first.
+      // Confirmed for real on CF-35038: Migration's first resolution came
+      // after ~8 minutes of real Migration time, yet read "SLA Breached by
+      // 2h50m" because the ticket spent its first hours in Dev. Judge it by
+      // the department's own clock as of that resolution instead, rebuilt
+      // from History; fall back to the old comparison only when there's no
+      // clock history for this department.
+      const eventMs = new Date(e.resolvedAt).getTime();
+      const elapsedAtEvent = !isOwnResolution && typeof s.goalDurationMs === 'number' && s.goalDurationMs > 0
+        ? deptSlaElapsedAt(slaHistoryRows, s.deptName || currentDept || '', eventMs)
+        : null;
+      const wasBreached = s.waived ? false
+        : isOwnResolution ? s.isBreached === true
+        : elapsedAtEvent !== null ? elapsedAtEvent >= s.goalDurationMs
+        : eventMs > dueMs;
       return { ...e, wasBreached };
     });
     return { ...s, resolvedByName: resolvedByName || s.resolvedByName, history };
@@ -3206,6 +3257,31 @@ function getHistoricalOverrideDurationMs(deptName: string, priority: string, per
   return typeof hours === 'number' ? hours * 3_600_000 : null;
 }
 
+// A resolved ticket's frozen sla_snapshot belongs to ONE resolution. If the
+// ticket was reopened and resolved again since, issues.resolvedAt has moved
+// on and the snapshot describes an earlier, finished-and-reopened cycle --
+// it must be recomputed (and re-frozen) instead of being shown forever.
+// Nothing ever cleared it on reopen, so the frozen copy from the FIRST
+// resolution kept winning. Confirmed for real on CF-35038: frozen at its
+// Nov 6 resolution, reopened Nov 8, passed through Dev and QA and resolved
+// again Nov 13 -- the SLA panel and History badges still showed only the
+// Nov 6 picture (no QA, Dev "not breached"). Snapshots frozen from now on
+// carry frozenForResolvedAt; older ones are judged by the resolvedAt their
+// current-department entry was frozen with. No timestamp to compare (legacy
+// rows with no resolvedAt) means the snapshot is kept, same as before.
+function isSlaSnapshotStale(snapshot: any[], issueResolvedAt: any): boolean {
+  if (!issueResolvedAt) return false;
+  const currentMs = new Date(issueResolvedAt).getTime();
+  if (!Number.isFinite(currentMs)) return false;
+  for (const inst of snapshot) {
+    const frozenFor = inst?.frozenForResolvedAt ?? inst?.resolvedAt;
+    if (!frozenFor) continue;
+    const frozenMs = new Date(frozenFor).getTime();
+    if (Number.isFinite(frozenMs)) return Math.abs(frozenMs - currentMs) > 1000;
+  }
+  return false;
+}
+
 async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotified: boolean): Promise<any[]> {
   try {
     const issueDept = ((issue as any).current_department || '').trim().toLowerCase();
@@ -3277,7 +3353,7 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
       const existingSnapshot = issue.sla_snapshot !== undefined
         ? issue.sla_snapshot
         : (await pool.query(`SELECT sla_snapshot FROM issues WHERE id=$1`, [issue.id]).catch(() => null))?.rows[0]?.sla_snapshot;
-      if (Array.isArray(existingSnapshot) && existingSnapshot.length) {
+      if (Array.isArray(existingSnapshot) && existingSnapshot.length && !isSlaSnapshotStale(existingSnapshot, (issue as any).resolvedAt)) {
         // A waiver applied AFTER the snapshot was frozen (an admin deciding
         // later that a breach was a mistake) only ever wrote to sla_waivers
         // -- the "SLA Breach Waiver" endpoint never touches sla_snapshot --
@@ -3710,7 +3786,11 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     // response, and every later call for this same ticket takes the
     // short-circuit above instead of ever reaching this point again.
     if (isResolved && issue.id && result.length) {
-      pool.query(`UPDATE issues SET sla_snapshot=$1::jsonb WHERE id=$2`, [JSON.stringify(result), issue.id]).catch(() => {});
+      // Stamped with the resolution it belongs to, so a later reopen +
+      // re-resolve is recognised as a new cycle (see isSlaSnapshotStale).
+      const frozenForResolvedAt = (issue as any).resolvedAt ? new Date((issue as any).resolvedAt).toISOString() : null;
+      const toStore = result.map((inst: any) => ({ ...inst, frozenForResolvedAt }));
+      pool.query(`UPDATE issues SET sla_snapshot=$1::jsonb WHERE id=$2`, [JSON.stringify(toStore), issue.id]).catch(() => {});
     }
     return result;
   } catch { return []; }
@@ -4451,7 +4531,9 @@ function computeSlaBreachedAndOverdue(
   // itself, since this runs across potentially thousands of Filters rows at
   // once and can't afford a per-row round trip. A ticket that's never been
   // individually viewed keeps using the live computation below until it has.
-  if (isResolved && Array.isArray(i.sla_snapshot) && i.sla_snapshot.length) {
+  // A snapshot from an earlier resolve-then-reopen cycle is ignored here too
+  // (live recompute below) -- see isSlaSnapshotStale.
+  if (isResolved && Array.isArray(i.sla_snapshot) && i.sla_snapshot.length && !isSlaSnapshotStale(i.sla_snapshot, i.resolvedAt)) {
     // Same "waiver applied after the freeze never reaches the snapshot"
     // fix as computeSLAInstancesPure's own frozen-snapshot short-circuit --
     // see its comment. Without this, a ticket waived on the detail page
@@ -11246,6 +11328,15 @@ async function _handleJiraPgApi(
         [newDept, rrAssigneeId, newStatusId, JSON.stringify(deptAssignees), JSON.stringify(deptStatuses), key, oldDept || null]
       );
       await startDeptSLA(key, null, newDept);
+      // A resolved ticket moved here stays resolved (see isDoneNow above), so
+      // this department has nothing to work -- stop its clock straight away,
+      // same as performDeptHandoff does for a ticket that lands already done.
+      // Otherwise the clock sat "running" behind a Resolved ticket, and the
+      // whole idle stretch got counted against this department the moment
+      // the ticket was later reopened or moved on.
+      if (newDeptStatusObj?.category === 'done') {
+        await pauseDeptSLA(key, null, newDept, 'SLA resolved');
+      }
       // Bring any subtasks along -- see cascadeDeptToChildren's own comment for why.
       await cascadeDeptToChildren(key, newDept);
 
@@ -12856,7 +12947,26 @@ async function _handleJiraPgApi(
                 const reopenTargetDept = reopenWaitMatch[1].trim();
                 if (dept.trim().toLowerCase() !== reopenTargetDept.toLowerCase()) {
                   try {
-                    const priorStatusForReopenHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
+                    // This IS a reopen: the ticket stops being done the moment
+                    // this status is picked. Handing performDeptHandoff the
+                    // pre-reopen status (still "Resolved" on issue.statusId at
+                    // this point) made it treat this as moving a resolved ticket
+                    // -- it restored the target's copied "Resolved" entry (every
+                    // department gets one when any of them resolves), landed the
+                    // ticket there already resolved and stopped that
+                    // department's SLA clock on arrival. The global status then
+                    // became the picked "Routed to X" anyway, so the department
+                    // actually held the ticket with its clock stopped: its time
+                    // there was never counted, while the breach monitor still
+                    // saw it as running. Confirmed for real on CF-35038: routed
+                    // to Dev from Resolved on Nov 8, 5 days in Dev never added
+                    // to Dev's elapsed time, yet "SLA breached — Dev" logged.
+                    const priorStatusForReopenHandoff = {
+                      id: String(matchedReal?.id || ''),
+                      name: queueStName,
+                      category: String(body.queueStatusCategory || 'todo'),
+                      color: String(body.queueStatusColor || '#64748B'),
+                    };
                     const reopenHandoffOldDept = await performDeptHandoff(
                       issue.id, issue.spaceId, (issue as any).productType || null,
                       reopenTargetDept, priorStatusForReopenHandoff, null, userId,
@@ -13298,7 +13408,14 @@ async function _handleJiraPgApi(
           console.log(`[DeptHandoff] ${issue.key}: already in ${handoffTargetDept} — skipping redundant handoff`);
         } else {
         try {
-          const priorStatusForHandoff = (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
+          // Picking a not-done "Waiting for X"/"Routed to X" status on a
+          // resolved ticket reopens it (resolvedAt was just cleared above) --
+          // hand performDeptHandoff that status, not the pre-reopen "Resolved",
+          // or it lands the target department already resolved with its SLA
+          // clock stopped. Same fix as the queue-status reopen path (CF-35038).
+          const priorStatusForHandoff = newStForHandoff && newStForHandoff.category !== 'done'
+            ? { id: newStForHandoff.id, name: newStForHandoff.name, category: newStForHandoff.category, color: newStForHandoff.color }
+            : (issue.space?.statuses ?? []).find((s: any) => s.id === issue.statusId) || null;
           handoffOldDept = await performDeptHandoff(
             issue.id, issue.spaceId, (issue as any).productType || null,
             handoffTargetDept, priorStatusForHandoff, data.statusId as string | null, userId,
