@@ -12,7 +12,7 @@ import { PriorityIcon, getPriorityMeta, getSelectablePriorities } from '@/compon
 import RichTextEditor from '@/components/ui/RichTextEditor';
 import CommentReactions from '@/components/ui/CommentReactions';
 import PriorityDropdown from '@/components/ui/PriorityDropdown';
-import IssueTypeIcon from '@/components/ui/IssueTypeIcon';
+import IssueTypeIcon, { TYPE_META } from '@/components/ui/IssueTypeIcon';
 import { INFRA_ISSUE_TYPES, TICKET_CATEGORIES } from '@/components/issues/CreateIssueModal';
 import * as XLSX from 'xlsx';
 
@@ -2246,6 +2246,9 @@ export default function IssueDetailPage() {
               className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-gray-100 transition-colors">
               <IssueTypeIcon type={issue.type} size={16} />
               <span className="text-gray-700 font-semibold text-sm">{issue.cfKey ?? issue.key}</span>
+              <span className="text-gray-400 text-xs font-medium">
+                {issueTypes.find(it => it.value === issue.type)?.label || TYPE_META[issue.type?.toLowerCase()]?.label || issue.type}
+              </span>
               <ChevronDown size={11} className="text-gray-400" />
             </button>
             {showTypeDropdown && (

@@ -66,9 +66,14 @@ interface SavedFilter {
   createdAt: string; updatedAt: string;
 }
 
-const ISSUE_TYPES = ['bug', 'task', 'subtask'];
+const ISSUE_TYPES = ['bug', 'task', 'subtask', 'demo', 'poc', 'technical_discussion', 'security_assessment', 'technical_assistance'];
 const TYPE_LABELS: Record<string, string> = {
   bug: 'Bug', task: 'Task', subtask: 'Subtask',
+  // Pre-Sales-Team's own work types -- weren't filterable here at all before,
+  // even though they've been a real, selectable value on every Pre-Sales-Team
+  // ticket's type field since that queue got its own work-type list.
+  demo: 'Demo', poc: 'POC', technical_discussion: 'Technical Discussion',
+  security_assessment: 'Security assessment', technical_assistance: 'Technical assistance',
 };
 // Highest removed per explicit request -- every ticket that had it was
 // bulk-converted to High (3,146 confirmed system-wide), and it's no
