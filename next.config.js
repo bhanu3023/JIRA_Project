@@ -16,6 +16,18 @@ const nextConfig = {
     ignoreDuringBuilds: true,
   },
   productionBrowserSourceMaps: false,
+  // OAuth discovery documents for the Claude (MCP) connector. Served from
+  // ordinary API routes; Claude looks for them at these fixed /.well-known
+  // paths (including the "/api/mcp"-suffixed form for the resource).
+  async rewrites() {
+    return [
+      { source: '/.well-known/oauth-protected-resource', destination: '/api/oauth/metadata/protected-resource' },
+      { source: '/.well-known/oauth-protected-resource/:path*', destination: '/api/oauth/metadata/protected-resource' },
+      { source: '/.well-known/oauth-authorization-server', destination: '/api/oauth/metadata/authorization-server' },
+      { source: '/.well-known/oauth-authorization-server/:path*', destination: '/api/oauth/metadata/authorization-server' },
+      { source: '/.well-known/openid-configuration', destination: '/api/oauth/metadata/authorization-server' },
+    ];
+  },
   async headers() {
     return [
       {

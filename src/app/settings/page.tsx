@@ -461,7 +461,7 @@ function SettingsContent() {
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm divide-y divide-gray-100 mb-6">
           <SettingsMenuItem icon={<User size={18} />} iconBg="bg-violet-100 text-violet-600" title="General settings" desc="Manage language, time zone, and other personal preferences" onClick={() => navigate('general')} />
           <SettingsMenuItem icon={<Bell size={18} />} iconBg="bg-blue-100 text-blue-600" title="Notification Settings" desc="Manage email and in-app Notification options" onClick={() => navigate('notifications')} />
-          <SettingsMenuItem icon={<Zap size={18} />} iconBg="bg-amber-100 text-amber-600" title="API tokens" desc="Create and manage personal API tokens to access the application" onClick={() => navigate('api')} />
+          <SettingsMenuItem icon={<Zap size={18} />} iconBg="bg-amber-100 text-amber-600" title="API tokens" desc="Personal API tokens, and the Claude Desktop connections that can read your tickets" onClick={() => navigate('api')} />
         </div>
 
         {/* Workspace — visible to all */}
@@ -3392,6 +3392,68 @@ function NotificationPrefsView({ navigate }: { navigate: (v: any) => void }) {
   );
 }
 
+// Read-only Claude Desktop connector connections (see src/lib/mcp/). Each
+// row is one "Allow" a person clicked on the connect page; disconnecting
+// stops Claude's access at once. Admins can switch to everyone's list.
+function ClaudeConnections({ isAdmin }: { isAdmin: boolean }) {
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [all, setAll] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = async (everyone = all) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/mcp-connections${everyone ? '?all=true' : ''}`);
+      if (res.ok) setRows(await res.json());
+    } catch {}
+    setLoading(false);
+  };
+  useEffect(() => { load(all); }, [all]);
+
+  const disconnect = async (id: string) => {
+    if (!confirm('Disconnect Claude? It will lose access right away and has to be connected again to be used.')) return;
+    setBusy(id);
+    try {
+      const res = await fetch(`/api/mcp-connections/${id}`, { method: 'DELETE' });
+      if (res.ok) setRows((r) => r.filter((x) => x.id !== id));
+    } catch {}
+    setBusy(null);
+  };
+  const fmt = (d: string | null) => (d ? new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-base font-semibold text-gray-900">Claude connections</h2>
+        {isAdmin && (
+          <label className="flex items-center gap-2 text-xs text-gray-600">
+            <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Show everyone&apos;s
+          </label>
+        )}
+      </div>
+      <p className="text-sm text-gray-500 mb-4">Claude Desktop can read (never change) what you can see here once you connect the &quot;Neutara Ticketing&quot; connector in Claude. Disconnect to stop it.</p>
+      <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+        {loading ? (
+          <div className="py-10 text-center text-sm text-gray-400">Loading…</div>
+        ) : rows.length === 0 ? (
+          <div className="py-10 text-center text-sm text-gray-400">No Claude connections</div>
+        ) : rows.map((c) => (
+          <div key={c.id} className="flex items-center gap-4 px-5 py-3 border-b border-gray-100 last:border-0">
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium text-gray-800 truncate">{c.clientName || 'Claude'}{all && c.userName ? ` — ${c.userName}` : ''}</div>
+              <div className="text-xs text-gray-500">Connected {fmt(c.createdAt)} · Last used {fmt(c.lastUsedAt)}</div>
+            </div>
+            <button onClick={() => disconnect(c.id)} disabled={busy === c.id} className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50">
+              <Trash2 size={13} /> Disconnect
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ApiTokensView({ navigate, user }: { navigate: (v: any) => void; user: any }) {
   const [tokens, setTokens] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -3511,6 +3573,8 @@ function ApiTokensView({ navigate, user }: { navigate: (v: any) => void; user: a
           </>
         )}
       </div>
+
+      <ClaudeConnections isAdmin={user?.role === 'admin'} />
 
       {/* Create modal */}
       {showModal && (

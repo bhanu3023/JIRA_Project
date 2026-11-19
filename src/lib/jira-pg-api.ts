@@ -17,6 +17,7 @@ import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 import { handleKbApi, kbSchemaReady, rerouteKbApprovals } from '@/lib/kb-api';
 import { handleTestRepoApi, isQaQueueMember } from '@/lib/test-repo-api';
 import { handleSavedFiltersApi } from '@/lib/saved-filters-api';
+import { resolveMcpAccessToken, isMcpAllowedRequest, ensureMcpTables } from '@/lib/mcp/store';
 import sanitizeHtml from 'sanitize-html';
 
 // Rich-text HTML (comment bodies, issue descriptions/root cause/fix
@@ -2036,10 +2037,13 @@ function hashToken(token: string): string {
 
 /** Generate a random API token string */
 function generateApiToken(): string {
+  // crypto.randomInt, not Math.random() -- Math.random() is not a secure
+  // random source, so its output could in principle be predicted.
+  const crypto = require('crypto');
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
   for (let i = 0; i < 40; i++) {
-    result += chars[Math.floor(Math.random() * chars.length)];
+    result += chars[crypto.randomInt(chars.length)];
   }
   return `nta_${result}`;
 }
@@ -2122,7 +2126,28 @@ async function resolveUserId(auth: string | null, reqIp?: string, fromRealHeader
       return userId;
     } catch { return null; }
   }
+
+  // Claude (MCP) connector access token (ntm_...) -- read-only, see
+  // src/lib/mcp/store.ts. The caller below restricts it to GETs on a
+  // fixed path list; only accepted from a real Authorization header.
+  if (t.startsWith('ntm_')) {
+    if (!fromRealHeader) return null;
+    return resolveMcpAccessToken(t);
+  }
   return null;
+}
+
+/**
+ * The signed-in browser user (from the httpOnly jira_session cookie), or
+ * null. Used by the Claude connector's OAuth authorize/consent pages, which
+ * live outside the catch-all API handler. Only active users count.
+ */
+export async function resolveSessionUserId(sessionCookie: string | null | undefined): Promise<string | null> {
+  if (!sessionCookie) return null;
+  const id = await resolveUserId(`Bearer ${sessionCookie}`, undefined, false);
+  if (!id) return null;
+  const u = await pool.query(`SELECT "isActive" FROM users WHERE id = $1`, [id]).catch(() => ({ rows: [] as any[] }));
+  return u.rows[0]?.isActive ? id : null;
 }
 
 // A data-URI avatar (a real uploaded photo, not a lightweight Gravatar link)
@@ -6622,9 +6647,22 @@ async function _handleJiraPgApi(
   if (userId && isRateLimited(userId)) {
     return json({ error: 'Too many requests. Please slow down and try again shortly.' }, 429);
   }
-  touchLastSeen(userId);
   const url = new URL(req.url);
   const path = segments.join('/');
+
+  // Claude connector tokens (ntm_) are READ-ONLY: GET on a fixed list of
+  // paths and nothing else. Checked here, before ANY route below runs
+  // (including the pre-auth-gate ones like uploads), so no write path can
+  // ever be reached with one -- even if the token leaked.
+  if (hasRealHeaderToken && headerAuth!.slice(7).trim().startsWith('ntm_')) {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    if (!isMcpAllowedRequest(path, method)) {
+      return json({ error: 'The Claude connector has read-only access. This action can only be done in the app.' }, 403);
+    }
+  } else {
+    // Only real app usage counts as "last seen", not Claude reading on someone's behalf.
+    touchLastSeen(userId);
+  }
 
   // Office/VPN-only enforcement was tried here (isOfficeIp below, gated by
   // can_access_anywhere) and then explicitly reverted: office-restricted-
@@ -15211,6 +15249,135 @@ async function _handleJiraPgApi(
   // report is for). A ticket is "within SLA" using the exact same live
   // breach check as the ticket detail page (computeSLAInstancesPure, reusing
   // its resolvedAt-vs-due-time comparison), not a separate/different rule.
+  // GET /reports/assignments?dept=Dev&from=<ISO>&to=<ISO>
+  // "Which tickets were assigned to each person in <dept> between two
+  // times" -- answered from assignee history (issue_history field='assignee'),
+  // not the current assignee, so a ticket handed on later still counts for
+  // whoever got it inside the window. Also counts a ticket CREATED inside
+  // the window with someone already assigned (that initial assignment writes
+  // no assignee history row). The ticket's department at that moment comes
+  // from its department history. Non-admins only see tickets in spaces
+  // they're a member of (same boundary as GET /issues). Used by the Claude
+  // connector's assignments_in_window tool.
+  if (path === 'reports/assignments' && method === 'GET') {
+    const fromRaw = url.searchParams.get('from');
+    const toRaw = url.searchParams.get('to');
+    const deptFilter = (url.searchParams.get('dept') || '').trim().toLowerCase();
+    const assigneeFilter = (url.searchParams.get('assignee') || '').trim().toLowerCase();
+    const from = fromRaw ? new Date(fromRaw) : null;
+    const to = toRaw ? new Date(toRaw) : new Date();
+    if (!from || isNaN(from.getTime()) || isNaN(to.getTime())) return json({ error: 'from (and optional to) must be ISO date-times' }, 400);
+    if (to.getTime() - from.getTime() > 93 * 24 * 3600 * 1000) return json({ error: 'Window too large (max 93 days)' }, 400);
+
+    let spaceIds: string[] | null = null;
+    if (!isAdmin) {
+      const sm = await pool.query(`SELECT "spaceId" FROM space_members WHERE "userId" = $1`, [userId]);
+      spaceIds = sm.rows.map((r: any) => r.spaceId);
+      if (!spaceIds.length) return json({ from: from.toISOString(), to: to.toISOString(), dept: deptFilter || null, total: 0, people: [] });
+    }
+    const spaceClause = spaceIds ? `AND i."spaceId" = ANY($3::text[])` : '';
+    const baseParams: any[] = [from, to];
+    if (spaceIds) baseParams.push(spaceIds);
+
+    // 1) Assignee changes inside the window.
+    const changes = await pool.query(
+      `SELECT h."issueId", h."oldValue", h."newValue", h."authorName", h."createdAt"
+         FROM issue_history h JOIN issues i ON i.id = h."issueId"
+        WHERE h.field = 'assignee' AND h."createdAt" >= $1 AND h."createdAt" <= $2
+          AND COALESCE(h."newValue", '') <> '' ${spaceClause}
+        ORDER BY h."createdAt" ASC LIMIT 5000`,
+      baseParams,
+    );
+    // 2) Tickets created inside the window with an initial assignee.
+    const created = await pool.query(
+      `SELECT i.id AS "issueId", i."createdAt",
+              COALESCE((SELECT h."oldValue" FROM issue_history h WHERE h."issueId" = i.id AND h.field = 'assignee' ORDER BY h."createdAt" ASC LIMIT 1),
+                       NULLIF(TRIM(COALESCE(a."firstName",'') || ' ' || COALESCE(a."lastName",'')), '')) AS "assigneeName",
+              NULLIF(TRIM(COALESCE(r."firstName",'') || ' ' || COALESCE(r."lastName",'')), '') AS "reporterName"
+         FROM issues i
+         LEFT JOIN users a ON a.id = i."assigneeId"
+         LEFT JOIN users r ON r.id = i."reporterId"
+        WHERE i."createdAt" >= $1 AND i."createdAt" <= $2 AND i."assigneeId" IS NOT NULL ${spaceClause}
+        LIMIT 5000`,
+      baseParams,
+    );
+
+    type Ev = { issueId: string; assignee: string; at: Date; by: string | null; via: 'reassigned' | 'created' };
+    const events: Ev[] = [
+      ...changes.rows.map((r: any) => ({ issueId: r.issueId, assignee: String(r.newValue).trim(), at: new Date(r.createdAt), by: r.authorName || null, via: 'reassigned' as const })),
+      ...created.rows.filter((r: any) => r.assigneeName).map((r: any) => ({ issueId: r.issueId, assignee: String(r.assigneeName).trim(), at: new Date(r.createdAt), by: r.reporterName || null, via: 'created' as const })),
+    ];
+    const issueIds = Array.from(new Set(events.map((e) => e.issueId)));
+    if (!issueIds.length) return json({ from: from.toISOString(), to: to.toISOString(), dept: deptFilter || null, total: 0, people: [] });
+
+    const [issueRows, deptHist] = await Promise.all([
+      pool.query(
+        `SELECT i.id, i.key, i.cf_key, i.summary, i.priority, i.current_department, i.original_dept, s.name AS status, s.category AS status_category,
+                sp.key AS space_key,
+                NULLIF(TRIM(COALESCE(a."firstName",'') || ' ' || COALESCE(a."lastName",'')), '') AS current_assignee
+           FROM issues i
+           LEFT JOIN statuses s ON s.id = i."statusId"
+           LEFT JOIN spaces sp ON sp.id = i."spaceId"
+           LEFT JOIN users a ON a.id = i."assigneeId"
+          WHERE i.id = ANY($1::text[])`,
+        [issueIds],
+      ),
+      pool.query(
+        `SELECT "issueId", "oldValue", "newValue", "createdAt" FROM issue_history
+          WHERE field = 'department' AND "issueId" = ANY($1::text[]) ORDER BY "createdAt" ASC`,
+        [issueIds],
+      ),
+    ]);
+    const issueById = new Map(issueRows.rows.map((r: any) => [r.id, r]));
+    // "Handed to Dev — SLA started" / "Dev" -> "Dev"
+    const deptName = (v: any) => String(v || '').replace(/^Handed to\s+/i, '').split(' — ')[0].split(' - ')[0].trim();
+    const histByIssue = new Map<string, any[]>();
+    for (const h of deptHist.rows) {
+      if (!histByIssue.has(h.issueId)) histByIssue.set(h.issueId, []);
+      histByIssue.get(h.issueId)!.push(h);
+    }
+    const deptAt = (issueId: string, at: Date): string | null => {
+      const hs = histByIssue.get(issueId) || [];
+      // +5s: a handoff writes its department row a moment around the
+      // assignee row it triggers, so treat near-simultaneous rows as "before".
+      const before = hs.filter((h) => new Date(h.createdAt).getTime() <= at.getTime() + 5000);
+      if (before.length) return deptName(before[before.length - 1].newValue) || null;
+      if (hs.length && hs[0].oldValue && hs[0].oldValue !== 'None') return deptName(hs[0].oldValue) || null;
+      const iss: any = issueById.get(issueId);
+      return iss?.original_dept || iss?.current_department || null;
+    };
+
+    const people = new Map<string, any[]>();
+    let total = 0;
+    for (const e of events) {
+      const iss: any = issueById.get(e.issueId);
+      if (!iss) continue;
+      const dept = deptAt(e.issueId, e.at);
+      if (deptFilter && String(dept || '').toLowerCase() !== deptFilter) continue;
+      if (assigneeFilter && !e.assignee.toLowerCase().includes(assigneeFilter)) continue;
+      if (!people.has(e.assignee)) people.set(e.assignee, []);
+      people.get(e.assignee)!.push({
+        ticket: iss.cf_key || iss.key,
+        summary: iss.summary,
+        priority: iss.priority,
+        assignedAt: e.at.toISOString(),
+        assignedBy: e.by,
+        how: e.via === 'created' ? 'assigned when the ticket was created' : 'assigned / handed over',
+        departmentAtThatTime: dept,
+        currentStatus: iss.status,
+        currentDepartment: iss.current_department,
+        currentAssignee: iss.current_assignee,
+        stillAssignedToThisPerson: (iss.current_assignee || '').trim().toLowerCase() === e.assignee.toLowerCase(),
+        space: iss.space_key,
+      });
+      total++;
+    }
+    const out = Array.from(people.entries())
+      .map(([person, tickets]) => ({ person, count: tickets.length, tickets }))
+      .sort((a, b) => b.count - a.count || a.person.localeCompare(b.person));
+    return json({ from: from.toISOString(), to: to.toISOString(), dept: deptFilter || null, total, people: out });
+  }
+
   if (path === 'reports/resolution-sla' && method === 'GET') {
     if (!isAdmin && !isManager(currentUser?.role)) return json({ error: 'Forbidden' }, 403);
     const deptParam = url.searchParams.get('dept') || '';
@@ -17400,6 +17567,38 @@ async function _handleJiraPgApi(
     );
     if (!existing.rows.length) return json({ error: 'Token not found' }, 404);
     await pool.query(`DELETE FROM api_tokens WHERE id = $1`, [tokenId]);
+    return json({ success: true });
+  }
+
+  // Claude connections (read-only MCP connector grants, see src/lib/mcp/).
+  // GET lists the signed-in person's own; DELETE revokes one, which stops
+  // every access/refresh token issued under it immediately. An admin may
+  // pass ?all=true to see everyone's (e.g. to cut off someone's access).
+  if (path === 'mcp-connections' && method === 'GET') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    await ensureMcpTables();
+    const all = isAdmin && url.searchParams.get('all') === 'true';
+    const rows = await pool.query(
+      `SELECT g.id, g.client_name AS "clientName", g.created_at AS "createdAt", g.last_used_at AS "lastUsedAt",
+              g.user_id AS "userId", NULLIF(TRIM(COALESCE(u."firstName",'') || ' ' || COALESCE(u."lastName",'')), '') AS "userName"
+         FROM mcp_grants g LEFT JOIN users u ON u.id = g.user_id
+        WHERE g.revoked = FALSE ${all ? '' : 'AND g.user_id = $1'}
+        ORDER BY COALESCE(g.last_used_at, g.created_at) DESC LIMIT 500`,
+      all ? [] : [userId],
+    );
+    return json(rows.rows);
+  }
+  const mcpConnDelete = path.match(/^mcp-connections\/([^/]+)$/);
+  if (mcpConnDelete && method === 'DELETE') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    await ensureMcpTables();
+    const r = await pool.query(
+      `UPDATE mcp_grants SET revoked = TRUE WHERE id = $1 ${isAdmin ? '' : 'AND user_id = $2'} RETURNING id`,
+      isAdmin ? [mcpConnDelete[1]] : [mcpConnDelete[1], userId],
+    );
+    if (!r.rows.length) return json({ error: 'Connection not found' }, 404);
+    await pool.query(`DELETE FROM mcp_access_tokens WHERE grant_id = $1`, [mcpConnDelete[1]]).catch(() => {});
+    await pool.query(`DELETE FROM mcp_refresh_tokens WHERE grant_id = $1`, [mcpConnDelete[1]]).catch(() => {});
     return json({ success: true });
   }
 

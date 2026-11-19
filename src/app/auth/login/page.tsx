@@ -78,7 +78,12 @@ function LoginContent() {
 
   const handleMicrosoft = () => {
     setLoading(true);
-    window.location.href = '/api/auth/oauth/microsoft?mode=login&returnUrl=/dashboard';
+    // ?next= (e.g. the Claude connector's /api/oauth/authorize step) brings
+    // the person back where they started after signing in. Same-site paths
+    // only -- never an absolute URL, so this can't become an open redirect.
+    const next = searchParams.get('next') || '';
+    const returnUrl = next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') ? next : '/dashboard';
+    window.location.href = `/api/auth/oauth/microsoft?mode=login&returnUrl=${encodeURIComponent(returnUrl)}`;
   };
 
   return (

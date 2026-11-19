@@ -21,7 +21,10 @@ function OAuthCallbackContent() {
   const loadUser       = useStore((s) => s.loadUser);
 
   useEffect(() => {
-    const next      = searchParams.get('next') || '/dashboard';
+    // Same-site paths only, so a crafted link can't bounce a freshly
+    // signed-in person to another website.
+    const rawNext   = searchParams.get('next') || '';
+    const next      = rawNext.startsWith('/') && !rawNext.startsWith('//') && !rawNext.startsWith('/\\') ? rawNext : '/dashboard';
     const oauthErr  = searchParams.get('oauth_error');
 
     if (oauthErr) {

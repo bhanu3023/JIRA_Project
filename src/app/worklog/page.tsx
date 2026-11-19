@@ -37,6 +37,7 @@ const DEV_ACTIVITY_TYPES = [
   'QA Discussion And Migration Team discussion',
   'RCA Doc preparation',
   'Working with infra on deployment',
+  'Worked on Mantec project',
   'Wrote KB articles',
   'Investigate issues',
   'Join client calls',
