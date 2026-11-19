@@ -2290,7 +2290,7 @@ export default function FiltersPage() {
             selected={selAssignees}
             onChange={setSelAssignees}
           />
-          <DropBtn label="Type" options={ISSUE_TYPES.map((t) => ({ value: t, label: TYPE_LABELS[t] || t }))} selected={selTypes} onChange={setSelTypes} />
+          <DropBtn label="Ticket Type" options={ISSUE_TYPES.map((t) => ({ value: t, label: TYPE_LABELS[t] || t }))} selected={selTypes} onChange={setSelTypes} />
           <DropBtn label="Status" options={availableStatuses} selected={selStatuses} onChange={setSelStatuses} />
 
           {/* SLA Breached filter */}

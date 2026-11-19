@@ -4237,6 +4237,17 @@ export default function IssueDetailPage() {
               }}
             />
 
+            {/* Ticket Type — same underlying `type` field as the icon dropdown next
+                to the ticket key up top, just also surfaced here as its own
+                Properties row (that icon-only dropdown wasn't discoverable as
+                "the place to set the ticket's type" the way every other field
+                here is, each with its own labeled row). */}
+            <PropRow label="Ticket Type">
+              <div className="px-1.5 py-1">
+                <TicketTypeDropdown value={issue.type} options={issueTypes} onChange={handleTypeChange} />
+              </div>
+            </PropRow>
+
             {/* Priority */}
             {!pinnedFields.includes('priority') && <PropRow label="Priority" onPin={() => togglePin('priority')}>
               <div className="px-1.5 py-1">
@@ -5905,6 +5916,52 @@ function PropRow({ label, children, pinned, onPin, required }: { label: string; 
         )}
       </div>
       <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+function TicketTypeDropdown({ value, options, onChange }: { value: string; options: { value: string; label: string }[]; onChange: (value: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const current = options.find(o => o.value === value);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className={`w-full flex items-center gap-2 px-2 py-1 rounded text-[13px] hover:bg-white transition-colors focus:outline-none -ml-1.5
+          ${open ? 'bg-white ring-1 ring-blue-400' : ''}`}
+      >
+        <IssueTypeIcon type={value} size={15} />
+        <span className="flex-1 text-left text-gray-700">{current?.label || TYPE_META[value?.toLowerCase()]?.label || value || <span className="text-gray-400">None</span>}</span>
+        <ChevronDown size={11} className="text-gray-400 flex-shrink-0" />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-md shadow-lg border border-gray-200 py-1 z-50 overflow-hidden">
+          {options.map(o => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => { onChange(o.value); setOpen(false); }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-gray-50 transition-colors ${value === o.value ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700'}`}
+            >
+              <IssueTypeIcon type={o.value} size={15} />
+              {o.label}
+              {value === o.value && <Check size={13} className="ml-auto text-indigo-600" />}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
