@@ -26,7 +26,7 @@ async function main() {
     console.log(`${key}  ->  CF key: ${r.cf_key || '(none)'}  |  summary: ${r.summary}`);
     console.log(`  department=${r.current_department}  status=${r.status_name}  assignee=${r.assignee_email}`);
     console.log(`  createdAt=${r.createdAt?.toISOString()}  updatedAt=${r.updatedAt?.toISOString()}  resolvedAt=${r.resolvedAt?.toISOString() || 'NULL'}`);
-    console.log(`  Open in tool: https://neutaraticketing.cftools.live/issues/${r.cf_key || r.key}\n`);
+    console.log(`  Open in tool: https://ticketing.fuzepilot.ai/issues/${r.cf_key || r.key}\n`);
   }
   await pool.end();
 }

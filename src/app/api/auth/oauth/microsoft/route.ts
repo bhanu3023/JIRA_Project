@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
 
   // Always use the configured public URL for redirectUri — must match Azure AD exactly.
   // Never compute from request headers (x-forwarded-host can differ between proxy layers).
-  const appUrl      = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://neutaraticketing.cftools.live').replace(/\/$/, '');
+  const appUrl      = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://ticketing.fuzepilot.ai').replace(/\/$/, '');
   const redirectUri = `${appUrl}/api/auth/oauth/microsoft/callback`;
   const mode        = searchParams.get('mode') || 'email';
   const loginHint   = searchParams.get('loginHint') || '';

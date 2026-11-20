@@ -63,7 +63,7 @@ export async function GET(req: NextRequest) {
 
   // Always use the configured public URL for redirectUri — must match Azure AD exactly.
   // Never compute from request headers (x-forwarded-host can differ between proxy layers).
-  const appUrl       = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://neutaraticketing.cftools.live').replace(/\/$/, '');
+  const appUrl       = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://ticketing.fuzepilot.ai').replace(/\/$/, '');
   // For internal server→server fetches use localhost (reachable within Docker network)
   const internalPort = process.env.PORT || '3000';
   const internalBase = `http://localhost:${internalPort}`;

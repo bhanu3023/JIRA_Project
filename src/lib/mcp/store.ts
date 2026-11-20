@@ -24,7 +24,7 @@ export const MCP_SCOPE = 'tickets:read';
 export const mcpEnabled = () => String(process.env.MCP_ENABLED ?? 'true').toLowerCase() !== 'false';
 
 export const appBaseUrl = () =>
-  (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://neutaraticketing.cftools.live').replace(/\/$/, '');
+  (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'https://ticketing.fuzepilot.ai').replace(/\/$/, '');
 
 /**
  * The only API paths an `ntm_` token may call (GET only). Kept to exactly

@@ -9,7 +9,7 @@ import { headers } from 'next/headers';
 // generic app name every page used to share (see the root layout fix).
 export function generateMetadata({ params }: { params: { issueKey: string } }): Metadata {
   const h = headers();
-  const host = h.get('host') || 'neutaraticketing.cftools.live';
+  const host = h.get('host') || 'ticketing.fuzepilot.ai';
   const proto = h.get('x-forwarded-proto') || 'https';
   return { title: `${proto}://${host}/issues/${params.issueKey}` };
 }

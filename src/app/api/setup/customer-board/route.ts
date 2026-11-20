@@ -124,7 +124,7 @@ export async function GET(req: NextRequest) {
       log,
       oauthConnected: !needsOAuth,
       next: needsOAuth
-        ? `⚠️ REQUIRED: Go to https://neutaraticketing.cftools.live/spaces/${realSpace.key}/settings?tab=email and click "Connect with Microsoft" for L1board@cloudfuze.com to start the email poller.`
+        ? `⚠️ REQUIRED: Go to https://ticketing.fuzepilot.ai/spaces/${realSpace.key}/settings?tab=email and click "Connect with Microsoft" for L1board@cloudfuze.com to start the email poller.`
         : `✅ All done! Email poller should be running. Test by sending an email to L1board@cloudfuze.com.`
     });
 
