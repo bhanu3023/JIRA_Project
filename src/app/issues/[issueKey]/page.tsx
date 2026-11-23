@@ -375,6 +375,7 @@ export default function IssueDetailPage() {
         customerName: (currentIssue as any).customerName || undefined,
         clientName: (currentIssue as any).clientName || undefined,
         projectManager: (currentIssue as any).projectManager || undefined,
+        ticketCategory: (currentIssue as any).ticketCategory || undefined,
         // Without this, the subtask never got a current_department at all, so it
         // fell back to the space's generic "To Do" status instead of the parent's
         // queue's own Open status (and wouldn't show up in that queue's lists).

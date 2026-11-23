@@ -10621,6 +10621,26 @@ async function _handleJiraPgApi(
       return json({ error: 'Your access to this queue has been suspended.' }, 403);
     }
 
+    // Ticket Category is mandatory for CloudFuze Board (TESTIN) tickets in the
+    // Migration queue. CreateIssueModal already blocks this client-side, but
+    // enforce it here too so no other caller (subtask creation, scripts,
+    // direct API calls) can create one without it. A subtask with no category
+    // of its own inherits its parent's before this check runs.
+    if (body.parentKey && !String(body.ticketCategory || '').trim()) {
+      const parentCat = await pool.query<{ ticketCategory: string | null }>(
+        `SELECT "ticketCategory" FROM issues WHERE key = $1 LIMIT 1`,
+        [String(body.parentKey).toUpperCase()]
+      ).catch(() => ({ rows: [] as { ticketCategory: string | null }[] }));
+      if (parentCat.rows[0]?.ticketCategory) body.ticketCategory = parentCat.rows[0].ticketCategory;
+    }
+    if (
+      sk === 'TESTIN' &&
+      String(body.department || '').trim().toLowerCase() === 'migration' &&
+      !String(body.ticketCategory || '').trim()
+    ) {
+      return json({ error: 'Ticket Category is required for tickets in the Migration queue.' }, 400);
+    }
+
     // Fetch max key number and a sample of recent keys for prefix detection.
     const [maxRow, prefixRow] = await Promise.all([
       pool.query<{ maxnum: string }>(

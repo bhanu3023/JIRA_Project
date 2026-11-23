@@ -11,7 +11,8 @@ import { Clock, Calendar, X, Search, ChevronDown, Plus, Trash2, Download } from 
 // "Others" is the one type that also needs a free-text reason, handled
 // specially wherever this list is used.
 const ACTIVITY_TYPES = [
-  'Monitor migrations and retry failed items from the UI',
+  'Monitor migrations',
+  'Worked on retries failed in the UI',
   'Analyse reports and send them to the customer',
   'Work on automation',
   'Attend the weekly communication training',
@@ -46,6 +47,10 @@ const DEV_ACTIVITY_TYPES = [
 ] as const;
 
 const HELPING_ON_TICKETS = 'Helping Team Members on tickets (Add Ticket Number Which Ticket You helped)';
+const RETRIES_FAILED_IN_UI = 'Worked on retries failed in the UI';
+// Former name of "Monitor migrations" -- no longer offered on Create, but
+// entries logged under it still exist, so keep it in the Activity filter.
+const LEGACY_ACTIVITY_TYPES = ['Monitor migrations and retry failed items from the UI'];
 
 // People whose role is on the Migration team. They always get the Migration
 // activity list and never count under the Dev queue, even if they're also
@@ -59,7 +64,7 @@ const activityTypesFor = (queue: string, role?: string | null): readonly string[
   !isMigrationRole(role) && isDevQueue(queue) ? DEV_ACTIVITY_TYPES : ACTIVITY_TYPES;
 
 // Every activity from both lists, for the Activity filter.
-const ALL_ACTIVITY_TYPES = Array.from(new Set<string>([...ACTIVITY_TYPES, ...DEV_ACTIVITY_TYPES]));
+const ALL_ACTIVITY_TYPES = Array.from(new Set<string>([...ACTIVITY_TYPES, ...DEV_ACTIVITY_TYPES, ...LEGACY_ACTIVITY_TYPES]));
 
 type ActivityWorklogRow = {
   id: string;
@@ -316,6 +321,7 @@ function CreateActivityWorklogModal({ onClose, onSaved, userId, userRole, spaces
       if (total <= 0) { setError(`Enter time spent for "${d.activityType}".`); return; }
       if (d.activityType === 'Others' && !d.customReason.trim()) { setError('Enter a reason for "Others".'); return; }
       if (d.activityType === HELPING_ON_TICKETS && !d.description.trim()) { setError('Enter the ticket number(s) you helped on in Notes.'); return; }
+      if (d.activityType === RETRIES_FAILED_IN_UI && !d.description.trim()) { setError(`Enter Notes for "${RETRIES_FAILED_IN_UI}".`); return; }
       entries.push({
         activityType: d.activityType,
         customReason: d.activityType === 'Others' ? d.customReason.trim() : undefined,
@@ -406,7 +412,7 @@ function CreateActivityWorklogModal({ onClose, onSaved, userId, userRole, spaces
                       <div className="flex items-center gap-2">
                         <label className="text-[11px] text-gray-500 font-medium w-20 flex-shrink-0">Notes</label>
                         <input type="text"
-                          placeholder={activityType === HELPING_ON_TICKETS ? 'Ticket number(s) you helped on — required' : 'Optional'}
+                          placeholder={activityType === HELPING_ON_TICKETS ? 'Ticket number(s) you helped on — required' : activityType === RETRIES_FAILED_IN_UI ? 'Required' : 'Optional'}
                           value={draft.description}
                           onChange={(e) => updateDraft(activityType, { description: e.target.value })}
                           className="flex-1 border border-gray-300 rounded px-2 py-1 text-[12.5px] focus:outline-none focus:ring-2 focus:ring-blue-500" />
