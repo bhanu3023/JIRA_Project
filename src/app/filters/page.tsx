@@ -1686,8 +1686,14 @@ export default function FiltersPage() {
     projectPool:    { label: 'Project Pool',    getValue: (i) => i.projectPool ?? '' },
     infraIssueType: { label: 'Infra Issue Type', getValue: (i) => i.infraIssueType ?? '' },
     ticketCategory: { label: 'Ticket Category', getValue: (i) => i.ticketCategory ?? '' },
-    dueDate:        { label: 'Due Date',        getValue: (i) => i.dueDate ?? '' },
-    resolved:       { label: 'Resolved date',   getValue: (i) => i.resolvedAt ?? '' },
+    // dueDate/resolved used to export the raw UTC ISO timestamp (e.g.
+    // "2026-11-23T23:51:40.258Z") straight from the API response, while
+    // Created/Updated right next to them in the same row were already
+    // formatted with toLocaleString() -- same underlying Date value, two
+    // different, inconsistent formats in the same export. Matching that
+    // formatting here too.
+    dueDate:        { label: 'Due Date',        getValue: (i) => (i.dueDate ? new Date(i.dueDate).toLocaleString() : '') },
+    resolved:       { label: 'Resolved date',   getValue: (i) => (i.resolvedAt ? new Date(i.resolvedAt).toLocaleString() : '') },
   };
   // One row per ticket. The Assignee column holds the same single person the
   // Assignee filter matches on, so filtering it in Excel gives the app's
