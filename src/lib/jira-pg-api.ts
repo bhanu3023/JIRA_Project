@@ -1916,7 +1916,7 @@ async function runMigration15MinWarningScan(): Promise<{ notified: number }> {
 // deliberately NOT dropped all the way to 5s, which would have been 60x and
 // risked reintroducing the exact "everything feels slow" problem this same
 // singleton fix exists to avoid.
-if (!globalThis.__monitorAgentInterval) {
+if (!globalThis.__monitorAgentInterval && process.env.DISABLE_BACKGROUND_JOBS !== 'true') {
   runMonitorAgentScan().catch((e) => console.error('[MonitorAgent] initial run failed:', e?.message));
   runMigration15MinWarningScan().catch((e) => console.error('[MonitorAgent:Migration15Min] initial run failed:', e?.message));
   globalThis.__monitorAgentInterval = setInterval(() => {

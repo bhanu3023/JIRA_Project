@@ -23,6 +23,18 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
+  // Safety switch for running this app against a COPY of production data
+  // (e.g. a local dev DB restored from a prod dump) -- without this, a
+  // local server boot would restart real IMAP pollers and auto-reply to
+  // real customer email using the copied OAuth tokens/passwords, and the
+  // 5-minute Jira sync / consistency-check jobs would hit real external
+  // systems too. Production itself never sets this, so none of this
+  // changes prod's own behavior.
+  if (process.env.DISABLE_BACKGROUND_JOBS === 'true') {
+    console.log('[Startup] DISABLE_BACKGROUND_JOBS=true -- skipping all startup jobs (pollers, Jira sync, consistency checks, AI suggestions).');
+    return;
+  }
+
   const internalPort = process.env.INTERNAL_PORT || process.env.PORT || '3000';
   const internalUrl  = `http://localhost:${internalPort}`;
 
