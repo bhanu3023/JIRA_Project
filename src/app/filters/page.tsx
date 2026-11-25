@@ -2521,6 +2521,32 @@ export default function FiltersPage() {
             </span>
           </div>
         )}
+        {/* Same union behavior as Created+Updated above, called out
+            separately because this is the combination that makes a Queue's
+            count match MBR's own "Total tickets" for the same department and
+            date range -- MBR counts a ticket if it was EITHER created or
+            resolved in range, not just created. With only Created set here,
+            this list is a strict subset of MBR's number by design, not a
+            bug -- see the matching comment in jira-pg-api.ts. */}
+        {selCreated && selResolved && (
+          <div className="flex items-start gap-2 px-4 py-2 bg-blue-50 border-b border-blue-100 text-[11.5px] text-blue-800">
+            <Filter size={13} className="mt-0.5 flex-shrink-0" />
+            <span>
+              Created and Resolved date are combined as <strong>either one</strong>: a ticket created in its range, or
+              resolved in its range, is included.
+            </span>
+          </div>
+        )}
+        {selQueue && selCreated && !selResolved && (
+          <div className="flex items-start gap-2 px-4 py-2 bg-amber-50 border-b border-amber-100 text-[11.5px] text-amber-800">
+            <Filter size={13} className="mt-0.5 flex-shrink-0" />
+            <span>
+              Comparing this count to MBR? MBR&apos;s totals for a department count tickets created <strong>or</strong>
+              resolved in the date range, not created-only. Add a <strong>Resolved date</strong> filter with the same
+              range as Created to match MBR&apos;s number exactly.
+            </span>
+          </div>
+        )}
         {/* Filters the server can't apply in the current combination --
             shown instead of silently doing nothing (buildFilterParams only
             sends a Queue with exactly one space, and Worked only with a
