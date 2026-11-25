@@ -1,18 +1,23 @@
-// Delete 25 specific tickets per explicit admin request, through the REAL
-// DELETE /api/issues/:key endpoint (not raw SQL) so it goes through this
-// app's actual trash mechanism: the ticket (plus comments/attachments/
-// history) gets snapshotted into `deleted_issues` before the real row is
-// removed, and is restorable from there later if ever needed.
+// Delete 25 specific tickets per explicit admin request -- direct-DB version
+// (the token-based HTTP version needs a personal API token, which was
+// friction; this replicates the exact same trash-then-delete logic the real
+// DELETE /api/issues/:key endpoint uses, verified against
+// src/lib/jira-pg-api.ts's issueKeyMatch DELETE handler and the Prisma
+// schema's onDelete: Cascade on Comment/Attachment/IssueHistory, and the raw
+// issue_worklogs table's own "ON DELETE CASCADE" FK -- so a plain
+// `DELETE FROM issues` cascades exactly the way db.issue.delete() does.
 //
-// Requires an admin personal API token (Settings -> API Tokens), passed via
-// the API_TOKEN env var -- never hardcode or paste the token into chat.
-// Dry-run by default (just looks each ticket up); pass --apply to delete.
+// Snapshots the ticket (+ comments/attachments/history) into deleted_issues
+// before the real delete, so it's restorable later from the app's own
+// Settings > Deleted Issues trash if ever needed. Dry-run by default;
+// --apply to write. Acting-admin identity comes from ADMIN_EMAIL env var.
+import pg from 'pg';
+import crypto from 'crypto';
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const APPLY = process.argv.includes('--apply');
-const API_TOKEN = process.env.API_TOKEN;
-const BASE = 'http://localhost:8080/api';
-
-if (!API_TOKEN) {
-  console.log('Set API_TOKEN=<your nta_... token> before running this script.');
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+if (!ADMIN_EMAIL) {
+  console.log('Set ADMIN_EMAIL=<your email> before running this script.');
   process.exit(1);
 }
 
@@ -24,25 +29,64 @@ const KEYS = [
 ];
 
 async function main() {
+  const { rows: adminRows } = await pool.query(
+    `SELECT id, "firstName", "lastName", email FROM users WHERE lower(email) = lower($1) LIMIT 1`,
+    [ADMIN_EMAIL],
+  );
+  if (!adminRows.length) {
+    console.log(`Admin user not found for ${ADMIN_EMAIL} -- aborting.`);
+    await pool.end();
+    process.exit(1);
+  }
+  const admin = adminRows[0];
+  const adminName = `${admin.firstName || ''} ${admin.lastName || ''}`.trim() || admin.email;
+  console.log(`Acting as: ${adminName} <${admin.email}> (${admin.id})\n`);
+
   for (const key of KEYS) {
-    const headers = { Authorization: `Bearer ${API_TOKEN}` };
-    const getRes = await fetch(`${BASE}/issues/${key}`, { headers });
-    if (!getRes.ok) {
-      console.log(`${key}: GET failed (${getRes.status}) -- skipping`);
+    const { rows } = await pool.query(
+      `SELECT i.*, sp.key AS space_key FROM issues i LEFT JOIN spaces sp ON sp.id = i."spaceId"
+       WHERE i.key = $1 OR i.cf_key = $1`,
+      [key],
+    );
+    if (!rows.length) {
+      console.log(`${key}: NOT FOUND -- skipping`);
       continue;
     }
-    const issue = await getRes.json();
-    const summary = issue?.summary ?? issue?.issue?.summary ?? '(no summary)';
+    const issueRow = rows[0];
+    const displayKey = issueRow.cf_key || issueRow.key;
 
     if (!APPLY) {
-      console.log(`[dry-run] would DELETE ${key}: "${summary}"`);
+      console.log(`[dry-run] would DELETE ${displayKey}: "${issueRow.summary}"`);
       continue;
     }
 
-    const delRes = await fetch(`${BASE}/issues/${key}`, { method: 'DELETE', headers });
-    const body = await delRes.json().catch(() => ({}));
-    console.log(delRes.ok ? `${key}: DELETED ("${summary}")` : `${key}: DELETE FAILED (${delRes.status}) ${JSON.stringify(body)}`);
+    const [comments, attachments, history] = await Promise.all([
+      pool.query(`SELECT * FROM comments WHERE "issueId" = $1`, [issueRow.id]),
+      pool.query(`SELECT * FROM attachments WHERE "issueId" = $1`, [issueRow.id]),
+      pool.query(`SELECT * FROM issue_history WHERE "issueId" = $1`, [issueRow.id]),
+    ]);
+
+    try {
+      await pool.query(
+        `INSERT INTO deleted_issues (id, key, cf_key, space_key, summary, data, deleted_by_id, deleted_by_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          crypto.randomUUID(), issueRow.key, issueRow.cf_key, issueRow.space_key, issueRow.summary,
+          JSON.stringify({ issue: issueRow, comments: comments.rows, attachments: attachments.rows, history: history.rows }),
+          admin.id, adminName,
+        ],
+      );
+    } catch (e) {
+      console.error(`${displayKey}: FAILED to snapshot to trash -- not deleting. Error:`, e.message);
+      continue;
+    }
+
+    await pool.query(`DELETE FROM issues WHERE id = $1`, [issueRow.id]);
+    await pool.query(`UPDATE spaces SET "issueCount" = GREATEST("issueCount" - 1, 0) WHERE id = $1`, [issueRow.spaceId]);
+    console.log(`${displayKey}: DELETED ("${issueRow.summary}") -- snapshot saved to deleted_issues, restorable from Settings > Deleted Issues.`);
   }
+
   console.log(APPLY ? '\nDone.' : '\nDry run only -- re-run with --apply to actually delete.');
+  await pool.end();
 }
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch(async (e) => { console.error(e); try { await pool.end(); } catch {} process.exit(1); });
