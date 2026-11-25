@@ -3850,6 +3850,7 @@ function SpaceSettingsContent() {
                   </div>
                 )}
               </div>
+              <SanitySlaSettings spaceKey={spaceKey} />
             </Section>
           )
         )}
@@ -4047,6 +4048,100 @@ function SpaceSettingsContent() {
           />
         )}
 
+      </div>
+    </div>
+  );
+}
+
+// Sanity SLA hours -- Sanity tickets (Ticket Category = Sanity) and their
+// bug subtasks use these four clocks INSTEAD of the policies listed above.
+// Stored per space (sanity_sla_settings, see src/lib/sanity-sla.ts).
+function SanitySlaSettings({ spaceKey }: { spaceKey: string }) {
+  type Hours = { overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number };
+  const [hours, setHours] = useState<Hours | null>(null);
+  const [draft, setDraft] = useState<Record<keyof Hours, string>>({ overallHours: '', qaHours: '', bugDevHours: '', bugQaHours: '' });
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    api.getSanitySla(spaceKey).then((h) => {
+      setHours(h);
+      setDraft({ overallHours: String(h.overallHours), qaHours: String(h.qaHours), bugDevHours: String(h.bugDevHours), bugQaHours: String(h.bugQaHours) });
+    }).catch(() => {});
+  }, [spaceKey]);
+
+  const rows: { key: keyof Hours; policy: string; appliesTo: string; queue: string; pauses: string }[] = [
+    { key: 'overallHours', policy: 'Sanity – Overall', appliesTo: 'Category = Sanity', queue: 'any', pauses: 'never' },
+    { key: 'qaHours', policy: 'Sanity – QA', appliesTo: 'Category = Sanity', queue: 'QA', pauses: 'yes (open Blocker subtask)' },
+    { key: 'bugDevHours', policy: 'Sanity Bug – Dev', appliesTo: 'Sanity bug subtasks', queue: 'Dev', pauses: 'no' },
+    { key: 'bugQaHours', policy: 'Sanity Bug – QA', appliesTo: 'Sanity bug subtasks', queue: 'QA (re-test)', pauses: 'no' },
+  ];
+
+  const dirty = !!hours && rows.some(r => String(hours[r.key]) !== draft[r.key]);
+  const invalid = rows.some(r => { const n = Number(draft[r.key]); return !Number.isFinite(n) || n <= 0; });
+
+  const save = async () => {
+    setSaving(true); setMsg(null);
+    try {
+      const saved = await api.updateSanitySla(spaceKey, {
+        overallHours: Number(draft.overallHours), qaHours: Number(draft.qaHours),
+        bugDevHours: Number(draft.bugDevHours), bugQaHours: Number(draft.bugQaHours),
+      });
+      setHours(saved);
+      setDraft({ overallHours: String(saved.overallHours), qaHours: String(saved.qaHours), bugDevHours: String(saved.bugDevHours), bugQaHours: String(saved.bugQaHours) });
+      setMsg({ ok: true, text: 'Saved.' });
+    } catch (e: any) {
+      setMsg({ ok: false, text: e?.message || 'Failed to save.' });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="mt-6 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3 border-b border-gray-200 bg-gray-50">
+        <p className="text-sm font-bold text-gray-800">Sanity SLA</p>
+        <p className="text-xs text-gray-500 mt-0.5">
+          For Sanity tickets and their bug subtasks, these replace the SLA policies above.
+        </p>
+      </div>
+      <table className="w-full">
+        <thead className="border-b border-gray-200">
+          <tr>
+            <th className="px-5 py-2.5 text-left text-xs font-bold text-gray-500 uppercase">Policy</th>
+            <th className="px-5 py-2.5 text-left text-xs font-bold text-gray-500 uppercase">Applies to</th>
+            <th className="px-5 py-2.5 text-left text-xs font-bold text-gray-500 uppercase">Queue</th>
+            <th className="px-5 py-2.5 text-left text-xs font-bold text-gray-500 uppercase">Hours</th>
+            <th className="px-5 py-2.5 text-left text-xs font-bold text-gray-500 uppercase">Pauses on Blocker</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-50">
+          {rows.map(r => (
+            <tr key={r.key}>
+              <td className="px-5 py-2.5 text-sm font-semibold text-gray-800">{r.policy}</td>
+              <td className="px-5 py-2.5 text-sm text-gray-600">{r.appliesTo}</td>
+              <td className="px-5 py-2.5 text-sm text-gray-600">{r.queue}</td>
+              <td className="px-5 py-2.5">
+                <input
+                  type="number" min={0.25} step={0.25}
+                  value={draft[r.key]}
+                  onChange={e => setDraft(d => ({ ...d, [r.key]: e.target.value }))}
+                  disabled={!hours}
+                  className="w-20 border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-blue-400"
+                />
+              </td>
+              <td className="px-5 py-2.5 text-sm text-gray-600">{r.pauses}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="flex items-center justify-end gap-3 px-5 py-3 border-t border-gray-100">
+        {msg && <span className={`text-xs ${msg.ok ? 'text-emerald-600' : 'text-red-600'}`}>{msg.text}</span>}
+        <button
+          onClick={save}
+          disabled={!dirty || invalid || saving}
+          className="bg-blue-600 text-white text-sm font-semibold px-4 py-1.5 rounded-lg hover:bg-blue-700 disabled:opacity-40 transition-all"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
       </div>
     </div>
   );

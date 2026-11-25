@@ -118,6 +118,10 @@ export const TICKET_CATEGORIES = [
   'User Missing or Not Sync',
   'UI & Reporting',
   'Customization & Enhancements',
+  // Sanity testing round -- gets its own Sanity SLA clocks (Overall / QA,
+  // plus Dev / QA re-test on its bug subtasks) instead of the queue's normal
+  // SLA policies. See src/lib/sanity-sla.ts.
+  'Sanity',
   'Other',
 ];
 

@@ -610,6 +610,12 @@ class ApiClient {
     const qs = dept ? `?dept=${encodeURIComponent(dept)}` : '';
     return this.request<any[]>(`/sla/${spaceKey}${qs}`);
   }
+  getSanitySla(spaceKey: string) {
+    return this.request<{ overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number }>(`/sanity-sla/${spaceKey}`);
+  }
+  updateSanitySla(spaceKey: string, data: { overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number }) {
+    return this.request<{ overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number }>(`/sanity-sla/${spaceKey}`, { method: 'PUT', body: JSON.stringify(data) });
+  }
   createSLA(spaceKey: string, data: any) { return this.request<any>(`/sla/${spaceKey}`, { method: 'POST', body: JSON.stringify(data) }); }
   updateSLA(spaceKey: string, id: string, data: any) { return this.request<any>(`/sla/${spaceKey}/${id}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteSLA(spaceKey: string, id: string) { return this.request<any>(`/sla/${spaceKey}/${id}`, { method: 'DELETE' }); }

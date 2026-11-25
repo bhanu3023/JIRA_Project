@@ -17,6 +17,7 @@ import { INTERNAL_JOB_SECRET } from '@/lib/internal-job-secret';
 import { handleKbApi, kbSchemaReady, rerouteKbApprovals } from '@/lib/kb-api';
 import { handleTestRepoApi, isQaQueueMember } from '@/lib/test-repo-api';
 import { handleSavedFiltersApi } from '@/lib/saved-filters-api';
+import { computeSanitySlaInstances, syncSanityForKeys, sanityParentKeyOf, sanityCloseBlockReason, normalizeSanityBugType, getSanityHours, saveSanityHours, sanityBreachVerdict } from '@/lib/sanity-sla';
 import { resolveMcpAccessToken, isMcpAllowedRequest, ensureMcpTables } from '@/lib/mcp/store';
 import sanitizeHtml from 'sanitize-html';
 
@@ -1211,6 +1212,9 @@ async function runMonitorAgentScan(): Promise<{ slaNotified: number; dueDateNoti
        LEFT JOIN statuses s ON i."statusId" = s.id
        LEFT JOIN users a ON a.id = i."assigneeId"
        WHERE i.dept_sla_started_at IS NOT NULL
+         -- Sanity tickets and their bug subtasks run on their own Sanity clocks
+         -- (sanity-sla.ts), not these department policies -- skip them here.
+         AND LOWER(TRIM(COALESCE(i."ticketCategory", ''))) <> 'sanity'
          AND (s.category IS NULL OR s.category != 'done')
        LIMIT 2000`
     );
@@ -3007,7 +3011,10 @@ async function enrichSlaWithInProgressTime(issueId: string, slaInstances: any[])
     // time (not a sum) so overlapping in-progress-status time and a
     // worklog entry logged during that same stretch don't double-count the
     // same work twice.
-    const deptKey = (s.deptName || '').trim().toLowerCase();
+    // Sanity cards carry no deptName (deptName drives the department-perspective
+    // filter in SlaPanel) -- their queue is in sanityBadge instead ("Dev"/"QA";
+    // "Any queue" for the Overall clock, which matches no worklog department).
+    const deptKey = (s.deptName || s.sanityBadge || '').trim().toLowerCase();
     const worklogMs = deptKey
       ? worklogRows
           .filter((w: any) => (w.department || '').trim().toLowerCase() === deptKey)
@@ -3355,6 +3362,12 @@ async function computeSLAInstancesPure(issue: any, allPolicies: any[], isNotifie
     const deptLogEntryForResolvedCheck = deptLogKeyForResolvedCheck ? deptSlaLogForResolvedCheck[deptLogKeyForResolvedCheck] : null;
     const deptClockGenuinelyStopped = !deptLogEntryForResolvedCheck || deptLogEntryForResolvedCheck.status !== 'running';
     const isResolved = issue.status?.category === 'done' || (deptStatusCategory === 'done' && deptClockGenuinelyStopped);
+
+    // Sanity tickets and their bug subtasks use their own clocks (see
+    // sanity-sla.ts) INSTEAD of the department policies below -- by explicit
+    // request. Returns null for every other ticket.
+    const sanityInstances = await computeSanitySlaInstances(issue, isResolved || !!(issue as any).resolvedAt);
+    if (sanityInstances) return sanityInstances;
 
     // By explicit request: editing an SLA policy (e.g. tightening Migration's
     // Medium target from 8h to 6h) was silently changing the breach verdict
@@ -4540,6 +4553,9 @@ function computeSlaBreachedAndOverdue(
   const deptLogEntryForStatus = deptLogKeyForStatus ? deptSlaLogForStatus[deptLogKeyForStatus] : null;
   const deptClockGenuinelyStoppedForStatus = !deptLogEntryForStatus || deptLogEntryForStatus.status !== 'running';
   const isResolved = i.status?.category === 'done' || (deptStatusCategoryForStatus === 'done' && deptClockGenuinelyStoppedForStatus);
+  // Sanity tickets / bug subtasks: their own Sanity clocks, not dept policies.
+  const sanityVerdict = sanityBreachVerdict(i, isResolved, nowMs);
+  if (sanityVerdict) return sanityVerdict;
   // jira_sla_breached (a single per-issue flag imported from Jira's own,
   // separate/legacy SLA field) used to unconditionally seed `breached =
   // true` here, which also SKIPPED the entire live per-policy computation
@@ -4920,6 +4936,7 @@ function formatIssue(issue: any) {
     projectPool: issue.projectPool ?? null,
     infraIssueType: issue.infraIssueType ?? null,
     ticketCategory: issue.ticketCategory ?? null,
+    sanityBugType: issue.sanity_bug_type ?? null,
     comments,
     commentCount: comments.length,
     attachments,
@@ -6554,7 +6571,31 @@ export async function handleJiraPgApi(
   method: string,
 ): Promise<NextResponse> {
   try {
-    return await _handleJiraPgApi(req, segments, method);
+    // Sanity SLA: every write to a ticket (create / any PATCH path / delete)
+    // re-syncs that ticket's Sanity clocks and its parent's, here in one place
+    // instead of inside each of the many status/department code paths.
+    // A delete has to look the parent up BEFORE the ticket is gone.
+    const isIssueWrite = method !== 'GET' && segments[0] === 'issues';
+    let sanityPreParent: string | null = null;
+    if (isIssueWrite && method === 'DELETE' && segments.length === 2) {
+      sanityPreParent = await sanityParentKeyOf(segments[1]);
+    }
+    const res = await _handleJiraPgApi(req, segments, method);
+    if (isIssueWrite && res.status < 400) {
+      try {
+        let keys: string[] = [];
+        if (segments.length === 1 && method === 'POST') {
+          const created = await res.clone().json().catch(() => null);
+          if (created?.key) keys = [String(created.key)];
+        } else if (segments.length >= 2 && method !== 'DELETE') {
+          keys = [segments[1]];
+        }
+        if (keys.length || sanityPreParent) await syncSanityForKeys(keys, [sanityPreParent]);
+      } catch (e: any) {
+        console.error('[SanitySLA] post-request sync failed:', e?.message || e);
+      }
+    }
+    return res;
   } catch (err: any) {
     const isDev = process.env.NODE_ENV === 'development';
     const isDbDown = err?.code === 'ECONNREFUSED' || err?.message?.includes('ECONNREFUSED') || err?.message?.includes('connect') || err?.message?.includes('prisma');
@@ -10898,6 +10939,15 @@ async function _handleJiraPgApi(
     }
     if (!issue) return json({ error: 'Failed to generate unique issue key' }, 500);
 
+    // Sanity Bug Type (Blocker / Non-Blocker) -- only meaningful on a subtask;
+    // raw column, Prisma doesn't know it. The Sanity clocks themselves are
+    // started by the post-request sync in handleJiraPgApi.
+    const createSanityBugType = body.parentKey ? normalizeSanityBugType(body.sanityBugType) : null;
+    if (createSanityBugType) {
+      await pool.query(`UPDATE issues SET sanity_bug_type=$1 WHERE id=$2`, [createSanityBugType, issue.id]).catch(() => {});
+      (issue as any).sanity_bug_type = createSanityBugType;
+    }
+
     // Set original_dept and assign next CF key at creation time
     // Hoisted out of the try block below (was declared let inside it, so out
     // of scope where the "issue created" notification email further down
@@ -12113,7 +12163,7 @@ async function _handleJiraPgApi(
       // gap for a ticket with genuinely empty dept_sla_log (nothing else
       // for that fallback to catch it with).
       pool.query(
-        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts, original_dept, jira_sla_breached, jira_sla_due_at, jira_sla_start_at, ai_suggested_root_cause, ai_suggested_fix_description FROM issues WHERE key = $1 LIMIT 1`,
+        `SELECT current_department, department_assignee_id, dept_sla_started_at, dept_assignees, dept_statuses, dept_sla_log, cf_key, "partnerKey", "resolvedAt", sla_waivers, resolve_override_depts, original_dept, jira_sla_breached, jira_sla_due_at, jira_sla_start_at, ai_suggested_root_cause, ai_suggested_fix_description, sanity_bug_type, sanity_sla FROM issues WHERE key = $1 LIMIT 1`,
         [key]
       ).catch(() => ({ rows: [] as any[] })),
       // Partner-ticket comment merge lookup -- also only needs `key`.
@@ -12184,11 +12234,11 @@ async function _handleJiraPgApi(
         // subtask's row can show which team it actually belongs to, now that
         // it's locked to its creating department for good rather than
         // silently following the parent around.
-        ? pool.query<{ id: string; cf_key: string | null; current_department: string | null }>(
-            `SELECT id, cf_key, current_department FROM issues WHERE id = ANY($1::text[])`,
+        ? pool.query<{ id: string; cf_key: string | null; current_department: string | null; sanity_bug_type?: string | null }>(
+            `SELECT id, cf_key, current_department, sanity_bug_type FROM issues WHERE id = ANY($1::text[])`,
             [childIssues.map(c => c.id)]
           )
-        : Promise.resolve({ rows: [] as { id: string; cf_key: string | null; current_department: string | null }[] }),
+        : Promise.resolve({ rows: [] as { id: string; cf_key: string | null; current_department: string | null; sanity_bug_type?: string | null }[] }),
     ]);
     const summaryMap = new Map(linkedIssues.map(i => [i.key, i]));
     const linkedCfKeyMap = new Map(linkedCfKeys.rows.map(r => [r.key, r.cf_key]));
@@ -12211,6 +12261,7 @@ async function _handleJiraPgApi(
     });
     const childCfKeyMap = new Map(childCfKeys.rows.map(r => [r.id, r.cf_key]));
     const childDeptMap = new Map(childCfKeys.rows.map(r => [r.id, r.current_department]));
+    const childSanityTypeMap = new Map(childCfKeys.rows.map(r => [r.id, r.sanity_bug_type ?? null]));
 
     // Format children
     const children = childIssues.map(c => ({
@@ -12228,6 +12279,7 @@ async function _handleJiraPgApi(
         : null,
       parentKey: key,
       currentDepartment: childDeptMap.get(c.id) ?? null,
+      sanityBugType: childSanityTypeMap.get(c.id) ?? null,
     }));
 
     const attachments = dbAttachments.map((a: any) => ({
@@ -12686,6 +12738,25 @@ async function _handleJiraPgApi(
       } catch { /* fail open on lookup errors, same as the queue-authorization check above */ }
     }
 
+    // Sanity main ticket: can't be closed while any Blocker subtask is still
+    // open (Non-Blockers don't stop it). Applies to everyone, admins included -- it's
+    // a workflow rule, not a permission.
+    {
+      const sanityResolvingViaStatusId = body.statusId !== undefined && body.statusId !== null;
+      const sanityResolvingViaQueue = !!body.queueStatusId && String(body.queueStatusCategory || '') === 'done';
+      if (sanityResolvingViaStatusId || sanityResolvingViaQueue) {
+        let sanityTargetDone = sanityResolvingViaQueue;
+        if (!sanityTargetDone) {
+          const st = await pool.query(`SELECT category FROM statuses WHERE id=$1 LIMIT 1`, [String(body.statusId)]).catch(() => null);
+          sanityTargetDone = st?.rows[0]?.category === 'done';
+        }
+        if (sanityTargetDone) {
+          const reason = await sanityCloseBlockReason(issue.id);
+          if (reason) return json({ error: reason }, 400);
+        }
+      }
+    }
+
     // Mandatory worklog before EVERY status change on a department-queue
     // ticket (Migration, Dev, Infra, QA) -- by explicit request: not just
     // once per department, but every single time the status changes,
@@ -12845,6 +12916,12 @@ async function _handleJiraPgApi(
     if (body.projectPool !== undefined) data.projectPool = body.projectPool === null ? null : String(body.projectPool);
     if (body.infraIssueType !== undefined) data.infraIssueType = body.infraIssueType === null ? null : String(body.infraIssueType);
     if (body.ticketCategory !== undefined) data.ticketCategory = body.ticketCategory === null || body.ticketCategory === '' ? null : String(body.ticketCategory);
+    // Sanity Bug Type (raw column) -- subtasks only. The parent's Sanity QA
+    // clock is re-synced after this request (see handleJiraPgApi).
+    if (body.sanityBugType !== undefined && issue.parentKey) {
+      const sbt = normalizeSanityBugType(body.sanityBugType);
+      await pool.query(`UPDATE issues SET sanity_bug_type=$1 WHERE id=$2`, [sbt, issue.id]).catch(() => {});
+    }
     // Was read by POST /issues (creation) but never by this PATCH handler --
     // the ticket detail page's due-date editor called this endpoint and got
     // a 200 back with no error, but the edit was silently dropped every
@@ -19431,6 +19508,21 @@ async function _handleJiraPgApi(
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ SLA routes Ã¢â‚¬â€ persisted to PostgreSQL via raw pg (avoids Prisma cache issues) Ã¢â€â‚¬
+  // Sanity SLA hours (Overall / QA / Bug Dev / Bug QA) per space -- see sanity-sla.ts.
+  const sanitySlaMatch = path.match(/^sanity-sla\/([^/]+)$/);
+  if (sanitySlaMatch) {
+    const spRow = await pool.query(`SELECT id FROM spaces WHERE key = $1 LIMIT 1`, [sanitySlaMatch[1].toUpperCase()]);
+    if (!spRow.rows[0]) return json({ error: 'Space not found' }, 404);
+    const spaceId = spRow.rows[0].id;
+    if (method === 'GET') return json(await getSanityHours(spaceId));
+    if (method === 'PUT' || method === 'PATCH') {
+      if (!isAdmin) return json({ error: 'Only admins can change Sanity SLA hours.' }, 403);
+      const body = await readJson(req);
+      return json(await saveSanityHours(spaceId, body || {}));
+    }
+    return json({ error: 'Method not allowed' }, 405);
+  }
+
   const slaListMatch = path.match(/^sla\/([^/]+)$/);
   if (slaListMatch) {
     const spKey = slaListMatch[1].toUpperCase();

@@ -355,8 +355,18 @@ export default function IssueDetailPage() {
   const [subtaskSaving, setSubtaskSaving] = useState(false);
   const [subtaskPriorityOpen, setSubtaskPriorityOpen] = useState(false);
 
+  // Sanity tickets: every subtask is a sanity bug and must say whether it
+  // blocks QA's testing (Blocker pauses the parent's Sanity QA clock).
+  const [subtaskBugType, setSubtaskBugType] = useState<'' | 'blocker' | 'non_blocker'>('');
+  const parentIsSanity = !!currentIssue && !(currentIssue as any).parentKey
+    && String((currentIssue as any).ticketCategory || '').trim().toLowerCase() === 'sanity';
+
   const handleCreateSubtask = async () => {
     if (!subtaskSummary.trim() || !currentIssue) return;
+    if (parentIsSanity && !subtaskBugType) {
+      alert('Choose a Sanity Bug Type (Blocker or Non-Blocker) for this subtask.');
+      return;
+    }
     setSubtaskSaving(true);
     try {
       await api.createIssue({
@@ -380,9 +390,11 @@ export default function IssueDetailPage() {
         // fell back to the space's generic "To Do" status instead of the parent's
         // queue's own Open status (and wouldn't show up in that queue's lists).
         department: (currentIssue as any).current_department || undefined,
+        ...(parentIsSanity ? { sanityBugType: subtaskBugType } : {}),
       });
       setShowSubtaskModal(false);
       setSubtaskSummary('');
+      setSubtaskBugType('');
       setSubtaskType('subtask');
       setSubtaskPriority('medium');
       setSubtaskAssigneeId(null);
@@ -2532,6 +2544,14 @@ export default function IssueDetailPage() {
                     <PriorityIcon priority={child.priority || 'medium'} size={13} />
                     <span className="text-sm text-indigo-600 font-semibold shrink-0">{child.cfKey ?? child.key}</span>
                     <span className="text-sm text-gray-700 flex-1 truncate">{child.summary}</span>
+                    {(child as any).sanityBugType && (
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 border ${(child as any).sanityBugType === 'blocker' ? 'bg-red-50 text-red-700 border-red-200' : 'bg-gray-50 text-gray-600 border-gray-200'}`}
+                        title={(child as any).sanityBugType === 'blocker' ? 'Sanity Blocker — pauses the Sanity QA clock while open' : 'Sanity Non-Blocker — does not pause the Sanity QA clock'}
+                      >
+                        {(child as any).sanityBugType === 'blocker' ? 'Blocker' : 'Non-Blocker'}
+                      </span>
+                    )}
                     {/* A subtask is locked to whichever department created it
                         (see jira-pg-api.ts's dept-handoff subtask guard) --
                         show that team here so it stays clear who owns it even
@@ -2578,10 +2598,22 @@ export default function IssueDetailPage() {
                     <IssueTypeIcon type="subtask" size={12} />
                     <span>Sub-task</span>
                   </div>
+                  {parentIsSanity && (
+                    <select
+                      value={subtaskBugType}
+                      onChange={e => setSubtaskBugType(e.target.value as any)}
+                      className={`text-[12px] border rounded px-2 py-1 bg-white outline-none ${subtaskBugType ? 'border-gray-200 text-gray-700' : 'border-amber-300 text-amber-700'}`}
+                      title="Sanity Bug Type — a Blocker pauses this ticket's Sanity QA clock"
+                    >
+                      <option value="">Sanity Bug Type…</option>
+                      <option value="blocker">Sanity Blocker</option>
+                      <option value="non_blocker">Sanity Non-Blocker</option>
+                    </select>
+                  )}
                   {/* Enter icon */}
                   <button
                     onClick={handleCreateSubtask}
-                    disabled={!subtaskSummary.trim() || subtaskSaving}
+                    disabled={!subtaskSummary.trim() || subtaskSaving || (parentIsSanity && !subtaskBugType)}
                     className="w-7 h-7 flex items-center justify-center rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
                     title="Create (Enter)"
                   >
@@ -4287,6 +4319,22 @@ export default function IssueDetailPage() {
             {/* Ticket Category -- every board */}
             {renderCustomField('ticketCategory', 'Ticket Category', 'select', TICKET_CATEGORIES, 'all')}
 
+            {/* Sanity Bug Type -- only on a subtask of a Sanity ticket. A
+                Blocker pauses the parent's Sanity QA clock while open. */}
+            {issue.parent && (String((issue as any).ticketCategory || '').trim().toLowerCase() === 'sanity' || (issue as any).sanityBugType) && (
+              <PropRow label="Sanity Bug Type">
+                <select
+                  value={(issue as any).sanityBugType || ''}
+                  onChange={e => handleUpdate('sanityBugType', e.target.value || null)}
+                  className="text-[13px] text-gray-700 bg-transparent hover:bg-white rounded-md px-1 py-1 -ml-1 outline-none w-full"
+                >
+                  <option value="">None</option>
+                  <option value="blocker">Sanity Blocker</option>
+                  <option value="non_blocker">Sanity Non-Blocker</option>
+                </select>
+              </PropRow>
+            )}
+
             {/* ── L2B Custom Fields ─────────────────────────────────────── */}
             {issue.spaceKey === 'L2BOARD' && (() => {
               // Root Cause & Fix Description moved to main body (below Linked Work Items)
@@ -5274,10 +5322,14 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                   ? (typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()) + (goalMs - Math.max(0, dueAt.getTime() - (startedAt?.getTime() ?? dueAt.getTime()))))
                   : isCompleted && resolvedAt
                   ? (typeof s.actualElapsedMs === 'number' ? s.actualElapsedMs : resolvedAt.getTime() - (startedAt?.getTime() ?? resolvedAt.getTime()))
+                  // Sanity clocks can pause and resume, so "now - start"
+                  // overcounts: use time already used + the current run.
+                  : s.runningSince
+                  ? (Number(s.elapsedBeforeRunMs) || 0) + (slaNow - new Date(s.runningSince).getTime())
                   : slaNow - (startedAt?.getTime() ?? slaNow);
                 const pct = goalMs > 0 ? Math.min(100, Math.round((elapsedMs / goalMs) * 100)) : 0;
                 const baseName = (s.policyName || 'SLA').replace(/ - (highest|high|medium|low|lowest)$/i, '');
-                const slaDept = s.deptName || (issue as any).current_department || null;
+                const slaDept = s.sanityBadge || s.deptName || (issue as any).current_department || null;
                 const warnMs = 30 * 60 * 1000;
                 const isNotified = s.isNotified === true && (remainingMs <= warnMs);
                 const isBreachingSoon = !isPaused && !isCompleted && !isBreached && remainingMs > 0 && remainingMs <= warnMs;
@@ -5388,7 +5440,7 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
 
                           {/* Countdown / paused / overdue / resolved time */}
                           <div className={`text-[15px] font-bold tabular-nums mb-1.5 ${showAsBreach ? 'text-red-600' : isCompleted ? 'text-emerald-600' : isPaused ? 'text-amber-600' : isBreachingSoon ? 'text-orange-600' : 'text-gray-900'}`}>
-                            {resolvedLate ? 'Resolved late' : isCompleted ? 'Resolved' : isPaused ? 'SLA paused' : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
+                            {resolvedLate ? 'Resolved late' : isCompleted ? 'Resolved' : isPaused ? (s.pausedReason || 'SLA paused') : isBreached ? fmtOverdue(remainingMs) : (fmtRemaining(remainingMs) || '—')}
                           </div>
 
                           {/* Progress bar */}
@@ -5428,7 +5480,12 @@ function SlaPanel({ issue, slaExpanded, setSlaExpanded, user, slaWaiverBusyId, h
                               Ym" above, for a department the ticket has since
                               moved on from -- the "Dev took 2h, Migration
                               took 1h" breakdown. */}
-                          {isPaused && !isCompleted && typeof s.actualElapsedMs === 'number' && (
+                          {isPaused && !isCompleted && s.sanity && typeof s.actualElapsedMs === 'number' && (
+                            <p className={`text-[10.5px] mt-1.5 ${historicallyBreached ? 'text-red-500' : 'text-amber-700'}`}>
+                              Used <span className="font-semibold">{fmtDuration(s.actualElapsedMs)}</span> of {fmtGoal(goalMs)} so far — continues from here when it resumes
+                            </p>
+                          )}
+                          {isPaused && !isCompleted && !s.sanity && typeof s.actualElapsedMs === 'number' && (
                             <p className={`text-[10.5px] mt-1.5 ${historicallyBreached ? 'text-red-500' : 'text-amber-700'}`}>
                               Spent <span className="font-semibold">{fmtDuration(s.actualElapsedMs)}</span> here before moving on
                               {historicallyBreached && goalMs > 0 && ' — past this queue’s own SLA goal'}
