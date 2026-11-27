@@ -209,6 +209,31 @@ async function userCanViewWorklog(userId: string | null): Promise<boolean> {
   } catch { return false; }
 }
 
+// Same narrow, additive-grant pattern as can_view_mbr above, for Reports.
+async function userCanViewReports(userId: string | null): Promise<boolean> {
+  if (!userId) return false;
+  try {
+    const row = await pool.query(`SELECT can_view_reports FROM users WHERE id = $1`, [userId]);
+    return !!row.rows[0]?.can_view_reports;
+  } catch { return false; }
+}
+
+// Test Repository access = an explicit grant OR the existing QA-queue
+// membership check (isQaQueueMember) this app already enforced -- OR'd so a
+// current QA member's access never changes, this column only adds a way to
+// grant someone outside that queue.
+async function userCanViewTestRepo(userId: string | null, isAdmin: boolean): Promise<boolean> {
+  if (!userId) return false;
+  if (isAdmin) return true;
+  try {
+    const [row, qaMember] = await Promise.all([
+      pool.query(`SELECT can_view_test_repo FROM users WHERE id = $1`, [userId]),
+      isQaQueueMember(userId),
+    ]);
+    return !!row.rows[0]?.can_view_test_repo || qaMember;
+  } catch { return false; }
+}
+
 // Whether userId may view a given space's tickets -- true for a member of
 // that space (any role: admin/manager/member/viewer/lead/shift_lead/agent),
 // false otherwise. Every real app user is an internal employee account (no
@@ -299,6 +324,39 @@ pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_worklog BOOLEAN 
 // outside the office/VPN network (see isOfficeIp/OFFICE_ALLOWED_IPS below).
 // Everyone else stays restricted to the office network by default.
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_access_anywhere BOOLEAN DEFAULT FALSE`).catch(() => {});
+// Same narrow additive-grant pattern as can_view_mbr/can_view_worklog above,
+// for Reports and Test Repository -- by explicit request, these two (plus
+// MBR, which already had can_view_mbr) move from "hidden from the sidebar
+// entirely if you can't see it" to "always shown, but locked with a Request
+// Access button if you don't have the grant." can_view_test_repo is OR'd
+// with the existing QA-queue-membership check (isQaQueueMember) rather than
+// replacing it, so current QA members keep their access unchanged -- this
+// column only adds a way to grant someone outside that queue. Both default
+// FALSE: on deploy, Reports (previously open to every logged-in user with
+// zero gating) and Test Repository (for anyone not already a QA-queue
+// member) lock for everyone except admins until individually granted --
+// confirmed as the intended behavior, not a regression to fix later.
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_reports BOOLEAN DEFAULT FALSE`).catch(() => {});
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_test_repo BOOLEAN DEFAULT FALSE`).catch(() => {});
+// Self-service request flow for the three locked sections above: a user
+// without access sees a lock screen with a "Request Access" button instead
+// of the section just disappearing; this table is what that button writes
+// to, and what the admin's Access Requests tab (previously a hardcoded "No
+// pending access requests" placeholder with nothing behind it) now reads
+// from. One row per request; a user can have at most one PENDING row per
+// section (enforced at the request-creation site, not a DB constraint,
+// since a resolved row for the same section must be allowed to exist
+// alongside a new pending one after a re-request).
+pool.query(`CREATE TABLE IF NOT EXISTS access_requests (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  section TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_at TIMESTAMPTZ DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ,
+  resolved_by_id TEXT,
+  resolved_by_name TEXT
+)`).catch(() => {});
 
 // Deleted-ticket trash: DELETE /issues/:key used to be a genuine hard
 // delete with no way to get a ticket back -- a production ticket got
@@ -2196,6 +2254,11 @@ function formatUser(u: {
     // callers correctly default to false rather than throwing.
     canViewMbr: !!(u as any).can_view_mbr,
     canViewWorklog: !!(u as any).can_view_worklog,
+    // Same "only present when the caller merged it in" rule as canViewMbr --
+    // merged into auth/me (computed per-request, test repo OR's in live
+    // QA-queue membership) and into GET /users (the raw columns only).
+    canViewReports: !!(u as any).can_view_reports,
+    canViewTestRepo: !!(u as any).can_view_test_repo,
     // Same "only present when the caller merged it in" rule as canViewMbr
     // above -- GET /users (the User Management list) merges this in for
     // every row itself, unlike canViewMbr/canViewWorklog which only ever
@@ -6863,6 +6926,8 @@ async function _handleJiraPgApi(
         can_view_mbr: await userCanViewMbr(userId),
         can_view_worklog: await userCanViewWorklog(userId),
         can_access_test_repo: dbUser.role === 'admin' || await isQaQueueMember(userId),
+        can_view_reports: await userCanViewReports(userId),
+        can_view_test_repo: await userCanViewTestRepo(userId, dbUser.role === 'admin'),
       } as any));
     } catch { /* DB unreachable -- fall through to dev fallback below */ }
     if (process.env.NODE_ENV === 'development') {
@@ -7005,20 +7070,36 @@ async function _handleJiraPgApi(
     // All authenticated users can list users (needed for queue member search)
     const [users, statusRows] = await Promise.all([
       db.user.findMany({ orderBy: { firstName: 'asc' } }),
-      kbSchemaReady.then(() => pool.query(`SELECT id, status, manager_ids, can_access_anywhere FROM users`))
+      kbSchemaReady.then(() => pool.query(`SELECT id, status, manager_ids, can_access_anywhere, can_view_reports, can_view_test_repo, can_view_mbr FROM users`))
         .catch(() => pool.query(`SELECT id, status FROM users`))
         .catch(() => ({ rows: [] as any[] })),
     ]);
     const statusMap: Record<string, string> = {};
     const managerMap: Record<string, string[]> = {};
     const accessMap: Record<string, boolean> = {};
-    for (const r of statusRows.rows) { statusMap[r.id] = r.status; managerMap[r.id] = r.manager_ids || []; accessMap[r.id] = !!r.can_access_anywhere; }
+    // Raw grant columns for the three lockable sections (Reports, Test
+    // Repository, MBR) -- shown in the User Management table's per-user "..."
+    // menu so an admin can see/toggle them without opening each user
+    // individually. Test Repository's table column is the grant only, NOT
+    // OR'd with live QA-queue membership here (unlike auth/me's own
+    // computed canViewTestRepo) -- this list is read dozens of times for
+    // unrelated reasons (queue member search) and doesn't need a QA-queue
+    // lookup per row; the toggle in the UI reflects (and only ever writes)
+    // the explicit grant.
+    const sectionAccessMap: Record<string, { reports: boolean; testRepo: boolean; mbr: boolean }> = {};
+    for (const r of statusRows.rows) {
+      statusMap[r.id] = r.status;
+      managerMap[r.id] = r.manager_ids || [];
+      accessMap[r.id] = !!r.can_access_anywhere;
+      sectionAccessMap[r.id] = { reports: !!r.can_view_reports, testRepo: !!r.can_view_test_repo, mbr: !!r.can_view_mbr };
+    }
     return json(users.map(u => ({
       ...formatUser(u),
       status: statusMap[u.id] || (u.isActive ? 'active' : 'inactive'),
       // Who approves this user's KB articles (raw column, added in kb-api.ts).
       managerIds: managerMap[u.id] || [],
       canAccessAnywhere: accessMap[u.id] || false,
+      sectionAccess: sectionAccessMap[u.id] || { reports: false, testRepo: false, mbr: false },
     })));
   }
 
@@ -7082,12 +7163,31 @@ async function _handleJiraPgApi(
       if (!isAdmin) return json({ error: 'Only admins can change remote access' }, 403);
       canAccessAnywhere = Boolean(body.canAccessAnywhere);
     }
+    // Per-section grants for the three lockable sections (Reports, Test
+    // Repository, MBR) -- same narrow, additive-grant pattern as
+    // canAccessAnywhere above, set from the User Management table's
+    // per-user "..." menu.
+    let sectionGrants: { reports?: boolean; testRepo?: boolean; mbr?: boolean } | undefined;
+    if (body.sectionAccess !== undefined) {
+      if (!isAdmin) return json({ error: 'Only admins can change section access' }, 403);
+      const sa = (body.sectionAccess || {}) as Record<string, unknown>;
+      sectionGrants = {
+        ...(sa.reports !== undefined ? { reports: Boolean(sa.reports) } : {}),
+        ...(sa.testRepo !== undefined ? { testRepo: Boolean(sa.testRepo) } : {}),
+        ...(sa.mbr !== undefined ? { mbr: Boolean(sa.mbr) } : {}),
+      };
+    }
     try {
       const user = Object.keys(data).length
         ? await db.user.update({ where: { id }, data })
         : await db.user.findUniqueOrThrow({ where: { id } });
       if (canAccessAnywhere !== undefined) {
         await pool.query(`UPDATE users SET can_access_anywhere=$1 WHERE id=$2`, [canAccessAnywhere, id]);
+      }
+      if (sectionGrants) {
+        if (sectionGrants.reports !== undefined) await pool.query(`UPDATE users SET can_view_reports=$1 WHERE id=$2`, [sectionGrants.reports, id]);
+        if (sectionGrants.testRepo !== undefined) await pool.query(`UPDATE users SET can_view_test_repo=$1 WHERE id=$2`, [sectionGrants.testRepo, id]);
+        if (sectionGrants.mbr !== undefined) await pool.query(`UPDATE users SET can_view_mbr=$1 WHERE id=$2`, [sectionGrants.mbr, id]);
       }
       const extra = canAccessAnywhere !== undefined ? { canAccessAnywhere } : {};
       if (managerIds !== undefined) {
@@ -7117,6 +7217,76 @@ async function _handleJiraPgApi(
     } catch {
       return json({ error: 'User not found' }, 404);
     }
+  }
+
+  // ─── Access requests: self-service "Request Access" for the three locked
+  // sections (reports / test_repo / mbr) -- see the access_requests table
+  // comment above for why. ──────────────────────────────────────────────
+  const ACCESS_SECTIONS = new Set(['reports', 'test_repo', 'mbr']);
+
+  if (path === 'access-requests' && method === 'GET') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    // Admins see every pending request (what the Access Requests tab
+    // lists); anyone else only ever sees their own, so the locked page can
+    // show "Request sent, waiting for approval" instead of the button.
+    const rows = isAdmin
+      ? await pool.query(
+          `SELECT ar.*, u."firstName", u."lastName", u.email
+           FROM access_requests ar JOIN users u ON u.id = ar.user_id
+           WHERE ar.status = 'pending'
+           ORDER BY ar.requested_at ASC`,
+        )
+      : await pool.query(`SELECT * FROM access_requests WHERE user_id = $1 ORDER BY requested_at DESC`, [userId]);
+    return json(rows.rows.map((r: any) => ({
+      id: r.id,
+      userId: r.user_id,
+      userName: r.firstName ? `${r.firstName} ${r.lastName || ''}`.trim() : undefined,
+      userEmail: r.email,
+      section: r.section,
+      status: r.status,
+      requestedAt: r.requested_at,
+      resolvedAt: r.resolved_at,
+      resolvedByName: r.resolved_by_name,
+    })));
+  }
+
+  if (path === 'access-requests' && method === 'POST') {
+    if (!userId) return json({ error: 'Unauthorized' }, 401);
+    const body = await readJson(req);
+    const section = String(body.section || '');
+    if (!ACCESS_SECTIONS.has(section)) return json({ error: 'Unknown section' }, 400);
+    // Idempotent: re-requesting while one's already pending just returns
+    // that same row instead of creating a duplicate.
+    const existing = await pool.query(
+      `SELECT * FROM access_requests WHERE user_id = $1 AND section = $2 AND status = 'pending' LIMIT 1`,
+      [userId, section],
+    );
+    if (existing.rows[0]) return json({ id: existing.rows[0].id, status: 'pending', alreadyPending: true });
+    const id = rid();
+    await pool.query(
+      `INSERT INTO access_requests (id, user_id, section, status) VALUES ($1, $2, $3, 'pending')`,
+      [id, userId, section],
+    );
+    return json({ id, status: 'pending' });
+  }
+
+  const accessRequestResolve = path.match(/^access-requests\/([^/]+)\/(approve|deny)$/);
+  if (accessRequestResolve && method === 'POST') {
+    if (!isAdmin) return json({ error: 'Forbidden' }, 403);
+    const [, reqId, action] = accessRequestResolve;
+    const row = (await pool.query(`SELECT * FROM access_requests WHERE id = $1`, [reqId])).rows[0];
+    if (!row) return json({ error: 'Not found' }, 404);
+    const resolver = userId ? await db.user.findUnique({ where: { id: userId } }) : null;
+    const resolverName = resolver ? `${resolver.firstName} ${resolver.lastName || ''}`.trim() : null;
+    await pool.query(
+      `UPDATE access_requests SET status = $1, resolved_at = NOW(), resolved_by_id = $2, resolved_by_name = $3 WHERE id = $4`,
+      [action === 'approve' ? 'approved' : 'denied', userId, resolverName, reqId],
+    );
+    if (action === 'approve') {
+      const column = row.section === 'reports' ? 'can_view_reports' : row.section === 'test_repo' ? 'can_view_test_repo' : 'can_view_mbr';
+      await pool.query(`UPDATE users SET ${column} = TRUE WHERE id = $1`, [row.user_id]);
+    }
+    return json({ ok: true });
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Spaces Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬

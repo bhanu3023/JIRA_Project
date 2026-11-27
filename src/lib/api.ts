@@ -218,6 +218,18 @@ class ApiClient {
   createUser(data: any) { return this.request<any>('/users', { method: 'POST', body: JSON.stringify(data) }); }
   updateUser(id: string, data: any) { return this.request<any>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }); }
   deleteUser(id: string) { return this.request<any>(`/users/${id}`, { method: 'DELETE' }); }
+
+  // Access requests -- self-service unlock for the three locked sections
+  // (reports / test_repo / mbr). GET returns the caller's own requests for a
+  // non-admin, or every pending request (for the Access Requests tab) for
+  // an admin.
+  getAccessRequests() { return this.request<any[]>('/access-requests'); }
+  requestAccess(section: 'reports' | 'test_repo' | 'mbr') {
+    return this.request<{ id: string; status: string; alreadyPending?: boolean }>('/access-requests', { method: 'POST', body: JSON.stringify({ section }) });
+  }
+  resolveAccessRequest(id: string, action: 'approve' | 'deny') {
+    return this.request<{ ok: true }>(`/access-requests/${id}/${action}`, { method: 'POST' });
+  }
   // The "Project Manager" custom field's option list used to be a
   // hand-maintained hardcoded name array (Harika, Abhishek, ...), which
   // drifted from reality -- Kiran U held the migration_manager role but was

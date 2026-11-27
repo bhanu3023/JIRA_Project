@@ -54,6 +54,7 @@ import {
   User,
   Inbox as InboxIcon,
   AlertTriangle,
+  Lock as LockIcon,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { getRecentItems, groupRecentItems, type RecentItem } from '@/lib/recent-items';
@@ -575,6 +576,9 @@ export default function Sidebar() {
   // comment) -- the backend enforces this too, on every Test Repository
   // route, so hiding the link here is a UX nicety, not the real boundary.
   const canAccessTestRepo = user?.role === 'admin' || !!(user as any)?.canAccessTestRepo;
+  // Same narrow additive-grant pattern as canSeeMbr above -- Reports was
+  // previously open to every logged-in user with no gate at all.
+  const canSeeReports = user?.role === 'admin' || !!(user as any)?.canViewReports;
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -673,8 +677,10 @@ export default function Sidebar() {
           { href: '/reports', icon: <TrendingUp size={16} />, match: pathname.startsWith('/reports') },
           { href: '/kb', icon: <BookOpen size={16} />, match: pathname.startsWith('/kb') },
           ...((user?.role === 'admin' || (user as any)?.canViewWorklog) ? [{ href: '/worklog', icon: <Clock size={16} />, match: pathname.startsWith('/worklog') }] : []),
-          ...(canAccessTestRepo ? [{ href: '/test-repository', icon: <ClipboardList size={16} />, match: pathname.startsWith('/test-repository') }] : []),
-          ...(canSeeMbr ? [{ href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' }] : []),
+          // Always shown now, same as the expanded sidebar -- see the
+          // GlobalNavItem `locked` comment above for why.
+          { href: '/test-repository', icon: <ClipboardList size={16} />, match: pathname.startsWith('/test-repository') },
+          { href: '/mbr', icon: <BarChart2 size={16} />, match: pathname === '/mbr' },
         ].map((item, i) => (
           <Link
             key={i}
@@ -730,15 +736,14 @@ export default function Sidebar() {
             />
             <GlobalNavItem href="/filters" icon={<List size={15} />} label="Filters" active={pathname === '/filters'} />
             <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
-            <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} />
+            <GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} locked={!canSeeReports} />
             <GlobalNavItem href="/kb" icon={<BookOpen size={15} />} label="KB Articles" active={pathname.startsWith('/kb')} />
             <GlobalNavItem href="/worklog" icon={<Clock size={15} />} label="Worklog" active={pathname.startsWith('/worklog')} />
-            {canAccessTestRepo && (
-              <GlobalNavItem href="/test-repository" icon={<ClipboardList size={15} />} label="Test Repository" active={pathname.startsWith('/test-repository')} />
-            )}
-            {canSeeMbr && (
-              <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} />
-            )}
+            {/* Always shown now (not hidden) -- clicking without access lands
+                on that page's own AccessGate lock screen instead of the link
+                just not existing, same as Reports above. */}
+            <GlobalNavItem href="/test-repository" icon={<ClipboardList size={15} />} label="Test Repository" active={pathname.startsWith('/test-repository')} locked={!canAccessTestRepo} />
+            <GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} locked={!canSeeMbr} />
           </div>
 
           <div className="mx-4 my-4 h-px bg-gray-200" />
@@ -1706,11 +1711,17 @@ function GlobalNavItem({
   icon,
   label,
   active,
+  locked,
 }: {
   href: string;
   icon: React.ReactNode;
   label: string;
   active: boolean;
+  // Still navigates to href -- the page itself renders the locked/Request
+  // Access screen (AccessGate). This is just a visual hint in the sidebar,
+  // same "always shown, link takes you to a lock screen" pattern as
+  // Reports/Test Repository/MBR now all use.
+  locked?: boolean;
 }) {
   return (
     <Link
@@ -1724,6 +1735,7 @@ function GlobalNavItem({
     >
       <span className={active ? 'text-blue-600' : 'text-gray-400'}>{icon}</span>
       {label}
+      {locked && <LockIcon size={11} className="ml-auto flex-shrink-0 text-gray-300" />}
     </Link>
   );
 }

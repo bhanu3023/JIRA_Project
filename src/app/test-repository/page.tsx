@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, ChevronDown, Folder, FolderPlus, Plus, Search, X, Trash2, Pencil, FileText, Lock } from 'lucide-react';
+import { ChevronRight, ChevronDown, Folder, FolderPlus, Plus, Search, X, Trash2, Pencil, FileText } from 'lucide-react';
 import { api, TestRepoFolder, TestCase, TestCaseSummary, TestStep, TestCaseAttachment } from '@/lib/api';
 import { useStore } from '@/store';
+import AccessGate from '@/components/ui/AccessGate';
 
 // Deleting a test/folder/attachment is restricted to admins + Bhuvana Mosra
 // specifically -- by explicit request, every other QA queue member can use
@@ -610,13 +611,7 @@ export default function TestRepositoryPage() {
   };
 
   if (!canAccessTestRepo) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 bg-white px-8 text-center">
-        <Lock size={28} className="text-gray-300" />
-        <p className="text-[14px] font-medium text-gray-700">Test Repository is only available to the QA queue and admins.</p>
-        <p className="text-[12.5px] text-gray-400">Ask an admin if you believe you should have access.</p>
-      </div>
-    );
+    return <AccessGate section="test_repo" />;
   }
 
   return (

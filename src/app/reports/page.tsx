@@ -7,6 +7,7 @@ import { useStore } from '@/store';
 import { isManager } from '@/lib/permissions';
 import { BarChart3, Calendar, X, CheckCircle2, ShieldCheck, AlertTriangle, LayoutGrid, Clock, Timer, Search } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
+import AccessGate from '@/components/ui/AccessGate';
 
 const WEEKLY_PRODUCT_TYPES = ['Content Migration', 'Message Migration', 'Email Migration'];
 const WEEK_COLORS = ['#1E40AF', '#93C5FD', '#2563EB', '#60A5FA', '#1D4ED8', '#BFDBFE'];
@@ -152,6 +153,13 @@ export default function ReportsPage() {
     { id: 'resolution-sla', label: 'Resolution & SLA', icon: ShieldCheck },
     { id: 'team-analytics', label: 'Team Analytics', icon: LayoutGrid },
   ];
+
+  // Reports was previously open to every logged-in user with no gate at
+  // all -- now a locked section like Test Repository/MBR, by explicit
+  // request. canViewReports is the raw grant (auth/me); admin always passes.
+  if (user?.role !== 'admin' && !(user as any)?.canViewReports) {
+    return <AccessGate section="reports" />;
+  }
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-auto bg-gray-50">

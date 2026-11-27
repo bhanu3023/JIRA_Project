@@ -329,6 +329,30 @@ function SettingsContent() {
     if (view === 'users') loadUsers();
   }, [view]);
 
+  const [accessRequests, setAccessRequests] = useState<any[]>([]);
+  const [accessRequestsLoading, setAccessRequestsLoading] = useState(false);
+  const [resolvingRequestId, setResolvingRequestId] = useState<string | null>(null);
+  const loadAccessRequests = () => {
+    setAccessRequestsLoading(true);
+    api.getAccessRequests().then((data: any) => { setAccessRequests(data); setAccessRequestsLoading(false); }).catch(() => setAccessRequestsLoading(false));
+  };
+  useEffect(() => {
+    if (view === 'users' && activeUserTab === 'access') loadAccessRequests();
+  }, [view, activeUserTab]);
+
+  const handleResolveAccessRequest = async (reqId: string, action: 'approve' | 'deny') => {
+    setResolvingRequestId(reqId);
+    try {
+      await api.resolveAccessRequest(reqId, action);
+      setAccessRequests(prev => prev.filter((r) => r.id !== reqId));
+      loadUsers(true); // the approved user's sectionAccess changed -- refresh the Users tab too
+    } catch (err: any) {
+      pushUserToast(err?.message || 'Failed to resolve request', 'error');
+    } finally {
+      setResolvingRequestId(null);
+    }
+  };
+
   const [deletedIssues, setDeletedIssues] = useState<any[]>([]);
   const [deletedLoading, setDeletedLoading] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
@@ -395,6 +419,23 @@ function SettingsContent() {
       pushUserToast(canAccessAnywhere ? `${name} restricted to the office network/VPN again` : `${name} can now access this tool from anywhere`);
     } catch (err: any) {
       pushUserToast(err?.message || 'Failed to update remote access', 'error');
+    }
+  };
+
+  const SECTION_ACCESS_LABELS: Record<'reports' | 'testRepo' | 'mbr', string> = {
+    reports: 'Reports', testRepo: 'Test Repository', mbr: 'MBR',
+  };
+  const handleToggleSectionAccess = async (userId: string, section: 'reports' | 'testRepo' | 'mbr', current: boolean) => {
+    const target = users.find(u => u.id === userId);
+    const name = target ? `${target.firstName} ${target.lastName}`.trim() : 'User';
+    try {
+      await api.updateUser(userId, { sectionAccess: { [section]: !current } });
+      setUsers(prev => prev.map(u => u.id === userId
+        ? { ...u, sectionAccess: { ...(u as any).sectionAccess, [section]: !current } }
+        : u));
+      pushUserToast(current ? `${name} can no longer access ${SECTION_ACCESS_LABELS[section]}` : `${name} can now access ${SECTION_ACCESS_LABELS[section]}`);
+    } catch (err: any) {
+      pushUserToast(err?.message || 'Failed to update section access', 'error');
     }
   };
 
@@ -2503,6 +2544,27 @@ function SettingsContent() {
                                   {(u as any).canAccessAnywhere === true ? 'Restrict to office network' : 'Allow access from anywhere'}
                                 </button>
                                 <div className="my-1 h-px bg-gray-100" />
+                                {/* Reports / Test Repository / MBR -- previously either fully
+                                    open (Reports) or hidden-if-ungranted (Test Repository/MBR)
+                                    with no admin UI to grant/revoke individually; now a locked
+                                    section per user, toggled here (see access_requests /
+                                    can_view_reports/can_view_test_repo/can_view_mbr). */}
+                                <p className="px-3 pt-1.5 pb-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-gray-400">Section access</p>
+                                {(['reports', 'testRepo', 'mbr'] as const).map((section) => {
+                                  const sa = (u as any).sectionAccess || {};
+                                  const has = !!sa[section];
+                                  return (
+                                    <button
+                                      key={section}
+                                      onClick={() => handleToggleSectionAccess(u.id, section, has)}
+                                      className="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors text-gray-700"
+                                    >
+                                      <span>{SECTION_ACCESS_LABELS[section]}</span>
+                                      {has ? <Check size={13} className="text-green-600" /> : <span className="text-[10.5px] text-gray-300">Locked</span>}
+                                    </button>
+                                  );
+                                })}
+                                <div className="my-1 h-px bg-gray-100" />
                                 <button onClick={() => { handleToggleActive(u.id, u.isActive !== false); setOpenUserMenu(null); setRoleMenuPos(null); }}
                                   className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-50 transition-colors text-red-600">
                                   {u.isActive !== false ? <UserX size={13} /> : <UserCheck size={13} className="text-green-600" />}
@@ -2543,11 +2605,48 @@ function SettingsContent() {
         )}
 
         {activeUserTab === 'access' && (
-          <div className="bg-white border border-gray-200 rounded-lg p-12 text-center">
-            <UserPlus size={28} className="text-gray-300 mx-auto mb-3" />
-            <p className="text-sm font-medium text-gray-600">No pending access requests</p>
-            <p className="text-xs text-gray-400 mt-1">New access requests will appear here</p>
-          </div>
+          accessRequestsLoading ? (
+            <div className="py-12 text-center">
+              <div className="inline-block w-6 h-6 border-2 border-gray-200 border-t-blue-500 rounded-full animate-spin mb-3" />
+              <p className="text-sm text-gray-400">Loading access requests…</p>
+            </div>
+          ) : accessRequests.length === 0 ? (
+            <div className="bg-white border border-gray-200 rounded-lg p-12 text-center">
+              <UserPlus size={28} className="text-gray-300 mx-auto mb-3" />
+              <p className="text-sm font-medium text-gray-600">No pending access requests</p>
+              <p className="text-xs text-gray-400 mt-1">New access requests will appear here</p>
+            </div>
+          ) : (
+            <div className="bg-white border border-gray-200 rounded-lg divide-y divide-gray-100">
+              {accessRequests.map((r: any) => (
+                <div key={r.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-gray-900">
+                      {r.userName || r.userEmail} <span className="font-normal text-gray-500">requested access to</span>{' '}
+                      {r.section === 'test_repo' ? 'Test Repository' : r.section === 'mbr' ? 'MBR' : r.section === 'reports' ? 'Reports' : r.section}
+                    </p>
+                    <p className="text-xs text-gray-400">{r.userEmail} · {new Date(r.requestedAt).toLocaleString()}</p>
+                  </div>
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <button
+                      disabled={resolvingRequestId === r.id}
+                      onClick={() => handleResolveAccessRequest(r.id, 'approve')}
+                      className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      <Check size={12} /> Approve
+                    </button>
+                    <button
+                      disabled={resolvingRequestId === r.id}
+                      onClick={() => handleResolveAccessRequest(r.id, 'deny')}
+                      className="rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Deny
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
         )}
 
         {/* Invite Modal */}

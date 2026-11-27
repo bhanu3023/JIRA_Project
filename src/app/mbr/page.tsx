@@ -2,10 +2,10 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 import { api } from '@/lib/api';
 import { BarChart2, Calendar, X, Users, AlertTriangle, Clock, UserX, ChevronUp, ChevronDown, Download } from 'lucide-react';
+import AccessGate from '@/components/ui/AccessGate';
 
 const PRIVILEGED_ROLES = ['admin'];
 
@@ -675,7 +675,6 @@ function TeamTab({ team, dateFrom, dateTo, staleDays }: { team: 'eng' | 'qa' | '
 
 export default function MbrPage() {
   const user = useStore((s) => s.user);
-  const router = useRouter();
   const isPrivileged = PRIVILEGED_ROLES.includes(user?.role || '') || !!(user as any)?.canViewMbr;
 
   const [topTab, setTopTab] = useState<TopTab>('department');
@@ -696,10 +695,10 @@ export default function MbrPage() {
   // Same stale-response guard as TeamTab's mainFetchIdRef -- see its comment.
   const deptFetchIdRef = useRef(0);
 
-  // Redirect non-admins away
-  useEffect(() => {
-    if (user && !isPrivileged) router.replace('/dashboard');
-  }, [user, isPrivileged, router]);
+  // Previously redirected non-privileged users straight to /dashboard with
+  // no explanation -- now shows a locked screen with a Request Access
+  // button instead (see AccessGate / access_requests), same treatment as
+  // Reports and Test Repository.
 
   // Fetch the full department list once, unfiltered, to populate the selector
   useEffect(() => {
@@ -732,7 +731,8 @@ export default function MbrPage() {
     });
   }, []);
 
-  if (!user || !isPrivileged) return null;
+  if (!user) return null;
+  if (!isPrivileged) return <AccessGate section="mbr" />;
 
   const totals = departments.reduce(
     (acc, d) => ({
