@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import {
   Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown, ChevronRight, Calendar, BarChart3,
-  Users, X, GitCompare, LayoutGrid, Check,
+  Users, X, GitCompare, LayoutGrid, Check, PieChart as PieChartIcon, TrendingUp,
 } from 'lucide-react';
 
 /** Every card on the PERSONAL dashboard (not the queue dashboard), each
@@ -24,22 +24,25 @@ import {
  * new ones with nothing behind them. Order here is the fixed render order;
  * this scope deliberately has no drag-to-reorder/resize (by explicit
  * request -- see the "Add/remove from a fixed widget set" decision). */
+// icon/color pairs match the exact icon+color each widget already renders
+// with on the dashboard itself (StatTile/Card), so the picker's logo tells
+// you exactly what you're about to see, not a generic placeholder.
 const DASHBOARD_WIDGETS = [
-  { id: 'myOpenTickets', label: 'My Open Tickets', group: 'Stats', description: 'Count of tickets currently assigned to you that are not yet closed.' },
-  { id: 'inProgress', label: 'In Progress (With Me)', group: 'Stats', description: 'Your assigned tickets currently in an in-progress status.' },
-  { id: 'waitingOrOnHold', label: 'Waiting / On Hold', group: 'Stats', description: 'Your assigned tickets sitting in a waiting or on-hold status.' },
-  { id: 'resolvedByMe', label: 'Resolved by Me', group: 'Stats', description: 'Tickets assigned to you that you have resolved.' },
-  { id: 'reportedByMe', label: 'Reported by Me', group: 'Stats', description: 'Tickets you raised, regardless of who they are assigned to.' },
-  { id: 'slaRunning', label: 'SLA Running (With Me)', group: 'Stats', description: 'Your tickets with an active SLA clock that has not breached.' },
-  { id: 'slaBreachingSoon', label: 'SLA Breaching Soon', group: 'Stats', description: 'Your tickets approaching their SLA deadline.' },
-  { id: 'byStatus', label: 'My Tickets by Status', group: 'Ticket Breakdown', description: 'Donut chart of your tickets split by their current status.' },
-  { id: 'byPriority', label: 'My Tickets by Priority', group: 'Ticket Breakdown', description: 'Donut chart of your tickets split by priority.' },
-  { id: 'slaStatus', label: 'SLA Status (My Tickets)', group: 'Ticket Breakdown', description: 'Your tickets split by within-SLA, near-breach, breaching-soon, and breached.' },
-  { id: 'slaCompliance', label: 'SLA Compliance (My Tickets)', group: 'Ticket Breakdown', description: 'Your overall SLA compliance percentage.' },
-  { id: 'movedByMe', label: 'Tickets Moved to Other Departments (By Me)', group: 'Activity & Trends', description: 'Bar chart of tickets you handed off to other departments.' },
-  { id: 'receivedByMe', label: 'Tickets Received from Other Departments', group: 'Activity & Trends', description: 'Bar chart of tickets handed to you from other departments.' },
-  { id: 'bySourceDept', label: 'My Current Tickets by Source Department', group: 'Activity & Trends', description: 'Your current tickets grouped by which department they originated from.' },
-  { id: 'journey', label: 'My Ticket Journey', group: 'Activity & Trends', description: 'Per-ticket progress stages: created, in progress, waiting, completed.' },
+  { id: 'myOpenTickets', label: 'My Open Tickets', group: 'Stats', description: 'Count of tickets currently assigned to you that are not yet closed.', icon: Layers, iconClass: 'text-blue-600 bg-blue-50' },
+  { id: 'inProgress', label: 'In Progress (With Me)', group: 'Stats', description: 'Your assigned tickets currently in an in-progress status.', icon: Loader2, iconClass: 'text-purple-600 bg-purple-50' },
+  { id: 'waitingOrOnHold', label: 'Waiting / On Hold', group: 'Stats', description: 'Your assigned tickets sitting in a waiting or on-hold status.', icon: Hourglass, iconClass: 'text-orange-600 bg-orange-50' },
+  { id: 'resolvedByMe', label: 'Resolved by Me', group: 'Stats', description: 'Tickets assigned to you that you have resolved.', icon: CheckCircle2, iconClass: 'text-green-600 bg-green-50' },
+  { id: 'reportedByMe', label: 'Reported by Me', group: 'Stats', description: 'Tickets you raised, regardless of who they are assigned to.', icon: Send, iconClass: 'text-teal-600 bg-teal-50' },
+  { id: 'slaRunning', label: 'SLA Running (With Me)', group: 'Stats', description: 'Your tickets with an active SLA clock that has not breached.', icon: Hourglass, iconClass: 'text-indigo-600 bg-indigo-50' },
+  { id: 'slaBreachingSoon', label: 'SLA Breaching Soon', group: 'Stats', description: 'Your tickets approaching their SLA deadline.', icon: AlertTriangle, iconClass: 'text-red-600 bg-red-50' },
+  { id: 'byStatus', label: 'My Tickets by Status', group: 'Ticket Breakdown', description: 'Donut chart of your tickets split by their current status.', icon: PieChartIcon, iconClass: 'text-blue-600 bg-blue-50' },
+  { id: 'byPriority', label: 'My Tickets by Priority', group: 'Ticket Breakdown', description: 'Donut chart of your tickets split by priority.', icon: PieChartIcon, iconClass: 'text-purple-600 bg-purple-50' },
+  { id: 'slaStatus', label: 'SLA Status (My Tickets)', group: 'Ticket Breakdown', description: 'Your tickets split by within-SLA, near-breach, breaching-soon, and breached.', icon: PieChartIcon, iconClass: 'text-amber-600 bg-amber-50' },
+  { id: 'slaCompliance', label: 'SLA Compliance (My Tickets)', group: 'Ticket Breakdown', description: 'Your overall SLA compliance percentage.', icon: PieChartIcon, iconClass: 'text-green-600 bg-green-50' },
+  { id: 'movedByMe', label: 'Tickets Moved to Other Departments (By Me)', group: 'Activity & Trends', description: 'Bar chart of tickets you handed off to other departments.', icon: BarChart3, iconClass: 'text-blue-600 bg-blue-50' },
+  { id: 'receivedByMe', label: 'Tickets Received from Other Departments', group: 'Activity & Trends', description: 'Bar chart of tickets handed to you from other departments.', icon: BarChart3, iconClass: 'text-purple-600 bg-purple-50' },
+  { id: 'bySourceDept', label: 'My Current Tickets by Source Department', group: 'Activity & Trends', description: 'Your current tickets grouped by which department they originated from.', icon: BarChart3, iconClass: 'text-teal-600 bg-teal-50' },
+  { id: 'journey', label: 'My Ticket Journey', group: 'Activity & Trends', description: 'Per-ticket progress stages: created, in progress, waiting, completed.', icon: TrendingUp, iconClass: 'text-amber-600 bg-amber-50' },
 ] as const;
 type WidgetId = (typeof DASHBOARD_WIDGETS)[number]['id'];
 const ALL_WIDGET_IDS: WidgetId[] = DASHBOARD_WIDGETS.map((w) => w.id);
@@ -109,9 +112,22 @@ function WidgetPicker({ enabled, onToggle }: { enabled: Set<WidgetId>; onToggle:
           <div className="fixed right-0 top-0 z-50 flex h-full w-[420px] max-w-[92vw] flex-col border-l border-gray-200 bg-white shadow-2xl">
             <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
               <h2 className="text-[15px] font-semibold text-gray-900">Add a Gadget</h2>
-              <button onClick={() => setOpen(false)} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
-                <X size={18} />
-              </button>
+              <div className="flex items-center gap-3">
+                {/* Doesn't change the default for anyone else -- purely this
+                    user's own localStorage prefs, same as every other toggle
+                    here -- lets someone start from a blank dashboard and add
+                    gadgets back one at a time, Jira-style, without affecting
+                    what any other user sees. */}
+                <button
+                  onClick={() => ALL_WIDGET_IDS.forEach((id) => { if (enabled.has(id)) onToggle(id); })}
+                  className="text-[12px] font-medium text-gray-400 hover:text-red-600"
+                >
+                  Remove all
+                </button>
+                <button onClick={() => setOpen(false)} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+                  <X size={18} />
+                </button>
+              </div>
             </div>
             <div className="border-b border-gray-100 px-5 py-3">
               <input
@@ -132,8 +148,12 @@ function WidgetPicker({ enabled, onToggle }: { enabled: Set<WidgetId>; onToggle:
                     <div className="space-y-2">
                       {items.map((w) => {
                         const isOn = enabled.has(w.id);
+                        const Icon = w.icon;
                         return (
                           <div key={w.id} className="flex items-start gap-3 rounded-lg border border-gray-200 p-3">
+                            <div className={cn('flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg', w.iconClass)}>
+                              <Icon size={16} />
+                            </div>
                             <div className="min-w-0 flex-1">
                               <p className="text-[13px] font-medium text-gray-800">{w.label}</p>
                               <p className="mt-0.5 text-[11.5px] leading-snug text-gray-500">{w.description}</p>
