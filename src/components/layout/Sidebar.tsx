@@ -1735,6 +1735,14 @@ function SectionAccessManager({ section, label }: { section: 'reports' | 'testRe
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState('');
   const [pending, setPending] = useState<string | null>(null);
+  // The sidebar's <nav> has overflow-y-auto, which (per the CSS overflow
+  // spec) forces overflow-x to clip too -- an `absolute` popover extending
+  // past the sidebar's own width was silently clipped off, invisible with
+  // no scrollbar anyone would think to look for. `fixed` + a computed rect
+  // (same pattern as this file's own recent-items panel/panelTop above)
+  // escapes that clipping entirely.
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
 
   const load = () => {
     if (_sectionManagerUsersCache.current) { setUsers(_sectionManagerUsersCache.current); return; }
@@ -1773,16 +1781,25 @@ function SectionAccessManager({ section, label }: { section: 'reports' | 'testRe
   return (
     <div className="relative flex-shrink-0">
       <button
-        onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!open) load(); setOpen((v) => !v); }}
+        ref={btnRef}
+        onClick={(e) => {
+          e.preventDefault(); e.stopPropagation();
+          if (!open) {
+            load();
+            const rect = btnRef.current?.getBoundingClientRect();
+            if (rect) setPos({ top: rect.top, left: rect.right + 8 });
+          }
+          setOpen((v) => !v);
+        }}
         title={`Who has access to ${label}`}
         className="flex h-6 w-6 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-700"
       >
         <MoreHorizontal size={13} />
       </button>
-      {open && (
+      {open && pos && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute left-full top-0 z-50 ml-2 w-72 rounded-lg border border-gray-200 bg-white py-2 shadow-xl">
+          <div className="fixed z-50 w-72 rounded-lg border border-gray-200 bg-white py-2 shadow-xl" style={{ top: pos.top, left: pos.left }}>
             <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Who has access — {label}</p>
             {section === 'testRepo' && (
               <p className="px-3 pb-1.5 text-[10.5px] text-gray-400">QA queue members also have access automatically (not reflected below).</p>
