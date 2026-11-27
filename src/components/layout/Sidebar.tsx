@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useShallow } from 'zustand/react/shallow';
@@ -1788,7 +1789,7 @@ function SectionAccessManager({ section, label }: { section: 'reports' | 'testRe
       >
         <MoreHorizontal size={13} />
       </button>
-      {open && (
+      {open && createPortal(
         <>
           <div className="fixed inset-0 z-40 bg-black/30" onClick={close} />
           <div className="fixed left-1/2 top-1/2 z-50 flex max-h-[80vh] w-[420px] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl border border-gray-200 bg-white shadow-2xl">
@@ -1867,7 +1868,8 @@ function SectionAccessManager({ section, label }: { section: 'reports' | 'testRe
               </>
             )}
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   );
