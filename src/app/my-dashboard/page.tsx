@@ -1,12 +1,12 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 import { useShallow } from 'zustand/react/shallow';
 import { api } from '@/lib/api';
-import { cn, priorityColors } from '@/lib/utils';
+import { cn, priorityColors, timeAgo } from '@/lib/utils';
 import { isManager } from '@/lib/permissions';
 import DotLoader from '@/components/ui/DotLoader';
 import {
@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import {
   Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown, ChevronRight, Calendar, BarChart3,
-  Users, X, GitCompare, LayoutGrid, Check, PieChart as PieChartIcon, TrendingUp,
+  Users, X, GitCompare, LayoutGrid, Check, PieChart as PieChartIcon, TrendingUp, RefreshCw, Maximize2,
 } from 'lucide-react';
 
 /** Every card on the PERSONAL dashboard (not the queue dashboard), each
@@ -313,16 +313,67 @@ function Donut({
   );
 }
 
-/* ─── card shell ─── */
-function Card({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-      <div className="mb-3">
-        <h3 title={title} className="line-clamp-2 break-normal text-[13px] font-semibold leading-snug text-gray-800">{title}</h3>
-        {subtitle && <p className="mt-0.5 text-[10.5px] text-gray-400">{subtitle}</p>}
+/* ─── card shell ─── onRefresh/lastSyncedAt are optional, Jira-tile-style
+ * chrome: a refresh button that re-fetches the real dashboard data
+ * (there's one combined endpoint behind every card here, so "refresh this
+ * card" really does refresh all of them -- same honest behavior, not a fake
+ * per-card spinner) and a fullscreen view. Omitted entirely on
+ * QueueDashboardView's cards further up this file -- unchanged there. */
+function Card({ title, subtitle, children, onRefresh, lastSyncedAt }: {
+  title: string; subtitle?: string; children: React.ReactNode;
+  onRefresh?: () => Promise<any>; lastSyncedAt?: number | null;
+}) {
+  const [fullscreen, setFullscreen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefresh = async () => {
+    if (!onRefresh || refreshing) return;
+    setRefreshing(true);
+    try { await onRefresh(); } finally { setRefreshing(false); }
+  };
+
+  const body = (
+    <>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h3 title={title} className="line-clamp-2 break-normal text-[13px] font-semibold leading-snug text-gray-800">{title}</h3>
+          {subtitle && <p className="mt-0.5 text-[10.5px] text-gray-400">{subtitle}</p>}
+        </div>
+        <div className="flex flex-shrink-0 items-center gap-0.5 text-gray-400">
+          {onRefresh && (
+            <button onClick={handleRefresh} title="Refresh" className="rounded p-1 hover:bg-gray-100 hover:text-gray-600">
+              <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+            </button>
+          )}
+          <button onClick={() => setFullscreen(true)} title="View fullscreen" className="rounded p-1 hover:bg-gray-100 hover:text-gray-600">
+            <Maximize2 size={13} />
+          </button>
+        </div>
       </div>
       <div className="flex flex-1 items-center">{children}</div>
-    </div>
+      {lastSyncedAt != null && (
+        <p className="mt-2 border-t border-gray-100 pt-2 text-[10px] text-gray-400">
+          Last refreshed {timeAgo(new Date(lastSyncedAt).toISOString())}
+        </p>
+      )}
+    </>
+  );
+
+  return (
+    <>
+      <div className="flex flex-col rounded-xl border border-gray-200 bg-white p-4 shadow-sm">{body}</div>
+      {fullscreen && (
+        <>
+          <div className="fixed inset-0 z-40 bg-black/40" onClick={() => setFullscreen(false)} />
+          <div className="fixed inset-6 z-50 flex flex-col overflow-auto rounded-xl bg-white p-6 shadow-2xl sm:inset-12">
+            <button onClick={() => setFullscreen(false)} className="absolute right-4 top-4 rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+              <X size={18} />
+            </button>
+            {body}
+          </div>
+        </>
+      )}
+    </>
   );
 }
 
@@ -948,39 +999,45 @@ export default function MyDashboardPage() {
     })();
   }, [canViewAllQueues, canViewMigrationOnly]);
 
+  // Lifted out of the effect below (as a stable, re-invokable function) so a
+  // card's own Refresh button can trigger the exact same real reload instead
+  // of a fake per-card spinner -- there's one combined endpoint behind every
+  // card on this page, so refreshing any one of them really does refresh all
+  // of them. loadSeqRef replaces the old per-effect `cancelled` flag with an
+  // equivalent guard that also covers manual refresh calls: a response only
+  // gets applied if no newer load (effect-triggered OR manual) started
+  // after it, so switching queue/user/date-range mid-refresh can't let a
+  // stale response clobber newer data.
+  const loadSeqRef = useRef(0);
+  const load = useCallback((isPoll: boolean) => {
+    const seq = ++loadSeqRef.current;
+    if (!isPoll) setLoading(true);
+    const to = new Date();
+    // 'total' sends the widest possible `from` instead of omitting the
+    // param -- the backend already treats a missing/absent from as "last 7
+    // days" (its own default), so leaving it out here would silently give
+    // "Total" the exact same window as "Last 7 Days" instead of everything.
+    const from = dateRangeKey === 'total'
+      ? new Date(0)
+      : dateRangeKey === 'today'
+      ? new Date(to.getFullYear(), to.getMonth(), to.getDate())
+      : new Date(to.getTime() - (dateRangeKey === '30d' ? 30 : 7) * 86_400_000);
+    return api.getMyDashboard({
+      // Mutually exclusive: a queue-dashboard view takes over the whole
+      // request when set, exactly like userId does for one person — never
+      // both at once (viewedUserId is always cleared whenever
+      // viewedQueueDept is set, and vice versa, see the handlers below).
+      ...(viewedQueueDept ? { viewedQueue: viewedQueueDept } : viewedUserId ? { userId: viewedUserId } : {}),
+      from: from.toISOString(),
+      to: to.toISOString(),
+    })
+      .then((d: any) => { if (loadSeqRef.current === seq) { setData(d); setLastSyncedAt(Date.now()); } })
+      .catch(() => {})
+      .finally(() => { if (loadSeqRef.current === seq && !isPoll) setLoading(false); });
+  }, [viewedUserId, viewedQueueDept, dateRangeKey]);
+
   useEffect(() => {
-    let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | null = null;
-
-    // isPoll=true is a silent background refresh (no loading spinner, and it
-    // stamps lastSyncedAt so the queue dashboard's SyncIndicator can reflect
-    // it) — isPoll=false is the normal "view/range/user changed" load.
-    const load = (isPoll: boolean) => {
-      if (!isPoll) setLoading(true);
-      const to = new Date();
-      // 'total' sends the widest possible `from` instead of omitting the
-      // param -- the backend already treats a missing/absent from as "last 7
-      // days" (its own default), so leaving it out here would silently give
-      // "Total" the exact same window as "Last 7 Days" instead of everything.
-      const from = dateRangeKey === 'total'
-        ? new Date(0)
-        : dateRangeKey === 'today'
-        ? new Date(to.getFullYear(), to.getMonth(), to.getDate())
-        : new Date(to.getTime() - (dateRangeKey === '30d' ? 30 : 7) * 86_400_000);
-      return api.getMyDashboard({
-        // Mutually exclusive: a queue-dashboard view takes over the whole
-        // request when set, exactly like userId does for one person — never
-        // both at once (viewedUserId is always cleared whenever
-        // viewedQueueDept is set, and vice versa, see the handlers below).
-        ...(viewedQueueDept ? { viewedQueue: viewedQueueDept } : viewedUserId ? { userId: viewedUserId } : {}),
-        from: from.toISOString(),
-        to: to.toISOString(),
-      })
-        .then((d: any) => { if (!cancelled) { setData(d); setLastSyncedAt(Date.now()); } })
-        .catch(() => {})
-        .finally(() => { if (!cancelled && !isPoll) setLoading(false); });
-    };
-
     load(false);
     // Live sync: only while an actual queue dashboard is being viewed (the
     // personal dashboard never polls). One interval per effect run, always
@@ -993,8 +1050,8 @@ export default function MyDashboardPage() {
     } else {
       setLastSyncedAt(null);
     }
-    return () => { cancelled = true; if (intervalId) clearInterval(intervalId); };
-  }, [viewedUserId, viewedQueueDept, dateRangeKey]);
+    return () => { if (intervalId) clearInterval(intervalId); };
+  }, [load, viewedQueueDept]);
 
   if (loading || !data) {
     // py-24 was just top/bottom padding on a small inline element — it sat
@@ -1228,10 +1285,10 @@ export default function MyDashboardPage() {
       {(enabledWidgets.has('byStatus') || enabledWidgets.has('byPriority') || enabledWidgets.has('slaStatus') || enabledWidgets.has('slaCompliance')) && (
       <Section title="Ticket Breakdown" subtitle="Status, priority, and SLA standing">
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-4 lg:items-stretch">
-        {enabledWidgets.has('byStatus') && <Card title="My Tickets by Status"><Donut data={statusDonutData} fallbackHref={myAssignedFallback} /></Card>}
-        {enabledWidgets.has('byPriority') && <Card title="My Tickets by Priority"><Donut data={priorityDonutData} fallbackHref={myAssignedFallback} /></Card>}
-        {enabledWidgets.has('slaStatus') && <Card title="SLA Status (My Tickets)"><Donut data={slaStatusDonutData} fallbackHref={myAssignedFallback} /></Card>}
-        {enabledWidgets.has('slaCompliance') && <Card title="SLA Compliance (My Tickets)">
+        {enabledWidgets.has('byStatus') && <Card title="My Tickets by Status" onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}><Donut data={statusDonutData} fallbackHref={myAssignedFallback} /></Card>}
+        {enabledWidgets.has('byPriority') && <Card title="My Tickets by Priority" onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}><Donut data={priorityDonutData} fallbackHref={myAssignedFallback} /></Card>}
+        {enabledWidgets.has('slaStatus') && <Card title="SLA Status (My Tickets)" onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}><Donut data={slaStatusDonutData} fallbackHref={myAssignedFallback} /></Card>}
+        {enabledWidgets.has('slaCompliance') && <Card title="SLA Compliance (My Tickets)" onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}>
           <Donut data={slaComplianceDonutData} centerLabel={`${data.slaCompliancePct ?? 100}%`} centerSub="Compliance" fallbackHref={myAssignedFallback} />
         </Card>}
       </div>
@@ -1248,17 +1305,17 @@ export default function MyDashboardPage() {
       {(enabledWidgets.has('movedByMe') || enabledWidgets.has('receivedByMe') || enabledWidgets.has('bySourceDept') || enabledWidgets.has('journey')) && (
       <Section title="Activity & Department Trends" subtitle={dateRangeLabel} defaultOpen={false}>
       <div className={cn('grid grid-cols-1 gap-3', journey.length === 0 ? 'lg:grid-cols-4' : 'lg:grid-cols-3')}>
-        {enabledWidgets.has('movedByMe') && <Card title="Tickets Moved to Other Departments (By Me)" subtitle={dateRangeLabel}>
+        {enabledWidgets.has('movedByMe') && <Card title="Tickets Moved to Other Departments (By Me)" subtitle={dateRangeLabel} onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}>
           <DeptBarChart data={barDataFor(movedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#3B82F6" fallbackHref={myAssignedFallback} />
         </Card>}
-        {enabledWidgets.has('receivedByMe') && <Card title="Tickets Received from Other Departments" subtitle={dateRangeLabel}>
+        {enabledWidgets.has('receivedByMe') && <Card title="Tickets Received from Other Departments" subtitle={dateRangeLabel} onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}>
           <DeptBarChart data={barDataFor(receivedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#8B5CF6" fallbackHref={myAssignedFallback} />
         </Card>}
-        {enabledWidgets.has('bySourceDept') && <Card title="My Current Tickets by Source Department (From)">
+        {enabledWidgets.has('bySourceDept') && <Card title="My Current Tickets by Source Department (From)" onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}>
           <DeptBarChart data={barDataFor(bySourceDept)} color="#14B8A6" fallbackHref={myAssignedFallback} />
         </Card>}
         {enabledWidgets.has('journey') && journey.length === 0 && (
-          <Card title="My Ticket Journey (Current Tickets)">
+          <Card title="My Ticket Journey (Current Tickets)" onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}>
             <DeptBarChart data={[]} color="#F59E0B" fallbackHref={myAssignedFallback} />
           </Card>
         )}
@@ -1266,7 +1323,7 @@ export default function MyDashboardPage() {
 
       {/* Ticket journey — full width, only rendered once there's real data */}
       {enabledWidgets.has('journey') && journey.length > 0 && (
-        <Card title="My Ticket Journey (Current Tickets)">
+        <Card title="My Ticket Journey (Current Tickets)" onRefresh={() => load(true)} lastSyncedAt={lastSyncedAt}>
           <div className="w-full space-y-4">
             {journey.map((j, i) => {
               const stageIdx = j.completed >= j.total * 0.5 ? 3 : j.waiting >= j.total * 0.5 ? 2 : j.inProgress >= j.total * 0.5 ? 1 : 0;
