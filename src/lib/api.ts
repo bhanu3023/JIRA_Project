@@ -623,10 +623,10 @@ class ApiClient {
     return this.request<any[]>(`/sla/${spaceKey}${qs}`);
   }
   getSanitySla(spaceKey: string) {
-    return this.request<{ overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number }>(`/sanity-sla/${spaceKey}`);
+    return this.request<SanitySlaHours>(`/sanity-sla/${spaceKey}`);
   }
-  updateSanitySla(spaceKey: string, data: { overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number }) {
-    return this.request<{ overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number }>(`/sanity-sla/${spaceKey}`, { method: 'PUT', body: JSON.stringify(data) });
+  updateSanitySla(spaceKey: string, data: SanitySlaHours) {
+    return this.request<SanitySlaHours>(`/sanity-sla/${spaceKey}`, { method: 'PUT', body: JSON.stringify(data) });
   }
   createSLA(spaceKey: string, data: any) { return this.request<any>(`/sla/${spaceKey}`, { method: 'POST', body: JSON.stringify(data) }); }
   updateSLA(spaceKey: string, id: string, data: any) { return this.request<any>(`/sla/${spaceKey}/${id}`, { method: 'PATCH', body: JSON.stringify(data) }); }
@@ -679,6 +679,12 @@ class ApiClient {
   unstarFilter(id: string) { return this.request<any>(`/filters/${id}/star`, { method: 'DELETE' }); }
 }
 
+// Sanity SLA hours per space (see src/lib/sanity-sla.ts). Migration's
+// default is 0.5 = 30 minutes.
+export type SanitySlaHours = {
+  overallHours: number; qaHours: number;
+  bugDevHours: number; bugInfraHours: number; bugMigrationHours: number; bugQaHours: number;
+};
 export type TestRepoFolder = { id: string; name: string; path: string; parentPath: string; testsCount: number; totalTestsCount?: number };
 export type TestStep = { stepNumber: number; action?: string; data?: string; testSteps?: string; result?: string; expectedResult?: string; comment?: string };
 export type TestCaseAttachment = { id: string; stepNumber: number; filename: string; url: string; mimeType: string | null; size: number | null; authorName: string | null; createdAt: string };

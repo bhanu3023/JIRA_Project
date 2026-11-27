@@ -5,7 +5,7 @@ import { useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '@/store';
-import { api } from '@/lib/api';
+import { api, type SanitySlaHours } from '@/lib/api';
 import { getInitials } from '@/lib/utils';
 import {
   Settings, Users, Tag, GitBranch, Clock, ShieldCheck, Bell,
@@ -4054,28 +4054,34 @@ function SpaceSettingsContent() {
 }
 
 // Sanity SLA hours -- Sanity tickets (Ticket Category = Sanity) and their
-// bug subtasks use these four clocks INSTEAD of the policies listed above.
+// bug subtasks use these clocks INSTEAD of the policies listed above.
 // Stored per space (sanity_sla_settings, see src/lib/sanity-sla.ts).
 function SanitySlaSettings({ spaceKey }: { spaceKey: string }) {
-  type Hours = { overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number };
+  type Hours = SanitySlaHours;
   const [hours, setHours] = useState<Hours | null>(null);
-  const [draft, setDraft] = useState<Record<keyof Hours, string>>({ overallHours: '', qaHours: '', bugDevHours: '', bugQaHours: '' });
+  const [draft, setDraft] = useState<Record<keyof Hours, string>>({
+    overallHours: '', qaHours: '', bugDevHours: '', bugInfraHours: '', bugMigrationHours: '', bugQaHours: '',
+  });
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
-  useEffect(() => {
-    api.getSanitySla(spaceKey).then((h) => {
-      setHours(h);
-      setDraft({ overallHours: String(h.overallHours), qaHours: String(h.qaHours), bugDevHours: String(h.bugDevHours), bugQaHours: String(h.bugQaHours) });
-    }).catch(() => {});
-  }, [spaceKey]);
 
   const rows: { key: keyof Hours; policy: string; appliesTo: string; queue: string; pauses: string }[] = [
     { key: 'overallHours', policy: 'Sanity – Overall', appliesTo: 'Category = Sanity', queue: 'any', pauses: 'never' },
     { key: 'qaHours', policy: 'Sanity – QA', appliesTo: 'Category = Sanity', queue: 'QA', pauses: 'yes (open Blocker subtask)' },
     { key: 'bugDevHours', policy: 'Sanity Bug – Dev', appliesTo: 'Sanity bug subtasks', queue: 'Dev', pauses: 'no' },
-    { key: 'bugQaHours', policy: 'Sanity Bug – QA', appliesTo: 'Sanity bug subtasks', queue: 'QA (re-test)', pauses: 'no' },
+    { key: 'bugInfraHours', policy: 'Sanity Bug – Infra', appliesTo: 'Sanity bug subtasks', queue: 'Infra', pauses: 'no' },
+    { key: 'bugMigrationHours', policy: 'Sanity Bug – Migration', appliesTo: 'Sanity bug subtasks', queue: 'Migration', pauses: 'no' },
+    { key: 'bugQaHours', policy: 'Sanity Bug – QA', appliesTo: 'Sanity bug subtasks', queue: 'QA (re-test, once bug reached Dev)', pauses: 'no' },
   ];
+  const toDraft = (h: Hours) => Object.fromEntries(rows.map(r => [r.key, String(h[r.key])])) as Record<keyof Hours, string>;
+
+  useEffect(() => {
+    api.getSanitySla(spaceKey).then((h) => {
+      setHours(h);
+      setDraft(toDraft(h));
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spaceKey]);
 
   const dirty = !!hours && rows.some(r => String(hours[r.key]) !== draft[r.key]);
   const invalid = rows.some(r => { const n = Number(draft[r.key]); return !Number.isFinite(n) || n <= 0; });
@@ -4083,12 +4089,10 @@ function SanitySlaSettings({ spaceKey }: { spaceKey: string }) {
   const save = async () => {
     setSaving(true); setMsg(null);
     try {
-      const saved = await api.updateSanitySla(spaceKey, {
-        overallHours: Number(draft.overallHours), qaHours: Number(draft.qaHours),
-        bugDevHours: Number(draft.bugDevHours), bugQaHours: Number(draft.bugQaHours),
-      });
+      const saved = await api.updateSanitySla(spaceKey,
+        Object.fromEntries(rows.map(r => [r.key, Number(draft[r.key])])) as Hours);
       setHours(saved);
-      setDraft({ overallHours: String(saved.overallHours), qaHours: String(saved.qaHours), bugDevHours: String(saved.bugDevHours), bugQaHours: String(saved.bugQaHours) });
+      setDraft(toDraft(saved));
       setMsg({ ok: true, text: 'Saved.' });
     } catch (e: any) {
       setMsg({ ok: false, text: e?.message || 'Failed to save.' });
@@ -4101,6 +4105,7 @@ function SanitySlaSettings({ spaceKey }: { spaceKey: string }) {
         <p className="text-sm font-bold text-gray-800">Sanity SLA</p>
         <p className="text-xs text-gray-500 mt-0.5">
           For Sanity tickets and their bug subtasks, these replace the SLA policies above.
+          Hours can be decimals (0.5 = 30 min).
         </p>
       </div>
       <table className="w-full">

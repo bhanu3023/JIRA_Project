@@ -2,18 +2,23 @@
 // (Ticket Category = "Sanity") and their bug subtasks. By explicit request,
 // these REPLACE the board's normal department SLA policies for those tickets.
 //
-// Confirmed flow (2026-11-25):
+// Confirmed flow (2026-11-25, team clocks revised 2026-11-27):
 //   Main Sanity ticket (stays in QA):
-//     - Overall clock (default 22h): starts at creation, never pauses, stops on close.
+//     - Overall clock (default 24h): starts at creation, never pauses, stops on close.
 //     - QA clock (default 6h): pauses while any open bug subtask is a Blocker,
 //       continues from where it stopped once every Blocker is closed
 //       (pauses again if a closed Blocker is reopened). Non-Blockers never pause it.
-//   Bug subtask (created by QA, moved with the normal "Routed to Dev" /
-//   "Routed to QA" statuses):
-//     - Dev clock (default 3h): runs while the subtask sits in Dev.
-//     - QA clock (default 1h): runs only while the subtask is in QA AFTER it
-//       has been to Dev at least once (re-testing time) -- not at creation.
-//     - Both continue from where they stopped if the subtask bounces back.
+//   Bug subtask (created by QA, moved with the normal "Routed to X" statuses):
+//     - Team clock while the subtask sits in that queue:
+//         Dev (default 3h), Infra (default 1h), Migration (default 30m).
+//       Any other queue (Support, Pre-Sales, ...) has no clock.
+//     - QA re-test clock (default 1h): runs while the subtask is in QA once
+//       it has reached Dev at least once (Dev changed code, so QA re-tests),
+//       even if Infra/Migration handled it after Dev. Never been to Dev ->
+//       no QA clock, QA just closes it. For a Blocker this hour is NOT part
+//       of the main ticket's 6h -- the main QA clock is paused meanwhile.
+//     - Every clock continues from where it stopped if the subtask returns
+//       to that queue (never restarts).
 //   The main ticket can't be closed while any Blocker subtask is still open
 //   (open Non-Blockers don't stop the close).
 //
@@ -28,22 +33,36 @@ import { pgPool as pool } from '@/lib/pg-pool';
 
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS sanity_bug_type TEXT`).catch(() => {});
 pool.query(`ALTER TABLE issues ADD COLUMN IF NOT EXISTS sanity_sla JSONB`).catch(() => {});
-pool.query(`CREATE TABLE IF NOT EXISTS sanity_sla_settings (
-  space_id TEXT PRIMARY KEY,
-  overall_hours NUMERIC NOT NULL DEFAULT 22,
-  qa_hours NUMERIC NOT NULL DEFAULT 6,
-  bug_dev_hours NUMERIC NOT NULL DEFAULT 3,
-  bug_qa_hours NUMERIC NOT NULL DEFAULT 1,
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-)`).catch(() => {});
+// Run in order: the two ALTERs need the table to exist first (on a fresh DB),
+// and settings reads/writes wait for this so the new columns are there.
+const settingsTableReady: Promise<void> = (async () => {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS sanity_sla_settings (
+      space_id TEXT PRIMARY KEY,
+      overall_hours NUMERIC NOT NULL DEFAULT 24,
+      qa_hours NUMERIC NOT NULL DEFAULT 6,
+      bug_dev_hours NUMERIC NOT NULL DEFAULT 3,
+      bug_qa_hours NUMERIC NOT NULL DEFAULT 1,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    await pool.query(`ALTER TABLE sanity_sla_settings ADD COLUMN IF NOT EXISTS bug_infra_hours NUMERIC NOT NULL DEFAULT 1`);
+    await pool.query(`ALTER TABLE sanity_sla_settings ADD COLUMN IF NOT EXISTS bug_migration_hours NUMERIC NOT NULL DEFAULT 0.5`);
+  } catch { /* reads fall back to defaults */ }
+})();
 
 export const SANITY_CATEGORY = 'Sanity';
 export const SANITY_BUG_TYPES = ['blocker', 'non_blocker'] as const;
 export type SanityBugType = typeof SANITY_BUG_TYPES[number];
 export const CLOSE_BLOCKED_MESSAGE = 'Close all Sanity Blocker subtasks first';
 
-export interface SanityHours { overallHours: number; qaHours: number; bugDevHours: number; bugQaHours: number }
-export const DEFAULT_SANITY_HOURS: SanityHours = { overallHours: 22, qaHours: 6, bugDevHours: 3, bugQaHours: 1 };
+export interface SanityHours {
+  overallHours: number; qaHours: number;
+  bugDevHours: number; bugInfraHours: number; bugMigrationHours: number; bugQaHours: number;
+}
+export const DEFAULT_SANITY_HOURS: SanityHours = {
+  overallHours: 24, qaHours: 6,
+  bugDevHours: 3, bugInfraHours: 1, bugMigrationHours: 0.5, bugQaHours: 1,
+};
 
 interface Clock {
   elapsed_ms: number;              // time accumulated in finished running periods
@@ -52,7 +71,23 @@ interface Clock {
   paused_at: string | null;        // when it last stopped
 }
 interface SanityParentState { qa: Clock; blocked_by: string[]; closed_at: string | null }
-interface SanityBugState { dev: Clock; qa: Clock; visited_dev: boolean; closed_at: string | null }
+// visited_dev: the bug has been in Dev at least once -> QA re-test applies.
+interface SanityBugState {
+  dev: Clock; infra: Clock; migration: Clock; qa: Clock;
+  visited_dev: boolean; closed_at: string | null;
+}
+
+// Bug team clocks: department (lower-case) -> clock key in SanityBugState.
+type BugTeamKey = 'dev' | 'infra' | 'migration';
+const BUG_TEAM_CLOCKS: { key: BugTeamKey; label: string; hours: (h: SanityHours) => number }[] = [
+  { key: 'dev', label: 'Dev', hours: (h) => h.bugDevHours },
+  { key: 'infra', label: 'Infra', hours: (h) => h.bugInfraHours },
+  { key: 'migration', label: 'Migration', hours: (h) => h.bugMigrationHours },
+];
+function normDept(d: unknown): string {
+  const s = String(d ?? '').trim().toLowerCase();
+  return s === 'infrastructure' ? 'infra' : s;
+}
 
 const HOUR_MS = 3600_000;
 
@@ -78,6 +113,8 @@ function rowToHours(r: any): SanityHours {
     overallHours: n(r?.overall_hours, DEFAULT_SANITY_HOURS.overallHours),
     qaHours: n(r?.qa_hours, DEFAULT_SANITY_HOURS.qaHours),
     bugDevHours: n(r?.bug_dev_hours, DEFAULT_SANITY_HOURS.bugDevHours),
+    bugInfraHours: n(r?.bug_infra_hours, DEFAULT_SANITY_HOURS.bugInfraHours),
+    bugMigrationHours: n(r?.bug_migration_hours, DEFAULT_SANITY_HOURS.bugMigrationHours),
     bugQaHours: n(r?.bug_qa_hours, DEFAULT_SANITY_HOURS.bugQaHours),
   };
 }
@@ -87,6 +124,7 @@ export async function getSanityHours(spaceId: string | null | undefined): Promis
   const cached = hoursCache.get(spaceId);
   if (cached && Date.now() - cached.at < HOURS_CACHE_MS) return cached.hours;
   try {
+    await settingsTableReady;
     const r = await pool.query(`SELECT * FROM sanity_sla_settings WHERE space_id = $1 LIMIT 1`, [spaceId]);
     const hours = rowToHours(r.rows[0]);
     hoursCache.set(spaceId, { hours, at: Date.now() });
@@ -103,13 +141,17 @@ export async function saveSanityHours(spaceId: string, input: Partial<SanityHour
     overallHours: pick(input.overallHours, current.overallHours),
     qaHours: pick(input.qaHours, current.qaHours),
     bugDevHours: pick(input.bugDevHours, current.bugDevHours),
+    bugInfraHours: pick(input.bugInfraHours, current.bugInfraHours),
+    bugMigrationHours: pick(input.bugMigrationHours, current.bugMigrationHours),
     bugQaHours: pick(input.bugQaHours, current.bugQaHours),
   };
+  await settingsTableReady;
   await pool.query(
-    `INSERT INTO sanity_sla_settings (space_id, overall_hours, qa_hours, bug_dev_hours, bug_qa_hours, updated_at)
-     VALUES ($1,$2,$3,$4,$5,NOW())
-     ON CONFLICT (space_id) DO UPDATE SET overall_hours=$2, qa_hours=$3, bug_dev_hours=$4, bug_qa_hours=$5, updated_at=NOW()`,
-    [spaceId, next.overallHours, next.qaHours, next.bugDevHours, next.bugQaHours]
+    `INSERT INTO sanity_sla_settings (space_id, overall_hours, qa_hours, bug_dev_hours, bug_infra_hours, bug_migration_hours, bug_qa_hours, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+     ON CONFLICT (space_id) DO UPDATE SET overall_hours=$2, qa_hours=$3, bug_dev_hours=$4,
+       bug_infra_hours=$5, bug_migration_hours=$6, bug_qa_hours=$7, updated_at=NOW()`,
+    [spaceId, next.overallHours, next.qaHours, next.bugDevHours, next.bugInfraHours, next.bugMigrationHours, next.bugQaHours]
   );
   hoursCache.set(spaceId, { hours: next, at: Date.now() });
   return next;
@@ -208,21 +250,28 @@ async function syncParentRow(row: SanityRow): Promise<void> {
   await saveState(row.id, prev, state);
 }
 
+// Stored bug state -> current shape. States saved before the Infra/Migration
+// clocks existed have only dev/qa (+ visited_dev); missing clocks start empty.
+function readBugState(prev: any): SanityBugState {
+  if (!prev) return { dev: newClock(), infra: newClock(), migration: newClock(), qa: newClock(), visited_dev: false, closed_at: null };
+  const dev = normClock(prev.dev);
+  return {
+    dev, infra: normClock(prev.infra), migration: normClock(prev.migration), qa: normClock(prev.qa),
+    visited_dev: !!prev.visited_dev || !!dev.first_started_at, closed_at: prev.closed_at || null,
+  };
+}
+
 async function syncBugRow(row: SanityRow): Promise<void> {
   if (!isBugRow(row)) return;
   const nowIso = new Date().toISOString();
   const prev = row.sanity_sla;
-  const state: SanityBugState = prev
-    ? { dev: normClock(prev.dev), qa: normClock(prev.qa), visited_dev: !!prev.visited_dev, closed_at: prev.closed_at || null }
-    : { dev: newClock(), qa: newClock(), visited_dev: false, closed_at: null };
+  const state = readBugState(prev);
 
   const done = rowIsDone(row);
-  const dept = String(row.current_department || '').trim().toLowerCase();
-  const inDev = !done && dept === 'dev';
-  if (inDev) state.visited_dev = true;
-  const inQaRetest = !done && dept === 'qa' && state.visited_dev;
-  setRunning(state.dev, inDev, nowIso);
-  setRunning(state.qa, inQaRetest, nowIso);
+  const dept = normDept(row.current_department);
+  if (!done && dept === 'dev') state.visited_dev = true;
+  for (const t of BUG_TEAM_CLOCKS) setRunning(state[t.key], !done && dept === t.key, nowIso);
+  setRunning(state.qa, !done && dept === 'qa' && state.visited_dev, nowIso);
   state.closed_at = done ? (state.closed_at || (row.resolvedAt ? new Date(row.resolvedAt).toISOString() : nowIso)) : null;
   await saveState(row.id, prev, state);
 }
@@ -317,7 +366,7 @@ export function sanityBreachVerdict(i: any, isResolved: boolean, nowMs: number):
     const qaClock = stored.qa || { elapsed_ms: 0, running_since: new Date(i.createdAt).toISOString() };
     breached = overallMs > hours.overallHours * HOUR_MS || over(qaClock, hours.qaHours);
   } else if (normalizeSanityBugType(i.sanity_bug_type)) {
-    breached = over(stored.dev, hours.bugDevHours) || over(stored.qa, hours.bugQaHours);
+    breached = BUG_TEAM_CLOCKS.some((t) => over(stored[t.key], t.hours(hours))) || over(stored.qa, hours.bugQaHours);
   } else {
     return null;
   }
@@ -422,25 +471,29 @@ export async function computeSanitySlaInstances(issue: any, isResolved: boolean)
     ];
   }
 
-  // Bug subtask
-  const dev = stored?.dev ? normClock(stored.dev) : newClock();
-  const qa = stored?.qa ? normClock(stored.qa) : newClock();
+  // Bug subtask: one card per clock that has ever run, oldest first, so the
+  // cards read in the order the bug actually travelled.
+  const state = readBugState(stored);
   const closedAt = isResolved ? (stored?.closed_at || resolvedIso || new Date(nowMs).toISOString()) : null;
   const typeLabel = normalizeSanityBugType(bugType) === 'blocker' ? 'Blocker' : 'Non-Blocker';
-  const out: any[] = [];
-  if (dev.first_started_at) {
-    out.push(clockInstance({
-      id: `sanity_bug_dev_${displayKey}`, policyId: 'sanity_bug_dev', policyName: `Sanity Bug – Dev (${typeLabel})`, badge: 'Dev',
-      clock: dev, goalMs: hours.bugDevHours * HOUR_MS, nowMs, isCompleted: isResolved, closedAt,
-      pausedReason: 'Paused – with QA',
-    }));
+  const nowWith = String(issue.current_department || '').trim();
+  const pausedAs = (fallback: string) => (nowWith ? `Paused – with ${nowWith}` : fallback);
+  const out: { at: string; card: any }[] = [];
+  for (const t of BUG_TEAM_CLOCKS) {
+    const c = state[t.key];
+    if (!c.first_started_at) continue;
+    out.push({ at: c.first_started_at, card: clockInstance({
+      id: `sanity_bug_${t.key}_${displayKey}`, policyId: `sanity_bug_${t.key}`, policyName: `Sanity Bug – ${t.label} (${typeLabel})`, badge: t.label,
+      clock: c, goalMs: t.hours(hours) * HOUR_MS, nowMs, isCompleted: isResolved, closedAt,
+      pausedReason: pausedAs(`Paused – not with ${t.label}`),
+    }) });
   }
-  if (qa.first_started_at) {
-    out.push(clockInstance({
+  if (state.qa.first_started_at) {
+    out.push({ at: state.qa.first_started_at, card: clockInstance({
       id: `sanity_bug_qa_${displayKey}`, policyId: 'sanity_bug_qa', policyName: `Sanity Bug – QA re-test (${typeLabel})`, badge: 'QA',
-      clock: qa, goalMs: hours.bugQaHours * HOUR_MS, nowMs, isCompleted: isResolved, closedAt,
-      pausedReason: 'Paused – back with Dev',
-    }));
+      clock: state.qa, goalMs: hours.bugQaHours * HOUR_MS, nowMs, isCompleted: isResolved, closedAt,
+      pausedReason: pausedAs('Paused – not in QA re-test'),
+    }) });
   }
-  return out;
+  return out.sort((a, b) => a.at.localeCompare(b.at)).map((x) => x.card);
 }

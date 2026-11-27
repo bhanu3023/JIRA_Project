@@ -19678,7 +19678,7 @@ async function _handleJiraPgApi(
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ SLA routes Ã¢â‚¬â€ persisted to PostgreSQL via raw pg (avoids Prisma cache issues) Ã¢â€â‚¬
-  // Sanity SLA hours (Overall / QA / Bug Dev / Bug QA) per space -- see sanity-sla.ts.
+  // Sanity SLA hours (Overall / QA / Bug Dev / Bug Infra / Bug Migration / Bug QA) per space -- see sanity-sla.ts.
   const sanitySlaMatch = path.match(/^sanity-sla\/([^/]+)$/);
   if (sanitySlaMatch) {
     const spRow = await pool.query(`SELECT id FROM spaces WHERE key = $1 LIMIT 1`, [sanitySlaMatch[1].toUpperCase()]);
