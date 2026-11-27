@@ -25,21 +25,21 @@ import {
  * this scope deliberately has no drag-to-reorder/resize (by explicit
  * request -- see the "Add/remove from a fixed widget set" decision). */
 const DASHBOARD_WIDGETS = [
-  { id: 'myOpenTickets', label: 'My Open Tickets', group: 'Stats' },
-  { id: 'inProgress', label: 'In Progress (With Me)', group: 'Stats' },
-  { id: 'waitingOrOnHold', label: 'Waiting / On Hold', group: 'Stats' },
-  { id: 'resolvedByMe', label: 'Resolved by Me', group: 'Stats' },
-  { id: 'reportedByMe', label: 'Reported by Me', group: 'Stats' },
-  { id: 'slaRunning', label: 'SLA Running (With Me)', group: 'Stats' },
-  { id: 'slaBreachingSoon', label: 'SLA Breaching Soon', group: 'Stats' },
-  { id: 'byStatus', label: 'My Tickets by Status', group: 'Ticket Breakdown' },
-  { id: 'byPriority', label: 'My Tickets by Priority', group: 'Ticket Breakdown' },
-  { id: 'slaStatus', label: 'SLA Status (My Tickets)', group: 'Ticket Breakdown' },
-  { id: 'slaCompliance', label: 'SLA Compliance (My Tickets)', group: 'Ticket Breakdown' },
-  { id: 'movedByMe', label: 'Tickets Moved to Other Departments (By Me)', group: 'Activity & Trends' },
-  { id: 'receivedByMe', label: 'Tickets Received from Other Departments', group: 'Activity & Trends' },
-  { id: 'bySourceDept', label: 'My Current Tickets by Source Department', group: 'Activity & Trends' },
-  { id: 'journey', label: 'My Ticket Journey', group: 'Activity & Trends' },
+  { id: 'myOpenTickets', label: 'My Open Tickets', group: 'Stats', description: 'Count of tickets currently assigned to you that are not yet closed.' },
+  { id: 'inProgress', label: 'In Progress (With Me)', group: 'Stats', description: 'Your assigned tickets currently in an in-progress status.' },
+  { id: 'waitingOrOnHold', label: 'Waiting / On Hold', group: 'Stats', description: 'Your assigned tickets sitting in a waiting or on-hold status.' },
+  { id: 'resolvedByMe', label: 'Resolved by Me', group: 'Stats', description: 'Tickets assigned to you that you have resolved.' },
+  { id: 'reportedByMe', label: 'Reported by Me', group: 'Stats', description: 'Tickets you raised, regardless of who they are assigned to.' },
+  { id: 'slaRunning', label: 'SLA Running (With Me)', group: 'Stats', description: 'Your tickets with an active SLA clock that has not breached.' },
+  { id: 'slaBreachingSoon', label: 'SLA Breaching Soon', group: 'Stats', description: 'Your tickets approaching their SLA deadline.' },
+  { id: 'byStatus', label: 'My Tickets by Status', group: 'Ticket Breakdown', description: 'Donut chart of your tickets split by their current status.' },
+  { id: 'byPriority', label: 'My Tickets by Priority', group: 'Ticket Breakdown', description: 'Donut chart of your tickets split by priority.' },
+  { id: 'slaStatus', label: 'SLA Status (My Tickets)', group: 'Ticket Breakdown', description: 'Your tickets split by within-SLA, near-breach, breaching-soon, and breached.' },
+  { id: 'slaCompliance', label: 'SLA Compliance (My Tickets)', group: 'Ticket Breakdown', description: 'Your overall SLA compliance percentage.' },
+  { id: 'movedByMe', label: 'Tickets Moved to Other Departments (By Me)', group: 'Activity & Trends', description: 'Bar chart of tickets you handed off to other departments.' },
+  { id: 'receivedByMe', label: 'Tickets Received from Other Departments', group: 'Activity & Trends', description: 'Bar chart of tickets handed to you from other departments.' },
+  { id: 'bySourceDept', label: 'My Current Tickets by Source Department', group: 'Activity & Trends', description: 'Your current tickets grouped by which department they originated from.' },
+  { id: 'journey', label: 'My Ticket Journey', group: 'Activity & Trends', description: 'Per-ticket progress stages: created, in progress, waiting, completed.' },
 ] as const;
 type WidgetId = (typeof DASHBOARD_WIDGETS)[number]['id'];
 const ALL_WIDGET_IDS: WidgetId[] = DASHBOARD_WIDGETS.map((w) => w.id);
@@ -79,60 +79,91 @@ function useDashboardWidgetPrefs(userId?: string) {
   return { enabled, toggle };
 }
 
-/** "Add gadget"-style picker -- a button that opens a checkbox panel of
- * every widget, grouped exactly like the page's own section headings. */
+/** "Add a Gadget" picker -- deliberately modeled on Jira's own dashboard-
+ * editing panel (right-side slide-over, search box, one row per gadget with
+ * its own description and an Add/Added button) rather than a plain
+ * dropdown, by explicit request ("I need view same like Jira"). Still the
+ * same fixed widget set underneath -- no drag/resize/reorder, just a UI that
+ * reads the way Jira's gadget picker does. */
 function WidgetPicker({ enabled, onToggle }: { enabled: Set<WidgetId>; onToggle: (id: WidgetId) => void }) {
   const [open, setOpen] = useState(false);
-  const ref = React.useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener('mousedown', onClick);
-    return () => document.removeEventListener('mousedown', onClick);
-  }, [open]);
+  const [query, setQuery] = useState('');
 
   const groups = Array.from(new Set(DASHBOARD_WIDGETS.map((w) => w.group)));
+  const q = query.trim().toLowerCase();
+  const matches = (w: (typeof DASHBOARD_WIDGETS)[number]) =>
+    !q || w.label.toLowerCase().includes(q) || w.description.toLowerCase().includes(q) || w.group.toLowerCase().includes(q);
 
   return (
-    <div ref={ref} className="relative flex-shrink-0">
+    <>
       <button
-        onClick={() => setOpen((v) => !v)}
-        className={cn(
-          'flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-colors',
-          open ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50',
-        )}
+        onClick={() => setOpen(true)}
+        className="flex flex-shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-2 text-[13px] font-medium text-gray-600 transition-colors hover:bg-gray-50"
       >
-        <LayoutGrid size={14} /> Add / Remove Widgets
+        <LayoutGrid size={14} /> Add gadget
       </button>
+
       {open && (
-        <div className="absolute right-0 z-20 mt-1.5 w-[300px] max-h-[420px] overflow-y-auto rounded-lg border border-gray-200 bg-white p-2 shadow-xl">
-          {groups.map((group) => (
-            <div key={group} className="mb-1 last:mb-0">
-              <p className="px-2 py-1 text-[10.5px] font-semibold uppercase tracking-wide text-gray-400">{group}</p>
-              {DASHBOARD_WIDGETS.filter((w) => w.group === group).map((w) => {
-                const isOn = enabled.has(w.id);
+        <>
+          <div className="fixed inset-0 z-40 bg-black/30" onClick={() => setOpen(false)} />
+          <div className="fixed right-0 top-0 z-50 flex h-full w-[420px] max-w-[92vw] flex-col border-l border-gray-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+              <h2 className="text-[15px] font-semibold text-gray-900">Add a Gadget</h2>
+              <button onClick={() => setOpen(false)} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="border-b border-gray-100 px-5 py-3">
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search gadgets…"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-[13px] text-gray-700 outline-none focus:border-blue-500"
+              />
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-3">
+              {groups.map((group) => {
+                const items = DASHBOARD_WIDGETS.filter((w) => w.group === group && matches(w));
+                if (!items.length) return null;
                 return (
-                  <button
-                    key={w.id}
-                    onClick={() => onToggle(w.id)}
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-gray-700 hover:bg-gray-50"
-                  >
-                    <span className={cn(
-                      'flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border',
-                      isOn ? 'border-blue-600 bg-blue-600' : 'border-gray-300 bg-white',
-                    )}>
-                      {isOn && <Check size={11} className="text-white" />}
-                    </span>
-                    {w.label}
-                  </button>
+                  <div key={group} className="mb-5 last:mb-0">
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{group}</p>
+                    <div className="space-y-2">
+                      {items.map((w) => {
+                        const isOn = enabled.has(w.id);
+                        return (
+                          <div key={w.id} className="flex items-start gap-3 rounded-lg border border-gray-200 p-3">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[13px] font-medium text-gray-800">{w.label}</p>
+                              <p className="mt-0.5 text-[11.5px] leading-snug text-gray-500">{w.description}</p>
+                            </div>
+                            <button
+                              onClick={() => onToggle(w.id)}
+                              className={cn(
+                                'flex flex-shrink-0 items-center gap-1 rounded-md border px-2.5 py-1.5 text-[11.5px] font-medium transition-colors',
+                                isOn
+                                  ? 'border-green-200 bg-green-50 text-green-700 hover:border-red-200 hover:bg-red-50 hover:text-red-700'
+                                  : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100',
+                              )}
+                            >
+                              {isOn ? <><Check size={12} /> Added</> : 'Add'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 );
               })}
+              {groups.every((group) => !DASHBOARD_WIDGETS.some((w) => w.group === group && matches(w))) && (
+                <p className="py-10 text-center text-[12.5px] text-gray-400">No gadgets match &quot;{query}&quot;.</p>
+              )}
             </div>
-          ))}
-        </div>
+          </div>
+        </>
       )}
-    </div>
+    </>
   );
 }
 
