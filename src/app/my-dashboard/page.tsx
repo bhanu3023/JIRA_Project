@@ -15,8 +15,126 @@ import {
 } from 'recharts';
 import {
   Layers, Loader2, CheckCircle2, Send, Hourglass, AlertTriangle, ChevronDown, ChevronRight, Calendar, BarChart3,
-  Users, X, GitCompare,
+  Users, X, GitCompare, LayoutGrid, Check,
 } from 'lucide-react';
+
+/** Every card on the PERSONAL dashboard (not the queue dashboard), each
+ * already backed by real computed data -- "Add gadget" here just means
+ * toggling which of these already-real widgets are visible, not inventing
+ * new ones with nothing behind them. Order here is the fixed render order;
+ * this scope deliberately has no drag-to-reorder/resize (by explicit
+ * request -- see the "Add/remove from a fixed widget set" decision). */
+const DASHBOARD_WIDGETS = [
+  { id: 'myOpenTickets', label: 'My Open Tickets', group: 'Stats' },
+  { id: 'inProgress', label: 'In Progress (With Me)', group: 'Stats' },
+  { id: 'waitingOrOnHold', label: 'Waiting / On Hold', group: 'Stats' },
+  { id: 'resolvedByMe', label: 'Resolved by Me', group: 'Stats' },
+  { id: 'reportedByMe', label: 'Reported by Me', group: 'Stats' },
+  { id: 'slaRunning', label: 'SLA Running (With Me)', group: 'Stats' },
+  { id: 'slaBreachingSoon', label: 'SLA Breaching Soon', group: 'Stats' },
+  { id: 'byStatus', label: 'My Tickets by Status', group: 'Ticket Breakdown' },
+  { id: 'byPriority', label: 'My Tickets by Priority', group: 'Ticket Breakdown' },
+  { id: 'slaStatus', label: 'SLA Status (My Tickets)', group: 'Ticket Breakdown' },
+  { id: 'slaCompliance', label: 'SLA Compliance (My Tickets)', group: 'Ticket Breakdown' },
+  { id: 'movedByMe', label: 'Tickets Moved to Other Departments (By Me)', group: 'Activity & Trends' },
+  { id: 'receivedByMe', label: 'Tickets Received from Other Departments', group: 'Activity & Trends' },
+  { id: 'bySourceDept', label: 'My Current Tickets by Source Department', group: 'Activity & Trends' },
+  { id: 'journey', label: 'My Ticket Journey', group: 'Activity & Trends' },
+] as const;
+type WidgetId = (typeof DASHBOARD_WIDGETS)[number]['id'];
+const ALL_WIDGET_IDS: WidgetId[] = DASHBOARD_WIDGETS.map((w) => w.id);
+
+/** Per-user (localStorage, not a server round-trip -- purely a personal
+ * display preference, same tier as "Viewed" recent items elsewhere in the
+ * app) set of which widgets are currently visible. Defaults to every widget
+ * on, so anyone who's never touched this panel sees exactly the dashboard
+ * that existed before this feature -- pixel-identical, nothing opted out by
+ * default. */
+function useDashboardWidgetPrefs(userId?: string) {
+  const [enabled, setEnabled] = useState<Set<WidgetId>>(new Set(ALL_WIDGET_IDS));
+  const storageKey = userId ? `dashboardWidgets:${userId}` : null;
+
+  useEffect(() => {
+    if (!storageKey) return;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const saved: string[] = JSON.parse(raw);
+        setEnabled(new Set(saved.filter((id) => (ALL_WIDGET_IDS as string[]).includes(id)) as WidgetId[]));
+      }
+    } catch { /* corrupt/blocked storage -- fall back to all-on */ }
+  }, [storageKey]);
+
+  const toggle = (id: WidgetId) => {
+    setEnabled((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      if (storageKey) {
+        try { localStorage.setItem(storageKey, JSON.stringify(Array.from(next))); } catch { /* ignore */ }
+      }
+      return next;
+    });
+  };
+
+  return { enabled, toggle };
+}
+
+/** "Add gadget"-style picker -- a button that opens a checkbox panel of
+ * every widget, grouped exactly like the page's own section headings. */
+function WidgetPicker({ enabled, onToggle }: { enabled: Set<WidgetId>; onToggle: (id: WidgetId) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [open]);
+
+  const groups = Array.from(new Set(DASHBOARD_WIDGETS.map((w) => w.group)));
+
+  return (
+    <div ref={ref} className="relative flex-shrink-0">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          'flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-colors',
+          open ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50',
+        )}
+      >
+        <LayoutGrid size={14} /> Add / Remove Widgets
+      </button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-1.5 w-[300px] max-h-[420px] overflow-y-auto rounded-lg border border-gray-200 bg-white p-2 shadow-xl">
+          {groups.map((group) => (
+            <div key={group} className="mb-1 last:mb-0">
+              <p className="px-2 py-1 text-[10.5px] font-semibold uppercase tracking-wide text-gray-400">{group}</p>
+              {DASHBOARD_WIDGETS.filter((w) => w.group === group).map((w) => {
+                const isOn = enabled.has(w.id);
+                return (
+                  <button
+                    key={w.id}
+                    onClick={() => onToggle(w.id)}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-gray-700 hover:bg-gray-50"
+                  >
+                    <span className={cn(
+                      'flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border',
+                      isOn ? 'border-blue-600 bg-blue-600' : 'border-gray-300 bg-white',
+                    )}>
+                      {isOn && <Check size={11} className="text-white" />}
+                    </span>
+                    {w.label}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // 'total' is the default -- shows every member's all-time numbers with no
 // date filter applied at all, so the table has something meaningful to show
@@ -730,6 +848,7 @@ export default function MyDashboardPage() {
   // QueueDashboardView's SyncIndicator can show it's really still syncing,
   // not a static label.
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const { enabled: enabledWidgets, toggle: toggleWidget } = useDashboardWidgetPrefs(user?.id);
 
   // Admin-only: group users by their custom-queue membership across EVERY
   // queue in every space (not just Migration/Dev), instead of one
@@ -929,6 +1048,7 @@ export default function MyDashboardPage() {
         </div>
 
         <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
+          {!queueDashboard && <WidgetPicker enabled={enabledWidgets} onToggle={toggleWidget} />}
           <DateRangeSelect value={dateRangeKey} onChange={setDateRangeKey} />
           {/* Unified two-step picker, by explicit request -- replaces the old
               "My Dashboard / Migration Queue Dashboard / Dev Queue
@@ -1011,56 +1131,61 @@ export default function MyDashboardPage() {
           never show at once, see QueueDashboardView above for that one). */}
       {!queueDashboard && (
       <>
-      {/* Top stat row */}
+      {/* Top stat row -- each tile only renders if its widget is enabled;
+          the whole row collapses if every stat tile was removed. */}
+      {ALL_WIDGET_IDS.filter((id) => DASHBOARD_WIDGETS.find((w) => w.id === id)?.group === 'Stats' && enabledWidgets.has(id)).length > 0 && (
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
-        <StatTile
+        {enabledWidgets.has('myOpenTickets') && <StatTile
           label="My Open Tickets" value={cards.myOpenTickets || 0}
           icon={<Layers size={17} className="text-blue-600" />} iconClass="bg-blue-50"
           href={filtersHref({ assignee: targetUserId, status: (cardStatuses.myOpenTickets || []).join(',') })}
-        />
-        <StatTile
+        />}
+        {enabledWidgets.has('inProgress') && <StatTile
           label="In Progress (With Me)" value={cards.inProgress || 0}
           icon={<Loader2 size={17} className="text-purple-600" />} iconClass="bg-purple-50"
           href={filtersHref({ assignee: targetUserId, status: (cardStatuses.inProgress || []).join(',') })}
-        />
-        <StatTile
+        />}
+        {enabledWidgets.has('waitingOrOnHold') && <StatTile
           label="Waiting / On Hold" value={cards.waitingOrOnHold || 0}
           icon={<Hourglass size={17} className="text-orange-600" />} iconClass="bg-orange-50"
           href={filtersHref({ assignee: targetUserId, status: (cardStatuses.waitingOrOnHold || []).join(',') })}
-        />
-        <StatTile
+        />}
+        {enabledWidgets.has('resolvedByMe') && <StatTile
           label="Resolved by Me" value={cards.resolvedByMe || 0}
           icon={<CheckCircle2 size={17} className="text-green-600" />} iconClass="bg-green-50"
           href={filtersHref({ assignee: targetUserId, status: (cardStatuses.resolvedByMe || []).join(',') })}
-        />
-        <StatTile
+        />}
+        {enabledWidgets.has('reportedByMe') && <StatTile
           label="Reported by Me" value={cards.reportedByMe || 0}
           icon={<Send size={17} className="text-teal-600" />} iconClass="bg-teal-50"
           href={filtersHref({ reporter: targetUserId })}
-        />
-        <StatTile
+        />}
+        {enabledWidgets.has('slaRunning') && <StatTile
           label="SLA Running (With Me)" value={cards.slaRunning || 0}
           icon={<Hourglass size={17} className="text-indigo-600" />} iconClass="bg-indigo-50"
           href={slaNotBreachedHref}
-        />
-        <StatTile
+        />}
+        {enabledWidgets.has('slaBreachingSoon') && <StatTile
           label="SLA Breaching Soon" value={cards.slaBreachingSoon || 0}
           icon={<AlertTriangle size={17} className="text-red-600" />} iconClass="bg-red-50"
           href={slaNotBreachedHref}
-        />
+        />}
       </div>
+      )}
 
-      {/* Donut row */}
+      {/* Donut row -- whole Section collapses if none of its 4 widgets are on */}
+      {(enabledWidgets.has('byStatus') || enabledWidgets.has('byPriority') || enabledWidgets.has('slaStatus') || enabledWidgets.has('slaCompliance')) && (
       <Section title="Ticket Breakdown" subtitle="Status, priority, and SLA standing">
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-4 lg:items-stretch">
-        <Card title="My Tickets by Status"><Donut data={statusDonutData} fallbackHref={myAssignedFallback} /></Card>
-        <Card title="My Tickets by Priority"><Donut data={priorityDonutData} fallbackHref={myAssignedFallback} /></Card>
-        <Card title="SLA Status (My Tickets)"><Donut data={slaStatusDonutData} fallbackHref={myAssignedFallback} /></Card>
-        <Card title="SLA Compliance (My Tickets)">
+        {enabledWidgets.has('byStatus') && <Card title="My Tickets by Status"><Donut data={statusDonutData} fallbackHref={myAssignedFallback} /></Card>}
+        {enabledWidgets.has('byPriority') && <Card title="My Tickets by Priority"><Donut data={priorityDonutData} fallbackHref={myAssignedFallback} /></Card>}
+        {enabledWidgets.has('slaStatus') && <Card title="SLA Status (My Tickets)"><Donut data={slaStatusDonutData} fallbackHref={myAssignedFallback} /></Card>}
+        {enabledWidgets.has('slaCompliance') && <Card title="SLA Compliance (My Tickets)">
           <Donut data={slaComplianceDonutData} centerLabel={`${data.slaCompliancePct ?? 100}%`} centerSub="Compliance" fallbackHref={myAssignedFallback} />
-        </Card>
+        </Card>}
       </div>
       </Section>
+      )}
 
       {/* Bar charts row — when the journey has nothing to show, its compact empty
           state joins this row as a 4th tile instead of sitting alone as a giant
@@ -1069,18 +1194,19 @@ export default function MyDashboardPage() {
           department rows), it gets its own full-width section below instead.
           Grouped with the journey list into one collapsed-by-default Section --
           secondary, drill-down detail rather than the first thing worth seeing. */}
+      {(enabledWidgets.has('movedByMe') || enabledWidgets.has('receivedByMe') || enabledWidgets.has('bySourceDept') || enabledWidgets.has('journey')) && (
       <Section title="Activity & Department Trends" subtitle={dateRangeLabel} defaultOpen={false}>
       <div className={cn('grid grid-cols-1 gap-3', journey.length === 0 ? 'lg:grid-cols-4' : 'lg:grid-cols-3')}>
-        <Card title="Tickets Moved to Other Departments (By Me)" subtitle={dateRangeLabel}>
+        {enabledWidgets.has('movedByMe') && <Card title="Tickets Moved to Other Departments (By Me)" subtitle={dateRangeLabel}>
           <DeptBarChart data={barDataFor(movedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#3B82F6" fallbackHref={myAssignedFallback} />
-        </Card>
-        <Card title="Tickets Received from Other Departments" subtitle={dateRangeLabel}>
+        </Card>}
+        {enabledWidgets.has('receivedByMe') && <Card title="Tickets Received from Other Departments" subtitle={dateRangeLabel}>
           <DeptBarChart data={barDataFor(receivedByMe.map((r) => ({ ...r, count: r.cnt })))} color="#8B5CF6" fallbackHref={myAssignedFallback} />
-        </Card>
-        <Card title="My Current Tickets by Source Department (From)">
+        </Card>}
+        {enabledWidgets.has('bySourceDept') && <Card title="My Current Tickets by Source Department (From)">
           <DeptBarChart data={barDataFor(bySourceDept)} color="#14B8A6" fallbackHref={myAssignedFallback} />
-        </Card>
-        {journey.length === 0 && (
+        </Card>}
+        {enabledWidgets.has('journey') && journey.length === 0 && (
           <Card title="My Ticket Journey (Current Tickets)">
             <DeptBarChart data={[]} color="#F59E0B" fallbackHref={myAssignedFallback} />
           </Card>
@@ -1088,7 +1214,7 @@ export default function MyDashboardPage() {
       </div>
 
       {/* Ticket journey — full width, only rendered once there's real data */}
-      {journey.length > 0 && (
+      {enabledWidgets.has('journey') && journey.length > 0 && (
         <Card title="My Ticket Journey (Current Tickets)">
           <div className="w-full space-y-4">
             {journey.map((j, i) => {
@@ -1126,6 +1252,7 @@ export default function MyDashboardPage() {
         </Card>
       )}
       </Section>
+      )}
       </>
       )}
     </div>
