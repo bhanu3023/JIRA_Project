@@ -1733,16 +1733,15 @@ function SectionAccessManager({ section, label }: { section: 'reports' | 'testRe
   const [open, setOpen] = useState(false);
   const [users, setUsers] = useState<any[] | null>(_sectionManagerUsersCache.current);
   const [loading, setLoading] = useState(false);
+  // Two modes, by explicit request -- the default view is a short list of
+  // who ALREADY has access (not all 164 users with most of them showing
+  // "Locked"), with Remove per row; "Add user" switches to a search over
+  // everyone who does NOT yet have access, to grant someone new. A full
+  // centered modal (not a small anchored popover) since this can legibly
+  // list dozens of people, not a handful.
+  const [adding, setAdding] = useState(false);
   const [query, setQuery] = useState('');
   const [pending, setPending] = useState<string | null>(null);
-  // The sidebar's <nav> has overflow-y-auto, which (per the CSS overflow
-  // spec) forces overflow-x to clip too -- an `absolute` popover extending
-  // past the sidebar's own width was silently clipped off, invisible with
-  // no scrollbar anyone would think to look for. `fixed` + a computed rect
-  // (same pattern as this file's own recent-items panel/panelTop above)
-  // escapes that clipping entirely.
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
 
   const load = () => {
     if (_sectionManagerUsersCache.current) { setUsers(_sectionManagerUsersCache.current); return; }
@@ -1769,69 +1768,104 @@ function SectionAccessManager({ section, label }: { section: 'reports' | 'testRe
   };
 
   const q = query.trim().toLowerCase();
-  const rows = (users || [])
-    .filter((u: any) => u.isActive !== false)
+  const active = (users || []).filter((u: any) => u.isActive !== false);
+  const granted = active
+    .filter((u: any) => !!u.sectionAccess?.[section])
+    .sort((a: any, b: any) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`));
+  const addCandidates = active
+    .filter((u: any) => !u.sectionAccess?.[section])
     .filter((u: any) => !q || `${u.firstName} ${u.lastName}`.toLowerCase().includes(q) || String(u.email || '').toLowerCase().includes(q))
-    .sort((a: any, b: any) => {
-      const aHas = !!a.sectionAccess?.[section], bHas = !!b.sectionAccess?.[section];
-      if (aHas !== bHas) return aHas ? -1 : 1;
-      return `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`);
-    });
+    .sort((a: any, b: any) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`));
+
+  const close = () => { setOpen(false); setAdding(false); setQuery(''); };
 
   return (
-    <div className="relative flex-shrink-0">
+    <div className="flex-shrink-0">
       <button
-        ref={btnRef}
-        onClick={(e) => {
-          e.preventDefault(); e.stopPropagation();
-          if (!open) {
-            load();
-            const rect = btnRef.current?.getBoundingClientRect();
-            if (rect) setPos({ top: rect.top, left: rect.right + 8 });
-          }
-          setOpen((v) => !v);
-        }}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); load(); setOpen(true); }}
         title={`Who has access to ${label}`}
         className="flex h-6 w-6 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-700"
       >
         <MoreHorizontal size={13} />
       </button>
-      {open && pos && (
+      {open && (
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="fixed z-50 w-72 rounded-lg border border-gray-200 bg-white py-2 shadow-xl" style={{ top: pos.top, left: pos.left }}>
-            <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Who has access — {label}</p>
+          <div className="fixed inset-0 z-40 bg-black/30" onClick={close} />
+          <div className="fixed left-1/2 top-1/2 z-50 flex max-h-[80vh] w-[420px] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl border border-gray-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+              <h3 className="text-[14px] font-semibold text-gray-900">Who has access — {label}</h3>
+              <button onClick={close} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+                <X size={16} />
+              </button>
+            </div>
             {section === 'testRepo' && (
-              <p className="px-3 pb-1.5 text-[10.5px] text-gray-400">QA queue members also have access automatically (not reflected below).</p>
+              <p className="px-4 pt-2 text-[11px] text-gray-400">QA queue members also have access automatically (not listed below).</p>
             )}
-            <div className="px-3 pb-1.5">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search people…"
-                className="w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-            <div className="max-h-64 overflow-y-auto">
-              {loading ? (
-                <p className="px-3 py-2 text-[12.5px] text-gray-400">Loading…</p>
-              ) : rows.length === 0 ? (
-                <p className="px-3 py-2 text-[12.5px] text-gray-400">No one matches</p>
-              ) : rows.map((u: any) => {
-                const has = !!u.sectionAccess?.[section];
-                return (
-                  <button
-                    key={u.id}
-                    disabled={pending === u.id}
-                    onClick={() => toggle(u.id, has)}
-                    className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12.5px] hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    <span className="min-w-0 truncate text-gray-700">{u.firstName} {u.lastName}</span>
-                    {has ? <Check size={13} className="flex-shrink-0 text-green-600" /> : <span className="flex-shrink-0 text-[10.5px] text-gray-300">Locked</span>}
+
+            {adding ? (
+              <>
+                <div className="px-4 py-2.5">
+                  <input
+                    autoFocus
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search people to add…"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-[13px] outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="flex-1 overflow-y-auto px-2 pb-2">
+                  {loading ? (
+                    <p className="px-2 py-3 text-[12.5px] text-gray-400">Loading…</p>
+                  ) : addCandidates.length === 0 ? (
+                    <p className="px-2 py-3 text-[12.5px] text-gray-400">No one matches</p>
+                  ) : addCandidates.map((u: any) => (
+                    <button
+                      key={u.id}
+                      disabled={pending === u.id}
+                      onClick={() => toggle(u.id, false)}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-left text-[13px] hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      <span className="min-w-0 truncate text-gray-700">{u.firstName} {u.lastName}</span>
+                      <span className="flex-shrink-0 text-[11.5px] text-blue-600">Add</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="border-t border-gray-100 px-4 py-2.5">
+                  <button onClick={() => { setAdding(false); setQuery(''); }} className="text-[12.5px] font-medium text-gray-500 hover:text-gray-700">
+                    ← Back to list
                   </button>
-                );
-              })}
-            </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex-1 overflow-y-auto px-2 py-2">
+                  {loading ? (
+                    <p className="px-2 py-3 text-[12.5px] text-gray-400">Loading…</p>
+                  ) : granted.length === 0 ? (
+                    <p className="px-2 py-6 text-center text-[12.5px] text-gray-400">No one has access yet.</p>
+                  ) : granted.map((u: any) => (
+                    <div key={u.id} className="flex items-center justify-between gap-2 rounded-lg px-2 py-2 text-[13px] hover:bg-gray-50">
+                      <span className="min-w-0 truncate text-gray-700">{u.firstName} {u.lastName}</span>
+                      <button
+                        disabled={pending === u.id}
+                        onClick={() => toggle(u.id, true)}
+                        className="flex-shrink-0 text-[11.5px] font-medium text-gray-400 hover:text-red-600 disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="border-t border-gray-100 px-4 py-2.5">
+                  <button
+                    onClick={() => setAdding(true)}
+                    className="flex items-center gap-1.5 text-[12.5px] font-medium text-blue-600 hover:text-blue-700"
+                  >
+                    <Plus size={13} /> Add user
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </>
       )}
