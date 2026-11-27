@@ -738,7 +738,7 @@ export default function Sidebar() {
             <GlobalNavItem href="/my-dashboard" icon={<LayoutDashboard size={15} />} label="Dashboard" active={pathname === '/my-dashboard'} />
             <div className="flex items-center gap-1">
               <div className="min-w-0 flex-1"><GlobalNavItem href="/reports" icon={<TrendingUp size={15} />} label="Reports" active={pathname.startsWith('/reports')} locked={!canSeeReports} /></div>
-              {user?.role === 'admin' && <ManageAccessLink label="Reports" />}
+              {user?.role === 'admin' && <SectionAccessManager section="reports" label="Reports" />}
             </div>
             <GlobalNavItem href="/kb" icon={<BookOpen size={15} />} label="KB Articles" active={pathname.startsWith('/kb')} />
             <GlobalNavItem href="/worklog" icon={<Clock size={15} />} label="Worklog" active={pathname.startsWith('/worklog')} />
@@ -751,11 +751,11 @@ export default function Sidebar() {
                 user's access to every section. */}
             <div className="flex items-center gap-1">
               <div className="min-w-0 flex-1"><GlobalNavItem href="/test-repository" icon={<ClipboardList size={15} />} label="Test Repository" active={pathname.startsWith('/test-repository')} locked={!canAccessTestRepo} /></div>
-              {user?.role === 'admin' && <ManageAccessLink label="Test Repository" />}
+              {user?.role === 'admin' && <SectionAccessManager section="testRepo" label="Test Repository" />}
             </div>
             <div className="flex items-center gap-1">
               <div className="min-w-0 flex-1"><GlobalNavItem href="/mbr" icon={<BarChart2 size={15} />} label="MBR" active={pathname === '/mbr'} locked={!canSeeMbr} /></div>
-              {user?.role === 'admin' && <ManageAccessLink label="MBR" />}
+              {user?.role === 'admin' && <SectionAccessManager section="mbr" label="MBR" />}
             </div>
           </div>
 
@@ -1719,23 +1719,106 @@ function SpaceSubItem({ href, icon, label, active }: { href: string; icon: React
   );
 }
 
-/** Admin-only shortcut next to a locked section's nav item (Reports / Test
- * Repository / MBR) -- straight to Settings > User Management > Users,
- * where the per-user "..." menu already has a "Section access" toggle for
- * exactly this section. Previously opened an inline popover here instead;
- * by explicit request, this now just navigates there directly (simpler,
- * more discoverable, and reuses the one real place access is managed
- * instead of a second parallel UI). Always visible for an admin, not
- * hover-only, so it isn't missed. */
-function ManageAccessLink({ label }: { label: string }) {
+/** Admin-only "who has access" popover for one locked section (Reports /
+ * Test Repository / MBR) -- opened right here from the section's own nav
+ * item, by explicit request (a link out to the full User Management list
+ * wasn't it -- this needs to answer "who can see this tab" in place,
+ * without leaving the sidebar). Reverse direction from the per-user "..."
+ * menu in Settings > User Management (toggle one user's access to every
+ * section): this is one section's access across every user. Lazily fetches
+ * the user list on first open and caches it on the module-level ref so
+ * reopening (or opening a different section's popover) doesn't refetch. */
+const _sectionManagerUsersCache: { current: any[] | null } = { current: null };
+function SectionAccessManager({ section, label }: { section: 'reports' | 'testRepo' | 'mbr'; label: string }) {
+  const [open, setOpen] = useState(false);
+  const [users, setUsers] = useState<any[] | null>(_sectionManagerUsersCache.current);
+  const [loading, setLoading] = useState(false);
+  const [query, setQuery] = useState('');
+  const [pending, setPending] = useState<string | null>(null);
+
+  const load = () => {
+    if (_sectionManagerUsersCache.current) { setUsers(_sectionManagerUsersCache.current); return; }
+    setLoading(true);
+    api.getUsers().then((data: any) => {
+      _sectionManagerUsersCache.current = data;
+      setUsers(data);
+    }).finally(() => setLoading(false));
+  };
+
+  const toggle = async (userId: string, current: boolean) => {
+    setPending(userId);
+    try {
+      await api.updateUser(userId, { sectionAccess: { [section]: !current } });
+      setUsers((prev) => {
+        const next = (prev || []).map((u: any) => u.id === userId
+          ? { ...u, sectionAccess: { ...(u.sectionAccess || {}), [section]: !current } }
+          : u);
+        _sectionManagerUsersCache.current = next;
+        return next;
+      });
+    } catch { /* non-fatal -- row just doesn't update */ }
+    setPending(null);
+  };
+
+  const q = query.trim().toLowerCase();
+  const rows = (users || [])
+    .filter((u: any) => u.isActive !== false)
+    .filter((u: any) => !q || `${u.firstName} ${u.lastName}`.toLowerCase().includes(q) || String(u.email || '').toLowerCase().includes(q))
+    .sort((a: any, b: any) => {
+      const aHas = !!a.sectionAccess?.[section], bHas = !!b.sectionAccess?.[section];
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      return `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`);
+    });
+
   return (
-    <Link
-      href="/settings?section=users"
-      title={`Manage who can access ${label} in User Management`}
-      className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-700"
-    >
-      <MoreHorizontal size={13} />
-    </Link>
+    <div className="relative flex-shrink-0">
+      <button
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!open) load(); setOpen((v) => !v); }}
+        title={`Who has access to ${label}`}
+        className="flex h-6 w-6 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-700"
+      >
+        <MoreHorizontal size={13} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-full top-0 z-50 ml-2 w-72 rounded-lg border border-gray-200 bg-white py-2 shadow-xl">
+            <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Who has access — {label}</p>
+            {section === 'testRepo' && (
+              <p className="px-3 pb-1.5 text-[10.5px] text-gray-400">QA queue members also have access automatically (not reflected below).</p>
+            )}
+            <div className="px-3 pb-1.5">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search people…"
+                className="w-full rounded border border-gray-200 px-2 py-1 text-[12.5px] focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="max-h-64 overflow-y-auto">
+              {loading ? (
+                <p className="px-3 py-2 text-[12.5px] text-gray-400">Loading…</p>
+              ) : rows.length === 0 ? (
+                <p className="px-3 py-2 text-[12.5px] text-gray-400">No one matches</p>
+              ) : rows.map((u: any) => {
+                const has = !!u.sectionAccess?.[section];
+                return (
+                  <button
+                    key={u.id}
+                    disabled={pending === u.id}
+                    onClick={() => toggle(u.id, has)}
+                    className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12.5px] hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    <span className="min-w-0 truncate text-gray-700">{u.firstName} {u.lastName}</span>
+                    {has ? <Check size={13} className="flex-shrink-0 text-green-600" /> : <span className="flex-shrink-0 text-[10.5px] text-gray-300">Locked</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
