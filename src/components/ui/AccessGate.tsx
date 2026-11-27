@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Lock, Clock } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useStore } from '@/store';
 
 type Section = 'reports' | 'test_repo' | 'mbr';
 
@@ -20,6 +21,15 @@ const SECTION_LABELS: Record<Section, string> = {
  * of the button again. */
 export default function AccessGate({ section }: { section: Section }) {
   const [status, setStatus] = useState<'checking' | 'pending' | 'none' | 'sending'>('checking');
+  const loadUser = useStore((s) => s.loadUser);
+
+  // Covers the other half of the same staleness problem: the request was
+  // already approved (and is no longer "pending" at all) before this visit
+  // -- e.g. the user reloads after being told it went through. Refreshing
+  // once up front means an already-granted user never sees this screen
+  // flash at all; the page's own gate re-evaluates against the freshly
+  // loaded user and renders the real content instead.
+  useEffect(() => { loadUser(); }, [loadUser]);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,6 +42,20 @@ export default function AccessGate({ section }: { section: Section }) {
       .catch(() => { if (!cancelled) setStatus('none'); });
     return () => { cancelled = true; };
   }, [section]);
+
+  // The page's own gate (e.g. Reports' `if (!canViewReports) return
+  // <AccessGate .../>`) reads the GLOBAL user object in the Zustand store --
+  // approving a request updates the DB, not this already-logged-in
+  // session's cached user, so without this the page stayed locked even
+  // right after approval until a manual full reload. Re-fetching /auth/me
+  // while a request sits pending means the moment it's approved, the next
+  // tick's updated user object makes the page's own gate condition flip and
+  // re-render past this component automatically -- no reload needed.
+  useEffect(() => {
+    if (status !== 'pending') return;
+    const id = setInterval(() => { loadUser(); }, 8000);
+    return () => clearInterval(id);
+  }, [status, loadUser]);
 
   const handleRequest = async () => {
     setStatus('sending');
